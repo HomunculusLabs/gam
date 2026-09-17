@@ -435,6 +435,7 @@ pub(crate) fn manifold_description_length_to_pydict<'py>(
     out.set_item("coord_dim", dl.coord_dim)?;
     out.set_item("g_dict", dl.g_dict)?;
     out.set_item("n_params", dl.n_params)?;
+    out.set_item("score_kind", dl.score_kind.as_str())?;
     Ok(out.into())
 }
 
@@ -579,6 +580,7 @@ fn sae_eq4_description_length<'py>(
     if let Some(native) = dl.native_bits_per_token {
         out.set_item("native_bits_per_token", native)?;
     }
+    out.set_item("score_kind", dl.score_kind.as_str())?;
     Ok(out.into())
 }
 

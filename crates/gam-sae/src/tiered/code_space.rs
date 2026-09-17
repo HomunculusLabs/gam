@@ -577,12 +577,16 @@ pub fn harvest_code_space_pair_promotions(
     let mut map_counts: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
     let mut active_total = 0usize;
     let mut support: Vec<(usize, f64)> = Vec::new();
+    // Each atom's largest |weight| over its firings, for the admission floor below.
+    let mut max_abs_weight = vec![0.0_f64; k_atoms];
     for row in codes.iter() {
         let n_active = row.active_mask.count_ones();
         active_total += n_active;
         support.clear();
         for atom in row.active_mask.iter_ones() {
-            support.push((atom, row.weights[atom]));
+            let weight = row.weights[atom];
+            max_abs_weight[atom] = max_abs_weight[atom].max(weight.abs());
+            support.push((atom, weight));
         }
         for a in 0..support.len() {
             for b in (a + 1)..support.len() {
@@ -614,24 +618,38 @@ pub fn harvest_code_space_pair_promotions(
         tolerance,
     };
 
-    // The ledger's own admission floor, not a knob: a circle's code term in the
-    // prescreen is exactly zero, so acceptance REQUIRES the support dividend to
-    // beat the dictionary surcharge — `f·(ŝ−1)·log₂(G/L0) > (m−ŝ)·P·½log₂N`,
-    // and the circle (ŝ=2, m=3) minimises the right/left ratio over the raced
-    // topologies. Pairs co-firing fewer than f_min times can therefore never be
-    // accepted, and skipping them prunes the candidate set from O(L0²·N) to the
-    // handful that could pay.
+    // The ledger's own admission floor, not a knob. A pair is accepted only when its
+    // atomic ledger pays,
+    //   f·(c_flat − c_curved + (s−1)·log₂(G/L0)) > (m−s)·P·½log₂N,
+    // with s = 2 and a circle basis m ≥ 3 for every pair span (ŝ ≤ 2). The curved
+    // phase rate is non-negative, and every in-plane point of the pair's cloud has
+    // norm at most Y = W_a‖d_a‖ + W_b‖d_b‖ (W an atom's largest |weight|), so each
+    // flat amplitude rate ½log₂(var/δ²)⁺ is at most log₂(Y/δ)⁺ and a pair firing f
+    // times can pay only if f·(2·log₂(Y/δ)⁺ + log₂(G/L0)) > P·½log₂N. With
+    // Y ≤ 2·max(W_a‖d_a‖, W_b‖d_b‖) the smaller of the two per-atom floors is a
+    // valid floor for the pair. Pairs co-firing fewer times can never be accepted,
+    // and skipping them prunes the candidate set from O(L0²·N) to the pairs that
+    // could pay. The spectra-only birth priority is not a floor: it is a heuristic
+    // and may not exclude a pair (#2933 F22).
     let unit_sel = if l0 > 0.0 {
         (k_atoms as f64 / l0).log2().max(0.0)
     } else {
         0.0
     };
     let log2_n = if n_tokens >= 2 { (n_tokens as f64).log2() } else { 0.0 };
-    let f_min = if unit_sel > 0.0 {
-        ((p as f64 * 0.5 * log2_n) / unit_sel).ceil().max(2.0) as u32
-    } else {
-        u32::MAX
-    };
+    let surcharge = p as f64 * 0.5 * log2_n;
+    let atom_floor: Vec<u32> = (0..k_atoms)
+        .map(|atom| {
+            let row = decoder.row(atom);
+            let reach = 2.0 * max_abs_weight[atom] * row.dot(&row).sqrt();
+            let payable = 2.0 * (reach / tolerance).log2().max(0.0) + unit_sel;
+            if payable > 0.0 {
+                ((surcharge / payable).floor() + 1.0).clamp(2.0, u32::MAX as f64) as u32
+            } else {
+                u32::MAX
+            }
+        })
+        .collect();
 
     // Pass 1 — accumulate weight clouds only for admissible pairs.
     let mut pair_firings: std::collections::BTreeMap<(usize, usize), Vec<f64>> =
@@ -645,7 +663,7 @@ pub fn harvest_code_space_pair_promotions(
             for b in (a + 1)..support.len() {
                 let (atom_a, w_a) = support[a];
                 let (atom_b, w_b) = support[b];
-                if pair_count(atom_a, atom_b) < f_min {
+                if pair_count(atom_a, atom_b) < atom_floor[atom_a].min(atom_floor[atom_b]) {
                     continue;
                 }
                 let joint = pair_firings.entry((atom_a, atom_b)).or_default();

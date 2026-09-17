@@ -4012,5 +4012,14 @@
     },
     "reason": "#2899 public API sweep of gam-models (prune-api-d): the uncalled LogLognormalKernelBundle::len accessor is deleted.",
     "evidence": "It is the file's only pub fn len. The removed map was derived by reading the change, not by running the script. Receipt: guarded job 657442 (agsmall, lane sw0m, node acn04) at 814808c53 with\nHEAD==PIN, dirty=0 and the 13 files of the s36 and s37 slices overlaid:\ncargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0\n(75 s) and cargo check -p gam-pyffi --lib exited 0 (40 s), with no error line.\nLog /scratch.global/sauer354/pool/prune-api-d/s36s37.657442.log. The first pass\non the s36 overlay (655090) stopped at the gam_custom_family import in\ngenerative.rs that only the deleted trait read, which this change removes."
+  },
+  {
+    "base": "3e50efdea7dfe172d7187d1548771aaff3bc2f36",
+    "removed": {
+      "crates/gam-sae/src/description_length.rs::circle_coding_gain_bits": 1,
+      "crates/gam-sae/src/description_length.rs::predicted_birth_dl_bits": 1
+    },
+    "reason": "#2933 F22 F23: predicted_birth_dl_bits called a spectra-only heuristic a theorem and returned NaN on degenerate inputs. It is replaced by birth_proposal_priority, which returns a typed Bits or Inconclusive priority. circle_coding_gain_bits called a small-cell expansion exact. It is replaced by circle_phase_code, a finite angular codec with an exact distortion.",
+    "evidence": "Both are declared only in description_length.rs. At the base their callers are structure_harvest.rs, curve_promotion.rs, description_length_tests.rs and tests_prescreen_geometry_2749.rs, and this commit moves every one to the replacements. No gam-cli, gam-pyffi, Python or example source names either function. The removed map was derived by reading the change, not by running the script."
   }
 ]

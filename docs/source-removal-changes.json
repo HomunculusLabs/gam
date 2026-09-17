@@ -9371,6 +9371,17 @@
     "evidence": "At the base, git grep -n for coordinate_sure_deflation_correction and SURE_DIVERGENCE_PD_FLOOR finds only their declarations and doc comments in construction_ard.rs, the single call in reconstruction_dispersion (construction_reconstruction.rs), and tests_sure_dispersion_2133.rs. This commit removes that call, the test module and its mod declaration in manifold/mod.rs. No bench, example, Python or FFI source names either. fitted_circle, hand_correction, lcg, lcg_normal and the two test functions are declared in tests_sure_dispersion_2133.rs and used only there. The replacement tests are in crates/gam-sae/src/manifold/tests_fitted_response_divergence_2933.rs."
   },
   {
+    "base": "3e50efdea7dfe172d7187d1548771aaff3bc2f36",
+    "items": [
+      "crates/gam-sae/src/description_length.rs:fn:circle_coding_gain_bits",
+      "crates/gam-sae/src/description_length.rs:fn:predicted_birth_dl_bits",
+      "crates/gam-sae/src/description_length_tests.rs:fn:circle_gain_matches_closed_form",
+      "crates/gam-sae/src/tiered/fit.rs:fn:code_space_census_recognizes_and_defers_a_zero_residual_planted_ring"
+    ],
+    "reason": "#2933 F22 F23. predicted_birth_dl_bits presented a spectra-only effective-dimension estimate as a theorem (a positive value implies a curved birth strictly lowers Eq. 4) and promised a finite return. It returned NaN at span-d-1 = 0 with a zero noise floor, and consumers used its sign to exclude candidates. birth_proposal_priority replaces it with a typed BirthProposalPriority (Bits or Inconclusive) that orders proposals and never excludes them. circle_coding_gain_bits called the small-cell expansion 1/2 log2(3a^2/(pi^2 delta^2)) an exact gain, and curve_promotion used it as the sign of the curved arm. circle_phase_code replaces it with an M-cell angular codec and its exact distortion. circle_gain_matches_closed_form only compared the deleted function against its own formula. The tiered census test code_space_census_recognizes_and_defers_a_zero_residual_planted_ring asserted the prescreen veto that F22 removes; it is renamed code_space_census_adjudicates_a_zero_residual_planted_ring_by_its_ledger and asserts the ledger verdict.",
+    "evidence": "At the base, git grep -n finds predicted_birth_dl_bits in description_length.rs (declaration and doc), in structure_harvest.rs (import and the birth pre-screen call), in curve_promotion.rs (import, doc and call), in description_length_tests.rs and tests_prescreen_geometry_2749.rs, and in one comment in structure_harvest/tests.rs; this commit moves every caller to birth_proposal_priority. circle_coding_gain_bits appears in description_length.rs, in curve_promotion.rs (import, doc and the ledger call), in description_length_tests.rs, and in three doc comments in curl.rs; every one is rewritten here. Outside docs JSON and experiment prose, no bench, example, Python or FFI source names either function. circle_gain_matches_closed_form and the renamed tiered test are test functions with no callers. The red runs at parent ba5b2a6b1 are MSI job 1102301 (/scratch.global/sauer354/au/logs/birth-red1-1102301.log)."
+  },
+  {
     "base": "a880bbaed02e660d3f2ad2cf58129b8f967bcfcb",
     "items": [
       "crates/gam-pyffi/src/manifold/geometry_ffi.rs:fn:coordinate_variance_spectrum",

@@ -84,7 +84,7 @@ use ndarray::{Array1, Array2, ArrayView2};
 use gam_linalg::faer_ndarray::{FaerEigh, FaerSvd};
 
 use crate::atom_codes::{combinatorial_support_bits, kt_code_bits};
-use crate::description_length::weighted_reverse_water_filling;
+use crate::description_length::{DescriptionLengthScoreKind, weighted_reverse_water_filling};
 
 /// Standard fixed-distortion reporting points shared by every front-end.
 pub const DEFAULT_EQ4_R2_TARGETS: &[f64] = &[0.99, 0.95, 0.90, 0.80];
@@ -180,6 +180,13 @@ pub struct Eq4DescriptionLength {
     pub per_target: Vec<Eq4TargetBits>,
     /// The featurizer's own native bits/token, echoed through when supplied.
     pub native_bits_per_token: Option<f64>,
+    /// Always [`DescriptionLengthScoreKind::GaussianSurrogate`] (#2933 F21): every
+    /// code and residual term is the joint reverse-water-filling rate of covariance
+    /// spectra under squared error, treating the components as independent
+    /// Gaussian sources whose distortions add. No encoder runs and no
+    /// reconstruction is measured, so the total is not an operational message
+    /// length and compares only with other Gaussian-surrogate figures.
+    pub score_kind: DescriptionLengthScoreKind,
 }
 
 /// The eigenvalues of the RAW second-moment matrix `vᵀv / N` of `values`
@@ -559,6 +566,7 @@ where
         amortization_horizon,
         per_target,
         native_bits_per_token,
+        score_kind: DescriptionLengthScoreKind::GaussianSurrogate,
     })
 }
 

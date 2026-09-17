@@ -82,7 +82,9 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 use crate::atom_codes::SparseAtomCodes;
 use crate::basis::{AmbientSphereHarmonicEvaluator, SaeBasisEvaluator, SaeBasisSecondJet};
-use crate::description_length::{BirthMdlPrescreen, predicted_birth_dl_bits};
+use crate::description_length::{
+    BirthMdlPrescreen, BirthProposalPriority, birth_proposal_priority,
+};
 use crate::frames::GrassmannFrame;
 use crate::manifold::{AssignmentMode, AtlasSeamKind, AtlasTopologyReadout, GraphCompressionKind, SAE_AMBIENT_SPHERE_DEFAULT_DEGREE, SAE_EUCLIDEAN_PATCH_MAX_DEGREE, SAE_MAX_PERIODIC_HARMONICS, SaeAtomBasisKind, SaeAtomGeometryPlan, SaeBasisResolution, SaeManifoldAtom, SaeManifoldRho, SaeManifoldTerm, SaeReferenceMetricPlan, SphereChartTransition, UnitSpeedChartTransition, amplitude_concentration_certificate, anisotropic_flat_product_torus_penalty, anisotropic_flat_product_torus_penalty_aspect_derivative, embedded_donut_torus_reference_penalty, embedded_donut_torus_reference_penalty_aspect_derivative};
 use crate::migration_ledger::SaeMigrationLedger;
@@ -790,10 +792,11 @@ pub fn harvest_move_proposals(
                 let g_dict = term.k_atoms();
                 let l0 = mean_active_atoms(assignments.view());
                 let n_tokens = n as f64;
-                // Score every factor direction; a positive predicted ΔMDL rides as a
-                // proposal (ordered by the prediction), a non-positive one is
-                // DEFERRED (not proposed this round — a soft defer, never a kill).
-                let mut scored: Vec<(usize, f64)> = Vec::with_capacity(r);
+                // Score every factor direction. The #2233 priority is a heuristic, not
+                // a certificate (#2933 F22), so it only ORDERS the proposals: a
+                // negative or inconclusive priority sorts late but still reaches the
+                // e-process gate. Only the `max_births` budget defers a candidate.
+                let mut scored: Vec<(usize, BirthProposalPriority)> = Vec::with_capacity(r);
                 for j in 0..r {
                     let energy = energies[j];
                     if !(energy > 0.0) {
@@ -834,7 +837,7 @@ pub fn harvest_move_proposals(
                     // terms are matched to the atom this candidate would actually race.
                     let span = participation_ratio(&local_energy);
                     let (intrinsic_dim, basis_size) = curved_topology_for_span(span)?;
-                    let predicted = predicted_birth_dl_bits(&BirthMdlPrescreen {
+                    let priority = birth_proposal_priority(&BirthMdlPrescreen {
                         rho,
                         span,
                         intrinsic_dim,
@@ -846,37 +849,43 @@ pub fn harvest_move_proposals(
                         g_dict,
                         l0,
                     });
-                    if predicted.is_finite() && predicted > 0.0 {
-                        scored.push((j, predicted));
-                    } else {
-                        births_deferred += 1;
-                        if predicted.is_finite() {
-                            deferred_predicted_bits += predicted;
-                        }
-                    }
+                    scored.push((j, priority));
                 }
-                // Order the survivors by predicted ΔMDL (descending), tie-break by
-                // index, and cap at `max_births`; the overflow is deferred too.
-                scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-                for &(candidate, predicted) in scored.iter().take(params.max_births) {
-                    proposals.push(proposal(
-                        term,
-                        StructureMove::Birth { candidate },
-                        predicted,
-                    ));
-                    birth_predictions.push((candidate, predicted));
+                // Finite priorities first (descending), inconclusive ones after them,
+                // tie-break by index; cap at `max_births`, and the overflow is deferred.
+                scored.sort_by(|a, b| {
+                    let by_priority = match (a.1.bits(), b.1.bits()) {
+                        (Some(left), Some(right)) => right.total_cmp(&left),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    };
+                    by_priority.then(a.0.cmp(&b.0))
+                });
+                for &(candidate, priority) in scored.iter().take(params.max_births) {
+                    // The search engine refuses a non-finite trigger, so an
+                    // inconclusive priority rides at the lowest finite trigger and
+                    // carries no prediction into the calibration ledger.
+                    let trigger = match priority.bits() {
+                        Some(bits) => {
+                            birth_predictions.push((candidate, bits));
+                            bits
+                        }
+                        None => f64::MIN,
+                    };
+                    proposals.push(proposal(term, StructureMove::Birth { candidate }, trigger));
                     births_proposed += 1;
                 }
-                for &(_, predicted) in scored.iter().skip(params.max_births) {
+                for &(_, priority) in scored.iter().skip(params.max_births) {
                     births_deferred += 1;
-                    deferred_predicted_bits += predicted;
+                    deferred_predicted_bits += priority.bits().unwrap_or(0.0);
                 }
                 if births_deferred > 0 {
                     log::debug!(
-                        "[structure-harvest] #2233 MDL pre-screen deferred {births_deferred} \
-                         birth(s) (total predicted ΔMDL {deferred_predicted_bits:.1} bits; \
-                         per-proposal local span) of {r} residual factors; proposed \
-                         {births_proposed} ordered by predicted ΔMDL",
+                        "[structure-harvest] #2233 deferred {births_deferred} birth(s) (zero \
+                         residual energy or past the max_births budget; total priority \
+                         {deferred_predicted_bits:.1} bits) of {r} residual factors; proposed \
+                         {births_proposed} ordered by the heuristic priority",
                     );
                 }
             }
@@ -1013,19 +1022,18 @@ pub struct HarvestReport {
     pub fission_carve_blocked_count: usize,
     /// Number of residual-factor birth candidates proposed.
     pub births_proposed: usize,
-    /// #2233 closed-form MDL pre-screen: `(candidate index, predicted ΔMDL bits)`
-    /// for every residual-factor birth that was PROPOSED (predicted saving > 0).
-    /// The candidate index is the factor direction the birth seeds from — the same
+    /// #2233 birth proposal priority: `(candidate index, heuristic priority bits)`
+    /// for every PROPOSED residual-factor birth whose priority is finite. The
+    /// candidate index is the factor direction the birth seeds from — the same
     /// index the [`StructureMove::Birth`] carries — so the round driver threads
-    /// each prediction into the unified [`SaeMigrationLedger`] record the post-refit
+    /// each priority into the unified [`SaeMigrationLedger`] record the post-refit
     /// verdict fills in (the predicted-vs-realized calibration curve).
     pub birth_predictions: Vec<(usize, f64)>,
-    /// #2233: number of residual-factor births DEFERRED this round — non-positive
-    /// predicted ΔMDL, so not proposed (a soft defer: they may return next round
-    /// once the residual changes; never a hard kill).
+    /// #2233: number of residual-factor directions NOT proposed this round — the
+    /// zero-energy directions with nothing to birth from, and candidates past the
+    /// `max_births` budget. A priority's sign never defers a birth (#2933 F22).
     pub births_deferred: usize,
-    /// #2233: total predicted ΔMDL (bits) summed over the deferred births — the
-    /// round-cadence honesty figure logged alongside the deferred count.
+    /// #2233: total finite priority (bits) summed over the budget-deferred births.
     pub deferred_predicted_bits: f64,
     /// If the birth channel could not run (empty residuals, evidence-ladder
     /// failure), why — so the absence of births is explained, not silent.

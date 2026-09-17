@@ -46,36 +46,38 @@
 //!   DL_old = f·( c_flat + s·log₂(G/L0) )              + s·P·½log₂N
 //!   DL_new = f·( c_curved + 1·log₂(G/L0) )            + m·P·½log₂N
 //!   c_flat   = Σ_{k∈{α,β}} scalar_rate_bits(varₖ, δ²)   (two amplitude coords)
-//!   c_curved = max(0, c_flat − circle_coding_gain_bits(R̂, δ))
+//!   c_curved = log₂ M                                  (one phase index)
 //! ```
 //!
-//! so the atomic saving is
+//! `c_flat` is the Gaussian surrogate rate of the ring plane's two amplitudes,
+//! which spends the in-plane distortion `D = Σₖ min(varₖ, δ²)`. `c_curved` is the
+//! rate of the least circle phase codebook whose exact distortion on the cloud's
+//! own radial moments fits that same `D`
+//! ([`crate::description_length::circle_phase_code`], #2933 F23). The ring's
+//! radial spread is fitting error, so it and the quantization error share the one
+//! budget; when the spread alone exceeds `D` no phase code matches the flat arm's
+//! fidelity and `DL_new = +∞`.
 //!
-//! ```text
-//!   DL_old − DL_new = f·[ circle_coding_gain_bits(R̂, δ) + (s−1)·log₂(G/L0) ]
-//!                     − (m−s)·P·½log₂N.
-//! ```
-//!
-//! This is precisely the #2233 crossover ledger
-//! ([`crate::description_length::predicted_birth_dl_bits`]) with the exact
-//! Theorem-3 circle coding gain in place of the crossover's coarse
-//! `(ŝ−d−1)·½log₂(1+λ/δ)` code term (which vanishes for a circle, `ŝ=2, d=1`).
-//! The circle therefore pays through the **support** dividend `(s−1)·log₂(G/L0)`
-//! — the active slots the single curved atom no longer spends — against the
-//! **dictionary surcharge** `(m−s)·P·½log₂N` of the wider harmonic basis. Both
-//! scale so that a HIGH firing rate `f` is what tips the atomic ledger positive:
-//! the promotion is a genuine compression win exactly when the community fires
-//! often enough to amortise the harmonic decoder columns. The zero-residual
-//! circle is discovered without any residual energy ever being present.
+//! The ledger sets a Gaussian surrogate against a finite codebook and prices
+//! support and decoder storage with per-slot and BIC-style charges, so it is a
+//! declared HEURISTIC comparison
+//! ([`crate::description_length::ScoreComparison::ExplicitHeuristic`]), not a
+//! certified message-length difference. The circle pays through the one-phase
+//! versus two-amplitude code saving and the **support** dividend
+//! `(s−1)·log₂(G/L0)`, against the **dictionary surcharge** `(m−s)·P·½log₂N` of
+//! the wider harmonic basis; a HIGH firing rate `f` is what amortises the harmonic
+//! decoder columns. The zero-residual circle is discovered without any residual
+//! energy ever being present.
 //!
 //! # Pure proposal producer
 //!
 //! [`propose_curve_promotion`] mutates nothing in the live fit loop. It reads a
 //! [`LinearCommunity`] (the block's atoms and code cloud), performs the local-PCA
-//! chart geometry, consumes the #2233 crossover as a pre-screen, and emits a
-//! typed [`CurvePromotionProposal`]. The structural controller consumes the
-//! proposal later; whether `accept` is set is a pure function of the DL ledger,
-//! the crossover pre-screen, and the ring geometry screens.
+//! chart geometry, records the #2233 birth proposal priority, and emits a typed
+//! [`CurvePromotionProposal`]. The structural controller consumes the proposal
+//! later; whether `accept` is set is a pure function of the DL ledger and the ring
+//! geometry screens. The priority is a spectra-only heuristic and never vetoes it
+//! (#2933 F22).
 
 use faer::Side;
 use gam_linalg::faer_ndarray::FaerEigh;
@@ -84,7 +86,9 @@ use ndarray::{Array1, Array2, ArrayView2};
 use super::curl::{CircleSeed, CurlVerdict, curl_seed, curl_verdict};
 use super::geometry_plan::SaeAtomGeometryPlan;
 use crate::description_length::{
-    BirthMdlPrescreen, circle_coding_gain_bits, predicted_birth_dl_bits, scalar_rate_bits,
+    BirthMdlPrescreen, BirthProposalPriority, CirclePhaseCode, DescriptionLengthScoreKind,
+    ScoreComparison, ScoredBits, birth_proposal_priority, circle_phase_code,
+    description_length_delta, scalar_rate_bits,
 };
 
 /// An active Tier-1 linear community `B`: the block's linear atoms and the
@@ -137,16 +141,19 @@ pub struct CurvePromotionProposal {
     pub firing_rate: f64,
     /// Total description length of `M_old = {linear atoms of B}`, in bits.
     pub dl_old: f64,
-    /// Total description length of `M_new = {curved chart replacing B}`, in bits.
+    /// Total description length of `M_new = {curved chart replacing B}`, in bits
+    /// (`+∞` when no circle phase code meets the flat arm's in-plane distortion).
     pub dl_new: f64,
-    /// The #2233 crossover pre-screen: predicted net DL saving of the curved
-    /// birth over the flat span from spectra alone
-    /// ([`crate::description_length::predicted_birth_dl_bits`]). A positive value
-    /// is the necessary pre-screen; the atomic `dl_new < dl_old` is the decision.
-    pub crossover_prescreen_bits: f64,
-    /// `true` iff the crossover pre-screen is positive, the ring geometry screens
-    /// pass, AND the atomic ledger strictly prefers the curved chart
-    /// (`dl_new < dl_old`). Never depends on residual explained variance.
+    /// The #2233 birth proposal priority of the curved birth over the flat span,
+    /// from spectra alone ([`crate::description_length::birth_proposal_priority`]).
+    /// An ordering and calibration heuristic: reported, never a veto on `accept`.
+    pub crossover_prescreen: BirthProposalPriority,
+    /// The least circle phase codebook meeting the flat arm's in-plane distortion,
+    /// or `None` when the ring's radial spread alone exceeds that distortion.
+    pub curved_phase_code: Option<CirclePhaseCode>,
+    /// `true` iff the ring geometry screens pass AND the atomic ledger strictly
+    /// prefers the curved chart (`dl_new < dl_old`). Never depends on residual
+    /// explained variance or on the birth proposal priority.
     pub accept: bool,
 }
 
@@ -289,15 +296,30 @@ pub fn propose_curve_promotion(
         center.view(),
     )?;
 
-    // ---- Atomic DL ledger (bits). δ is the distortion SCALE; the amplitude code
-    //      bits are charged at variance δ².
+    // ---- Atomic DL ledger (bits). δ is the distortion SCALE: each flat amplitude
+    //      is coded at variance δ², and the curved phase code must meet the same
+    //      in-plane distortion the flat arm spends.
     let delta = ctx.tolerance;
     let delta2 = delta * delta;
     let var_alpha = alpha.iter().map(|&a| a * a).sum::<f64>() / f as f64;
     let var_beta = beta.iter().map(|&b| b * b).sum::<f64>() / f as f64;
     let c_flat = scalar_rate_bits(var_alpha, delta2) + scalar_rate_bits(var_beta, delta2);
-    let circle_gain = circle_coding_gain_bits(verdict.radius, delta);
-    let c_curved = (c_flat - circle_gain).max(0.0);
+    let flat_distortion = var_alpha.min(delta2) + var_beta.min(delta2);
+    // The cloud's radial moments. The spread about the mean radius is summed
+    // directly, not formed as E[r²] − E[r]², which cancels at the resolution floor.
+    let radii: Vec<f64> = alpha
+        .iter()
+        .zip(beta.iter())
+        .map(|(&a, &b)| a.hypot(b))
+        .collect();
+    let mean_radius = radii.iter().sum::<f64>() / f as f64;
+    let radial_variance = radii
+        .iter()
+        .map(|&radius| (radius - mean_radius) * (radius - mean_radius))
+        .sum::<f64>()
+        / f as f64;
+    let curved_phase_code = circle_phase_code(mean_radius, radial_variance, flat_distortion)?;
+    let c_curved = curved_phase_code.map_or(f64::INFINITY, |code| code.rate_bits);
 
     let unit_sel = if ctx.g_dict > 0 && ctx.l0 > 0.0 {
         (ctx.g_dict as f64 / ctx.l0).log2().max(0.0)
@@ -315,10 +337,10 @@ pub fn propose_curve_promotion(
     let dl_old = f as f64 * (c_flat + s_f * unit_sel) + s_f * p_f * l_param;
     let dl_new = f as f64 * (c_curved + unit_sel) + m_f * p_f * l_param;
 
-    // ---- #2233 crossover pre-screen (spectra-only predicted saving). Consumed as
-    //      the necessary pre-screen; the atomic ledger is the sufficient decision.
+    // ---- #2233 birth proposal priority (spectra only), reported for ordering and
+    //      calibration. A heuristic, so it may not veto the ledger (#2933 F22).
     let firing_rate = f as f64 / ctx.n_tokens;
-    let crossover_prescreen_bits = predicted_birth_dl_bits(&BirthMdlPrescreen {
+    let crossover_prescreen = birth_proposal_priority(&BirthMdlPrescreen {
         rho: firing_rate,
         span,
         intrinsic_dim: d,
@@ -331,7 +353,20 @@ pub fn propose_curve_promotion(
         l0: ctx.l0,
     });
 
-    let accept = crossover_prescreen_bits > 0.0 && verdict.recommend_curl && dl_new < dl_old;
+    // The flat arm is a Gaussian surrogate and the curved arm a finite codebook:
+    // a declared heuristic comparison, not a certified length difference.
+    let ledger_saving = description_length_delta(
+        ScoredBits {
+            bits: dl_old,
+            kind: DescriptionLengthScoreKind::GaussianSurrogate,
+        },
+        ScoredBits {
+            bits: dl_new,
+            kind: DescriptionLengthScoreKind::FiniteQuantizer,
+        },
+        ScoreComparison::ExplicitHeuristic,
+    )?;
+    let accept = verdict.recommend_curl && ledger_saving > 0.0;
 
     Ok(Some(CurvePromotionProposal {
         block: community.block_id,
@@ -342,7 +377,8 @@ pub fn propose_curve_promotion(
         firing_rate,
         dl_old,
         dl_new,
-        crossover_prescreen_bits,
+        crossover_prescreen,
+        curved_phase_code,
         accept,
     }))
 }
@@ -506,11 +542,12 @@ mod curve_promotion_tests {
             proposal.verdict.kappa
         );
 
-        // (3) The #2233 crossover pre-screen is positive at this firing rate.
+        // (3) The #2233 priority is finite and positive at this firing rate (a
+        //     reported ordering key; it does not decide acceptance).
         assert!(
-            proposal.crossover_prescreen_bits > 0.0,
-            "crossover pre-screen must pay at high firing rate (bits={})",
-            proposal.crossover_prescreen_bits
+            proposal.crossover_prescreen.bits().is_some_and(|bits| bits > 0.0),
+            "crossover priority must pay at high firing rate: {:?}",
+            proposal.crossover_prescreen
         );
 
         // (4) The ATOMIC ledger strictly prefers the curved chart, and the
@@ -523,8 +560,8 @@ mod curve_promotion_tests {
         );
         assert!(
             proposal.accept,
-            "zero-residual circle must be accepted by DL (prescreen={}, dl_old={}, dl_new={}, recommend={})",
-            proposal.crossover_prescreen_bits,
+            "zero-residual circle must be accepted by DL (prescreen={:?}, dl_old={}, dl_new={}, recommend={})",
+            proposal.crossover_prescreen,
             proposal.dl_old,
             proposal.dl_new,
             proposal.verdict.recommend_curl
@@ -622,5 +659,163 @@ mod curve_promotion_tests {
         let c1 = vecs.column(1).to_owned();
         assert!((c0.dot(&c0) - 1.0).abs() < 1.0e-10);
         assert!(c0.dot(&c1).abs() < 1.0e-10);
+    }
+
+    /// A ring community whose phases sit at the centres of `n` equal arcs.
+    fn centred_ring_community(n: usize, radius: f64, p: usize) -> (Array2<f64>, Array2<f64>) {
+        let mut atoms = Array2::<f64>::zeros((2, p));
+        atoms[[0, 0]] = 1.0;
+        atoms[[1, 1]] = 1.0;
+        let mut codes = Array2::<f64>::zeros((n, 2));
+        for i in 0..n {
+            let theta = TAU * (i as f64 + 0.5) / n as f64;
+            codes[[i, 0]] = radius * theta.cos();
+            codes[[i, 1]] = radius * theta.sin();
+        }
+        (atoms, codes)
+    }
+
+    /// Encode each in-plane point to the index of its angular cell
+    /// `[2πk/M, 2π(k+1)/M)`, decode it to `ρ·(cos φ_k, sin φ_k)` at the cell centre
+    /// `φ_k`, and return the mean squared reconstruction error. `ρ` is the
+    /// least-squares decoder radius of this codebook, `mean ⟨x, e_k⟩`; with one
+    /// cell the centre direction averages to zero and the decoder is the origin.
+    fn measured_phase_codebook_distortion(codes: &Array2<f64>, m: usize) -> f64 {
+        let cell = TAU / m as f64;
+        let n = codes.nrows() as f64;
+        let mut directions = Vec::with_capacity(codes.nrows());
+        let mut projection = 0.0_f64;
+        for row in codes.rows() {
+            let theta = row[1].atan2(row[0]).rem_euclid(TAU);
+            let k = ((theta / cell).floor() as usize).min(m - 1);
+            let phi = (k as f64 + 0.5) * cell;
+            projection += row[0] * phi.cos() + row[1] * phi.sin();
+            directions.push(phi);
+        }
+        let rho = projection / n;
+        codes
+            .rows()
+            .into_iter()
+            .zip(&directions)
+            .map(|(row, &phi)| {
+                let dx = row[0] - rho * phi.cos();
+                let dy = row[1] - rho * phi.sin();
+                dx * dx + dy * dy
+            })
+            .sum::<f64>()
+            / n
+    }
+
+    /// #2933 F23: the curved arm of the atomic ledger must be priced at the rate of
+    /// an actual codebook that meets the flat arm's in-plane distortion, not at
+    /// the small-cell expansion `½log₂(3a²/(π²δ²))`. The test measures quantized
+    /// reconstructions of the community's own points for M = 1, 2, … and takes
+    /// the least M whose measured error fits the flat code's budget
+    /// `min(var_α, δ²) + min(var_β, δ²)`; `dl_new` must charge `log₂ M` per firing.
+    /// A coarse codebook (M = 4) and a fine one (M = 65) are both checked, and
+    /// each budget sits more than 1% from both neighbouring codebooks' errors, far
+    /// beyond the finite-grid effect of the planted points.
+    #[test]
+    fn curved_arm_is_priced_at_a_measured_codebook_2933() {
+        let p = 4;
+        let radius = 1.0;
+        for &(tolerance, n, expected_m) in &[(0.35_f64, 4096usize, 4usize), (0.01988, 1 << 16, 65)] {
+            let (atoms, codes) = centred_ring_community(n, radius, p);
+            let ctx = PromotionContext {
+                n_tokens: n as f64,
+                g_dict: 64,
+                l0: 2.0,
+                tolerance,
+            };
+            let proposal = propose_curve_promotion(
+                LinearCommunity {
+                    block_id: 0,
+                    atoms: atoms.view(),
+                    codes: codes.view(),
+                },
+                &ctx,
+            )
+            .expect("proposal producer runs")
+            .expect("a 2-plane ring yields a proposal");
+            let delta2 = tolerance * tolerance;
+            let per_axis_variance = radius * radius / 2.0;
+            let budget = 2.0 * per_axis_variance.min(delta2);
+            let measured_m = (1..=4 * expected_m)
+                .find(|&m| measured_phase_codebook_distortion(&codes, m) <= budget)
+                .expect("a fine enough codebook meets the budget");
+            assert_eq!(
+                measured_m, expected_m,
+                "planted premise: the least measured codebook at δ={tolerance}"
+            );
+            let below = measured_phase_codebook_distortion(&codes, measured_m - 1);
+            let at = measured_phase_codebook_distortion(&codes, measured_m);
+            assert!(
+                below > 1.01 * budget && at < 0.99 * budget,
+                "the budget must separate neighbouring codebooks: D(M-1)={below}, \
+                 D(M)={at}, budget={budget}"
+            );
+            let unit_sel = (ctx.g_dict as f64 / ctx.l0).log2();
+            let l_param = 0.5 * (n as f64).log2();
+            let expected_dl_new =
+                n as f64 * ((measured_m as f64).log2() + unit_sel) + 3.0 * p as f64 * l_param;
+            assert!(
+                (proposal.dl_new - expected_dl_new).abs() <= 1.0e-9 * expected_dl_new,
+                "δ={tolerance}: dl_new {} must charge the measured {measured_m}-cell codebook \
+                 ({expected_dl_new})",
+                proposal.dl_new
+            );
+            let code = proposal
+                .curved_phase_code
+                .expect("the planted ring has a phase code at this budget");
+            assert!(
+                (code.distortion - at).abs() <= 1.0e-4 * budget,
+                "the code's exact distortion {} must match the measured {at}",
+                code.distortion
+            );
+        }
+    }
+
+    /// #2933 F22: the spectra-only prescreen is not a certificate, so it may not
+    /// veto a promotion. A clean ring at G = L0 has no support dividend, which
+    /// sends the prescreen negative; the atomic ledger still prefers one phase to
+    /// two amplitudes by far more than the one extra harmonic decoder column.
+    #[test]
+    fn a_negative_prescreen_does_not_veto_the_atomic_ledger_2933() {
+        let n = 512;
+        let p = 4;
+        let (atoms, codes) = centred_ring_community(n, 1.0, p);
+        let ctx = PromotionContext {
+            n_tokens: n as f64,
+            g_dict: 2,
+            l0: 2.0,
+            tolerance: 0.05,
+        };
+        let proposal = propose_curve_promotion(
+            LinearCommunity {
+                block_id: 0,
+                atoms: atoms.view(),
+                codes: codes.view(),
+            },
+            &ctx,
+        )
+        .expect("proposal producer runs")
+        .expect("a 2-plane ring yields a proposal");
+        let surcharge = p as f64 * 0.5 * (n as f64).log2();
+        let saving = proposal.dl_old - proposal.dl_new;
+        assert!(proposal.verdict.recommend_curl, "planted premise: a clean ring");
+        assert!(
+            proposal.crossover_prescreen.bits().is_some_and(|bits| bits < 0.0),
+            "planted premise: with G = L0 the prescreen is negative, got {:?}",
+            proposal.crossover_prescreen
+        );
+        assert!(
+            saving > 10.0 * surcharge,
+            "planted premise: the ledger's saving {saving} dwarfs the surcharge {surcharge}"
+        );
+        assert!(
+            proposal.accept,
+            "a ring the atomic ledger and geometry both prefer must not be vetoed by the \
+             spectra-only prescreen"
+        );
     }
 }

@@ -107,8 +107,8 @@ fn the_deleted_sphere_chart_form_is_unbuildable_2749() {
 /// The reprice is MONOTONE and its size is closed-form: widening `m` by `Δm`
 /// lowers the predicted birth saving by exactly `Δm·P·½log₂N` bits and
 /// changes nothing else, so a span-3 birth can only be DEFERRED by #2749,
-/// never newly admitted. That is the pre-screen's own contract — it may
-/// defer, never accept; the e-process gate is the sole arbiter.
+/// never newly admitted. The priority only orders proposals (#2933 F22); the
+/// e-process gate is the sole arbiter.
 #[test]
 fn repricing_the_sphere_only_defers_2749() {
     let (d, m) = curved_topology_for_span(3.0).expect("the sphere band must price");
@@ -125,11 +125,15 @@ fn repricing_the_sphere_only_defers_2749() {
         l0: 32.0,
     };
     let deleted_chart_width = 7usize;
-    let at_chart_width = predicted_birth_dl_bits(&BirthMdlPrescreen {
+    let at_chart_width = birth_proposal_priority(&BirthMdlPrescreen {
         basis_size: deleted_chart_width,
         ..base
-    });
-    let at_realizable_width = predicted_birth_dl_bits(&base);
+    })
+    .bits()
+    .expect("a firing candidate with a positive noise floor has a finite priority");
+    let at_realizable_width = birth_proposal_priority(&base)
+        .bits()
+        .expect("a firing candidate with a positive noise floor has a finite priority");
     assert!(
         at_realizable_width < at_chart_width,
         "pricing the realizable atom must be the more conservative of the two \

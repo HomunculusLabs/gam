@@ -964,7 +964,7 @@ fn residuals_of(term: &SaeManifoldTerm) -> Array2<f64> {
 fn residual_bearing_fit_harvests_birth_proposal() {
     // An OVERCOMPLETE dictionary (G = 8 atoms, exactly one active per token ⇒
     // L0 = 1) so the #2233 birth pre-screen the harvest channel now embeds
-    // (`predicted_birth_dl_bits`) sees a real support saving log₂(G/L0) = 3
+    // (`birth_proposal_priority`) sees a real support saving log₂(G/L0) = 3
     // bits/token — the term that funds a curved birth. A single-atom dictionary
     // (G = 1, log₂(G/L0) = 0) offers ZERO overcompleteness and a lone LINEAR
     // residual direction earns no code saving either, so the pre-screen
@@ -1024,6 +1024,56 @@ fn residual_bearing_fit_harvests_birth_proposal() {
         report.birth_skipped_reason.is_none(),
         "the birth channel must run (no skip) on a non-degenerate residual; got {:?}",
         report.birth_skipped_reason
+    );
+}
+
+/// #2933 F22: the birth priority is a proposal-ordering heuristic, not a theorem,
+/// so a negative priority may sort a birth last but may not keep it from the
+/// e-process gate. A single-atom dictionary (G = L0 = 1, no support dividend)
+/// carries one linear residual direction with row-varying amplitude plus a small
+/// deterministic idiosyncratic spread; its priority is negative, and the candidate
+/// must still be proposed.
+#[test]
+fn a_negative_birth_priority_still_reaches_the_gate_2933() {
+    let n = 40usize;
+    let active: Vec<Vec<bool>> = (0..n).map(|_| vec![true]).collect();
+    let (term, rho) = planted_term(&active);
+    let p = term.output_dim();
+    let u = [0.6_f64, -0.4, 0.5, -0.3];
+    let un: f64 = u.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let mut residuals = Array2::<f64>::zeros((n, p));
+    for row in 0..n {
+        let amplitude = 2.0 * (std::f64::consts::TAU * row as f64 / n as f64).cos();
+        for out in 0..p {
+            let spread = 0.05 * (0.7 * row as f64 + 1.9 * out as f64 + 0.3).sin();
+            residuals[[row, out]] = amplitude * u[out] / un + spread;
+        }
+    }
+    let params = HarvestParams {
+        max_fusions: 0,
+        max_fissions: 0,
+        max_births: 2,
+    };
+    let report = harvest_move_proposals(&term, &rho, residuals.view(), &params).unwrap();
+    let births = report
+        .proposals
+        .iter()
+        .filter(|p| matches!(p.mv, StructureMove::Birth { .. }))
+        .count();
+    assert!(
+        births >= 1,
+        "a residual direction with a negative priority must still be proposed; got {births} \
+         births and {} deferred",
+        report.births_deferred
+    );
+    // Planted premise: every proposed birth here carries a negative priority, so
+    // before #2933 F22 the prescreen deferred them all (births = 0, deferred = 2).
+    assert_eq!(report.births_proposed, births);
+    assert!(
+        !report.birth_predictions.is_empty()
+            && report.birth_predictions.iter().all(|&(_, bits)| bits < 0.0),
+        "planted premise: negative priorities, got {:?}",
+        report.birth_predictions
     );
 }
 

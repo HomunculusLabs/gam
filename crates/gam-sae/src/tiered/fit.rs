@@ -929,15 +929,14 @@ mod fit_tests {
     /// The census the residual substrate cannot run: a planted circle that ONE
     /// Tier-1 block (`b=2`) reconstructs EXACTLY leaves a zero block residual,
     /// so no residual-mining tier can ever see it — yet the code-space census
-    /// discovers the ring in the block's code cloud. At this fixture's width the
-    /// dictionary is NOT overcomplete (`G = L0`), so the support dividend that
-    /// funds a circle's promotion is zero and the prescreen must DEFER: the
-    /// honest end-to-end behavior is recognition + a recorded refusal, never a
-    /// birth bought with no compression to pay for it (the acceptance arm lives
-    /// in the overcomplete hand-minted census tests). This is the #2502 in-span
-    /// curvature move wired end to end from `fit_tiered`.
+    /// discovers the ring in the block's code cloud and adjudicates it in bits. At
+    /// this fixture's width the dictionary is NOT overcomplete (`G = L0`), so the
+    /// spectra-only birth priority is negative — but it is a heuristic and may not
+    /// veto (#2933 F22). The decision is the atomic ledger's, and the migration
+    /// ledger records exactly that decision. This is the #2502 in-span curvature
+    /// move wired end to end from `fit_tiered`.
     #[test]
-    fn code_space_census_recognizes_and_defers_a_zero_residual_planted_ring() {
+    fn code_space_census_adjudicates_a_zero_residual_planted_ring_by_its_ledger() {
         use std::f64::consts::TAU;
         // A pure circle in cols 0,1 of P=4; evenly spaced phases for full
         // ring coverage. Cols 2,3 carry nothing, so one b=2 block spans the
@@ -961,35 +960,49 @@ mod fit_tests {
             "the fired 2-atom block must reach the adjudicator"
         );
         let proposal = &census.proposals[0];
-        // Recognition: the ring geometry is seen (span ≈ 2, ring screens pass)
-        // and the ATOMIC ledger genuinely prefers the curved chart …
+        println!(
+            "PROBE_TIERED dl_old={} dl_new={} accept={} prescreen={:?} phase_code={:?} verdict={:?}",
+            proposal.dl_old,
+            proposal.dl_new,
+            proposal.accept,
+            proposal.crossover_prescreen,
+            proposal.curved_phase_code,
+            proposal.verdict
+        );
+        // Recognition: the ring geometry is seen (span ≈ 2, ring screens pass).
         assert!(
             proposal.verdict.recommend_curl,
             "the census must recognize the planted ring geometrically: {proposal:?}"
         );
+        // At G = L0 the support dividend is zero and the priority is negative …
         assert!(
+            proposal
+                .crossover_prescreen
+                .bits()
+                .is_some_and(|bits| bits <= 0.0),
+            "with no overcompleteness the priority cannot pay: {:?}",
+            proposal.crossover_prescreen
+        );
+        // … and it does not decide: acceptance is the atomic ledger's verdict alone.
+        assert_eq!(
+            proposal.accept,
             proposal.dl_new < proposal.dl_old,
-            "the atomic ledger must prefer the circle (dl_new={}, dl_old={})",
+            "a recognized ring is accepted exactly when its ledger pays (dl_new={}, dl_old={})",
             proposal.dl_new,
             proposal.dl_old
         );
-        // … but at G = L0 the support dividend is zero, so the conservative
-        // prescreen defers rather than buys the wider harmonic decoder.
-        assert!(
-            proposal.crossover_prescreen_bits <= 0.0,
-            "with no overcompleteness the prescreen cannot pay: {}",
-            proposal.crossover_prescreen_bits
-        );
-        assert_eq!(census.n_accepted, 0, "deferred, not bought");
-        // Ledger provenance: the deferral is a recorded Curved REFUSAL, never a
-        // curved birth, and the linear rung accounts for the one block.
-        assert_eq!(stage_tally(&report.ledger, MoveStage::Curved).0, 0);
-        assert_eq!(report.ledger.n_admitted, 0, "a deferred promotion is not admitted");
+        assert_eq!(census.n_accepted, usize::from(proposal.accept));
+        // Ledger provenance: the census verdict is recorded as a Curved admission
+        // or refusal, and the linear rung accounts for the one block.
+        assert_eq!(stage_tally(&report.ledger, MoveStage::Curved).0, census.n_accepted);
+        assert_eq!(report.ledger.n_admitted, census.n_accepted);
         assert_linear_blocks_accounted(&report);
-        assert!(
-            report.ledger.n_refusals >= 1,
-            "the ledger must record the deferred promotion"
-        );
+        if !proposal.accept {
+            assert!(
+                report.ledger.n_refusals >= 1,
+                "the ledger must record the refused promotion"
+            );
+        }
         assert_eq!(report.ledger.pc_reseed_events, 0);
     }
 

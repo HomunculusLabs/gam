@@ -56,11 +56,16 @@ use rayon::prelude::*;
 /// of κ. Derived, not tuned: quantizing the arc `s ∈ [0, 2πR̂)` with cell width
 /// `Δ` gives positional MSE `Δ²/12`; matching the noise floor (`Δ²/12 = σ²`)
 /// makes the per-row angle cost `ln(2πR̂/Δ) = ln(πR̂/(√3σ))` nats against the
-/// flat two-coordinate reference `2·ln(R̂/σ)` (the Theorem-3 convention of
-/// `description_length::circle_coding_gain_bits`), so the per-row gain is
+/// flat two-coordinate reference `2·ln(R̂/σ)`, so the per-row gain is
 /// `½·ln(3R̂²/(π²σ²))`, whose zero is exactly `R̂ = σ·π/√3 ≈ 1.814σ`. Sanity:
 /// the crossover must exceed σ — a ring smaller than its own noise annulus is
 /// described at least as compactly by the Gaussian fill.
+///
+/// `Δ²/12` is the small-cell law, so this crossover is a high-resolution
+/// approximation, accurate only while `πR̂/(√3σ)` is large; near the crossover
+/// the codebook holds a few cells and the finite code
+/// (`description_length::circle_phase_code`) differs. It only screens which
+/// planes race; the race and the permutation null adjudicate (#2933 F23).
 pub const RD_CROSSOVER_FACTOR: f64 = 1.8137993642342178; // π / √3
 
 /// The evidence level the κ / resultant gates fire at (a 2σ screen, matching the
@@ -84,8 +89,8 @@ pub struct CurlVerdict {
     /// `R̂ = √(max(E[r²] − 2σ², 0))` — the noise-debiased fitted radius (the raw
     /// √(E\[r²\]) is biased up by the 2-D noise energy `2σ²` on the active support).
     pub radius: f64,
-    /// `½·ln(3R̂²/(π²σ²))` — the per-row coding gain (Theorem-3 circle gain of
-    /// `description_length::circle_coding_gain_bits`, in nats).
+    /// `½·ln(3R̂²/(π²σ²))` — the per-row coding gain in nats, in its small-cell
+    /// (high-resolution) approximation: a race screen, not a certificate.
     pub gain_nats_per_row: f64,
     /// `n_eff·½·ln(3R̂²/(π²σ²)) − Δcharge` — the net evidence for the circle.
     pub net_evidence_nats: f64,
@@ -214,10 +219,12 @@ pub fn curl_verdict(
     // gain is negative. Subtract the `2σ²` noise energy first (same debiasing as
     // `isa_seed`'s `a² = (m₂ − 2σ²)/q̂`, here with `q̂ = 1` on the active support).
     let radius = (law.m2 - 2.0 * sigma * sigma).max(0.0).sqrt();
-    // Per-row circle coding gain ½·ln(3R̂²/(π²σ²)) — the exact Theorem-3 circle
-    // gain of `description_length::circle_coding_gain_bits`, in nats (bits·ln 2).
-    // Equivalently ln(R̂/σ) − ln(π/√3): the shape constant −0.5954… is what makes
-    // the gain vanish exactly at the RD_CROSSOVER_FACTOR radius, not at R̂ = σ.
+    // Per-row circle coding gain ½·ln(3R̂²/(π²σ²)) in nats, in its small-cell
+    // approximation (arc cells with noise Δ²/12). Equivalently ln(R̂/σ) − ln(π/√3):
+    // the shape constant −0.5954… is what makes the gain vanish at the
+    // RD_CROSSOVER_FACTOR radius, not at R̂ = σ. At coarse resolution the finite
+    // phase code differs (`description_length::circle_phase_code`); this value only
+    // screens and ranks race candidates (#2933 F23).
     let gain_nats_per_row = {
         use std::f64::consts::PI;
         0.5 * (3.0 * radius * radius / (PI * PI * sigma * sigma)).ln()

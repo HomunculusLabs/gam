@@ -239,13 +239,14 @@ pub struct MigrationMove {
     pub evidence: MoveEvidence,
     /// Joint objective `J` after the round (`NaN` for a structural tally).
     pub objective: f64,
-    /// #2233 closed-form MDL birth pre-screen: the predicted net
-    /// description-length change (bits) the pre-screen computed for this move at
-    /// PROPOSAL time, before any refit. `Some` only for a residual-factor
-    /// [`SaeMove::Birth`] the pre-screen scored (the prediction the post-refit
-    /// `evidence.dl_bits` realizes — a logged predicted-vs-realized calibration
-    /// pair); `None` for every move the pre-screen does not price (deaths,
-    /// refusals, fusions/fissions/glues, curl births, structural tallies).
+    /// #2233 birth proposal priority: the heuristic net description-length change
+    /// (bits) computed for this move at PROPOSAL time, before any refit. It orders
+    /// proposals and certifies nothing (#2933 F22). `Some` only for a
+    /// residual-factor [`SaeMove::Birth`] with a finite priority (paired with the
+    /// post-refit `evidence.dl_bits` — a logged predicted-vs-realized calibration
+    /// pair); `None` for every move the priority does not price (deaths, refusals,
+    /// fusions/fissions/glues, curl births, structural tallies, inconclusive
+    /// priorities).
     pub predicted_dl_bits: Option<f64>,
 }
 

@@ -11,15 +11,101 @@
 //! Every quantity is read off an existing fit; nothing here recomputes it. The
 //! surface is ported from the hand-verified `Manifold-SAE
 //! experiments/mdl_ladder/mdl.py` reference: the rate-distortion primitives, the
-//! closed-form curved-birth pre-screen ([`predicted_birth_dl_bits`]), matched
-//! curved-vs-flat description lengths ([`matched_dl`]), and the fit-level
+//! spectra-only birth proposal priority ([`birth_proposal_priority`]), matched
+//! curved-vs-flat description lengths ([`matched_dl`]), the finite circle phase
+//! code ([`circle_phase_code`]), and the fit-level
 //! [`manifold_fit_description_length`] with its persisted-artifact entry
 //! [`native_manifold_description_length`].
+//!
+//! These figures are different mathematical objects — a Gaussian rate–distortion
+//! surrogate, a small-cell quantization cost, a finite codebook's exact rate —
+//! and each report carries its [`DescriptionLengthScoreKind`]. A difference of
+//! two figures is a model comparison only between figures of one kind
+//! ([`description_length_delta`]).
 
 use crate::atom_codes::SparseAtomCodes;
 use crate::manifold::SaeAtomGeometryPlan;
 use crate::native_code_source::native_active_code_sources;
 use ndarray::{ArrayView1, ArrayView2};
+
+/// Which mathematical object a description-length figure is (#2933 F21).
+///
+/// The routines here and in [`crate::eq4_description_length`] all report bits,
+/// but they compute different things, and subtracting two figures compares
+/// models only when both are the same kind:
+///
+/// * [`Self::GaussianSurrogate`] — the reverse-water-filling rate of a Gaussian
+///   source with the stated covariance spectrum under squared error. It is the
+///   rate–distortion function of that Gaussian model and nothing more. Sparse
+///   codes, wrapped angles, bounded amplitudes and manifold-supported
+///   contributions are not Gaussian, and a covariance does not determine their
+///   rate–distortion function: an equiprobable two-point scalar source is sent
+///   losslessly in one bit, while a Gaussian of the same variance needs an
+///   unbounded rate as the distortion goes to zero. No encoder runs and no
+///   reconstruction is measured, so the figure is neither a lower bound on
+///   nonlinear codes nor an achievable length for a non-Gaussian source.
+/// * [`Self::HighResolutionIntrinsic`] — the small-cell uniform-quantization
+///   cost `log₂(range/Δ)` of intrinsic coordinates with cell noise `Δ²/12`: the
+///   leading term of an expansion in cell size, accurate only while cells are
+///   small against the coordinate range and the density is flat across a cell.
+/// * [`Self::FiniteQuantizer`] — the rate `log₂ M` of an implemented
+///   `M`-codeword index code, with that codebook's exact expected distortion
+///   under a declared source model and no small-cell approximation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DescriptionLengthScoreKind {
+    GaussianSurrogate,
+    HighResolutionIntrinsic,
+    FiniteQuantizer,
+}
+
+impl DescriptionLengthScoreKind {
+    /// The stable name serialized into the Python report dictionaries.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GaussianSurrogate => "gaussian_surrogate",
+            Self::HighResolutionIntrinsic => "high_resolution_intrinsic",
+            Self::FiniteQuantizer => "finite_quantizer",
+        }
+    }
+}
+
+/// A description-length figure tagged with the object it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScoredBits {
+    pub bits: f64,
+    pub kind: DescriptionLengthScoreKind,
+}
+
+/// How a caller compares two [`ScoredBits`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScoreComparison {
+    /// A model comparison: both figures must be the same kind of object.
+    SameKind,
+    /// A comparison the caller declares heuristic because its figures rest on
+    /// different assumptions; the difference ranks or screens proposals and
+    /// certifies nothing.
+    ExplicitHeuristic,
+}
+
+/// `reference − candidate` in bits (positive ⇒ the candidate is the shorter
+/// figure). Under [`ScoreComparison::SameKind`] a pair of different kinds is
+/// refused rather than subtracted.
+pub fn description_length_delta(
+    reference: ScoredBits,
+    candidate: ScoredBits,
+    comparison: ScoreComparison,
+) -> Result<f64, String> {
+    if comparison == ScoreComparison::SameKind && reference.kind != candidate.kind {
+        return Err(format!(
+            "description-length comparison refused: {} bits and {} bits are different \
+             objects, not two lengths of one message; compare within one kind or declare \
+             the comparison heuristic",
+            reference.kind.as_str(),
+            candidate.kind.as_str()
+        ));
+    }
+    Ok(reference.bits - candidate.bits)
+}
 
 /// Bits to code one Gaussian scalar of variance `signal_var` to per-sample MSE
 /// `delta2`: the Gaussian rate-distortion law
@@ -207,11 +293,15 @@ pub fn weighted_reverse_water_filling(
     solve_weighted_allocation(components, total_distortion).map(|allocation| allocation.rates)
 }
 
-/// Rate (bits/sample) of the optimal linear (reverse-water-filling) code of a
-/// Gaussian source with covariance eigenvalues `eigs`, coded to total MSE
-/// `delta2`. Returns `(total_rate_bits, per_coordinate_bits)`. This is the
-/// best a LINEAR featurizer can do at that distortion — the block/direction lower
-/// bound a chart must beat.
+/// Reverse-water-filling rate (bits/sample) of a Gaussian source with covariance
+/// eigenvalues `eigs`, coded to total MSE `delta2`. Returns
+/// `(total_rate_bits, per_coordinate_bits)`.
+///
+/// This is the rate–distortion function of that Gaussian model under squared
+/// error, a [`DescriptionLengthScoreKind::GaussianSurrogate`]. It is not a lower
+/// bound on the rate a nonlinear or non-Gaussian code of the same covariance
+/// needs, nor the achievable rate of an arbitrary featurizer: a covariance does
+/// not determine a non-Gaussian source's rate–distortion function.
 ///
 /// `delta2 = 0` gives the legitimate `+∞` rate of every positive variance.
 /// A nonfinite or negative `delta2`, a nonfinite eigenvalue, or an eigenvalue
@@ -226,11 +316,12 @@ pub fn reverse_water_filling(eigs: &[f64], delta2: f64) -> Result<(f64, Vec<f64>
     Ok((allocation.rates[0], per))
 }
 
-/// The spectra-only inputs to the #2233 closed-form curved-birth MDL pre-screen.
+/// The spectra-only inputs to the #2233 birth proposal priority.
 ///
 /// Every field is estimated at PROPOSAL time from quantities the structured
-/// residual-factor fit already produced — no candidate refit is run. See
-/// [`predicted_birth_dl_bits`] for the crossover formula they feed.
+/// residual-factor fit (or a linear community's code cloud) already produced —
+/// no candidate refit is run. See [`birth_proposal_priority`] for the heuristic
+/// they feed.
 #[derive(Clone, Copy, Debug)]
 pub struct BirthMdlPrescreen {
     /// Activation rate `ρ̂ ∈ [0, 1]`: the fraction of tokens whose residual
@@ -263,90 +354,270 @@ pub struct BirthMdlPrescreen {
     pub l0: f64,
 }
 
-/// The #2233 closed-form curved-birth MDL pre-screen: the predicted NET
-/// description-length saving (bits) of a curved birth over the flat `s`-latent
-/// alternative, from spectra alone.
-///
-/// From the Eq-4 crossover theorem (positive ⇒ the birth strictly lowers Eq-4
-/// bits and should reach the e-process gate):
+/// Why [`birth_proposal_priority`] has no finite priority for a candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BirthPriorityInconclusive {
+    /// A field is non-finite or outside its domain: `rho ∉ [0, 1]`, or a negative
+    /// span, signal variance, noise floor, token count or support size.
+    InvalidInput,
+    /// The candidate fires and its code term needs the Gaussian rate of a
+    /// direction with positive signal and a zero noise floor, which is
+    /// unbounded. Both arms' code lengths are then infinite and their difference
+    /// is undefined, whatever the dimension coefficient multiplying it.
+    UnboundedCodeRate,
+}
+
+/// The birth proposal priority: an ordering key, never a certificate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BirthProposalPriority {
+    /// A finite heuristic net saving in bits; larger means propose earlier.
+    Bits(f64),
+    /// No finite priority exists for these inputs.
+    Inconclusive(BirthPriorityInconclusive),
+}
+
+impl BirthProposalPriority {
+    /// The finite heuristic bits, or `None` when the priority is inconclusive.
+    pub fn bits(self) -> Option<f64> {
+        match self {
+            Self::Bits(bits) => Some(bits),
+            Self::Inconclusive(_) => None,
+        }
+    }
+}
+
+/// The #2233 birth proposal priority: a spectra-only estimate of the net
+/// description-length saving (bits) of a curved birth over the flat alternative
+/// spanning the same residual directions,
 ///
 /// ```text
-///   ΔMDL = ρ̂·N·[ (ŝ−d−1)·½log₂(λ̂/δ) + (ŝ−1)·log₂(G/L0) ]
-///          − (m−ŝ)·P·½log₂(N)
+///   priority = ρ̂·N·[ (ŝ−d−1)·½log₂(λ̂/δ) + (ŝ−1)·log₂(G/L0) ]
+///              − (m−ŝ)·P·½log₂(N)
 /// ```
 ///
-/// The code coefficient is the Gaussian rate-distortion rate `scalar_rate_bits`
-/// (`½max(log₂(λ̂/δ),0)`) — the SAME per-scalar rate the Eq-4 scorer water-fills,
-/// so the pre-screen is priced in the scorer's own currency (not the `½log₂(1+SNR)`
-/// channel-capacity form, which the scorer never uses).
+/// with the Gaussian surrogate rate [`scalar_rate_bits`] `½max(log₂(λ̂/δ),0)` as
+/// the code coefficient.
 ///
-/// * the **code** term `(ŝ−d−1)·½log₂(λ̂/δ)` credits the scalars the curved
-///   atom transmits fewer of than the flat span (zero for circle/sphere, positive
-///   for torus/helix — signed, so a topology that needs MORE code dims than the
-///   span is honestly charged);
-/// * the **support** term `(ŝ−1)·log₂(G/L0)` credits the extra active slots the
-///   flat span spends that the single curved atom does not — the term that scales
-///   with dictionary overcompleteness;
-/// * the **signed dictionary** term `−(m−ŝ)·P·½log₂(N)` is the BIC decoder-parameter
-///   delta: a SURCHARGE when the curved basis is wider than the flat span it
-///   replaces (m>ŝ, e.g. an H-harmonic circle m=2H+1>2), and a genuine SAVING when
-///   it is narrower (m<ŝ) — the principal win for a high-codimension manifold
-///   spanning many ambient directions on a compact basis (`ŝ ≥ m`). Never clamped:
-///   the delta is an exact decoder-column count, so its sign never over-admits.
+/// # A heuristic, not a theorem (#2933 F22)
 ///
-/// The second-order residual (Eckart–Young) term `Δresid ≥ 0` is OMITTED: the
-/// pre-screen therefore under-credits the birth, so it can only DEFER a proposal
-/// (which returns next round when the residual changes), never accept one — the
-/// e-process gate stays the sole arbiter. Returns a finite value (all logs are
-/// floored on degenerate inputs).
+/// Every term is an effective-dimension approximation, so the sign of the
+/// priority certifies nothing about Eq. 4 or any other code:
+///
+/// * `ŝ` is a participation ratio — a non-integer effective dimension, not a
+///   count of decoder columns, coded coordinates or active slots — so none of
+///   `(ŝ−d−1)`, `(ŝ−1)` and `(m−ŝ)` is an exact difference of a scorer's code,
+///   support or parameter message;
+/// * `(ŝ−1)·log₂(G/L0)` prices freed active slots at a flat per-slot rate, not
+///   the change in the support code a scorer actually charges;
+/// * no candidate reconstruction is fitted or measured, and residual spectra
+///   alone cannot establish the error a candidate basis achieves, so leaving a
+///   term out does not make the estimate a one-sided bound.
+///
+/// A positive priority does not imply the birth lowers Eq. 4, and a negative one
+/// does not imply it cannot. Consumers use it to ORDER proposals and must not
+/// exclude a candidate on its sign; acceptance belongs to the separate gate (the
+/// e-process gate in structure search, the atomic ledger in a curve promotion).
+///
+/// # Degenerate inputs
+///
+/// Zero occupancy `ρ̂·N = 0` transmits nothing in either arm, so the code and
+/// support terms are exactly zero; that product is simplified before any rate is
+/// evaluated and the priority is the dictionary term alone. A firing candidate
+/// whose code rate is unbounded returns
+/// [`BirthPriorityInconclusive::UnboundedCodeRate`], and a non-finite or
+/// out-of-domain field returns [`BirthPriorityInconclusive::InvalidInput`]. No
+/// path returns NaN.
 #[must_use]
-pub fn predicted_birth_dl_bits(p: &BirthMdlPrescreen) -> f64 {
-    let span = p.span;
-    let code_bits =
-        (span - p.intrinsic_dim as f64 - 1.0) * scalar_rate_bits(p.signal_var, p.noise_floor);
-    let support_bits = if p.g_dict > 0 && p.l0 > 0.0 {
-        (span - 1.0) * (p.g_dict as f64 / p.l0).log2()
+pub fn birth_proposal_priority(p: &BirthMdlPrescreen) -> BirthProposalPriority {
+    let nonnegative = |value: f64| value.is_finite() && value >= 0.0;
+    if !((0.0..=1.0).contains(&p.rho)
+        && nonnegative(p.span)
+        && nonnegative(p.signal_var)
+        && nonnegative(p.noise_floor)
+        && nonnegative(p.n_tokens)
+        && nonnegative(p.l0))
+    {
+        return BirthProposalPriority::Inconclusive(BirthPriorityInconclusive::InvalidInput);
+    }
+    let firings = p.rho * p.n_tokens;
+    let saving = if firings == 0.0 {
+        0.0
+    } else {
+        let code_rate = scalar_rate_bits(p.signal_var, p.noise_floor);
+        if !code_rate.is_finite() {
+            return BirthProposalPriority::Inconclusive(
+                BirthPriorityInconclusive::UnboundedCodeRate,
+            );
+        }
+        let code_bits = (p.span - p.intrinsic_dim as f64 - 1.0) * code_rate;
+        let support_bits = if p.g_dict > 0 && p.l0 > 0.0 {
+            (p.span - 1.0) * (p.g_dict as f64 / p.l0).log2()
+        } else {
+            0.0
+        };
+        firings * (code_bits + support_bits)
+    };
+    // `½log₂(N)` is non-negative only for N ≥ 2; a degenerate token count charges
+    // no dictionary term. The term is signed: a charge when the curved basis is
+    // wider than the effective span it replaces, a credit when it is narrower.
+    let log2_n = if p.n_tokens >= 2.0 {
+        p.n_tokens.log2()
     } else {
         0.0
     };
-    let n = p.n_tokens.max(0.0);
-    let saving = p.rho.clamp(0.0, 1.0) * n * (code_bits + support_bits);
-    // `½log₂(N)` needs N ≥ 2 to be non-negative; a degenerate token count charges
-    // no dictionary term. The dictionary delta `−(m−ŝ)·P·½log₂N` is SIGNED: a charge
-    // when the curved basis is wider than the flat span it replaces (m>ŝ), and a
-    // genuine SAVING when it is narrower (m<ŝ) — the principal Eq-4 win for a
-    // high-codimension manifold carried by a compact basis (`s ≥ m`). The BIC
-    // decoder-parameter delta is exact (a difference of decoder column counts), so
-    // crediting its sign never over-admits a birth; the pre-screen's conservatism
-    // comes solely from omitting the Eckart–Young residual term, never from clamping
-    // this one (a clamp would indefinitely defer exactly the births the theorem targets).
-    let log2_n = if n >= 2.0 { n.log2() } else { 0.0 };
-    let dictionary_delta = (p.basis_size as f64 - span) * p.p_out as f64 * 0.5 * log2_n;
-    saving - dictionary_delta
+    let dictionary_delta = (p.basis_size as f64 - p.span) * p.p_out as f64 * 0.5 * log2_n;
+    BirthProposalPriority::Bits(saving - dictionary_delta)
 }
 
 // ===========================================================================
-// Rate–distortion currency: the curved-coding gain (Theorem 3 of the
-// "Superposed Geometry" memo).
+// The finite-resolution circle phase code (#2933 F23).
 // ===========================================================================
 //
-// Coding a firing against a curved chart beats the flat Gaussian code by a
-// closed-form gain: every pinned-down ambient direction saves `½ log₂(1/δ²)` bits.
-// This gain is ACTIVATION-space compression, measured in bits of reconstruction
-// code. It is orthogonal to the behavioral nats of the Rung-1/Rung-2 fits:
-// curvature can pay here and be behaviorally inert.
+// The "exact circle coding gain" `½·log₂(3a²/(π²δ²))` this replaces is the
+// small-cell expansion of a phase code: arc cells of length Δ carry positional
+// noise Δ²/12 only while Δ is small against the radius. Used as a sign
+// certificate at every resolution it is wrong where it matters — at M = 2 the
+// on-circle quantizer's error on a unit circle is 0.7268, not the expansion's
+// 0.8225. What replaces it is a specified codec with its exact distortion.
+//
+// # The codec
+//
+// A firing's centred in-plane point `x = r·(cos θ, sin θ)` is sent as the index of
+// its angular cell `[2πk/M, 2π(k+1)/M)` — `log₂ M` bits, fixed rate; for a phase
+// uniform on the circle the index is uniform, so no entropy code is shorter — and
+// decoded to `ρ·(cos φ_k, sin φ_k)` at the cell centre `φ_k = 2π(k+½)/M`.
+//
+// # Its exact distortion
+//
+// Declared source: θ uniform on the circle and independent of r. Within a cell
+// `E[cos(θ − φ_k)] = sinc(π/M)` with `sinc x = sin x / x`, so for any decoder radius
+//
+// ```text
+//   E‖x − ρ·e_k‖² = E[r²] − 2ρ·E[r]·sinc(π/M) + ρ²,
+// ```
+//
+// minimised at `ρ = E[r]·sinc(π/M)`, where
+//
+// ```text
+//   D_M = Var(r) + E[r]²·(1 − sinc²(π/M)).
+// ```
+//
+// `M = 1` decodes every firing to the origin (`sinc π = 0`, `D_1 = E[r²]`) at zero
+// rate: the zero-rate transition. `D_M` falls strictly in `M` towards `Var(r)`. The
+// cloud's radial spread is fitting error the phase code never removes, so the
+// fitting and quantization errors share ONE budget, and a budget at or below
+// `Var(r)` admits no phase code. The small-cell limit
+// `D_M ≈ Var(r) + π²E[r]²/(3M²)` recovers the old expansion only as `M → ∞`.
 
-/// The EXACT circle coding gain (Theorem 3, circle case), in bits:
-/// `Δ_circle = ½ · log₂( 3 a² / (π² δ²) )`.
-///
-/// `a` is the circle radius, `delta = δ` the tolerance: the Theorem-3 gain at
-/// codimension one, with the circle's shape constant folded in.
-pub(crate) fn circle_coding_gain_bits(a: f64, delta: f64) -> f64 {
-    if !(a > 0.0) || !(delta > 0.0) {
-        return 0.0;
+/// A finite circle phase code (see the module note on the codec).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CirclePhaseCode {
+    /// Number of codewords `M ≥ 1`.
+    pub codebook_size: u64,
+    /// Index rate `log₂ M`, bits per firing.
+    pub rate_bits: f64,
+    /// The MSE-optimal decoder radius `E[r]·sinc(π/M)`.
+    pub reconstruction_radius: f64,
+    /// Exact expected squared error `Var(r) + E[r]²·(1 − sinc²(π/M))` on the
+    /// declared source.
+    pub distortion: f64,
+}
+
+/// `1 − sinc²(x)` for `x ∈ (0, π]`, free of the cancellation in `1 − (sin x/x)²`
+/// that would swamp small-cell distortions near the resolution floor.
+fn one_minus_sinc_squared(x: f64) -> f64 {
+    // 1 − sinc²x = (1 − sinc x)(1 + sinc x) with 1 − sinc x = (x − sin x)/x.
+    let x_minus_sin = if x <= 1.0 {
+        // x − sin x = Σ_{k≥1} (−1)^{k+1}·x^{2k+1}/(2k+1)!. For x ≤ 1 the terms
+        // alternate and shrink by at least 20× each, and the ninth term against the
+        // first, 6·x¹⁶/19!, is below f64 epsilon: nine terms are exact to rounding.
+        let x2 = x * x;
+        let mut term = x * x2 / 6.0;
+        let mut sum = term;
+        for k in 2..=9 {
+            let even = (2 * k) as f64;
+            term *= -x2 / (even * (even + 1.0));
+            sum += term;
+        }
+        sum
+    } else {
+        // `x − sin x ≥ 1 − sin 1 > x/7` here, so the direct difference keeps its digits.
+        x - x.sin()
+    };
+    (x_minus_sin / x) * (1.0 + x.sin() / x)
+}
+
+fn circle_phase_code_at(mean_radius: f64, radial_variance: f64, codebook_size: u64) -> CirclePhaseCode {
+    let x = std::f64::consts::PI / codebook_size as f64;
+    CirclePhaseCode {
+        codebook_size,
+        rate_bits: (codebook_size as f64).log2(),
+        reconstruction_radius: mean_radius * x.sin() / x,
+        distortion: radial_variance + mean_radius * mean_radius * one_minus_sinc_squared(x),
     }
-    use std::f64::consts::PI;
-    0.5 * (3.0 * a * a / (PI * PI * delta * delta)).log2()
+}
+
+/// The least-rate circle phase code whose exact distortion fits `budget`: the
+/// smallest codebook `M` with `D_M ≤ budget`, on a source with mean radius
+/// `mean_radius` and radial variance `radial_variance` (see the module note).
+///
+/// Returns `Ok(None)` when no finite codebook meets the budget: `budget ≤ Var(r)`
+/// with a nonzero mean radius, or `budget < E[r²]` with a zero mean radius. Errors
+/// on a non-finite or negative input, or when the least codebook would exceed
+/// `2⁵³` codewords, past which an index is not exactly representable.
+pub fn circle_phase_code(
+    mean_radius: f64,
+    radial_variance: f64,
+    budget: f64,
+) -> Result<Option<CirclePhaseCode>, String> {
+    let nonnegative = |value: f64| value.is_finite() && value >= 0.0;
+    if !(nonnegative(mean_radius) && nonnegative(radial_variance) && nonnegative(budget)) {
+        return Err(format!(
+            "circle_phase_code: mean radius {mean_radius}, radial variance {radial_variance} \
+             and budget {budget} must be finite and non-negative"
+        ));
+    }
+    let zero_rate = circle_phase_code_at(mean_radius, radial_variance, 1);
+    if zero_rate.distortion <= budget {
+        return Ok(Some(zero_rate));
+    }
+    let angular_budget = budget - radial_variance;
+    if !(angular_budget > 0.0 && mean_radius > 0.0) {
+        return Ok(None);
+    }
+    // An upper codebook. `sin x ≥ x − x³/6` gives `sinc x ≥ 1 − x²/6`, hence
+    // `1 − sinc²x ≤ x²/3` while `x ≤ √6` (every M ≥ 2), and M ≥ π·E[r]/√(3·angular)
+    // meets the budget. Doubling guards the rounding of that boundary.
+    let codeword_limit = (1_u64 << 53) as f64;
+    let bound = (std::f64::consts::PI * mean_radius / (3.0 * angular_budget).sqrt()).ceil();
+    if !(bound <= codeword_limit) {
+        return Err(format!(
+            "circle_phase_code: the least codebook exceeds 2^53 codewords (mean radius \
+             {mean_radius}, radial variance {radial_variance}, budget {budget})"
+        ));
+    }
+    let mut upper = (bound as u64).max(2);
+    while circle_phase_code_at(mean_radius, radial_variance, upper).distortion > budget {
+        if upper as f64 >= codeword_limit {
+            return Err(format!(
+                "circle_phase_code: no codebook below 2^53 codewords resolves budget {budget} \
+                 above radial variance {radial_variance}"
+            ));
+        }
+        upper *= 2;
+    }
+    // `D_M` is strictly decreasing in M, so the least codebook is the bisection
+    // point of `D_M ≤ budget` on (1, upper].
+    let mut lower = 1_u64;
+    while upper - lower > 1 {
+        let middle = lower + (upper - lower) / 2;
+        if circle_phase_code_at(mean_radius, radial_variance, middle).distortion <= budget {
+            upper = middle;
+        } else {
+            lower = middle;
+        }
+    }
+    Ok(Some(circle_phase_code_at(mean_radius, radial_variance, upper)))
 }
 
 // ===========================================================================
@@ -400,6 +671,9 @@ pub(crate) fn circle_coding_gain_bits(a: f64, delta: f64) -> f64 {
 /// Uniform-quantization coding cost, in bits, of one unit-range coordinate known to
 /// standard error `se`: `½·log₂(1/(12·se²))`, floored at 0.
 ///
+/// A [`DescriptionLengthScoreKind::HighResolutionIntrinsic`] cost: the `Δ²/12`
+/// cell noise is the small-cell law for a density flat across each cell.
+///
 /// Derived in the module note: matching a uniform quantizer's noise variance
 /// `Δ²/12` to the estimation variance `se²` gives cell width `Δ = se·√12` and cost
 /// `log₂(1/Δ) = ½·log₂(1/(12·se²))`. Returns `0` for `se ≥ 1/√12` (the coordinate
@@ -444,6 +718,9 @@ pub struct MatchedDl {
     pub ev: f64,
     /// Matched-DL cost per unit EV, `total_dl_bits / ev` (`+∞` when `ev ≤ 0`).
     pub dl_per_ev: f64,
+    /// Always [`DescriptionLengthScoreKind::HighResolutionIntrinsic`]: the coding
+    /// bits are small-cell quantization costs ([`se_resolution_bits`]).
+    pub score_kind: DescriptionLengthScoreKind,
 }
 
 /// Assemble the matched description length of a chart / atom from its column count,
@@ -488,15 +765,27 @@ pub fn matched_dl(
         total_dl_bits: total,
         ev,
         dl_per_ev,
+        score_kind: DescriptionLengthScoreKind::HighResolutionIntrinsic,
     }
 }
 
 /// Matched-DL delta `flat − chart`, in bits: the description length the curved chart
 /// SAVES over the flat/line atom at the SAME firings. Positive ⇒ the curved chart is
 /// the shorter code (curvature pays in bits); negative ⇒ the flat atom is cheaper
-/// (the honest "curvature does not pay here" verdict).
-pub(crate) fn matched_dl_delta(flat: &MatchedDl, chart: &MatchedDl) -> f64 {
-    flat.total_dl_bits - chart.total_dl_bits
+/// (the honest "curvature does not pay here" verdict). Refuses two reports of
+/// different score kinds.
+pub(crate) fn matched_dl_delta(flat: &MatchedDl, chart: &MatchedDl) -> Result<f64, String> {
+    description_length_delta(
+        ScoredBits {
+            bits: flat.total_dl_bits,
+            kind: flat.score_kind,
+        },
+        ScoredBits {
+            bits: chart.total_dl_bits,
+            kind: chart.score_kind,
+        },
+        ScoreComparison::SameKind,
+    )
 }
 
 // ===========================================================================
@@ -756,6 +1045,10 @@ pub struct ManifoldFitDl {
     pub total_bits: f64,
     /// The headline currency: `total_bits / n_tokens`.
     pub bits_per_token: f64,
+    /// Always [`DescriptionLengthScoreKind::GaussianSurrogate`]: the code rate is
+    /// the reverse-water-filling rate of the coordinate covariance spectrum, not
+    /// an encoded message whose reconstruction is measured.
+    pub score_kind: DescriptionLengthScoreKind,
 }
 
 /// Assemble the fit-level [`ManifoldFitDl`] from a fit's own empirical byproducts.
@@ -977,6 +1270,7 @@ pub fn manifold_fit_description_length(
         dict_bits,
         total_bits,
         bits_per_token: total_bits / n,
+        score_kind: DescriptionLengthScoreKind::GaussianSurrogate,
     })
 }
 

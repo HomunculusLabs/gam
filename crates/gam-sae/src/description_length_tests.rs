@@ -3,16 +3,24 @@
 //! exactly.
 
 use super::{
-    BirthMdlPrescreen, DecoderBlockCode, DictionaryCode, DictionaryCodeKind, atom_occupancy,
-    circle_coding_gain_bits, manifold_fit_description_length, matched_dl, matched_dl_delta,
-    persisted_decoder_dictionary_code, predicted_birth_dl_bits, reverse_water_filling,
-    scalar_rate_bits, se_resolution_bits, selection_bits, weighted_reverse_water_filling,
+    BirthMdlPrescreen, BirthPriorityInconclusive, BirthProposalPriority, DecoderBlockCode,
+    DescriptionLengthScoreKind, DictionaryCode, DictionaryCodeKind, ScoreComparison, ScoredBits,
+    atom_occupancy, birth_proposal_priority, circle_phase_code, circle_phase_code_at,
+    description_length_delta, manifold_fit_description_length, matched_dl, matched_dl_delta,
+    persisted_decoder_dictionary_code, reverse_water_filling, scalar_rate_bits, se_resolution_bits, selection_bits, weighted_reverse_water_filling,
 };
 use crate::atom_codes::SparseAtomCodes;
 use crate::manifold::{
     SaeAtomBasisKind, SaeAtomGeometryPlan, SaeBasisResolution, SaeReferenceMetricPlan,
 };
 use ndarray::Array2;
+
+/// The finite priority of a firing candidate with a positive noise floor.
+fn priority_bits(p: &BirthMdlPrescreen) -> f64 {
+    birth_proposal_priority(p)
+        .bits()
+        .expect("a firing candidate with a positive noise floor has a finite priority")
+}
 
 /// A small deterministic support: `n` tokens over `g` atoms, atom `k` firing on
 /// every `(k+1)`-th token, so supports vary in cardinality (exercising the
@@ -234,7 +242,7 @@ fn matched_dl_planted_circle_gives_closed_form_bit_count() {
     // distinction (the 2π factor) is pinned in
     // `matched_dl_per_arm_phase_vs_amplitude_rate_removes_pro_chart_bias`.
     let flat = matched_dl(1, 1, p, l_param, &ses, ev);
-    let delta = matched_dl_delta(&flat, &dl);
+    let delta = matched_dl_delta(&flat, &dl).expect("matched reports share one score kind");
     let expected_delta = flat.total_dl_bits - dl.total_dl_bits;
     assert!((delta - expected_delta).abs() < 1e-9);
     assert!(
@@ -257,7 +265,8 @@ fn matched_dl_planted_circle_gives_closed_form_bit_count() {
         "block codes 4 scalars per firing: {}",
         block.coding_bits
     );
-    let economy_delta = matched_dl_delta(&block, &dl);
+    let economy_delta =
+        matched_dl_delta(&block, &dl).expect("matched reports share one score kind");
     let expected_economy = (4.0 - 7.0) * 64.0 * 4.0 + 3.0 * f as f64 * per_firing_bits;
     assert!(
         (economy_delta - expected_economy).abs() < 1e-6,
@@ -317,11 +326,14 @@ fn matched_dl_per_arm_phase_vs_amplitude_rate_removes_pro_chart_bias() {
         "phase SE is 2π finer than amplitude SE ⇒ log₂(2π) more bits per coordinate"
     );
 
-    let corrected_delta = matched_dl_delta(&flat, &chart); // flat − chart, bits
+    // flat − chart, bits
+    let corrected_delta =
+        matched_dl_delta(&flat, &chart).expect("matched reports share one score kind");
 
     // The OLD biased arithmetic priced the flat amplitudes at the PHASE SE too.
     let flat_biased = matched_dl(b, b, p, l_param, &phase_ses, ev);
-    let biased_delta = matched_dl_delta(&flat_biased, &chart);
+    let biased_delta =
+        matched_dl_delta(&flat_biased, &chart).expect("matched reports share one score kind");
 
     // Sign of the correction: matched_dl_delta = flat − chart (positive ⇒ chart is
     // the shorter code). Overcharging the flat amplitudes inflated flat.total, which
@@ -343,18 +355,127 @@ fn matched_dl_per_arm_phase_vs_amplitude_rate_removes_pro_chart_bias() {
     assert!((chart.param_bits - 1.0 * p as f64 * l_param).abs() < 1e-9);
 }
 
+/// #2933 F23: the circle phase code's exact distortion against ACTUAL quantized
+/// reconstructions, over coarse and fine codebooks and a radial spread independent
+/// of phase. The planted cloud is a product grid — `n_θ` phases at the centres of
+/// equal arcs times two radii `a ± b` — so every tested `M` divides `n_θ` into
+/// cells of `m = n_θ/M` points. Each point is encoded to its cell index and decoded
+/// to the code's own reconstruction radius at the cell centre, and the measured mean
+/// squared error is compared with `D_M = Var(r) + E[r]²·(1 − sinc²(π/M))`.
+///
+/// The only admissible gap is the grid's in-cell average of `cos(θ − φ_k)`,
+/// `S_m = sin(π/M)/(m·sin(π/(Mm)))` instead of `sinc(π/M)`. From
+/// `m·sin(x/m) ≥ x − x³/(6m²)` it lies in
+/// `[sinc x, sinc x/(1 − x²/(6m²))]`, so the measured error differs from `D_M` by
+/// at most `2ρ·E[r]·(S_m − sinc x)`: the test's tolerance, derived, not tuned.
+///
+/// The old expansion `π²E[r]²/(3M²)` says 0.8225 at M = 2 on a unit circle; the
+/// centroid codec measures `1 − (2/π)² = 0.5947`, and the check below would fail
+/// the expansion at every coarse codebook.
 #[test]
-fn circle_gain_matches_closed_form() {
-    use std::f64::consts::PI;
-    let a = 1.7;
-    let delta = 0.05;
-    let got = circle_coding_gain_bits(a, delta);
-    let expected = 0.5 * (3.0 * a * a / (PI * PI * delta * delta)).log2();
+fn circle_phase_code_matches_measured_reconstructions_2933() {
+    use std::f64::consts::{PI, TAU};
+    let n_theta = 3072 * 8;
+    for &(a, b) in &[(1.0_f64, 0.0_f64), (1.5, 0.3)] {
+        let radii = [a - b, a + b];
+        let mean_radius = a;
+        let radial_variance = b * b;
+        let mean_square = mean_radius * mean_radius + radial_variance;
+        for &m_cells in &[1_u64, 2, 3, 4, 16, 64, 1024] {
+            let code = circle_phase_code_at(mean_radius, radial_variance, m_cells);
+            let cell = TAU / m_cells as f64;
+            let mut squared_error = 0.0_f64;
+            let mut count = 0.0_f64;
+            for j in 0..n_theta {
+                let theta = TAU * (j as f64 + 0.5) / n_theta as f64;
+                let k = ((theta / cell).floor() as u64).min(m_cells - 1);
+                let phi = (k as f64 + 0.5) * cell;
+                for &r in &radii {
+                    let dx = r * theta.cos() - code.reconstruction_radius * phi.cos();
+                    let dy = r * theta.sin() - code.reconstruction_radius * phi.sin();
+                    squared_error += dx * dx + dy * dy;
+                    count += 1.0;
+                }
+            }
+            let measured = squared_error / count;
+            let x = PI / m_cells as f64;
+            let per_cell = (n_theta as u64 / m_cells) as f64;
+            let sinc = x.sin() / x;
+            let grid_shift = x * x / (6.0 * per_cell * per_cell);
+            let tolerance = 2.0 * code.reconstruction_radius.abs() * mean_radius * sinc
+                * grid_shift
+                / (1.0 - grid_shift)
+                + 1.0e-12 * mean_square;
+            assert!(
+                (measured - code.distortion).abs() <= tolerance,
+                "a={a}, b={b}, M={m_cells}: measured {measured} vs exact {} (tolerance {tolerance})",
+                code.distortion
+            );
+            assert_eq!(code.rate_bits, (m_cells as f64).log2());
+        }
+    }
+    // The coarse case the small-cell expansion gets wrong, pinned in closed form.
+    let two_cells = circle_phase_code_at(1.0, 0.0, 2);
+    let exact = 1.0 - (2.0 / PI) * (2.0 / PI);
+    assert!((two_cells.distortion - exact).abs() < 1.0e-12);
+    assert!(PI * PI / 12.0 - two_cells.distortion > 0.2);
+}
+
+/// #2933 F23: `circle_phase_code` returns the LEAST codebook meeting the budget,
+/// makes the zero-rate transition, refuses budgets no phase code can meet, and
+/// resolves small-cell distortions at the resolution floor, where the naive
+/// `1 − (sin x/x)²` cancels to rounding noise.
+#[test]
+fn circle_phase_code_selects_the_least_codebook_2933() {
+    // Zero rate: a budget at or above E[r²] decodes every firing to the origin.
+    let zero = circle_phase_code(1.5, 0.09, 1.5 * 1.5 + 0.09)
+        .expect("valid inputs")
+        .expect("the origin meets E[r²]");
+    assert_eq!(zero.codebook_size, 1);
+    assert_eq!(zero.rate_bits, 0.0);
+    assert_eq!(zero.reconstruction_radius.abs() < 1.0e-15, true);
+    // No finite codebook removes the radial spread.
+    assert_eq!(circle_phase_code(1.5, 0.09, 0.09).expect("valid inputs"), None);
+    assert_eq!(circle_phase_code(1.5, 0.09, 0.05).expect("valid inputs"), None);
+    // A zero mean radius leaves every codebook at E[r²].
+    assert_eq!(circle_phase_code(0.0, 0.5, 0.4).expect("valid inputs"), None);
+    // Domain errors are loud.
+    assert!(circle_phase_code(f64::NAN, 0.0, 0.1).is_err());
+    assert!(circle_phase_code(1.0, -0.1, 0.1).is_err());
+    assert!(circle_phase_code(1.0, 0.0, f64::INFINITY).is_err());
+
+    // Least codebook: the chosen M meets the budget and M − 1 does not.
+    for &budget in &[0.9_f64, 0.6, 0.3, 0.05, 1.0e-3, 1.0e-6] {
+        let code = circle_phase_code(1.0, 0.0, budget)
+            .expect("valid inputs")
+            .expect("a zero-spread ring has a code for every positive budget");
+        assert!(code.distortion <= budget, "budget {budget}: {code:?}");
+        if code.codebook_size > 1 {
+            let coarser = circle_phase_code_at(1.0, 0.0, code.codebook_size - 1);
+            assert!(
+                coarser.distortion > budget,
+                "budget {budget}: M={} is not least ({coarser:?})",
+                code.codebook_size
+            );
+        }
+    }
+
+    // Resolution floor. At x = π/M ≈ 1e-8 the exact `1 − sinc²x = x²/3 − 2x⁴/45 + …`
+    // is x²/3 to relative 1e-17, while `1 − (sin x/x)²` rounds to 0 or 2.2e-16.
+    let budget = 3.0e-16;
+    let code = circle_phase_code(1.0, 0.0, budget)
+        .expect("valid inputs")
+        .expect("a positive budget has a code");
+    let x = std::f64::consts::PI / code.codebook_size as f64;
+    let small_cell = x * x / 3.0;
     assert!(
-        (got - expected).abs() < 1e-12,
-        "got {got} expected {expected}"
+        (code.distortion - small_cell).abs() <= 1.0e-12 * small_cell,
+        "distortion {} vs x²/3 {small_cell} at M={}",
+        code.distortion,
+        code.codebook_size
     );
-    assert_eq!(circle_coding_gain_bits(0.0, 0.1), 0.0);
+    let coarser = std::f64::consts::PI / (code.codebook_size - 1) as f64;
+    assert!(code.distortion <= budget && coarser * coarser / 3.0 > budget);
 }
 
 fn close(a: f64, b: f64, tol: f64) -> bool {
@@ -726,7 +847,7 @@ fn birth_prescreen_matches_hand_computed_crossover() {
     // saving = ρN·[0 + (s−1)·log₂(G/L0)] = 0.1·1000·(1·5) = 500.
     // surcharge = (m−s)·P·½·log₂(N) = (3−2)·8·0.5·log₂(1000).
     let expected_circle = 0.1 * 1000.0 * 5.0 - (3.0 - 2.0) * 8.0 * 0.5 * log2_n;
-    let got_circle = predicted_birth_dl_bits(&circle);
+    let got_circle = priority_bits(&circle);
     assert!(
         (got_circle - expected_circle).abs() < 1e-9,
         "circle pre-screen bits {got_circle} != hand value {expected_circle}"
@@ -749,7 +870,7 @@ fn birth_prescreen_matches_hand_computed_crossover() {
     // code coeff (s−d−1)=1, scalar rate = ½log₂(3); support=(4−1)·5=15.
     let scalar_rate = 0.5 * 3.0_f64.log2();
     let expected_torus = 0.001 * 1000.0 * (scalar_rate + 15.0) - (25.0 - 4.0) * 8.0 * 0.5 * log2_n;
-    let got_torus = predicted_birth_dl_bits(&torus);
+    let got_torus = priority_bits(&torus);
     assert!(
         (got_torus - expected_torus).abs() < 1e-9,
         "torus pre-screen bits {got_torus} != hand value {expected_torus}"
@@ -767,9 +888,8 @@ fn birth_prescreen_matches_hand_computed_crossover() {
 /// dictionary saving `+(ŝ−m)·P·½log₂N`, not clamped to zero. This is the theorem's
 /// principal win for a manifold spanning many ambient directions on a compact basis
 /// (a shell/high-genus kind), which an earlier `(m−ŝ).max(0)` clamp defers
-/// indefinitely. The saving is an exact decoder-column-count delta, so crediting it
-/// never over-admits — the pre-screen still under-credits (Eckart–Young residual
-/// omitted) and the e-process gate stays sole arbiter.
+/// indefinitely. The priority only orders proposals and certifies nothing
+/// (#2933 F22); the e-process gate stays sole arbiter.
 #[test]
 fn birth_prescreen_credits_dictionary_saving_when_basis_narrower_than_span() {
     // ŝ=8 ambient span, compact basis m=5 (< ŝ), d=2. N=1000, P=8, G=1024, L0=32.
@@ -793,7 +913,7 @@ fn birth_prescreen_credits_dictionary_saving_when_basis_narrower_than_span() {
     // signed dictionary delta = (m−ŝ)·P·½log₂N = (5−8)·8·½·log₂N  (NEGATIVE ⇒ saving)
     let dict_delta = (5.0 - 8.0) * 8.0 * 0.5 * log2_n;
     let expected = saving - dict_delta; // saving − (negative) = saving + |dict_delta|
-    let got = predicted_birth_dl_bits(&p);
+    let got = priority_bits(&p);
     assert!(
         (got - expected).abs() < 1e-9,
         "signed-dictionary bits {got} != hand value {expected}"
@@ -806,7 +926,7 @@ fn birth_prescreen_credits_dictionary_saving_when_basis_narrower_than_span() {
          got {got}, saving-alone {saving} (a zero-clamp regression)"
     );
     // Monotonicity: an even narrower basis earns a strictly larger saving.
-    let narrower = predicted_birth_dl_bits(&BirthMdlPrescreen { basis_size: 3, ..p });
+    let narrower = priority_bits(&BirthMdlPrescreen { basis_size: 3, ..p });
     assert!(
         narrower > got,
         "a narrower basis must earn a larger dictionary saving: m=3 {narrower} <= m=5 {got}"
@@ -847,9 +967,9 @@ fn planted_sd1_signal(n: usize, p: usize, d: usize, radius: f64) -> (Vec<Vec<f64
 /// over the FLAT `s`-latent alternative on a planted `s=d+1` kind (positive ⇒
 /// curved is cheaper ⇒ the birth wins), computed through the production
 /// [`crate::eq4_description_length::eq4_fixed_distortion_description_length`]
-/// path — and the closed-form pre-screen's prediction on the SAME planted
-/// quantities. Both should carry the same sign: that agreement is the pre-screen's
-/// contract.
+/// path — and the heuristic birth priority on the SAME planted quantities. On these
+/// integer-span fixtures both carry the same sign; in general they need not
+/// ([`birth_priority_is_not_an_eq4_certificate_2933`]).
 fn eq4_curved_advantage_and_prescreen(
     d: usize,
     n: usize,
@@ -940,7 +1060,7 @@ fn eq4_curved_advantage_and_prescreen(
 
     let eq4_advantage = flat.per_target[0].bits - curved.per_target[0].bits;
 
-    let predicted = predicted_birth_dl_bits(&BirthMdlPrescreen {
+    let predicted = priority_bits(&BirthMdlPrescreen {
         rho: 1.0,
         span: s as f64,
         intrinsic_dim: d,
@@ -956,12 +1076,12 @@ fn eq4_curved_advantage_and_prescreen(
     (eq4_advantage, predicted)
 }
 
-/// #2233 agreement contract: the closed-form birth pre-screen's win/lose VERDICT
-/// (the sign of its predicted ΔMDL) must match the full Eq-4 fixed-distortion
-/// bits computation run through the production scorer on the same planted
-/// `s=d+1` data — for a circle (`d=1`) and a sphere (`d=2`), on BOTH sides of the
-/// crossover (a lean basis where the curved birth pays, and a rich basis where
-/// its dictionary surcharge sinks it).
+/// #2233 agreement on integer-span fixtures: the birth priority's sign matches the
+/// full Eq-4 fixed-distortion bits computation run through the production scorer
+/// on the same planted `s=d+1` data — for a circle (`d=1`) and a sphere (`d=2`), on
+/// BOTH sides of the crossover (a lean basis where the curved birth pays, and a
+/// rich basis where its dictionary surcharge sinks it). This is agreement on these
+/// fixtures, not a guarantee (#2933 F22).
 #[test]
 fn birth_prescreen_verdict_agrees_with_full_eq4_bits() {
     // Grid of (d, N, P, G): circle and sphere at a 2048-atom overcomplete
@@ -987,8 +1107,7 @@ fn birth_prescreen_verdict_agrees_with_full_eq4_bits() {
              got Eq-4 advantage {eq4_lose} and pre-screen {pred_lose}"
         );
 
-        // The pre-screen never claims a win the full scorer denies (its raison
-        // d'être: it may only DEFER, never spuriously accept).
+        // On these fixtures the two scoreboards agree in sign.
         assert_eq!(
             eq4_win.signum(),
             pred_win.signum(),
@@ -1008,13 +1127,13 @@ fn birth_prescreen_verdict_agrees_with_full_eq4_bits() {
 /// * the **unscreened race**: every candidate is scored through the production
 ///   Eq-4 fixed-distortion scorer and the winner is `argmax` of the true bits
 ///   advantage (this is the expensive full refit a birth would trigger);
-/// * the **screened race**: the closed-form [`predicted_birth_dl_bits`]
-///   pre-screen ranks the same candidates from spectra alone (no refit).
+/// * the **screened race**: the heuristic [`birth_proposal_priority`] ranks the
+///   same candidates from spectra alone (no refit).
 ///
-/// The pre-screen's whole contract is that it changes the COST of selection (it
-/// skips the refit of candidates that cannot win) without changing the OUTCOME.
-/// This asserts exactly that: the two races pick the **same winner** and admit
-/// the **same set** of candidates. Per-candidate sign agreement
+/// On these integer-span fixtures the ranking reproduces the outcome: the two races
+/// pick the **same winner** and split the candidates into the **same signs**. The
+/// priority is not a certificate in general (#2933 F22), so it orders proposals
+/// and never excludes them. Per-candidate sign agreement
 /// ([`birth_prescreen_verdict_agrees_with_full_eq4_bits`]) is necessary but not
 /// sufficient for this — two scorers can agree on every sign yet disagree on the
 /// `argmax` among the winners, which would silently change which atom is born.
@@ -1070,9 +1189,8 @@ fn birth_prescreen_selects_same_winner_as_unscreened_eq4_race() {
         race[screened_winner].0
     );
 
-    // Same admitted set: the candidates the pre-screen proposes (predicted ΔMDL
-    // > 0) are exactly the candidates the full Eq-4 race keeps (advantage > 0) —
-    // the pre-screen never drops a true winner nor admits a true loser.
+    // Same signs: on these fixtures the candidates with a positive priority are
+    // exactly the candidates the full Eq-4 race keeps (advantage > 0).
     for (i, (&(label, ..), (&adv, &pr))) in
         race.iter().zip(eq4_adv.iter().zip(pred.iter())).enumerate()
     {
@@ -1156,8 +1274,8 @@ fn per_kind_crossover_table_splits_code_vs_support_classes_2233() {
 
     for &(label, span, d, m) in &kinds {
         let code_coefficient = span - d as f64 - 1.0;
-        let low = predicted_birth_dl_bits(&prescreen(span, d, m, 3.0));
-        let high = predicted_birth_dl_bits(&prescreen(span, d, m, 300.0));
+        let low = priority_bits(&prescreen(span, d, m, 3.0));
+        let high = priority_bits(&prescreen(span, d, m, 300.0));
         let support_only_value = rho * n_tokens * (span - 1.0) * log2_g_over_l0
             - (m as f64 - span) * p_out as f64 * 0.5 * log2_n;
         match label {
@@ -1425,7 +1543,7 @@ fn faithful_matched_dictionary_hybrid_wins_on_support_alone_2233() {
                 "32K support credit per freed slot must be large, got \
                  {support_per_freed_slot}"
             );
-            let predicted = predicted_birth_dl_bits(&BirthMdlPrescreen {
+            let predicted = priority_bits(&BirthMdlPrescreen {
                 rho: 0.1,
                 span: 2.0,
                 intrinsic_dim: 1,
@@ -1450,4 +1568,349 @@ fn faithful_matched_dictionary_hybrid_wins_on_support_alone_2233() {
             );
         }
     }
+}
+
+/// #2933 F22: where the old closed form returned NaN the priority returns a typed
+/// `Inconclusive`, and zero occupancy is simplified before any rate is evaluated.
+#[test]
+fn birth_priority_is_inconclusive_instead_of_nan_2933() {
+    let audit_case = BirthMdlPrescreen {
+        rho: 0.1,
+        span: 2.0,
+        intrinsic_dim: 1,
+        basis_size: 3,
+        signal_var: 3.0,
+        noise_floor: 0.0,
+        n_tokens: 1000.0,
+        p_out: 8,
+        g_dict: 1024,
+        l0: 32.0,
+    };
+    let unbounded = BirthProposalPriority::Inconclusive(BirthPriorityInconclusive::UnboundedCodeRate);
+    // ŝ−d−1 = 0 against an unbounded rate was 0·∞ = NaN. Both arms send the same
+    // number of scalars at an unbounded rate, so no finite difference exists.
+    assert_eq!(birth_proposal_priority(&audit_case), unbounded);
+    // A non-integer span on the same zero floor is inconclusive for the same reason.
+    assert_eq!(
+        birth_proposal_priority(&BirthMdlPrescreen {
+            span: 1.5,
+            ..audit_case
+        }),
+        unbounded
+    );
+    // Zero occupancy transmits nothing: the divergent rate is never reached and the
+    // priority is exactly the signed dictionary term.
+    let silent = BirthMdlPrescreen {
+        rho: 0.0,
+        ..audit_case
+    };
+    let dictionary_only = 0.0 - (3.0 - 2.0) * 8.0 * 0.5 * 1000.0_f64.log2();
+    assert_eq!(
+        birth_proposal_priority(&silent),
+        BirthProposalPriority::Bits(dictionary_only)
+    );
+    // No signal on a zero floor has a zero rate, not an unbounded one.
+    let no_signal = birth_proposal_priority(&BirthMdlPrescreen {
+        signal_var: 0.0,
+        ..audit_case
+    });
+    assert!(no_signal.bits().is_some_and(f64::is_finite), "{no_signal:?}");
+    // Out-of-domain fields are refused, never clamped into a number.
+    let invalid = BirthProposalPriority::Inconclusive(BirthPriorityInconclusive::InvalidInput);
+    for bad in [
+        BirthMdlPrescreen {
+            rho: f64::NAN,
+            ..audit_case
+        },
+        BirthMdlPrescreen {
+            rho: 1.5,
+            ..audit_case
+        },
+        BirthMdlPrescreen {
+            span: f64::INFINITY,
+            ..audit_case
+        },
+        BirthMdlPrescreen {
+            noise_floor: -1.0,
+            ..audit_case
+        },
+        BirthMdlPrescreen {
+            signal_var: f64::NAN,
+            ..audit_case
+        },
+    ] {
+        assert_eq!(birth_proposal_priority(&bad), invalid, "{bad:?}");
+    }
+}
+
+/// The per-token Eq. 4 advantage (flat − curved; positive ⇒ the curved atom is
+/// cheaper) of ONE curved atom over `signal.len()` flat atoms on planted signal
+/// columns, through the production scorer. Both arms reconstruct the same denoised
+/// signal, so their residual spectra match, and with mutually orthogonal columns
+/// the curved atom's code spectrum equals the flat atoms' pooled spectra.
+fn eq4_flat_minus_curved(
+    signal: &[Vec<f64>],
+    n: usize,
+    p: usize,
+    g_dict: usize,
+    basis_m: usize,
+) -> f64 {
+    use crate::eq4_description_length::eq4_fixed_distortion_description_length;
+    use ndarray::Array2;
+
+    let s = signal.len();
+    let signal_mat =
+        Array2::<f64>::from_shape_fn((n, p), |(i, j)| if j < s { signal[j][i] } else { 0.0 });
+    let test_x = Array2::<f64>::from_shape_fn((n, p), |(i, j)| {
+        signal_mat[[i, j]] + 0.1 * (0.7 * i as f64 + 1.9 * j as f64 + 0.3).sin()
+    });
+    let score = |gate: &Array2<f64>, dims: &[i64], columns: usize, curved: bool| {
+        let contribution = signal_mat.clone();
+        eq4_fixed_distortion_description_length(
+            test_x.view(),
+            signal_mat.view(),
+            gate.view(),
+            dims,
+            (columns * p) as i64,
+            n as i64,
+            &[0.9],
+            None,
+            move |atom, take| {
+                let mut out = Array2::<f64>::zeros((take.len(), p));
+                for (out_row, &src) in take.iter().enumerate() {
+                    if curved {
+                        for col in 0..s {
+                            out[[out_row, col]] = contribution[[src, col]];
+                        }
+                    } else {
+                        out[[out_row, atom]] = contribution[[src, atom]];
+                    }
+                }
+                Ok(out)
+            },
+        )
+        .expect("Eq. 4 scoring succeeds")
+    };
+    let mut flat_gate = Array2::<f64>::zeros((n, g_dict));
+    let mut flat_dims = vec![0_i64; g_dict];
+    for atom in 0..s {
+        flat_gate.column_mut(atom).fill(1.0);
+        flat_dims[atom] = 1;
+    }
+    let mut curved_gate = Array2::<f64>::zeros((n, g_dict));
+    curved_gate.column_mut(0).fill(1.0);
+    let mut curved_dims = vec![0_i64; g_dict];
+    curved_dims[0] = s as i64;
+    let flat = score(&flat_gate, &flat_dims, s, false);
+    let curved = score(&curved_gate, &curved_dims, basis_m, true);
+    flat.per_target[0].bits - curved.per_target[0].bits
+}
+
+/// #2933 F22: the birth priority is not an Eq. 4 certificate. Candidates whose two
+/// arms have MATCHED residual and code spectra are scored by the production Eq. 4
+/// scorer and by the priority, and the signs disagree in BOTH directions:
+///
+/// * an anisotropic ellipse (variances 2 and 0.125, participation ratio ≈ 1.12)
+///   charges a negative non-integer code coefficient the scorer never charges,
+///   while Eq. 4 prefers the curved atom by its ≈ log₂((G−1)/2) support saving;
+/// * four equal-energy harmonics (ŝ = 4, torus basis m = 25) are credited a code
+///   saving `(ŝ−d−1)·½log₂(λ̂/δ)` the scorer does not see (both arms code the same
+///   four variances), lifting the priority above zero while Eq. 4 prefers the flat
+///   arm. At P = 108, N = 320 the per-token dictionary surcharge
+///   `21·P·log₂N/(2N) = 29.49` bits sits between Eq. 4's support saving
+///   `log₂C(G,4) − log₂G = 28.41` and the priority's `30.82`.
+#[test]
+fn birth_priority_is_not_an_eq4_certificate_2933() {
+    use std::f64::consts::TAU;
+    let topology = |span: f64| {
+        let plan = crate::manifold::SaeAtomGeometryPlan::curved_prescreen_atom_for_span(span)
+            .expect("the production pre-screen map must build its atom");
+        (
+            plan.intrinsic_dim(),
+            plan.basis_size().expect("a built plan has a width"),
+        )
+    };
+
+    // A negative priority for a candidate Eq. 4 prefers.
+    let (n, p, g_dict) = (300usize, 6usize, 2048usize);
+    let ellipse = vec![
+        (0..n)
+            .map(|i| 2.0 * (TAU * i as f64 / n as f64).cos())
+            .collect::<Vec<f64>>(),
+        (0..n)
+            .map(|i| 0.5 * (TAU * i as f64 / n as f64).sin())
+            .collect::<Vec<f64>>(),
+    ];
+    let variances = [2.0_f64, 0.125];
+    let total: f64 = variances.iter().sum();
+    let span = total * total / variances.iter().map(|v| v * v).sum::<f64>();
+    let (d, m) = topology(span);
+    let eq4_ellipse = eq4_flat_minus_curved(&ellipse, n, p, g_dict, m);
+    let priority_ellipse = priority_bits(&BirthMdlPrescreen {
+        rho: 1.0,
+        span,
+        intrinsic_dim: d,
+        basis_size: m,
+        signal_var: variances[0],
+        noise_floor: 0.01,
+        n_tokens: n as f64,
+        p_out: p,
+        g_dict,
+        l0: 2.0,
+    });
+    assert!(
+        eq4_ellipse > 1.0 && priority_ellipse < -(n as f64),
+        "ellipse (span {span}): Eq. 4 advantage {eq4_ellipse} bits/token, priority \
+         {priority_ellipse} bits"
+    );
+
+    // A positive priority for a candidate Eq. 4 rejects.
+    let (n, p, g_dict) = (320usize, 108usize, 2048usize);
+    let harmonics: Vec<Vec<f64>> = (1..=4)
+        .map(|freq| {
+            (0..n)
+                .map(|i| 2.0 * (TAU * freq as f64 * i as f64 / n as f64).cos())
+                .collect()
+        })
+        .collect();
+    let (d, m) = topology(4.0);
+    assert_eq!((d, m), (2, 25), "planted premise: the torus band");
+    let eq4_harmonics = eq4_flat_minus_curved(&harmonics, n, p, g_dict, m);
+    let priority_harmonics = priority_bits(&BirthMdlPrescreen {
+        rho: 1.0,
+        span: 4.0,
+        intrinsic_dim: d,
+        basis_size: m,
+        signal_var: 2.0,
+        noise_floor: 0.01,
+        n_tokens: n as f64,
+        p_out: p,
+        g_dict,
+        l0: 4.0,
+    });
+    assert!(
+        eq4_harmonics < -0.5 && priority_harmonics > 0.5 * n as f64,
+        "harmonics: Eq. 4 advantage {eq4_harmonics} bits/token, priority \
+         {priority_harmonics} bits"
+    );
+}
+
+/// #2933 F21: every report carries its score kind, and a model comparison across
+/// kinds is refused unless the caller declares it heuristic.
+#[test]
+fn score_kinds_propagate_and_mixed_comparisons_are_refused_2933() {
+    let codes = planted_codes(20, 4);
+    let native = manifold_fit_description_length(
+        &codes,
+        &vec![vec![1.0, 0.5]; 4],
+        0.2,
+        0.8,
+        &declared(50, 16.0),
+    )
+    .expect("the planted native ledger prices");
+    assert_eq!(native.score_kind, DescriptionLengthScoreKind::GaussianSurrogate);
+    let matched = matched_dl(3, 1, 8, 4.0, &[0.02; 10], 0.5);
+    assert_eq!(
+        matched.score_kind,
+        DescriptionLengthScoreKind::HighResolutionIntrinsic
+    );
+    let test_x = ndarray::Array2::<f64>::from_shape_fn((8, 2), |(i, j)| {
+        0.25 * (i * (j + 1)) as f64 + j as f64
+    });
+    let recon = test_x.mapv(|value| 0.8 * value);
+    let gate = ndarray::Array2::<f64>::ones((8, 1));
+    let contribution = recon.clone();
+    let eq4 = crate::eq4_description_length::eq4_fixed_distortion_description_length(
+        test_x.view(),
+        recon.view(),
+        gate.view(),
+        &[1],
+        4,
+        4096,
+        &[0.9],
+        None,
+        move |_, take| {
+            let mut selected = ndarray::Array2::<f64>::zeros((take.len(), contribution.ncols()));
+            for (out_row, &source_row) in take.iter().enumerate() {
+                selected
+                    .row_mut(out_row)
+                    .assign(&contribution.row(source_row));
+            }
+            Ok(selected)
+        },
+    )
+    .expect("the Eq. 4 fixture scores");
+    assert_eq!(eq4.score_kind, DescriptionLengthScoreKind::GaussianSurrogate);
+    assert_eq!(
+        DescriptionLengthScoreKind::GaussianSurrogate.as_str(),
+        "gaussian_surrogate"
+    );
+    assert_eq!(
+        DescriptionLengthScoreKind::FiniteQuantizer.as_str(),
+        "finite_quantizer"
+    );
+
+    let surrogate = ScoredBits {
+        bits: native.total_bits,
+        kind: native.score_kind,
+    };
+    let codebook = ScoredBits {
+        bits: 17.0,
+        kind: DescriptionLengthScoreKind::FiniteQuantizer,
+    };
+    let refused = description_length_delta(surrogate, codebook, ScoreComparison::SameKind);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|error| error.contains("gaussian_surrogate")
+                && error.contains("finite_quantizer")),
+        "{refused:?}"
+    );
+    assert_eq!(
+        description_length_delta(surrogate, codebook, ScoreComparison::ExplicitHeuristic),
+        Ok(native.total_bits - 17.0)
+    );
+    assert_eq!(
+        description_length_delta(surrogate, surrogate, ScoreComparison::SameKind),
+        Ok(0.0)
+    );
+}
+
+/// #2933 F21: a covariance does not determine a rate. An equiprobable two-point
+/// source `±σ` and a Gaussian of variance `σ²` receive the same surrogate rate at
+/// every distortion, yet a one-bit sign codec round-trips the two-point source
+/// exactly. At the surrogate's own one-bit operating point `D = σ²/4` the codec is
+/// lossless, and at `D = 0` the surrogate rate is unbounded, so the surrogate is
+/// neither a lower bound nor a message length for this source.
+#[test]
+fn gaussian_surrogate_is_not_a_bound_for_a_matched_covariance_discrete_source_2933() {
+    let sigma = 1.7_f64;
+    let source: Vec<f64> = (0..64)
+        .map(|i| if i % 2 == 0 { sigma } else { -sigma })
+        .collect();
+    let n = source.len() as f64;
+    let variance = source.iter().map(|x| x * x).sum::<f64>() / n;
+    assert!((variance - sigma * sigma).abs() < 1.0e-12);
+    // Encode one index bit per sample, decode it, and measure the reconstruction.
+    let indices: Vec<bool> = source.iter().map(|&x| x >= 0.0).collect();
+    let decoded: Vec<f64> = indices
+        .iter()
+        .map(|&positive| if positive { sigma } else { -sigma })
+        .collect();
+    let codec_bits_per_sample = indices.len() as f64 / n;
+    let codec_distortion = source
+        .iter()
+        .zip(&decoded)
+        .map(|(x, y)| (x - y) * (x - y))
+        .sum::<f64>()
+        / n;
+    let (surrogate_one_bit, _) = reverse_water_filling(&[variance], variance / 4.0)
+        .expect("a finite spectrum at a positive distortion");
+    let (surrogate_lossless, _) = reverse_water_filling(&[variance], 0.0)
+        .expect("zero distortion is a valid boundary");
+    assert!((surrogate_one_bit - 1.0).abs() < 1.0e-12);
+    assert!(surrogate_lossless.is_infinite());
+    assert_eq!(codec_bits_per_sample, 1.0);
+    assert_eq!(codec_distortion, 0.0);
+    assert!(codec_distortion < variance / 4.0);
 }

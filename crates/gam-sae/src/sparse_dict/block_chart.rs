@@ -518,7 +518,7 @@ pub fn block_sparse_dictionary_seed_manifest(
         let (matched_dl_flat, matched_dl_chart) =
             matched_dl_for_block(&firing_coords, config, decoder.ncols(), block_ev);
         let matched_dl_delta_bits =
-            crate::description_length::matched_dl_delta(&matched_dl_flat, &matched_dl_chart);
+            crate::description_length::matched_dl_delta(&matched_dl_flat, &matched_dl_chart)?;
         records.push(BlockSeedRecord {
             block: g,
             block_dim: config.block_size,
