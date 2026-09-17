@@ -406,8 +406,8 @@ pub fn build_bspline_basis_1d(
             p_raw,
             chunk,
         );
-        let mean_end_slope = if uses_mean_end_slope_ridge(spec) {
-            Some(bspline_mean_end_slope_row(&knots, spec.degree)?)
+        let mean_slope = if uses_mean_slope_ridge(spec) {
+            Some(bspline_mean_slope_row(&knots, spec.degree)?)
         } else {
             None
         };
@@ -421,10 +421,10 @@ pub fn build_bspline_basis_1d(
                 penalties_raw,
                 Some(chunk),
             )?;
-        let transformed_candidates = charge_null_ridge_along_mean_end_slope(
+        let transformed_candidates = charge_null_ridge_along_mean_slope(
             rebuild_double_penalty_nullspace_in_constrained_chart(transformed_candidates)?,
             identifiability_transform.as_ref(),
-            mean_end_slope.as_ref(),
+            mean_slope.as_ref(),
         )?;
         let filtered = filter_penalty_candidates(renormalize_constrained_penalty_candidates(
             transformed_candidates,
@@ -615,8 +615,8 @@ pub fn build_bspline_basis_1d(
         "B-spline roughness",
     )?;
     let penalties_raw = bspline_penalty_candidates(&s_bend_raw, spec, &knots)?;
-    let mean_end_slope = if uses_mean_end_slope_ridge(spec) {
-        Some(bspline_mean_end_slope_row(&knots, spec.degree)?)
+    let mean_slope = if uses_mean_slope_ridge(spec) {
+        Some(bspline_mean_slope_row(&knots, spec.degree)?)
     } else {
         None
     };
@@ -719,10 +719,10 @@ pub fn build_bspline_basis_1d(
                 identifiability_transform,
             )
         };
-    let transformed_candidates = charge_null_ridge_along_mean_end_slope(
+    let transformed_candidates = charge_null_ridge_along_mean_slope(
         rebuild_double_penalty_nullspace_in_constrained_chart(transformed_candidates)?,
         identifiability_transform.as_ref(),
-        mean_end_slope.as_ref(),
+        mean_slope.as_ref(),
     )?;
     let filtered = filter_penalty_candidates(renormalize_constrained_penalty_candidates(
         transformed_candidates,
@@ -938,12 +938,11 @@ fn bspline_endpoint_derivative_row(
     Ok(Array1::from_vec(row))
 }
 
-/// The double-penalty ridge is charged along the mean end slope for an open
-/// smooth whose order-2 roughness is centered by the weighted sum-to-zero
-/// constraint, and for its frozen replay: the constrained null space is the
-/// single centered linear function, on which the mean end slope is
-/// nondegenerate.
-fn uses_mean_end_slope_ridge(spec: &BSplineBasisSpec) -> bool {
+/// The double-penalty ridge is charged along the mean slope for an open smooth
+/// whose order-2 roughness is centered by the weighted sum-to-zero constraint,
+/// and for its frozen replay: the constrained null space is the single centered
+/// linear function, on which the mean slope is nondegenerate.
+fn uses_mean_slope_ridge(spec: &BSplineBasisSpec) -> bool {
     spec.double_penalty
         && spec.penalty_order == 2
         && spec.boundary_conditions.is_free()
@@ -954,68 +953,82 @@ fn uses_mean_end_slope_ridge(spec: &BSplineBasisSpec) -> bool {
         )
 }
 
-/// Mean end slope `½(f'(a) + f'(b))` of `f = Σ βᵢ Bᵢ` as a row over the raw
-/// clamped basis, with `[a, b]` the modeling interval.
-fn bspline_mean_end_slope_row(
+/// Mean slope `(f(b) − f(a))/(b − a)`, the interval mean of `f'`, of
+/// `f = Σ βᵢ Bᵢ` as a row over the raw basis, with `[a, b]` the modeling
+/// interval.
+fn bspline_mean_slope_row(
     knots: &Array1<f64>,
     degree: usize,
 ) -> Result<Array1<f64>, BasisError> {
-    let left = bspline_endpoint_derivative_row(
-        knots,
-        degree,
-        bspline_boundary_endpoint(knots, degree, false)?,
-    )?;
-    let right = bspline_endpoint_derivative_row(
-        knots,
-        degree,
-        bspline_boundary_endpoint(knots, degree, true)?,
-    )?;
-    Ok((&left + &right) * 0.5)
+    let left_end = bspline_boundary_endpoint(knots, degree, false)?;
+    let right_end = bspline_boundary_endpoint(knots, degree, true)?;
+    let width = right_end - left_end;
+    if !width.is_finite() || width <= 0.0 {
+        crate::bail_invalid_basis!(
+            "mean-slope ridge: the modeling interval [{left_end}, {right_end}] has no width"
+        );
+    }
+    let left = bspline_endpoint_value_row(knots, degree, left_end)?;
+    let right = bspline_endpoint_value_row(knots, degree, right_end)?;
+    Ok((&right - &left) / width)
 }
 
-/// Charge the double-penalty ridge along the mean end slope (#2668 row 23,
+/// Charge the double-penalty ridge along the mean slope (#1561, #2668 row 23,
 /// #1266).
 ///
 /// `rebuild_double_penalty_nullspace_in_constrained_chart` ships `R = m n̂n̂ᵀ`
 /// (#2372), with `n̂` the unit null vector of `S_c` and `m` the null function's
 /// `L²` energy. It penalizes `(n̂ᵀβ)²`, so what it leaves unpenalized is
 /// `{β : n̂ᵀβ = 0}`: the Euclidean complement of `n̂` in whatever coefficient
-/// chart the basis happens to use, not a property of `f` (SPEC rule 5). With `φ`
-/// the mean end slope `½(f'(a) + f'(b))` as a row over the constrained
-/// coefficients, this ships `m vvᵀ` with `v = φ/(φᵀn̂)`. `vᵀn̂ = 1`, so the null
-/// function keeps its charge `m`, and what is left unpenalized is
-/// `H = {f : ½(f'(a) + f'(b)) = 0}`. A natural spline is linear beyond its ends,
-/// and `½(f'(a) + f'(b))` is the slope of its mean tail line, which is the
-/// thin-plate null coordinate.
+/// chart the basis happens to use, not a property of `f` (SPEC rule 5). A rank-one
+/// ridge on a one-dimensional null space charges one functional `ℓ` of `f` and
+/// leaves `{f : ℓ(f) = 0}` unpenalized. With `φ` the row of `ℓ` over the
+/// constrained coefficients this ships `m vvᵀ` with `v = φ/(φᵀn̂)`. `vᵀn̂ = 1`, so
+/// the null function keeps its charge `m`.
+///
+/// `ℓ(f) = (f(b) − f(a))/(b − a)` leaves unpenalized every `f` whose ends agree,
+/// which includes every periodic function on `[a, b]` and the even quadratic, so
+/// the ridge charges only a trend that makes the ends differ. It is the order-2
+/// case of the averaged-derivative boundary functionals `∫ₐᵇ f^{(ν)}`, `ν < m`, of
+/// the Sobolev space the roughness penalizes. The alternatives charge the sine
+/// modes of `[a, b]`: the `L²` slope `⟨f, n⟩/⟨n, n⟩`, and the mean end slope
+/// `½(f'(a) + f'(b))` of `8bee1c631` and `c886bb1fb`, which charges the steep ends
+/// of any curve. On the #1266 `s(z)` basis the end-slope row makes cosine 0.031
+/// with `n̂`, so its `‖v‖ ≈ 32` against `vᵀn̂ = 1`.
+///
+/// Measured with mgcv REML on this basis rebuilt in R (clamped uniform knots,
+/// exact `∫f''²`, QR centering), which reproduces gam's per-seed `s(z)` EDF under
+/// the complementary and end-slope ridges to 1e-4 (MSI jobs 1101238, 1102073):
+/// - pyGAM logistic panel (truth `1.2 sin(πx/50)`, 25 draws, `s(x, k=10)`):
+///   err_to_truth 0.2006 against pyGAM 0.2078, 17 of 25 wins. End slope 0.2578,
+///   `L²` slope 0.2284, no ridge 0.2287.
+/// - #1266 null (`y ~ s(x) + s(z)`, seeds 200..240): `s(z)` EDF below 0.01 on 16 of
+///   41 seeds, mean EDF 0.514, z RMSE 0.00613. End slope 26, 0.312, 0.00343; `L²`
+///   slope 14, 0.592, 0.00698; complementary 14, 0.582, 0.00708.
+/// - 120 Gaussian and 120 binomial truths drawn from a squared-exponential GP
+///   (length scales 0.1, 0.2, 0.4): mean RMSE within 1.5% of the end slope and of
+///   no ridge.
 ///
 /// `R` has rank one on a one-dimensional null space, so `log|λ₁S_c + λ₂R|` stays
-/// `(p − 1)ρ₁ + ρ₂ + const`. It is no longer spectrally complementary to `S_c`:
-/// a curvature mode with a nonzero mean end slope is charged. `8bee1c631` built
-/// the same model by composing into `Z` the chart `M` in which this ridge is
-/// `m n̂n̂ᵀ`, with `cond(M) = (1 + √(1 − c²))/|c| ≈ 65`. Here `Z`, `S_c` and the
-/// design are untouched.
-///
-/// On the #1266 fixture (`y ~ s(x) + s(z)`, `z` pure noise, seeds 200..240) the
-/// irrelevant term reaches the switched-off face on 27 of 41 seeds instead of 16
-/// and its RMSE halves. A weak linear trend in `z` is never annihilated (+2.5%
-/// RMSE) and a smooth bump in `z` costs +11% RMSE.
-fn charge_null_ridge_along_mean_end_slope(
+/// `(p − 1)ρ₁ + ρ₂ + const`. It is not spectrally complementary to `S_c`: a
+/// curvature mode whose ends differ is charged.
+fn charge_null_ridge_along_mean_slope(
     mut candidates: Vec<PenaltyCandidate>,
     transform: Option<&Array2<f64>>,
-    raw_end_slope: Option<&Array1<f64>>,
+    raw_mean_slope: Option<&Array1<f64>>,
 ) -> Result<Vec<PenaltyCandidate>, BasisError> {
-    let (Some(transform), Some(raw_end_slope)) = (transform, raw_end_slope) else {
+    let (Some(transform), Some(raw_mean_slope)) = (transform, raw_mean_slope) else {
         return Ok(candidates);
     };
-    if transform.nrows() != raw_end_slope.len() {
+    if transform.nrows() != raw_mean_slope.len() {
         crate::bail_dim_basis!(
-            "mean end-slope ridge: transform is {}x{} but the end-slope row has length {}",
+            "mean-slope ridge: transform is {}x{} but the mean-slope row has length {}",
             transform.nrows(),
             transform.ncols(),
-            raw_end_slope.len()
+            raw_mean_slope.len()
         );
     }
-    let slope = transform.t().dot(raw_end_slope);
+    let slope = transform.t().dot(raw_mean_slope);
     for candidate in &mut candidates {
         // The rebuilt ridge's energy factor is the single row `±√m n̂ᵀ`. A frozen
         // transform that removed the linear function leaves no row to charge.
@@ -1030,14 +1043,14 @@ fn charge_null_ridge_along_mean_end_slope(
         let cosine = slope_on_null / (slope.dot(&slope) * null_energy).sqrt();
         if !cosine.is_finite() || cosine.abs() <= slope.len() as f64 * f64::EPSILON {
             return Err(BasisError::InvalidInput(format!(
-                "mean end-slope ridge: the end slope vanishes on the constrained null function (cosine {cosine:e})"
+                "mean-slope ridge: the mean slope vanishes on the constrained null function (cosine {cosine:e})"
             )));
         }
         // `√m vᵀ = (‖row‖² / φᵀrow) φᵀ`, whichever sign the row carries.
         let scale = null_energy / slope_on_null;
         candidate.matrix = ConstructiveQuadratic::from_energy_factor(
             slope.mapv(|value| scale * value).insert_axis(Axis(0)),
-            "mean end-slope null ridge",
+            "mean-slope null ridge",
         )?;
     }
     Ok(candidates)

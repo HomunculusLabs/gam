@@ -1270,12 +1270,11 @@ fn test_build_bspline_basis_1d_double_penalty() {
 
     let s_c = &result.active_penalties[0].matrix;
     let p_null = &result.active_penalties[1].matrix;
-    // #2668 row 23: P charges the null function along the mean end slope, so what
-    // it leaves unpenalized is {f : ½(f'(a) + f'(b)) = 0}, the natural-spline
-    // complement, not the Euclidean complement of null(S_c) in this chart. A
-    // curvature mode with a nonzero mean end slope is charged, so S_c·P is not
+    // #1561: P charges the null function along the mean slope, so what it leaves
+    // unpenalized is {f : f(b) = f(a)}, not the Euclidean complement of null(S_c)
+    // in this chart. A curvature mode whose ends differ is charged, so S_c·P is not
     // zero and is not asserted.
-    assert_ridge_range_is_mean_end_slope(&result, "k=10 order-2 centered");
+    assert_ridge_range_is_mean_slope(&result, "k=10 order-2 centered");
 
     // Together the two blocks still leave NO unpenalized direction: the assembled
     // double penalty `S_bend + P` has full structural rank, so REML can shrink
@@ -1294,17 +1293,17 @@ fn test_build_bspline_basis_1d_double_penalty() {
 enum RidgeRange {
     /// `range(P) = null(S_c)`: `S_c·P = P·S_c = 0` (#1476, #2372).
     NullSpace,
-    /// `range(P) = span(φ_c)`, the mean end slope over the constrained chart
-    /// (#2668 row 23).
-    MeanEndSlope,
+    /// `range(P) = span(φ_c)`, the mean slope over the constrained chart (#1561).
+    MeanSlope,
 }
 
-/// `P = c·φ_cφ_cᵀ` with `c > 0`, where `φ_c = Zᵀφ` is the mean end slope
-/// `½(f'(a) + f'(b))` as a row over the constrained coefficients. So `P` charges
-/// the null function, which carries a nonzero end slope, and leaves
-/// `{f : ½(f'(a) + f'(b)) = 0}` unpenalized (#2668 row 23). `φ` is read from
-/// `create_basis`'s first-derivative design at the modeling interval's ends.
-fn assert_ridge_range_is_mean_end_slope(result: &BasisBuildResult, label: &str) {
+/// `P = c·φ_cφ_cᵀ` with `c > 0`, where `φ_c = Zᵀφ` is the mean slope
+/// `(f(b) − f(a))/(b − a)` as a row over the constrained coefficients. So `P`
+/// charges the null function, whose ends differ, and leaves `{f : f(b) = f(a)}`
+/// unpenalized (#1561). The knots are clamped, so `f(a) = β₁` and `f(b) = β_p`
+/// and `φ = (e_p − e₁)/(b − a)` is read off the knot vector without evaluating the
+/// basis.
+fn assert_ridge_range_is_mean_slope(result: &BasisBuildResult, label: &str) {
     let BasisMetadata::BSpline1D {
         knots,
         identifiability_transform: Some(transform),
@@ -1315,24 +1314,23 @@ fn assert_ridge_range_is_mean_end_slope(result: &BasisBuildResult, label: &str) 
         panic!("{label}: a centered B-spline must carry its knots, degree and transform");
     };
     let n_basis = knots.len() - degree - 1;
-    let endpoints = array![knots[*degree], knots[n_basis]];
-    let (slopes, _) = create_basis::<Dense>(
-        endpoints.view(),
-        KnotSource::Provided(knots.view()),
-        *degree,
-        BasisOptions::first_derivative(),
-    )
-    .unwrap_or_else(|e| panic!("{label}: endpoint derivative design failed: {e:?}"));
-    let slopes = slopes.as_ref();
-    let raw_mean_end_slope: Array1<f64> = (&slopes.row(0) + &slopes.row(1)) * 0.5;
-    let phi = transform.t().dot(&raw_mean_end_slope);
+    let (left, right) = (knots[*degree], knots[n_basis]);
+    assert!(
+        knots.iter().take(degree + 1).all(|&t| t == left)
+            && knots.iter().skip(n_basis).all(|&t| t == right),
+        "{label}: an open smooth's knots must be clamped at [{left}, {right}]; got {knots:?}"
+    );
+    let mut raw_mean_slope = Array1::<f64>::zeros(n_basis);
+    raw_mean_slope[0] = -1.0 / (right - left);
+    raw_mean_slope[n_basis - 1] = 1.0 / (right - left);
+    let phi = transform.t().dot(&raw_mean_slope);
     let p_null = &result.active_penalties[1].matrix;
     let p = phi.len();
     let phi_sq = phi.dot(&phi);
     let charge = phi.dot(&p_null.dot(&phi)) / (phi_sq * phi_sq);
     assert!(
         charge > 0.0,
-        "{label}: P must charge the mean end slope; got φᵀPφ/‖φ‖⁴ = {charge:e}"
+        "{label}: P must charge the mean slope; got φᵀPφ/‖φ‖⁴ = {charge:e}"
     );
     let rank_one = Array2::from_shape_fn((p, p), |(i, j)| charge * phi[i] * phi[j]);
     let residual = (p_null - &rank_one)
@@ -1343,7 +1341,7 @@ fn assert_ridge_range_is_mean_end_slope(result: &BasisBuildResult, label: &str) 
     let p_norm = p_null.iter().map(|v| v * v).sum::<f64>().sqrt();
     assert!(
         residual <= 1e-9 * p_norm,
-        "{label}: P must be c·φ_cφ_cᵀ along the mean end slope; got ‖P − c·φ_cφ_cᵀ‖_F = \
+        "{label}: P must be c·φ_cφ_cᵀ along the mean slope; got ‖P − c·φ_cφ_cᵀ‖_F = \
          {residual:e} against ‖P‖_F = {p_norm:e}"
     );
 }
@@ -1355,7 +1353,7 @@ fn assert_ridge_range_is_mean_end_slope(result: &BasisBuildResult, label: &str) 
 /// penalties:
 ///   * `rank(P) == nullity(S_c)` (one penalized direction per null direction)
 ///   * the ridge's range, `ridge_range`: `null(S_c)` with `‖S_c · P‖_F ≈ 0` and
-///     `‖P · S_c‖_F ≈ 0`, or the mean end slope
+///     `‖P · S_c‖_F ≈ 0`, or the mean slope
 ///   * `rank(S_c) + rank(P) == p_constrained` (no unpenalized direction left,
 ///     so REML can shrink — never inflate — the null space, #1266)
 ///
@@ -1431,7 +1429,7 @@ fn assert_double_penalty_projector_contract(
                 "{label}: ‖P·S_c‖_F must vanish (spectral complementarity); got {ps_norm:e}"
             );
         }
-        RidgeRange::MeanEndSlope => assert_ridge_range_is_mean_end_slope(result, label),
+        RidgeRange::MeanSlope => assert_ridge_range_is_mean_slope(result, label),
     }
 
     // The two blocks together leave NO unpenalized direction: rank(S_c)+rank(P)
@@ -1476,7 +1474,7 @@ fn double_penalty_spec(
 /// order-2 P-spline the constant direction is removed by centering but the
 /// residual linear trend survives, so the constrained wiggliness penalty keeps a
 /// single null direction at every k — `nullity(S_c)=1` and a rank-1 ridge along
-/// the mean end slope (#2668 row 23). Order-1 is exercised uncentered
+/// the mean slope (#1561). Order-1 is exercised uncentered
 /// below, where its constant null direction is unambiguously kept; under
 /// sum-to-zero centering an order-1 null space can vanish entirely (a different,
 /// correct, single-penalty outcome covered by the non-free / cyclic tests).
@@ -1498,7 +1496,7 @@ fn double_penalty_projector_contract_across_k() {
         let label = format!("centered k={k} order=2");
         // After sum-to-zero centering the order-2 P-spline keeps nullity(S_c)=1
         // (constant removed, residual linear trend survives) at every k.
-        assert_double_penalty_projector_contract(&result, 1, RidgeRange::MeanEndSlope, &label);
+        assert_double_penalty_projector_contract(&result, 1, RidgeRange::MeanSlope, &label);
     }
 }
 

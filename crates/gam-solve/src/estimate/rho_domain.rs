@@ -227,8 +227,8 @@ fn psd_null_frame(matrix: &Array2<f64>) -> Option<Array2<f64>> {
 /// for the companions' sum `C`, and the coordinate switches the term off along
 /// `N` at the curvature of `NᵀGN` against `NᵀSN`. When `range(S) = null(C)`
 /// (the complementary ridge `N M Nᵀ`, #2372) that is the shared read. A ridge
-/// charged along another direction (the mean end-slope ridge `m vvᵀ`, #2668
-/// row 23) charges the null function `n̂` only `(vᵀn̂)²` of its strength, so its
+/// charged along another direction (the mean-slope ridge `m vvᵀ`, #1561)
+/// charges the null function `n̂` only `(vᵀn̂)²` of its strength, so its
 /// switch-off curvature is `n̂ᵀGn̂ / (vᵀn̂)²`, far above `vᵀGv` along its own
 /// range. The coordinate's domain spans all three intervals: it stays free
 /// wherever the term is resolvable at some strength of its companions. A lone

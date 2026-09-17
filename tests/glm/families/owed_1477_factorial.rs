@@ -15,9 +15,10 @@
 //!
 //! The fix rebuilds the ridge from `null(S_c)` of the TRANSFORMED primary
 //! wiggliness penalty in the final coefficient chart, so the ridge contract
-//! `rank(P) = nullity(S_c)` with `S_c + P` full rank holds exactly. Since #2668
-//! row 23 the default ridge charges the null function along the mean end slope,
-//! which a curvature mode can carry, so `S_c·P` is not zero and is not asserted.
+//! `rank(P) = nullity(S_c)` with `S_c + P` full rank holds exactly. Since #1561
+//! the default ridge charges the null function along the mean slope
+//! `(f(b) − f(a))/(b − a)`, which a curvature mode can carry, so `S_c·P` is not
+//! zero and is not asserted.
 //!
 //! WHY A FACTORIAL. The bug was MASKED because no single test isolated the
 //! interacting factors. The defect only surfaced in the
@@ -626,8 +627,8 @@ fn double_penalty_projector_holds_across_family_dp_prior_factorial_1477_1476() {
                         // leaves unpenalized, so with the rank equality above the
                         // pair penalizes every direction once and log|λ₁S_c + λ₂P|
                         // separates in ρ. P is not spectrally complementary to
-                        // S_c: the default ridge penalizes the mean end slope
-                        // (#2668 row 23), which a curvature mode can carry, so
+                        // S_c: the default ridge penalizes the mean slope
+                        // (#1561), which a curvature mode can carry, so
                         // ‖S_c·P‖_F is printed and not asserted. The #1476 defect
                         // was a SECOND penalized direction, which the rank
                         // equality refuses.

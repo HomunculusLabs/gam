@@ -14,7 +14,7 @@
 // WHAT THE DELETION-FACE TEST DOES NOT CLAIM, AND WHY (#2668 group C, measured
 // 2026-09-04; cause measured 2026-09-12). The original contract asserts
 // `mean z edf < 1.0` over five seeds against an "mgcv select=TRUE" reference;
-// #2668 keeps it as its own test
+// #2668 keeps it as its own test, which #1561 restates over 41 seeds with a band
 // (`default_double_penalty_shrinks_irrelevant_covariate_edf_below_one`, below),
 // reading per-term EDF from the production summary rows. On the identical data,
 // mgcv's cubic knot bases miss that bar (`bs="bs", m=c(3,2)` k=12 gives
@@ -27,9 +27,12 @@
 // coefficient chart. Thin-plate's chart penalizes the mean end slope
 // `½(f'(a) + f'(b))`; the same functional swapped into the `bs` basis meets the
 // bar in mgcv (mean 0.27), and on gam's exact matrices it gives mean 0.27.
-// Since `8bee1c631` gam's default B-spline ridge penalizes that end slope, now as
-// `m·vvᵀ` with `v = φ/(φᵀn̂)` in the basis's own chart rather than through a
-// composed coefficient chart. Under the null, REML's variance-component estimate is
+// `8bee1c631` and `c886bb1fb` made gam's default B-spline ridge penalize that end
+// slope. Since #1561 it penalizes the mean slope `(f(b) − f(a))/(b − a)` instead,
+// which leaves every function whose ends agree unpenalized. The end slope shrank
+// steep-ended curves (the pyGAM logistic panel), and the mean slope switches `s(z)`
+// off on fewer null seeds (16 of 41 against 26 in the mgcv replica of gam's basis,
+// MSI job 1101238). Under the null, REML's variance-component estimate is
 // still positive on some draws, so a term's optimum can keep a little wiggle,
 // which is why the reference-free deletion-face statement below is kept beside
 // the bar. (The old helper also indexed the per-term edf with the block-LOCAL
@@ -67,6 +70,7 @@ use csv::StringRecord;
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
+use gam::test_support::reference::{RESOLUTION_TAIL, student_t_upper_quantile};
 use gam_solve::estimate::smooth_term_summary_rows;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -233,15 +237,37 @@ fn default_double_penalty_is_never_beaten_by_deleting_the_irrelevant_covariate_1
     );
 }
 
-/// The original #1266 Half-B contract, restored for #2668: on seeds 200..205
-/// the default double penalty (mgcv `select = TRUE`) must shrink the irrelevant
-/// covariate's smooth well below its ~2-EDF null-space floor, mean EDF < 1.
+/// The original #1266 Half-B contract, restored for #2668 and restated with power
+/// for #1561: the default double penalty (mgcv `select = TRUE`) shrinks the
+/// irrelevant covariate's smooth below the one unpenalized direction a
+/// single-penalty smooth keeps, mean EDF < 1, resolved against the seed-to-seed
+/// spread.
 ///
 /// Per-term EDF is read from the production summary rows (`smooth_term_edf`
 /// above). The earlier version of this test passed the block-LOCAL
 /// `coeff_range` to `per_term_edf`, so s(z)'s window held s(x)'s last column
 /// and dropped its own; that inflated the reported z EDF and is not a property
 /// of the fit.
+///
+/// WHY 41 SEEDS AND A BAND. Under the null a seed's `s(z)` EDF is zero when REML
+/// reaches the deletion face and up to about 3 when it keeps some wiggle. In an
+/// mgcv REML replica of gam's basis over seeds 200..240 (MSI job 1101238) its SD
+/// is 0.57 to 0.72 under every rank-one null ridge, so a mean over seeds 200..204
+/// has an SEM of 0.25 to 0.32. Those five seeds read 1.03 to 1.42 under ridges whose
+/// 41-seed means are 0.51 to 0.59, and mgcv's own `bs`, `ps` and `cr` bases read
+/// 1.09 to 1.43 there against 0.52 to 0.59 over 41 seeds (regress2668's jobs). The
+/// claim is therefore asserted over seeds 200..240 on its one-sided upper bound
+/// `mean + t·s/√n` at the suite's resolution tail.
+///
+/// WHAT THE BAR SEPARATES: a live null ridge from none. With `double_penalty=False`
+/// the linear direction of `s(z)` is unpenalized, so every seed's EDF is at least 1
+/// (replica minimum 1.0001) and the same bound must fail on the same draws. The test
+/// asserts that positive control. The bar does not test the ridge's chart: the
+/// complementary ridge before `c886bb1fb` passes it too (replica 41-seed mean 0.582,
+/// upper bound 0.883), as does the end-slope ridge (0.312, 0.551). Whether a fit
+/// reaches the switched-off face is the deletion-face test's claim above. The
+/// paired per-seed shrinkage, the single-penalty EDF minus the default's, must be
+/// positive on the same band, which is robust to the draw.
 #[test]
 fn default_double_penalty_shrinks_irrelevant_covariate_edf_below_one() {
     init_parallelism();
@@ -251,22 +277,58 @@ fn default_double_penalty_shrinks_irrelevant_covariate_edf_below_one() {
         ..FitConfig::default()
     };
 
-    let mut z_edf: Vec<f64> = Vec::new();
-    let mut x_edf: Vec<f64> = Vec::new();
-    let mut fitted_rhos: Vec<Vec<f64>> = Vec::new();
-    for seed in 200u64..205 {
+    let seeds: Vec<u64> = (200u64..241).collect();
+    let mut z_edf: Vec<f64> = Vec::with_capacity(seeds.len());
+    let mut z_edf_single: Vec<f64> = Vec::with_capacity(seeds.len());
+    let mut x_edf: Vec<f64> = Vec::with_capacity(seeds.len());
+    for &seed in &seeds {
         let data = irrelevant_covariate_dataset(seed, 800);
         let fit = fit_from_formula("y ~ s(x) + s(z)", &data, &cfg).expect("fit ok");
-        z_edf.push(smooth_term_edf(&fit, "z"));
-        x_edf.push(smooth_term_edf(&fit, "x"));
-        fitted_rhos.push(standard(&fit).fit.log_lambdas.to_vec());
+        let single = fit_from_formula(
+            "y ~ s(x, double_penalty=False) + s(z, double_penalty=False)",
+            &data,
+            &cfg,
+        )
+        .expect("single-penalty fit ok");
+        let z = smooth_term_edf(&fit, "z");
+        let x = smooth_term_edf(&fit, "x");
+        let z_single = smooth_term_edf(&single, "z");
+        println!(
+            "#1266 row 23 seed {seed}: z edf={z:.6} x edf={x:.6} single-penalty z edf={z_single:.6} \
+             rho=[x bend, x null, z bend, z null]={:?}",
+            standard(&fit).fit.log_lambdas.to_vec()
+        );
+        z_edf.push(z);
+        x_edf.push(x);
+        z_edf_single.push(z_single);
     }
 
-    let mean_z = z_edf.iter().sum::<f64>() / z_edf.len() as f64;
-    let mean_x = x_edf.iter().sum::<f64>() / x_edf.len() as f64;
+    let n = seeds.len() as f64;
+    let mean_and_sem = |values: &[f64]| {
+        let mean = values.iter().sum::<f64>() / n;
+        let var = values.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / (n - 1.0);
+        (mean, (var / n).sqrt())
+    };
+    let t = student_t_upper_quantile(seeds.len() - 1, RESOLUTION_TAIL);
+    let (mean_z, sem_z) = mean_and_sem(&z_edf);
+    let (mean_single, sem_single) = mean_and_sem(&z_edf_single);
+    let (mean_x, _) = mean_and_sem(&x_edf);
+    let shrinkage: Vec<f64> = z_edf_single
+        .iter()
+        .zip(&z_edf)
+        .map(|(single, default)| single - default)
+        .collect();
+    let (mean_shrinkage, sem_shrinkage) = mean_and_sem(&shrinkage);
+    let upper = mean_z + t * sem_z;
+    let single_upper = mean_single + t * sem_single;
+    let shrinkage_lower = mean_shrinkage - t * sem_shrinkage;
+    let at_face = z_edf.iter().filter(|&&edf| edf < 0.01).count();
     println!(
-        "#1266 row 23: mean z edf={mean_z:.6} (bar < 1.0) z={z_edf:?}; mean x edf={mean_x:.6} \
-         x={x_edf:?}; rho=[x bend, x null, z bend, z null] by seed={fitted_rhos:?}"
+        "#1266 row 23: seeds={} mean z edf={mean_z:.6} sem={sem_z:.6} upper={upper:.6} (bar < 1.0, \
+         t={t:.4}); z edf < 0.01 on {at_face} seeds; single-penalty mean z edf={mean_single:.6} \
+         upper={single_upper:.6}; paired shrinkage mean={mean_shrinkage:.6} lower={shrinkage_lower:.6}; \
+         mean x edf={mean_x:.6}",
+        seeds.len()
     );
 
     assert!(
@@ -275,11 +337,22 @@ fn default_double_penalty_shrinks_irrelevant_covariate_edf_below_one() {
          mean x edf={mean_x:.6}, values={x_edf:?}"
     );
     assert!(
-        mean_z < 1.0,
+        single_upper >= 1.0,
+        "positive control: without the null ridge s(z) keeps its unpenalized linear direction, \
+         so the bound must fail; got single-penalty mean z edf={mean_single:.6}, \
+         upper={single_upper:.6}, values={z_edf_single:?}"
+    );
+    assert!(
+        upper < 1.0,
         "default double penalty failed to shrink the irrelevant covariate s(z) \
-         (mgcv select=TRUE): mean z edf={mean_z:.6} (must be < 1.0), \
-         values={z_edf:?}; supported mean x edf={mean_x:.6}, x values={x_edf:?}; \
-         fitted rho=[x bend, x null, z bend, z null] by seed={fitted_rhos:?}"
+         (mgcv select=TRUE): mean z edf={mean_z:.6} + t·sem ({t:.4}·{sem_z:.6}) = {upper:.6} \
+         (must be < 1.0), values={z_edf:?}; supported mean x edf={mean_x:.6}"
+    );
+    assert!(
+        shrinkage_lower > 0.0,
+        "default double penalty did not shrink s(z) below the single-penalty fit draw by draw: \
+         mean paired shrinkage={mean_shrinkage:.6} − t·sem ({t:.4}·{sem_shrinkage:.6}) = \
+         {shrinkage_lower:.6} (must be > 0), values={shrinkage:?}"
     );
 }
 

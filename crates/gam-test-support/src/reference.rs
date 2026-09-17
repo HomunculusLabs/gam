@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use gam_linalg_test_support::{
     PairedFoldComparison, PairedHoldout, RESOLUTION_TAIL, assert_paired_match_or_beat,
-    paired_holdout_partition,
+    paired_holdout_partition, student_t_upper_quantile,
 };
 
 /// Parsed results emitted by a reference-tool body via `emit(key, values)`.
