@@ -1,7 +1,7 @@
 # Real behavior-anchored fixture — Qwen3.5-9B (#2015)
 
 Row-aligned activation/behavior pair: 2000 WikiText-103-raw (test split) token
-positions through **Qwen3.5-9B** (dense, 31 text layers), harvested on GPU by
+positions through **Qwen3.5-9B** (dense, 32 text layers), harvested on GPU by
 `scripts/qwen_joint_behavior_harvest.py` and reduced for the in-crate gate.
 
 ## qwen35_9b_actsL21_pca64_2000.npy — shape (2000, 64) float32
