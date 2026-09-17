@@ -155,6 +155,34 @@ impl GaussianActivation {
             }),
         }
     }
+
+    /// An upper bound on `sup_x |σ'(x)|²`, the covariance Lipschitz constant of
+    /// every pair kernel: `|∂_r K| = |E σ'(X) σ'(Y)| ≤ sup|σ'|²`, so moving the
+    /// covariance by `δ` at fixed means and variances moves `K` by at most this
+    /// bound times `δ`.
+    ///
+    /// - ReLU: `σ' ∈ {0, 1}`, so the bound is `1`.
+    /// - Exact GELU: `σ'(x) = Φ(x) + x φ(x)` and `σ''(x) = (2 − x²) φ(x)`, so `σ'`
+    ///   rises on `(−√2, √2)` from its minimum to its maximum. By the symmetry
+    ///   `σ'(−x) = 1 − σ'(x)`, `sup|σ'| = σ'(√2) = Φ(√2) + √2 φ(√2) = 1.1289…`.
+    ///   It is evaluated with its rounding, and the square plus its bound is
+    ///   returned, so the bound holds. Rounding `√2` moves `σ'` only to second
+    ///   order, because `σ''(√2) = 0`.
+    /// - SiLU has no closed form here, and `gaussian_gated` owns its expectations.
+    #[inline]
+    pub fn slope_bound_squared(self) -> Result<f64, GaussianActivationError> {
+        match self {
+            Self::Relu => Ok(1.0),
+            Self::ExactGelu => {
+                let argument = Bounded::exact(std::f64::consts::SQRT_2);
+                let slope = bounded_normal_cdf(argument)
+                    .add(argument.mul(bounded_normal_pdf(argument)));
+                let square = slope.mul(slope);
+                Ok(square.value + square.bound)
+            }
+            Self::Silu => Err(GaussianActivationError::NoClosedForm { activation: self }),
+        }
+    }
 }
 
 /// A refused Gaussian activation expectation.
@@ -426,8 +454,8 @@ pub struct ProjectedCovariance {
 /// predicate is not rounding.
 ///
 /// The projection moves `K` by at most `sup|σ'|² β`, because
-/// `|∂_r K| = |E σ'(X) σ'(Y)| ≤ sup|σ'|²`: `1` for ReLU and
-/// `(Φ(√2) + √2 φ(√2))² < 1.28` for the exact GELU.
+/// `|∂_r K| = |E σ'(X) σ'(Y)| ≤ sup|σ'|²`
+/// ([`GaussianActivation::slope_bound_squared`]).
 #[inline]
 pub fn project_covariance(
     variance_x: f64,
@@ -3691,6 +3719,54 @@ mod tests {
         assert!(
             largest_discrepancy > 0.0,
             "no evaluation rounded, so the bounds were not exercised"
+        );
+    }
+
+    #[test]
+    fn slope_bound_squared_covers_the_slope_and_is_tight_at_its_extreme() {
+        assert_eq!(GaussianActivation::Relu.slope_bound_squared(), Ok(1.0));
+        assert!(matches!(
+            GaussianActivation::Silu.slope_bound_squared(),
+            Err(GaussianActivationError::NoClosedForm { .. })
+        ));
+        let bound = GaussianActivation::ExactGelu
+            .slope_bound_squared()
+            .expect("exact GELU slope bound");
+        // σ'' = (2 − x²) φ vanishes at √2, where σ' peaks.
+        let at_peak = smoothing(GaussianActivation::ExactGelu, SQRT_2, 0.0, 3);
+        assert!(
+            at_peak[2].abs()
+                <= closed_form_rounding(smoothing_magnitude(
+                    GaussianActivation::ExactGelu,
+                    SQRT_2,
+                    0.0,
+                    2
+                )),
+            "σ''(√2) = {} does not vanish",
+            at_peak[2]
+        );
+        let peak_square = at_peak[1] * at_peak[1];
+        assert!(
+            bound >= peak_square && bound - peak_square <= closed_form_rounding(bound),
+            "slope bound {bound} is not σ'(√2)² = {peak_square} to rounding"
+        );
+        // The bound covers σ'(x)² on a dense sample of [−20, 20], through both extremes.
+        let mut largest = 0.0_f64;
+        let mut index = -4000_i32;
+        while index <= 4000 {
+            let slope = smoothing(GaussianActivation::ExactGelu, f64::from(index) * 0.005, 0.0, 2)[1];
+            largest = largest.max(slope * slope);
+            index += 1;
+        }
+        assert!(
+            largest <= bound,
+            "sampled sup σ'² = {largest} exceeds the bound {bound}"
+        );
+        // Positive control: Φ(√2)² without the √2 φ(√2) term is exceeded by the sample.
+        let incomplete = normal_cdf(SQRT_2).powi(2);
+        assert!(
+            largest > incomplete,
+            "control: sampled {largest} does not exceed Φ(√2)² = {incomplete}"
         );
     }
 
