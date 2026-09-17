@@ -35,6 +35,31 @@
 //! generators are collinear and share one edge, are therefore exact for the stored `f64`
 //! generators; vertex positions carry a derived roundoff band.
 //!
+//! # Logit vertex adversary (P9)
+//!
+//! The logits are declared multilinear across affine factors. A factor is the set of blocks whose
+//! moments enter the logits additively:
+//!
+//! `z(q) = z₀ − Σ_terms (Π_{coordinates of the term} q_coordinate)·column`,
+//!
+//! with at most one coordinate of each factor in a term. With the other factors fixed, the logits
+//! are affine in one factor's moment, so `KL(p₀ ‖ softmax z)` is convex along that factor. When every
+//! free control moves at most one declared factor, the admissible moments are the product of the
+//! per-factor zonotopes. From any maximizer, moving one factor at a time to a maximizing vertex
+//! never decreases the divergence, so a tuple of per-factor planar vertices attains the maximum. The
+//! enumeration visits `Π_f 2G_f` tuples and never `2^C` masks. The status is exact, as exhaustive
+//! over that family.
+//!
+//! A declaration is refused at the exact boundary (gam-67's ruling; mpd-verify, comment 5716951603):
+//! - A moved block has a nonlinearity between its tensor and the logits, such as a final norm
+//!   dividing by `(mean(h²) + ε)^{1/2}`.
+//! - Some control enters with degree at least two. Either a term takes two coordinates of one
+//!   factor, or a control moves two factors that share a term, such as a tied embedding and
+//!   unembedding.
+//!
+//! A control moving two factors that share no term couples their zonotopes. The product is then a
+//! superset, and its vertex maximum is reported as a uniform bound, never as exact.
+//!
 //! # Fragmentation (P10)
 //!
 //! A positive collinear refinement preserves the set, `Σ_i [0, α_i·v] = [0, v]` for `α_i > 0`, so
@@ -56,10 +81,14 @@
 //! - A supremum over masks is reported as [`MaskEvidence`], the shared evidence status: `Exact` by
 //!   the algebraic identity `max(h(u), h(−u))`, with the band as its numerical error and an
 //!   endpoint mask as its witness.
+//! - The logit vertex maximum is `Exact` and exhaustive over its vertex tuples. Its numerical error
+//!   combines gam-math's KL evaluation error with `2·max_k |δz′_k|` for the rounding of the shifted
+//!   logits. A coupled declaration gives only a `UniformBound`.
 
 use std::cmp::Ordering;
 
 use gam_linalg::roundoff::{UNIT_ROUNDOFF, accumulation_band, accumulation_growth};
+use gam_math::categorical::{CategoricalError, categorical_kl_from_logits_with_error};
 use ndarray::Array1;
 
 use super::supports::{EvidenceStatus, EvidenceStatusError, ExactBasis};
@@ -308,6 +337,143 @@ pub struct AdmissibleMasks {
 
 /// What a reported extremum over the admissible masks may mean, with an endpoint mask as its witness.
 pub type MaskEvidence = EvidenceStatus<Vec<WitnessEndpoint>, AdmissibleMasks>;
+
+/// An affine factor of the logit map: blocks whose moments enter the logits additively.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LogitFactor(pub usize);
+
+/// How a moment block's tensor reaches the logits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LogitPath {
+    /// No nonlinearity lies between the tensor and the logits. Examples are the unembedding and the
+    /// final norm's gain and bias. Blocks in different factors multiply only through declared terms.
+    Affine(LogitFactor),
+    /// A nonlinearity lies between the tensor and the logits. An example is every residual write
+    /// before a final norm.
+    Nonlinear,
+}
+
+/// One term `(Π_{coordinates} q_coordinate)·column` of the logit shift.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LogitTerm {
+    pub coordinates: Vec<MomentCoordinate>,
+    pub column: Vec<f64>,
+}
+
+/// Logits declared multilinear across affine factors over the whole admissible set:
+/// `z(q) = z₀ − Σ_terms (Π q)·column`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MultilinearLogitModel {
+    /// The logits `z₀` at all-on.
+    pub reference_logits: Vec<f64>,
+    /// Each block's path to the logits, one per block of the system.
+    pub block_paths: Vec<LogitPath>,
+    pub terms: Vec<LogitTerm>,
+}
+
+/// Why the logit vertex adversary does not run.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LogitAdversaryRefusal {
+    Geometry(MomentGeometryError),
+    Categorical(CategoricalError),
+    Evidence(EvidenceStatusError),
+    BlockPathCount { expected: usize, found: usize },
+    TermLength { term: usize, expected: usize, found: usize },
+    NonFiniteTerm { term: usize },
+    /// A term names a coordinate whose block reaches the logits through a nonlinearity.
+    CoordinateOnNonlinearPath { term: usize, coordinate: MomentCoordinate },
+    /// A term takes two coordinates of one factor, so the logits are of degree two within that
+    /// factor.
+    FactorRepeatedInTerm { term: usize, factor: LogitFactor },
+    /// Free controls move blocks with a nonlinearity between their tensors and the logits.
+    NonlinearPathToLogits { blocks: Vec<usize> },
+    /// A free control moves two factors that share a term, so the logits are of degree at least
+    /// two in that control.
+    ControlOfDegreeTwo { control: usize, factors: Vec<LogitFactor> },
+    /// Exact vertex enumeration here is planar per factor.
+    BeyondPlanarFactor { factor: LogitFactor, coordinates: usize },
+    /// The number of vertex tuples does not fit in a `u64`.
+    VertexTupleCountOverflow,
+}
+
+impl MultilinearLogitModel {
+    /// `KL(softmax z₀ ‖ softmax z(q))` at a moment, with its numerical error.
+    pub fn divergence_at(&self, moment: &MomentVector) -> Result<(f64, f64), LogitAdversaryRefusal> {
+        self.validate_terms()?;
+        self.divergence(|term, index| {
+            let coordinate = self.terms[term].coordinates[index];
+            moment
+                .component(coordinate)
+                .map(|value| (value, 0.0))
+                .ok_or(LogitAdversaryRefusal::Geometry(
+                    MomentGeometryError::CoordinateOutOfRange { coordinate },
+                ))
+        })
+    }
+
+    fn validate_terms(&self) -> Result<(), LogitAdversaryRefusal> {
+        for (term, entry) in self.terms.iter().enumerate() {
+            if entry.column.len() != self.reference_logits.len() {
+                return Err(LogitAdversaryRefusal::TermLength {
+                    term,
+                    expected: self.reference_logits.len(),
+                    found: entry.column.len(),
+                });
+            }
+            if entry.column.iter().any(|value| !value.is_finite()) {
+                return Err(LogitAdversaryRefusal::NonFiniteTerm { term });
+            }
+        }
+        Ok(())
+    }
+
+    /// The divergence, reading each term's coordinate values through `value(term, index)`. It
+    /// returns a value and a bound on that value's error.
+    ///
+    /// Numerical error:
+    /// - A product of `r` values, each within `e_i` of exact, is within `Π(|q̂_i| + e_i) − Π|q̂_i|` of
+    ///   the exact product, plus `γ_{2r}·Π(|q̂_i| + e_i)` for rounding both products.
+    /// - A shifted logit accumulates `2T` rounded operations over `|z₀_k| + Σ_t |p̂_t·c_tk|`.
+    /// - To first order the divergence moves by at most `Σ_k |p′_k − p₀_k|·|δz′_k| ≤ 2·max_k |δz′_k|`,
+    ///   since `∂KL/∂z′_k = p′_k − p₀_k`. gam-math's error covers the evaluation itself.
+    fn divergence(
+        &self,
+        value: impl Fn(usize, usize) -> Result<(f64, f64), LogitAdversaryRefusal>,
+    ) -> Result<(f64, f64), LogitAdversaryRefusal> {
+        let mut shifted = self.reference_logits.clone();
+        let mut spread = vec![0.0_f64; shifted.len()];
+        let mut magnitude: Vec<f64> = self.reference_logits.iter().map(|logit| logit.abs()).collect();
+        for (term, entry) in self.terms.iter().enumerate() {
+            let mut product = 1.0_f64;
+            let mut inflated = 1.0_f64;
+            for index in 0..entry.coordinates.len() {
+                let (component, error) = value(term, index)?;
+                product *= component;
+                inflated *= component.abs() + error;
+            }
+            let product_error =
+                (inflated - product.abs()) + accumulation_growth(2 * entry.coordinates.len()) * inflated;
+            for (logit, (&slope, (deviation, size))) in shifted
+                .iter_mut()
+                .zip(entry.column.iter().zip(spread.iter_mut().zip(magnitude.iter_mut())))
+            {
+                let moved = product * slope;
+                *logit -= moved;
+                *size += moved.abs();
+                *deviation += slope.abs() * product_error;
+            }
+        }
+        let growth = accumulation_growth(2 * self.terms.len());
+        let logit_error = spread
+            .iter()
+            .zip(&magnitude)
+            .fold(0.0_f64, |acc, (&deviation, &size)| acc.max(deviation + growth * size));
+        let (divergence, evaluation_error) =
+            categorical_kl_from_logits_with_error(&self.reference_logits, &shifted)
+                .map_err(LogitAdversaryRefusal::Categorical)?;
+        Ok((divergence, evaluation_error + 2.0 * logit_error))
+    }
+}
 
 /// Controls merged by positive collinear refinement (#2951 P10).
 #[derive(Clone, Debug, PartialEq)]
@@ -622,6 +788,195 @@ impl MaskMomentSystem {
         Ok(planar_walk(domain, kept, &projections))
     }
 
+    /// The maximum over the admissible masks of `KL(p₀ ‖ softmax z(q))`, for logits declared
+    /// multilinear across affine factors. It is found by enumerating tuples of per-factor planar
+    /// vertices (#2951 P9).
+    ///
+    /// Returns `Exact { basis: Exhaustive { cardinality: tuples } }` with the attaining mask. When a
+    /// control couples two factors that share no term, the tuple maximum is returned as a
+    /// `UniformBound` over the product of the per-factor zonotopes, which is a superset.
+    pub fn logit_vertex_adversary(
+        &self,
+        domain: &MaskDomain,
+        kept: &[bool],
+        model: &MultilinearLogitModel,
+    ) -> Result<MaskEvidence, LogitAdversaryRefusal> {
+        self.check_controls(domain, kept.len())
+            .map_err(LogitAdversaryRefusal::Geometry)?;
+        if model.block_paths.len() != self.blocks.len() {
+            return Err(LogitAdversaryRefusal::BlockPathCount {
+                expected: self.blocks.len(),
+                found: model.block_paths.len(),
+            });
+        }
+        model.validate_terms()?;
+        // Each declared factor with its coordinates, and for every term coordinate its
+        // (factor position, slot).
+        let mut factors: Vec<(LogitFactor, Vec<MomentCoordinate>)> = Vec::new();
+        let mut term_slots: Vec<Vec<(usize, usize)>> = Vec::with_capacity(model.terms.len());
+        for (term, entry) in model.terms.iter().enumerate() {
+            let mut seen: Vec<LogitFactor> = Vec::new();
+            let mut slots = Vec::with_capacity(entry.coordinates.len());
+            for &coordinate in &entry.coordinates {
+                self.check_coordinate(coordinate)
+                    .map_err(LogitAdversaryRefusal::Geometry)?;
+                let LogitPath::Affine(factor) = model.block_paths[coordinate.block] else {
+                    return Err(LogitAdversaryRefusal::CoordinateOnNonlinearPath { term, coordinate });
+                };
+                if seen.contains(&factor) {
+                    return Err(LogitAdversaryRefusal::FactorRepeatedInTerm { term, factor });
+                }
+                seen.push(factor);
+                let position = match factors.iter().position(|named| named.0 == factor) {
+                    Some(position) => position,
+                    None => {
+                        factors.push((factor, Vec::new()));
+                        factors.len() - 1
+                    }
+                };
+                let coordinates = &mut factors[position].1;
+                let slot = match coordinates.iter().position(|&named| named == coordinate) {
+                    Some(slot) => slot,
+                    None => {
+                        coordinates.push(coordinate);
+                        coordinates.len() - 1
+                    }
+                };
+                slots.push((position, slot));
+            }
+            term_slots.push(slots);
+        }
+        if let Some((factor, coordinates)) = factors.iter().find(|named| named.1.len() > 2) {
+            return Err(LogitAdversaryRefusal::BeyondPlanarFactor {
+                factor: *factor,
+                coordinates: coordinates.len(),
+            });
+        }
+        let mut nonlinear: Vec<usize> = Vec::new();
+        let mut coupled = false;
+        for (control, parts) in self.generators.iter().enumerate() {
+            let (least, most) = domain.deletion_range(control);
+            if kept[control] || most == least {
+                continue;
+            }
+            let mut moved_factors: Vec<LogitFactor> = Vec::new();
+            for part in parts.iter().filter(|part| part.vector.iter().any(|&entry| entry != 0.0)) {
+                match model.block_paths[part.block] {
+                    LogitPath::Nonlinear => {
+                        if !nonlinear.contains(&part.block) {
+                            nonlinear.push(part.block);
+                        }
+                    }
+                    LogitPath::Affine(factor) => {
+                        if factors.iter().any(|named| named.0 == factor) && !moved_factors.contains(&factor) {
+                            moved_factors.push(factor);
+                        }
+                    }
+                }
+            }
+            if moved_factors.len() > 1 {
+                let shares_a_term = model.terms.iter().any(|term| {
+                    moved_factors
+                        .iter()
+                        .filter(|&&factor| {
+                            term.coordinates
+                                .iter()
+                                .any(|named| model.block_paths[named.block] == LogitPath::Affine(factor))
+                        })
+                        .count()
+                        > 1
+                });
+                if shares_a_term {
+                    moved_factors.sort();
+                    return Err(LogitAdversaryRefusal::ControlOfDegreeTwo {
+                        control,
+                        factors: moved_factors,
+                    });
+                }
+                coupled = true;
+            }
+        }
+        if !nonlinear.is_empty() {
+            nonlinear.sort_unstable();
+            return Err(LogitAdversaryRefusal::NonlinearPathToLogits { blocks: nonlinear });
+        }
+        let walks: Vec<PlanarBoundary> = factors
+            .iter()
+            .map(|named| {
+                let projections: Vec<[f64; 2]> = (0..self.generators.len())
+                    .map(|control| {
+                        let mut projection = [0.0, 0.0];
+                        for (slot, &coordinate) in projection.iter_mut().zip(&named.1) {
+                            *slot = self.coordinate_value(control, coordinate);
+                        }
+                        projection
+                    })
+                    .collect();
+                planar_walk(domain, kept, &projections)
+            })
+            .collect();
+        let cardinality = walks
+            .iter()
+            .try_fold(1u64, |count, walk| count.checked_mul(walk.vertices.len() as u64))
+            .ok_or(LogitAdversaryRefusal::VertexTupleCountOverflow)?;
+        let evaluate = |tuple: &[usize]| {
+            model.divergence(|term, index| {
+                let (position, slot) = term_slots[term][index];
+                let walk = &walks[position];
+                Ok((walk.vertices[tuple[position]][slot], walk.band))
+            })
+        };
+        let mut tuple = vec![0usize; walks.len()];
+        let (mut divergence, mut numerical_error) = evaluate(&tuple)?;
+        let mut best = tuple.clone();
+        while advance_tuple(&mut tuple, &walks) {
+            let (candidate, error) = evaluate(&tuple)?;
+            numerical_error = numerical_error.max(error);
+            if candidate > divergence {
+                divergence = candidate;
+                best.clone_from(&tuple);
+            }
+        }
+        let admissible = AdmissibleMasks {
+            domain: domain.clone(),
+            kept: kept.to_vec(),
+        };
+        if coupled {
+            return EvidenceStatus::uniform_bound(
+                (divergence + numerical_error).next_up(),
+                numerical_error,
+                admissible,
+            )
+            .map_err(LogitAdversaryRefusal::Evidence);
+        }
+        let mut witness: Vec<WitnessEndpoint> = kept
+            .iter()
+            .map(|&is_kept| {
+                if is_kept {
+                    WitnessEndpoint::Kept
+                } else {
+                    WitnessEndpoint::Upper
+                }
+            })
+            .collect();
+        for (walk, &vertex) in walks.iter().zip(&best) {
+            let factor_witness = walk.switched_witness(vertex);
+            for edge in &walk.edges {
+                for &control in &edge.controls {
+                    witness[control] = factor_witness[control];
+                }
+            }
+        }
+        EvidenceStatus::exact(
+            divergence,
+            numerical_error,
+            ExactBasis::Exhaustive { cardinality },
+            Some(witness),
+            admissible,
+        )
+        .map_err(LogitAdversaryRefusal::Evidence)
+    }
+
     /// Merges every group of positively collinear generators that share one declared interval into
     /// a single control whose generator is their sum (#2951 P10).
     ///
@@ -888,6 +1243,19 @@ fn planar_walk(domain: &MaskDomain, kept: &[bool], projections: &[[f64; 2]]) -> 
         band,
         start,
     }
+}
+
+/// Advances a mixed-radix counter over the walks' vertex counts, last digit fastest. Returns false
+/// once every tuple has been visited.
+fn advance_tuple(tuple: &mut [usize], walks: &[PlanarBoundary]) -> bool {
+    for (digit, walk) in tuple.iter_mut().zip(walks).rev() {
+        *digit += 1;
+        if *digit < walk.vertices.len() {
+            return true;
+        }
+        *digit = 0;
+    }
+    false
 }
 
 /// The order behind [`MaskMomentSystem::merge_positive_collinear`]'s candidate sort: the nonzero
@@ -1556,5 +1924,247 @@ mod tests {
                 assert_eq!(after.witness(image), before.witness(index));
             }
         }
+    }
+
+    fn affine(factor: usize) -> LogitPath {
+        LogitPath::Affine(LogitFactor(factor))
+    }
+
+    fn term(coordinates: Vec<MomentCoordinate>, column: &[f64]) -> LogitTerm {
+        LogitTerm {
+            coordinates,
+            column: column.to_vec(),
+        }
+    }
+
+    fn exhaustive_divergence(
+        system: &MaskMomentSystem,
+        domain: &MaskDomain,
+        kept: &[bool],
+        model: &MultilinearLogitModel,
+    ) -> f64 {
+        endpoint_masks(domain, kept)
+            .iter()
+            .map(|mask| {
+                model
+                    .divergence_at(&system.moment(domain, mask).expect("endpoint mask admissible"))
+                    .expect("declared coordinates present")
+                    .0
+            })
+            .fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    #[test]
+    fn logit_vertex_maximum_equals_the_exhaustive_endpoint_maximum_2951() {
+        // One affine factor. Integer generators and dyadic columns keep every shift exact, so both routes
+        // evaluate the divergence on identical logits.
+        let (system, domain) = planar_fixture();
+        let model = MultilinearLogitModel {
+            reference_logits: vec![0.5, -1.0, 2.0, 0.0],
+            block_paths: vec![affine(0)],
+            terms: vec![
+                term(vec![coordinate(0, 0)], &[0.25, -0.5, 0.125, 0.5]),
+                term(vec![coordinate(0, 1)], &[-0.5, 0.25, 0.375, -0.125]),
+            ],
+        };
+        for (kept, cardinality) in [
+            (vec![false; 8], 14u64),
+            (vec![false, true, false, false, true, false, false, false], 10),
+        ] {
+            let status = system
+                .logit_vertex_adversary(&domain, &kept, &model)
+                .expect("affine and planar");
+            let EvidenceStatus::Exact {
+                value,
+                numerical_error,
+                basis,
+                witness: Some(witness),
+                ..
+            } = status
+            else {
+                panic!("an affine declaration must give an exact status with a witness");
+            };
+            assert_eq!(basis, ExactBasis::Exhaustive { cardinality });
+            assert_eq!(value, exhaustive_divergence(&system, &domain, &kept, &model), "kept {kept:?}");
+            assert!(numerical_error.is_finite() && value - numerical_error > 0.0);
+            let witness_moment = system
+                .moment(&domain, &domain.mask_at(&witness).expect("same controls"))
+                .expect("admissible");
+            assert_eq!(model.divergence_at(&witness_moment).expect("coordinates present").0, value);
+        }
+        // Two factors with a bilinear cross term: exact over the 8 × 2 vertex tuples.
+        let bilinear = MaskMomentSystem::new(
+            vec![block(2), block(1)],
+            vec![
+                vec![part(0, &[1.0, 2.0])],
+                vec![part(0, &[-2.0, 1.0])],
+                vec![part(0, &[3.0, -1.0])],
+                vec![part(0, &[0.0, 2.0])],
+                vec![part(1, &[1.0])],
+                vec![part(1, &[-2.0])],
+                vec![part(1, &[1.0])],
+            ],
+        )
+        .expect("well-formed generators");
+        let bilinear_model = MultilinearLogitModel {
+            reference_logits: vec![0.0, 1.0, -0.5],
+            block_paths: vec![affine(0), affine(1)],
+            terms: vec![
+                term(vec![coordinate(0, 0)], &[0.25, -0.125, 0.0]),
+                term(vec![coordinate(0, 1)], &[0.0, 0.25, -0.25]),
+                term(vec![coordinate(1, 0)], &[0.5, 0.0, 0.25]),
+                term(vec![coordinate(0, 0), coordinate(1, 0)], &[-0.125, 0.25, 0.125]),
+            ],
+        };
+        let domain = unit_domain(7);
+        let status = bilinear
+            .logit_vertex_adversary(&domain, &[false; 7], &bilinear_model)
+            .expect("multilinear across distinct controls");
+        let EvidenceStatus::Exact { value, basis, .. } = status else {
+            panic!("distinct controls in two factors must stay exact");
+        };
+        assert_eq!(basis, ExactBasis::Exhaustive { cardinality: 16 });
+        assert_eq!(value, exhaustive_divergence(&bilinear, &domain, &[false; 7], &bilinear_model));
+    }
+
+    #[test]
+    fn logit_vertex_adversary_refuses_at_the_degree_and_nonlinearity_boundary_2951() {
+        // Why degree two is refused: z(t) = (0, (1 − 2t)²) with p₀ at t = 0 (mpd-verify). The divergence is 0 at
+        // both endpoints and positive at t = 1/2. The shift 4t(1 − t) is quadratic in the mask.
+        let quadratic = MultilinearLogitModel {
+            reference_logits: vec![0.0, 1.0],
+            block_paths: vec![affine(0)],
+            terms: vec![term(vec![coordinate(0, 0)], &[0.0, 1.0])],
+        };
+        let at = |mask: f64| {
+            quadratic
+                .divergence_at(&MomentVector {
+                    blocks: vec![array![4.0 * mask * (1.0 - mask)]],
+                })
+                .expect("finite logits")
+                .0
+        };
+        assert_eq!((at(0.0), at(1.0)), (0.0, 0.0));
+        assert!(at(0.5) > 0.0);
+        let cross = MultilinearLogitModel {
+            reference_logits: vec![0.0, 1.0],
+            block_paths: vec![affine(0), affine(1)],
+            terms: vec![
+                term(vec![coordinate(0, 0)], &[1.0, -1.0]),
+                term(vec![coordinate(1, 0)], &[0.5, 0.0]),
+                term(vec![coordinate(0, 0), coordinate(1, 0)], &[0.25, 0.25]),
+            ],
+        };
+        let tied = MaskMomentSystem::new(
+            vec![block(1), block(1)],
+            vec![
+                vec![part(0, &[1.0]), part(1, &[1.0])],
+                vec![part(0, &[2.0])],
+                vec![part(1, &[-1.0])],
+            ],
+        )
+        .expect("well-formed generators");
+        let domain = unit_domain(3);
+        assert_eq!(
+            tied.logit_vertex_adversary(&domain, &[false; 3], &cross),
+            Err(LogitAdversaryRefusal::ControlOfDegreeTwo {
+                control: 0,
+                factors: vec![LogitFactor(0), LogitFactor(1)]
+            })
+        );
+        // Negative control: with the tied control kept, each control moves one factor and the result is exact.
+        assert!(matches!(
+            tied.logit_vertex_adversary(&domain, &[true, false, false], &cross),
+            Ok(EvidenceStatus::Exact { .. })
+        ));
+        let repeated = MultilinearLogitModel {
+            reference_logits: vec![0.0, 1.0],
+            block_paths: vec![affine(0)],
+            terms: vec![term(vec![coordinate(0, 0), coordinate(0, 1)], &[1.0, 0.0])],
+        };
+        let (planar_system, planar_domain) = planar_fixture();
+        assert_eq!(
+            planar_system.logit_vertex_adversary(&planar_domain, &[false; 8], &repeated),
+            Err(LogitAdversaryRefusal::FactorRepeatedInTerm {
+                term: 0,
+                factor: LogitFactor(0)
+            })
+        );
+        let pre_norm = MaskMomentSystem::new(
+            vec![block(1), block(1)],
+            vec![vec![part(0, &[1.0])], vec![part(1, &[1.0])]],
+        )
+        .expect("well-formed generators");
+        let pre_norm_model = MultilinearLogitModel {
+            reference_logits: vec![0.0, 1.0],
+            block_paths: vec![affine(0), LogitPath::Nonlinear],
+            terms: vec![term(vec![coordinate(0, 0)], &[1.0, 0.0])],
+        };
+        assert_eq!(
+            pre_norm.logit_vertex_adversary(&unit_domain(2), &[false; 2], &pre_norm_model),
+            Err(LogitAdversaryRefusal::NonlinearPathToLogits { blocks: vec![1] })
+        );
+        assert!(
+            pre_norm
+                .logit_vertex_adversary(&unit_domain(2), &[false, true], &pre_norm_model)
+                .is_ok()
+        );
+        let declared_on_norm = MultilinearLogitModel {
+            terms: vec![term(vec![coordinate(1, 0)], &[1.0, 0.0])],
+            ..pre_norm_model
+        };
+        assert_eq!(
+            pre_norm.logit_vertex_adversary(&unit_domain(2), &[false, true], &declared_on_norm),
+            Err(LogitAdversaryRefusal::CoordinateOnNonlinearPath {
+                term: 0,
+                coordinate: coordinate(1, 0)
+            })
+        );
+        let wide = MaskMomentSystem::new(vec![block(3)], vec![vec![part(0, &[1.0, 2.0, 3.0])]])
+            .expect("well-formed generators");
+        let wide_model = MultilinearLogitModel {
+            reference_logits: vec![0.0, 0.0],
+            block_paths: vec![affine(0)],
+            terms: (0..3)
+                .map(|index| term(vec![coordinate(0, index)], &[1.0, 0.0]))
+                .collect(),
+        };
+        assert_eq!(
+            wide.logit_vertex_adversary(&unit_domain(1), &[false], &wide_model),
+            Err(LogitAdversaryRefusal::BeyondPlanarFactor {
+                factor: LogitFactor(0),
+                coordinates: 3
+            })
+        );
+    }
+
+    #[test]
+    fn coupled_factors_give_a_uniform_bound_not_an_exact_maximum_2951() {
+        // One control tied across two additive factors, with columns a and −a. Its only moments are (0, 0) and
+        // (1, 1), both with shift 0, so the true maximum is 0. The per-factor product also contains (1, 0) with
+        // shift a, where the divergence is positive. Labelling that superset maximum Exact would be wrong.
+        let system = MaskMomentSystem::new(
+            vec![block(1), block(1)],
+            vec![vec![part(0, &[1.0]), part(1, &[1.0])]],
+        )
+        .expect("well-formed generators");
+        let model = MultilinearLogitModel {
+            reference_logits: vec![0.0, 0.0],
+            block_paths: vec![affine(0), affine(1)],
+            terms: vec![
+                term(vec![coordinate(0, 0)], &[1.0, -1.0]),
+                term(vec![coordinate(1, 0)], &[-1.0, 1.0]),
+            ],
+        };
+        let domain = unit_domain(1);
+        let status = system
+            .logit_vertex_adversary(&domain, &[false], &model)
+            .expect("coupled factors give a bound");
+        assert!(matches!(status, EvidenceStatus::UniformBound { .. }), "got {status:?}");
+        let exhaustive = exhaustive_divergence(&system, &domain, &[false], &model);
+        assert_eq!(exhaustive, 0.0);
+        let upper = status.upper_bound().expect("a uniform bound bounds its extremum");
+        assert!(upper > exhaustive && !status.certifies_at_most(0.0));
+        assert_eq!(status.witness(), None);
     }
 }
