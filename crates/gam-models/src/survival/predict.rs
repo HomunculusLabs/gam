@@ -1870,6 +1870,147 @@ pub fn integrated_ipcw_brier_score(
     Some(integral / span)
 }
 
+/// The data-driven grid a held-out survival prediction is scored on: `0`, 24
+/// interior knots at the empirical quantiles `j / 25` of the finite positive
+/// training times, and the largest such time, strictly increasing.
+///
+/// A fixed grid such as `{0, 1, 2, 5, 10, median}` suits only O(1)–O(10) survival
+/// times; on any other scale it either runs far past the data, so an integrated
+/// Brier is dominated by an empty extrapolation tail, or never reaches it.
+/// Quantile knots resolve the event-dense region for both the survival-matrix
+/// evaluation and the [`integrated_ipcw_brier_score`] integration. With no finite
+/// positive time the grid is `[0, 1]`.
+pub fn survival_score_grid(train_times: &[f64]) -> Vec<f64> {
+    const INTERIOR: usize = 24;
+    let mut times: Vec<f64> = train_times
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .collect();
+    let Some(max_t) = times.iter().copied().reduce(f64::max) else {
+        return vec![0.0, 1.0];
+    };
+    times.sort_by(f64::total_cmp);
+    let mut grid: Vec<f64> = Vec::with_capacity(INTERIOR + 2);
+    grid.push(0.0);
+    for j in 1..=INTERIOR {
+        let p = j as f64 / (INTERIOR as f64 + 1.0);
+        grid.push(gam_math::quantile::quantile_from_sorted(&times, p));
+    }
+    grid.push(max_t);
+    grid.sort_by(f64::total_cmp);
+    // Heavy ties pull many quantiles onto one value: drop the points that collapse
+    // onto their predecessor, so the grid stays strictly increasing.
+    grid.dedup_by(|a, b| (*a - *b).abs() <= f64::EPSILON * a.abs().max(*b).max(1.0));
+    grid[0] = 0.0;
+    if grid.len() < 2 {
+        grid = vec![0.0, max_t.max(1.0)];
+    }
+    grid
+}
+
+/// Held-out scores of a predicted survival matrix, and their skill relative to a
+/// null survival matrix when one is given. A field is `None` where the score has
+/// no value on this input.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SurvivalPredictionScores {
+    /// Integrated IPCW Brier score ([`integrated_ipcw_brier_score`]).
+    pub brier: Option<f64>,
+    /// Mean hazard quadratic score `½∫h² − δ·h(T)` ([`HazardPathScores`]).
+    pub hazard_quadratic_score: Option<f64>,
+    /// Mean hazard-path negative log-likelihood ([`HazardPathScores`]).
+    pub logloss: Option<f64>,
+    /// `(null − model) / |null|` of the integrated IPCW Brier score.
+    pub lifted_brier: Option<f64>,
+    /// `(null − model) / |null|` of the mean hazard quadratic score.
+    pub lifted_hazard_quadratic_score: Option<f64>,
+    /// `(null − model) / |null|` of the mean hazard-path log-loss.
+    pub lifted_logloss: Option<f64>,
+    /// Nagelkerke R² of the hazard-path log-likelihood over the null matrix's.
+    pub nagelkerke_r2: Option<f64>,
+}
+
+/// Score a predicted survival matrix against the observed `(event_times, events)`
+/// on `grid`, and against `null_survival` when it is given with the same shape.
+///
+/// Both matrices are repaired into survival paths by
+/// [`monotone_survival_and_hazard_scores`] before scoring. The censoring
+/// distribution is Kaplan–Meier on the evaluation set itself, so every model
+/// scored on the same fold gets the same IPCW weights, and integration stops at
+/// the largest observed time, before the tail where those weights blow up.
+///
+/// Every field is `None` when the shapes disagree, the grid is not strictly
+/// increasing with at least two points, or an event time is not finite and
+/// positive. What a malformed input means is decided here, once, for every front
+/// door.
+pub fn survival_prediction_scores(
+    event_times: &[f64],
+    events: &[f64],
+    grid: &[f64],
+    survival: ArrayView2<f64>,
+    null_survival: Option<ArrayView2<f64>>,
+) -> SurvivalPredictionScores {
+    fn mean(values: &[f64]) -> f64 {
+        values.iter().sum::<f64>() / values.len() as f64
+    }
+    if event_times.len() != events.len()
+        || survival.nrows() != event_times.len()
+        || survival.ncols() != grid.len()
+        || grid.len() < 2
+        || grid.windows(2).any(|pair| pair[1] <= pair[0])
+        || event_times.iter().any(|time| !time.is_finite() || *time <= 0.0)
+    {
+        return SurvivalPredictionScores::default();
+    }
+    let observed: Vec<bool> = events.iter().map(|value| *value > 0.5).collect();
+    let censoring = KaplanMeier::fit_censoring(event_times, events);
+    let horizon = event_times.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let score = |matrix: ArrayView2<f64>| {
+        let (repaired, path) =
+            monotone_survival_and_hazard_scores(matrix, event_times, &observed, grid);
+        let brier = integrated_ipcw_brier_score(
+            repaired.view(),
+            event_times,
+            events,
+            grid,
+            horizon,
+            |t| censoring.at(t),
+        );
+        (brier, path)
+    };
+    let (brier, path) = score(survival);
+    let hazard_quadratic_score = mean(&path.hazard_quadratic_losses);
+    let logloss = mean(&path.log_losses);
+    let mut scores = SurvivalPredictionScores {
+        brier,
+        hazard_quadratic_score: Some(hazard_quadratic_score),
+        logloss: Some(logloss),
+        ..SurvivalPredictionScores::default()
+    };
+    if let Some(null_matrix) = null_survival.filter(|matrix| matrix.dim() == survival.dim()) {
+        let (null_brier, null_path) = score(null_matrix);
+        // A relative skill over a null score of exactly zero, or over an infinite
+        // null score, has no value; it is not divided by a clipped denominator.
+        let relative_skill = |null: f64, model: f64| {
+            (null != 0.0 && null.is_finite()).then(|| (null - model) / null.abs())
+        };
+        scores.lifted_brier = brier
+            .zip(null_brier)
+            .and_then(|(model, null)| relative_skill(null, model));
+        scores.lifted_hazard_quadratic_score = relative_skill(
+            mean(&null_path.hazard_quadratic_losses),
+            hazard_quadratic_score,
+        );
+        scores.lifted_logloss = relative_skill(mean(&null_path.log_losses), logloss);
+        scores.nagelkerke_r2 = gam_problem::diagnostics::nagelkerke_r_squared_from_log_likelihoods(
+            -path.log_losses.iter().sum::<f64>(),
+            -null_path.log_losses.iter().sum::<f64>(),
+            event_times.len(),
+        );
+    }
+    scores
+}
+
 /// Right-continuous Kaplan–Meier survival estimator `Ŝ(t) = ∏_{t_j ≤ t}(1 − d_j/n_j)`.
 ///
 /// Built from observed `(time, event)` pairs. To estimate the **censoring**
@@ -5702,6 +5843,62 @@ mod tests {
         .expect("valid cloglog hazard");
 
         assert!((hazard - eta.exp() * eta_t).abs() <= 1e-14);
+    }
+
+    // ---- Held-out survival scoring, one owner for every front door (#2899) --
+
+    #[test]
+    fn survival_score_grid_spans_zero_to_the_largest_time_strictly_increasing() {
+        let times = [0.3, 0.1, 0.1, 0.1, 0.45, f64::NAN, -2.0, 0.0, 0.2];
+        let grid = survival_score_grid(&times);
+        assert_eq!(grid[0], 0.0);
+        assert_eq!(grid[grid.len() - 1], 0.45);
+        assert!(grid.windows(2).all(|pair| pair[1] > pair[0]), "grid={grid:?}");
+        // Half the finite positive times tie at 0.1, so the low quantiles land
+        // there exactly and collapse onto one knot.
+        assert_eq!(grid.iter().filter(|knot| **knot == 0.1).count(), 1);
+        assert_eq!(survival_score_grid(&[f64::NAN, -1.0]), vec![0.0, 1.0]);
+    }
+
+    #[test]
+    fn survival_prediction_scores_integrate_the_ipcw_brier_and_lift_it_over_the_null() {
+        let time = [2.0, 8.0, 10.0, 3.0, 6.0, 1.5];
+        let event = [1.0, 1.0, 0.0, 1.0, 0.0, 1.0];
+        let grid = [0.0, 1.0, 2.0, 3.0, 5.0, 7.0];
+        // Rows that are already survival paths, so the repair leaves them as they are.
+        let model = Array2::from_shape_fn((6, 6), |(row, col)| {
+            1.0 - col as f64 * (0.05 + 0.02 * row as f64)
+        });
+        let null = Array2::from_shape_fn((6, 6), |(_, col)| 1.0 - 0.1 * col as f64);
+        let scores =
+            survival_prediction_scores(&time, &event, &grid, model.view(), Some(null.view()));
+        let censoring = KaplanMeier::fit_censoring(&time, &event);
+        let model_ibs =
+            integrated_ipcw_brier_score(model.view(), &time, &event, &grid, 10.0, |t| {
+                censoring.at(t)
+            })
+            .expect("model integrated Brier");
+        let null_ibs =
+            integrated_ipcw_brier_score(null.view(), &time, &event, &grid, 10.0, |t| {
+                censoring.at(t)
+            })
+            .expect("null integrated Brier");
+        assert_eq!(scores.brier, Some(model_ibs));
+        let lifted = scores.lifted_brier.expect("lifted Brier");
+        assert!((lifted - (null_ibs - model_ibs) / null_ibs.abs()).abs() <= 1e-15);
+        assert!(scores.hazard_quadratic_score.is_some() && scores.logloss.is_some());
+        assert!(scores.lifted_hazard_quadratic_score.is_some());
+        assert!(scores.lifted_logloss.is_some());
+        let alone = survival_prediction_scores(&time, &event, &grid, model.view(), None);
+        assert_eq!(alone.brier, scores.brier);
+        assert_eq!(alone.logloss, scores.logloss);
+        assert_eq!(alone.lifted_brier, None);
+        assert_eq!(alone.nagelkerke_r2, None);
+        let repeated_knot = [0.0, 1.0, 1.0, 3.0, 5.0, 7.0];
+        assert_eq!(
+            survival_prediction_scores(&time, &event, &repeated_knot, model.view(), None),
+            SurvivalPredictionScores::default()
+        );
     }
 
     // ---- IPCW Brier score (Graf et al. 1999) -------------------------------

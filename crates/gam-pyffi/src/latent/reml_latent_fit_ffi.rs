@@ -4351,30 +4351,6 @@ fn report_html(py: Python<'_>, model_bytes: Vec<u8>) -> PyResult<String> {
 }
 
 #[pyfunction]
-fn compute_residuals<'py>(
-    py: Python<'py>,
-    observed: PyReadonlyArray1<'py, f64>,
-    predicted_mean: PyReadonlyArray1<'py, f64>,
-) -> PyResult<Py<PyArray1<f64>>> {
-    let observed_values = observed.as_array();
-    let predicted_values = predicted_mean.as_array();
-    if observed_values.len() != predicted_values.len() {
-        return Err(py_value_error(format!(
-            "compute_residuals length mismatch: observed has {} values but predicted mean has {}",
-            observed_values.len(),
-            predicted_values.len()
-        )));
-    }
-
-    let residuals = observed_values
-        .iter()
-        .zip(predicted_values.iter())
-        .map(|(obs, pred)| *obs - *pred)
-        .collect::<Vec<_>>();
-    Ok(Array1::from_vec(residuals).into_pyarray(py).unbind())
-}
-
-#[pyfunction]
 fn diagnostics_from_predictions(
     py: Python<'_>,
     observed: Vec<f64>,
@@ -4786,56 +4762,8 @@ fn survival_score_grid_from_times<'py>(
     py: Python<'py>,
     train_times: Vec<f64>,
 ) -> PyResult<Py<PyArray1<f64>>> {
-    let mut times: Vec<f64> = train_times
-        .into_iter()
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .collect();
-    if times.is_empty() {
-        return Ok(Array1::from_vec(vec![0.0, 1.0]).into_pyarray(py).unbind());
-    }
-    times.sort_by(|a, b| a.total_cmp(b));
-    let max_t = times.last().copied().ok_or_else(|| {
-        py_value_error("survival score grid requires at least one finite positive time".to_string())
-    })?;
-    // Data-driven, quantile-spaced evaluation grid spanning [0, max(t)]. The old
-    // grid was a fixed {0,1,2,5,10,median} set whose magic constants only made
-    // sense for O(1)–O(10) survival times; on any other time scale it either ran
-    // far past the data (so an integrated Brier was dominated by an empty
-    // extrapolation tail) or never reached it. Concentrating the interior knots
-    // at empirical quantiles resolves the event-dense region well for both the
-    // survival-matrix evaluation and the integrated IPCW Brier integration.
-    const INTERIOR: usize = 24;
-    let mut grid: Vec<f64> = Vec::with_capacity(INTERIOR + 2);
-    grid.push(0.0);
-    for j in 1..=INTERIOR {
-        let p = j as f64 / (INTERIOR as f64 + 1.0);
-        grid.push(quantile_of_sorted(&times, p));
-    }
-    grid.push(max_t);
-    grid.sort_by(|a, b| a.total_cmp(b));
-    // Strictly increasing: drop points that collapse onto their predecessor
-    // (heavy ties pull many quantiles to the same value).
-    grid.dedup_by(|a, b| (*a - *b).abs() <= f64::EPSILON * a.abs().max(*b).max(1.0));
-    grid[0] = 0.0;
-    if grid.len() < 2 {
-        grid = vec![0.0, max_t.max(1.0)];
-    }
+    let grid = gam::families::survival::predict::survival_score_grid(&train_times);
     Ok(Array1::from_vec(grid).into_pyarray(py).unbind())
-}
-
-/// Type-7 (NumPy default) linear-interpolation quantile of an ascending slice.
-fn quantile_of_sorted(sorted: &[f64], p: f64) -> f64 {
-    match sorted.len() {
-        0 => f64::NAN,
-        1 => sorted[0],
-        n => {
-            let h = (n as f64 - 1.0) * p.clamp(0.0, 1.0);
-            let lo = h.floor() as usize;
-            let hi = (lo + 1).min(n - 1);
-            let frac = h - lo as f64;
-            sorted[lo] + frac * (sorted[hi] - sorted[lo])
-        }
-    }
 }
 
 #[pyfunction]
@@ -4929,137 +4857,21 @@ fn survival_lifted_metrics_from_predictions<'py>(
     survival_matrix: PyReadonlyArray2<'py, f64>,
     null_survival_matrix: Option<PyReadonlyArray2<'py, f64>>,
 ) -> PyResult<Py<PyDict>> {
-    let out = PyDict::new(py);
-    let none_result = |out: &Bound<'_, PyDict>| -> PyResult<Py<PyDict>> {
-        out.set_item("brier", py.None())?;
-        out.set_item("hazard_quadratic_score", py.None())?;
-        out.set_item("logloss", py.None())?;
-        out.set_item("lifted_brier", py.None())?;
-        out.set_item("lifted_hazard_quadratic_score", py.None())?;
-        out.set_item("lifted_logloss", py.None())?;
-        out.set_item("nagelkerke_r2", py.None())?;
-        Ok(out.clone().unbind())
-    };
-    let obs: Vec<bool> = events.iter().map(|value| *value > 0.5).collect();
-    let raw_surv = survival_matrix.as_array();
-    if event_times.len() != obs.len()
-        || raw_surv.nrows() != event_times.len()
-        || raw_surv.ncols() != grid.len()
-        || grid.len() < 2
-        || grid.windows(2).any(|pair| pair[1] <= pair[0])
-    {
-        return none_result(&out);
-    }
-    // Hoisted out of the scoring loop: the core scorer takes finite positive
-    // event times as a precondition, and deciding what a malformed one means
-    // for the Python surface is this layer's job.
-    if event_times
-        .iter()
-        .any(|time| !time.is_finite() || *time <= 0.0)
-    {
-        return none_result(&out);
-    }
-    let (surv, scores) = gam::families::survival::predict::monotone_survival_and_hazard_scores(
-        raw_surv,
-        &event_times,
-        &obs,
-        &grid,
-    );
-    let log_losses = scores.log_losses;
-    let hazard_quadratic_losses = scores.hazard_quadratic_losses;
-    let logloss = log_losses.iter().sum::<f64>() / log_losses.len() as f64;
-    let hazard_quadratic =
-        hazard_quadratic_losses.iter().sum::<f64>() / hazard_quadratic_losses.len() as f64;
-
-    // Genuine integrated IPCW Brier score (Graf et al. 1999), comparable to
-    // scikit-survival's `integrated_brier_score`, pec, and `survival::brier`.
-    // This is what `brier` now reports; the hazard quadratic score above (which
-    // this field previously mis-reported as `brier`) is exposed honestly under
-    // `hazard_quadratic_score`. The censoring distribution G(t) is estimated by
-    // Kaplan–Meier on the evaluation set itself, so the metric is self-contained
-    // and identical for every model scored against the same fold (fair ranking).
-    // Integration is capped at the largest observed time to avoid the
-    // extrapolation tail where the IPCW weights blow up.
-    let censoring_km =
-        gam::families::survival::predict::KaplanMeier::fit_censoring(&event_times, &events);
-    let horizon = event_times
-        .iter()
-        .copied()
-        .filter(|value| value.is_finite())
-        .fold(f64::NEG_INFINITY, f64::max);
-    let ibs = gam::families::survival::predict::integrated_ipcw_brier_score(
-        surv.view(),
+    let scores = gam::families::survival::predict::survival_prediction_scores(
         &event_times,
         &events,
         &grid,
-        horizon,
-        |t| censoring_km.at(t),
+        survival_matrix.as_array(),
+        null_survival_matrix.as_ref().map(|matrix| matrix.as_array()),
     );
-    match ibs {
-        Some(value) => out.set_item("brier", value)?,
-        None => out.set_item("brier", py.None())?,
-    }
-    out.set_item("hazard_quadratic_score", hazard_quadratic)?;
-    out.set_item("logloss", logloss)?;
-    out.set_item("lifted_brier", py.None())?;
-    out.set_item("lifted_hazard_quadratic_score", py.None())?;
-    out.set_item("lifted_logloss", py.None())?;
-
-    let mut nagelkerke = None;
-    if let Some(null_matrix) = null_survival_matrix {
-        let raw_null = null_matrix.as_array();
-        if raw_null.dim() == surv.dim() {
-            let (null_surv, null_scores) =
-                gam::families::survival::predict::monotone_survival_and_hazard_scores(
-                    raw_null,
-                    &event_times,
-                    &obs,
-                    &grid,
-                );
-            let null_log_losses = null_scores.log_losses;
-            let null_hazard_quadratic_losses = null_scores.hazard_quadratic_losses;
-            let null_logloss = null_log_losses.iter().sum::<f64>() / null_log_losses.len() as f64;
-            let null_hazard_quadratic = null_hazard_quadratic_losses.iter().sum::<f64>()
-                / null_hazard_quadratic_losses.len() as f64;
-            // `lifted_brier` is the relative IPCW-Brier skill of the model over
-            // the Kaplan–Meier null curve — consistent with `brier` now being a
-            // genuine Brier score. The hazard-quadratic relative skill (what
-            // this used to report) is preserved as `lifted_hazard_quadratic_score`.
-            let null_ibs = gam::families::survival::predict::integrated_ipcw_brier_score(
-                null_surv.view(),
-                &event_times,
-                &events,
-                &grid,
-                horizon,
-                |t| censoring_km.at(t),
-            );
-            // A relative skill over a null score of exactly zero, or over an infinite
-            // null score, has no value: the field is reported as None rather than
-            // divided by a clipped denominator.
-            let relative_skill = |null: f64, model: f64| -> Option<f64> {
-                (null != 0.0 && null.is_finite()).then(|| (null - model) / null.abs())
-            };
-            if let (Some(model_ibs), Some(null_ibs)) = (ibs, null_ibs) {
-                out.set_item("lifted_brier", relative_skill(null_ibs, model_ibs))?;
-            }
-            out.set_item(
-                "lifted_hazard_quadratic_score",
-                relative_skill(null_hazard_quadratic, hazard_quadratic),
-            )?;
-            out.set_item("lifted_logloss", relative_skill(null_logloss, logloss))?;
-            let ll_model = -log_losses.iter().sum::<f64>();
-            let ll_null = -null_log_losses.iter().sum::<f64>();
-            nagelkerke = gam::inference::diagnostics::nagelkerke_r_squared_from_log_likelihoods(
-                ll_model,
-                ll_null,
-                event_times.len(),
-            );
-        }
-    }
-    match nagelkerke {
-        Some(value) => out.set_item("nagelkerke_r2", value)?,
-        None => out.set_item("nagelkerke_r2", py.None())?,
-    }
+    let out = PyDict::new(py);
+    out.set_item("brier", scores.brier)?;
+    out.set_item("hazard_quadratic_score", scores.hazard_quadratic_score)?;
+    out.set_item("logloss", scores.logloss)?;
+    out.set_item("lifted_brier", scores.lifted_brier)?;
+    out.set_item("lifted_hazard_quadratic_score", scores.lifted_hazard_quadratic_score)?;
+    out.set_item("lifted_logloss", scores.lifted_logloss)?;
+    out.set_item("nagelkerke_r2", scores.nagelkerke_r2)?;
     Ok(out.unbind())
 }
 

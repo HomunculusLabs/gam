@@ -5114,7 +5114,6 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(check_json, module)?)?;
     module.add_function(wrap_pyfunction!(check_payload_from_model, module)?)?;
     module.add_function(wrap_pyfunction!(report_html, module)?)?;
-    module.add_function(wrap_pyfunction!(compute_residuals, module)?)?;
     module.add_function(wrap_pyfunction!(diagnostics_from_predictions, module)?)?;
     module.add_function(wrap_pyfunction!(auc_from_predictions, module)?)?;
     module.add_function(wrap_pyfunction!(weighted_auc_from_predictions, module)?)?;

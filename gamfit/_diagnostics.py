@@ -119,17 +119,10 @@ class Diagnostics:
         """
         point = _point_series(predicted, point_column)
         try:
-            rust = rust_module()
-            diagnostics = rust.diagnostics_from_predictions(observed, point)
-            import numpy as np
-
-            residuals_array = rust.compute_residuals(
-                np.asarray(observed, dtype=np.float64),
-                np.asarray(point, dtype=np.float64),
-            )
+            diagnostics = rust_module().diagnostics_from_predictions(observed, point)
         except Exception as exc:
             raise map_exception(exc) from exc
-        residuals = list(residuals_array)
+        residuals = list(diagnostics["residuals"])
         metrics = dict(diagnostics["metrics"])
         return cls(
             formula=formula,
@@ -203,17 +196,14 @@ class Diagnostics:
             train_prev = float(np.mean(observed)) if len(observed) else 0.0
             metrics = dict(rust.classification_metrics(observed, mean, train_prev))
             metrics["n_obs"] = float(len(observed))
-            residuals_array = rust.compute_residuals(
-                np.asarray(observed, dtype=np.float64),
-                np.asarray(mean, dtype=np.float64),
-            )
+            residuals = list(rust.diagnostics_from_predictions(observed, mean)["residuals"])
         except Exception as exc:
             raise map_exception(exc) from exc
         return cls(
             formula=formula,
             response_name=response_name,
             observed=observed,
-            residuals=list(residuals_array),
+            residuals=residuals,
             predicted=predicted,
             metrics=metrics,
             interval_lower=predicted.get(f"{point_column}_lower"),
