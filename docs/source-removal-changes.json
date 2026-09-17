@@ -6487,6 +6487,14 @@
     "evidence": "At base 4b1bccae, git grep -n -w over the repo finds exact_outer_order_from_capability only in options.rs, the gam-custom-family test and the rigid test. exact_outer_order_with_outer_hvp appears only in options.rs, the family_trait.rs import and default, bms custom_family_impl.rs and the rigid test. coefficient_gradient_cost appears only in the family_trait.rs declaration and default, the bms coefficient_work line and the CTN override. This change removes every one of those sites. Compile is covered by the lead shared tip check."
   },
   {
+    "base": "51eba551c638869032888c994328490ef66b3a70",
+    "items": [
+      "crates/gam-linalg/src/faer_ndarray.rs:fn:general_eigenpairs_backward_stable"
+    ],
+    "reason": "#2627 / #2951 mpd-verify follow-up: the boolean certificate predicate general_eigenpairs_backward_stable is replaced in the same commit by general_eigenpair_backward_errors, which returns the per-slot measured backward errors that the new real_general_spectrum publishes, and general_eigen_pair_band, the band they are compared against. The comparison and the refusals are unchanged.",
+    "evidence": "At the base, git grep -n -w general_eigenpairs_backward_stable finds it only in crates/gam-linalg/src/faer_ndarray.rs: its declaration (:2999), the real_general_eigenvalues doc link (:3090), its one production call (:3134) and three test calls (:5296, :5309, :5327). This commit rewrites all of them to read the measured errors. Gate 1200426 ran source_removal_guard.py, which reported exactly this one identity (public false, test_scoped false) and nothing else."
+  },
+  {
     "base": "7ae739779d12243f43487d4252b5ac4c8aa456a9",
     "items": [
       "crates/gam-models/src/transformation_normal/tests.rs:fn:ctn_large_n_outer_hvp_capability_selects_operator_path",

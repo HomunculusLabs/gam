@@ -2989,39 +2989,37 @@ fn frobenius_trace_and_diagonal_mass(a: MatRef<'_, f64>) -> (f64, f64, f64) {
     (frobenius_sq, trace, diagonal_mass)
 }
 
-/// Certificate (i) of [`real_general_eigenvalues`]. Conjugate pairs are adjacent
-/// with equal real parts and negated imaginary parts, and every eigenpair's
-/// backward error `‖Av − λv‖₂ / ((‖A‖_F + |λ|)·‖v‖₂)` is within
-/// `η = η_A + 2·γ_{n+1}`. The two `γ_{n+1}` terms charge the eigenvectors'
-/// back-substitution and the residual's formation. `vectors` holds faer's right
-/// eigenvectors: a real eigenvalue's in its own column, and for
-/// `λ = re[i] + i·im[i]` of a conjugate pair, `col(i) + i·col(i + 1)`.
-fn general_eigenpairs_backward_stable(
+/// The measured backward error `‖Av − λv‖₂ / ((‖A‖_F + |λ|)·‖v‖₂)` of every
+/// slot's eigenpair, with a conjugate pair's two slots carrying the same value.
+/// `None` when a pair is not adjacent with equal real parts and negated imaginary
+/// parts. An exact zero residual measures zero whatever the denominator.
+/// `vectors` holds faer's right eigenvectors: a real eigenvalue's in its own
+/// column, and for `λ = re[i] + i·im[i]` of a conjugate pair,
+/// `col(i) + i·col(i + 1)`.
+fn general_eigenpair_backward_errors(
     a: MatRef<'_, f64>,
     re: &Array1<f64>,
     im: &Array1<f64>,
     vectors: MatRef<'_, f64>,
-    reduction: f64,
-) -> bool {
+) -> Option<Array1<f64>> {
     let n = a.nrows();
     let (frobenius_sq, _, _) = frobenius_trace_and_diagonal_mass(a);
     let frobenius = frobenius_sq.sqrt();
-    let eta = reduction + 2.0 * crate::roundoff::accumulation_growth(n + 1);
     let mut av = Mat::<f64>::zeros(n, n);
     faer::linalg::matmul::matmul(av.as_mut(), faer::Accum::Replace, a, vectors, 1.0, pool_parallelism());
     let column_sq = |j: usize| (0..n).map(|k| vectors[(k, j)] * vectors[(k, j)]).sum::<f64>();
+    let relative = |residual: f64, scale: f64| if residual == 0.0 { 0.0 } else { residual / scale };
+    let mut errors = Array1::<f64>::zeros(n);
     let mut i = 0;
     while i < n {
         if im[i] == 0.0 {
             let lambda = re[i];
             let residual_sq: f64 = (0..n).map(|k| (av[(k, i)] - lambda * vectors[(k, i)]).powi(2)).sum();
-            if !(residual_sq.sqrt() <= eta * (frobenius + lambda.abs()) * column_sq(i).sqrt()) {
-                return false;
-            }
+            errors[i] = relative(residual_sq.sqrt(), (frobenius + lambda.abs()) * column_sq(i).sqrt());
             i += 1;
         } else {
             if i + 1 >= n || re[i + 1] != re[i] || im[i + 1] != -im[i] {
-                return false;
+                return None;
             }
             // A(x + iy) = (a + ib)(x + iy) is Ax = a·x − b·y and Ay = b·x + a·y.
             let (real, imag) = (re[i], im[i]);
@@ -3032,13 +3030,21 @@ fn general_eigenpairs_backward_stable(
                 })
                 .sum();
             let vector_norm = (column_sq(i) + column_sq(i + 1)).sqrt();
-            if !(residual_sq.sqrt() <= eta * (frobenius + real.hypot(imag)) * vector_norm) {
-                return false;
-            }
+            let error = relative(residual_sq.sqrt(), (frobenius + real.hypot(imag)) * vector_norm);
+            errors[i] = error;
+            errors[i + 1] = error;
             i += 2;
         }
     }
-    true
+    Some(errors)
+}
+
+/// Certificate (i)'s band, `η = η_A + 2·γ_{n+1}`, over the reduction's counted
+/// backward error `reduction` ([`general_eigen_reduction_band`]). The two
+/// `γ_{n+1}` terms charge the eigenvectors' back-substitution and the residual's
+/// formation.
+fn general_eigen_pair_band(n: usize, reduction: f64) -> f64 {
+    reduction + 2.0 * crate::roundoff::accumulation_growth(n + 1)
 }
 
 /// Certificate (ii), the trace, of [`real_general_eigenvalues`]. The computed
@@ -3074,8 +3080,28 @@ fn general_spectrum_within_schur_bound(
             + accumulation_growth(2 * n) * magnitude_sq
 }
 
-/// #2627 — the eigenvalues `(re, im)` of a real square matrix at
-/// [`evd_parallelism`], certified after faer returns.
+/// #2627 — a real square matrix's certified spectrum ([`real_general_spectrum`])
+/// with the measurements that certified it.
+#[derive(Clone, Debug)]
+pub struct CertifiedGeneralSpectrum {
+    /// Real parts. Conjugate pairs are adjacent, the member with the positive
+    /// imaginary part first.
+    pub re: Array1<f64>,
+    /// Imaginary parts, `0.0` exactly for a real eigenvalue.
+    pub im: Array1<f64>,
+    /// Per slot, the measured backward error of its eigenpair,
+    /// `‖Av − λv‖₂ / ((‖A‖_F + |λ|)·‖v‖₂)`. A conjugate pair's two slots carry
+    /// the same value.
+    pub backward_errors: Array1<f64>,
+    /// The band every backward error was certified against,
+    /// `η = η_A + 2·γ_{n+1}` ([`general_eigen_reduction_band`]). It counts faer's
+    /// iteration cap, not the iterations run, so it grows like `60·n³·u`. A decision
+    /// that needs tighter evidence reads `backward_errors`.
+    pub band: f64,
+}
+
+/// #2627 — the eigenvalues of a real square matrix at [`evd_parallelism`],
+/// certified after faer returns, with the backward errors that certified them.
 ///
 /// Conjugate pairs are adjacent, the member with the positive imaginary part
 /// first, and a real eigenvalue has `im == 0.0` exactly. Non-finite input is
@@ -3087,9 +3113,10 @@ fn general_spectrum_within_schur_bound(
 /// undeflated slots and still returns `Ok(())`, and the iteration itself is
 /// `pub(crate)` in faer. So the helper computes the right eigenvectors internally
 /// and refuses as `GeneralEigen(EvdError::NoConvergence)` unless both hold:
-/// - (i) [`general_eigenpairs_backward_stable`]: every eigenpair's backward error
-///   is within the reduction's counted band [`general_eigen_reduction_band`]
-///   plus the vectors' and the residual's rounding;
+/// - (i) every eigenpair's measured backward error
+///   ([`general_eigenpair_backward_errors`]) is within the reduction's counted
+///   band plus the vectors' and the residual's rounding
+///   ([`general_eigen_pair_band`]);
 /// - (ii) `Σ re` agrees with `tr A` ([`general_spectrum_trace_consistent`]), and
 ///   Schur's inequality `Σ|λ|² ≤ ‖A‖_F²` holds
 ///   ([`general_spectrum_within_schur_bound`]), each within its band.
@@ -3102,9 +3129,9 @@ fn general_spectrum_within_schur_bound(
 /// **faer dependency.** This reads faer's info-discarding `evd_imp`, its
 /// iteration cap, and its conjugate-pair eigenvector convention. Like
 /// [`EVD_DEPLOYMENT_DEGREE`], re-read them whenever faer is bumped.
-pub fn real_general_eigenvalues<S: Data<Elem = f64>>(
+pub fn real_general_spectrum<S: Data<Elem = f64>>(
     matrix: &ArrayBase<S, Ix2>,
-) -> Result<(Array1<f64>, Array1<f64>), FaerLinalgError> {
+) -> Result<CertifiedGeneralSpectrum, FaerLinalgError> {
     let owned = matrix.to_owned();
     let n = owned.nrows();
     if n != owned.ncols() {
@@ -3113,7 +3140,12 @@ pub fn real_general_eigenvalues<S: Data<Elem = f64>>(
         });
     }
     if n == 0 {
-        return Ok((Array1::zeros(0), Array1::zeros(0)));
+        return Ok(CertifiedGeneralSpectrum {
+            re: Array1::zeros(0),
+            im: Array1::zeros(0),
+            backward_errors: Array1::zeros(0),
+            band: 0.0,
+        });
     }
     if owned.iter().any(|value| !value.is_finite()) {
         return Err(FaerLinalgError::FactorizationFailed {
@@ -3122,7 +3154,12 @@ pub fn real_general_eigenvalues<S: Data<Elem = f64>>(
     }
     // A 1×1 matrix is its own eigenvalue, exactly; there is nothing to reduce.
     if n == 1 {
-        return Ok((Array1::from_elem(1, owned[[0, 0]]), Array1::zeros(1)));
+        return Ok(CertifiedGeneralSpectrum {
+            re: Array1::from_elem(1, owned[[0, 0]]),
+            im: Array1::zeros(1),
+            backward_errors: Array1::zeros(1),
+            band: general_eigen_pair_band(1, general_eigen_reduction_band(1)),
+        });
     }
     let view = FaerArrayView::new(&owned);
     let (re, im, vectors) = catch_unwind(AssertUnwindSafe(|| general_evd(view.as_ref())))
@@ -3131,11 +3168,16 @@ pub fn real_general_eigenvalues<S: Data<Elem = f64>>(
         })?
         .map_err(FaerLinalgError::GeneralEigen)?;
     let reduction = general_eigen_reduction_band(n);
-    if !(general_eigenpairs_backward_stable(view.as_ref(), &re, &im, vectors.as_ref(), reduction)
-        && general_spectrum_trace_consistent(view.as_ref(), &re, reduction)
+    let band = general_eigen_pair_band(n, reduction);
+    let refused = || FaerLinalgError::GeneralEigen(solvers::EvdError::NoConvergence);
+    let backward_errors = match general_eigenpair_backward_errors(view.as_ref(), &re, &im, vectors.as_ref()) {
+        Some(errors) if errors.iter().all(|error| *error <= band) => errors,
+        _ => return Err(refused()),
+    };
+    if !(general_spectrum_trace_consistent(view.as_ref(), &re, reduction)
         && general_spectrum_within_schur_bound(view.as_ref(), &re, &im, reduction))
     {
-        return Err(FaerLinalgError::GeneralEigen(solvers::EvdError::NoConvergence));
+        return Err(refused());
     }
     let mut im = im;
     let mut i = 0;
@@ -3146,7 +3188,15 @@ pub fn real_general_eigenvalues<S: Data<Elem = f64>>(
         }
         i += if im[i] == 0.0 { 1 } else { 2 };
     }
-    Ok((re, im))
+    Ok(CertifiedGeneralSpectrum { re, im, backward_errors, band })
+}
+
+/// #2627 — the eigenvalues `(re, im)` of [`real_general_spectrum`], for callers
+/// that read the spectrum alone.
+pub fn real_general_eigenvalues<S: Data<Elem = f64>>(
+    matrix: &ArrayBase<S, Ix2>,
+) -> Result<(Array1<f64>, Array1<f64>), FaerLinalgError> {
+    real_general_spectrum(matrix).map(|spectrum| (spectrum.re, spectrum.im))
 }
 
 /// faer's real eigendecomposition with right eigenvectors, at [`evd_parallelism`].
@@ -5293,11 +5343,15 @@ mod general_eigenvalues_2627_tests {
         let view = FaerArrayView::new(&a);
         let (re, im, vectors) = general_evd(view.as_ref()).expect("faer eigendecomposition");
         let reduction = general_eigen_reduction_band(n);
-        assert!(general_eigenpairs_backward_stable(view.as_ref(), &re, &im, vectors.as_ref(), reduction));
+        let eta = general_eigen_pair_band(n, reduction);
+        let within_band = |re: &Array1<f64>, im: &Array1<f64>| {
+            general_eigenpair_backward_errors(view.as_ref(), re, im, vectors.as_ref())
+                .is_some_and(|errors| errors.iter().all(|error| *error <= eta))
+        };
+        assert!(within_band(&re, &im));
         assert!(general_spectrum_trace_consistent(view.as_ref(), &re, reduction));
         assert!(general_spectrum_within_schur_bound(view.as_ref(), &re, &im, reduction));
         let scale = frobenius(&a);
-        let eta = reduction + 2.0 * accumulation_growth(n + 1);
 
         let shift = 1.0e6 * eta * (scale + re[0].hypot(im[0]));
         let mut moved = re.clone();
@@ -5306,7 +5360,7 @@ mod general_eigenvalues_2627_tests {
             moved[1] += shift;
         }
         assert!(
-            !general_eigenpairs_backward_stable(view.as_ref(), &moved, &im, vectors.as_ref(), reduction),
+            !within_band(&moved, &im),
             "an eigenvalue moved by {shift:.3e} must fail the backward-error arm"
         );
 
@@ -5324,7 +5378,7 @@ mod general_eigenvalues_2627_tests {
         let mut broken = im.clone();
         broken[k + 1] *= 0.5;
         assert!(
-            !general_eigenpairs_backward_stable(view.as_ref(), &re, &broken, vectors.as_ref(), reduction),
+            !within_band(&re, &broken),
             "a pair broken off conjugacy must fail the backward-error arm"
         );
 
@@ -5347,5 +5401,41 @@ mod general_eigenvalues_2627_tests {
             !general_spectrum_within_schur_bound(view.as_ref(), &inflated, &im, reduction),
             "real parts moved by ±{s:.3e} must fail Schur's inequality"
         );
+    }
+
+    /// The measured backward errors a consumer reads beside the spectrum. Each is
+    /// finite and within the certified band, a conjugate pair's two slots carry one
+    /// value, and `real_general_eigenvalues` returns exactly the spectrum's
+    /// `(re, im)`.
+    #[test]
+    fn real_general_spectrum_reports_measured_backward_errors_within_its_band_2627() {
+        for &n in &[1_usize, 2, 5, 17, 40] {
+            let a = hashed_matrix(n, 11);
+            let spectrum = real_general_spectrum(&a).expect("certified spectrum");
+            assert_eq!(spectrum.backward_errors.len(), n);
+            assert!(spectrum.band.is_finite() && spectrum.band > 0.0, "n={n}: band {}", spectrum.band);
+            for (k, error) in spectrum.backward_errors.iter().enumerate() {
+                assert!(
+                    error.is_finite() && *error <= spectrum.band,
+                    "n={n}: slot {k} backward error {error:e} against band {:e}",
+                    spectrum.band
+                );
+            }
+            let mut i = 0;
+            while i < n {
+                if spectrum.im[i] == 0.0 {
+                    i += 1;
+                    continue;
+                }
+                assert_eq!(
+                    spectrum.backward_errors[i], spectrum.backward_errors[i + 1],
+                    "n={n}: the pair at {i} carries two different measurements"
+                );
+                i += 2;
+            }
+            let (re, im) = real_general_eigenvalues(&a).expect("certified spectrum");
+            assert_eq!(re, spectrum.re, "n={n}: the convenience returns other real parts");
+            assert_eq!(im, spectrum.im, "n={n}: the convenience returns other imaginary parts");
+        }
     }
 }
