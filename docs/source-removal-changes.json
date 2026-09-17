@@ -72,5 +72,18 @@
     ],
     "reason": "#2951 mpd-spec NOTE 11 (comment 5719475109): the gated_rewrite.rs test module kept local copies of the roundoff owner, a private test-scoped const UNIT_ROUNDOFF = f64::EPSILON / 2 and a private test-scoped fn gamma computing gamma_n = n u / (1 - n u). Both are deleted, and every call site now reads gam_linalg::roundoff::{UNIT_ROUNDOFF, accumulation_growth}, the owner moments, spectral, rewrite and attention already import, which computes the same gamma_n and returns infinity once n u >= 1.",
     "evidence": "Both items were private and inside the #[cfg(test)] module of crates/gam-sae/src/parameter_decomposition/gated_rewrite.rs, with no production occurrence. At the base every former call site reads accumulation_growth(n), and the test module imports UNIT_ROUNDOFF from gam_linalg::roundoff (gam-linalg roundoff.rs:49 and :57 on main d466c9c5d2). Slurm job 1197488 (pool-sw0d) on the landing tree at 5023324b3c: source_removal_guard.py reported exactly these two identities (test_scoped, removed_declarations 1, production_occurrences 0) and nothing else, public_api_census.py passed, and the guard's positive control refused the #2818 sweep. Gate job 1201008 at 0e584db5ad with this entry: RC_REMOVAL_GUARD=0 and RC_PUBLIC_API_CENSUS=0."
+  },
+  {
+    "base": "bbfae6e0dc26742287d24936dbd4d038796359ac",
+    "items": [
+      "crates/gam-sae/src/parameter_decomposition/spectral.rs:fn:hidden_basis",
+      "crates/gam-sae/src/parameter_decomposition/spectral.rs:fn:normal_form",
+      "crates/gam-sae/src/parameter_decomposition/spectral.rs:fn:orthogonality_bound",
+      "crates/gam-sae/src/parameter_decomposition/spectral.rs:fn:plant",
+      "crates/gam-sae/src/parameter_decomposition/spectral.rs:fn:projector_distance",
+      "crates/gam-sae/src/parameter_decomposition/spectral.rs:struct:Planted"
+    ],
+    "reason": "#2951 A13: mpd-teacher's end-to-end planted-rotation test needs the same planted-rotation fixture as spectral.rs's A3 tests. The fixture and its derived float-defect bounds therefore move out of spectral.rs's #[cfg(test)] module into the shared, test-only parameter_decomposition/test_support.rs, instead of being copied into a second test module.",
+    "evidence": "All six items are test-scoped: they were declared only inside spectral.rs's #[cfg(test)] mod tests, and the removal guard counts 0 production occurrences of each name. In this commit each is declared, with the same body and made pub, in crates/gam-sae/src/parameter_decomposition/test_support.rs (#![cfg(test)]), declared by a bare #[cfg(test)] mod test_support; in parameter_decomposition/mod.rs. spectral.rs's tests import them from there. No test body, bound or assertion changes. A guard dry run on synthetic commits (main + spectral v3, then + this move) listed exactly these six guarded removals."
   }
 ]

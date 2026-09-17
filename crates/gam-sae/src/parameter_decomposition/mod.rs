@@ -69,6 +69,10 @@
 //! Lipschitz covering). Derivatives must be analytic; finite differences belong in
 //! tests only.
 
+// Shared planted-rotation fixtures with derived float-defect bounds.
+#[cfg(test)]
+mod test_support;
+
 // Blind re-derivation oracles for P7, P15 and P17 against the landed APIs.
 #[cfg(test)]
 mod oracle_tests;
