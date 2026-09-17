@@ -1102,3 +1102,44 @@ The `survival/laml-net-single-block` row is not restored. Its subject,
 `d484a091a` deleted together with its private inner-mode reconvergence. The unified survival
 LAML evaluator it wrapped, `unified_lamlobjective_and_rhogradient`, is `pub(crate)`, so no
 public route re-solves the inner mode at a perturbed ρ.
+
+## Runtime verdict of the restored pins, September 17
+
+By September 16 every census name was declared or recorded. These runs execute the declared
+pins on clean checkouts (`HEAD == PIN`, DIRTY=0). Each target gets one `cargo nextest` run, and
+its filter selects exactly the pins declared in that target, with the expected count printed.
+
+| run | sha | targets | pins | result |
+| --- | --- | ---: | ---: | --- |
+| 1100763 | `a24b42fb0` | 16 that do not depend on gam-sae | 71 | 71 passed. The other 15 targets did not compile there (gam-sae E0658 `float_bits_const`). |
+| verify3.1109689 | `39e96f017` | the 15 that depend on gam-sae | 123 | 101 passed, 22 not green |
+| 1190023 | `0e9ca555de` | gam-sae lib | 44 | 31 passed, 13 not green |
+| 1190027 | `0e9ca555de` | the five root pins still not green, run serially | 5 | 2 passed, 3 not green |
+
+Between `39e96f017` and the pin, five pins turned green:
+- the #2144 pair and #1625, after `2ef4a4ecc`;
+- `value_lane_prices_at_shared_fixed_point_2228`;
+- `large_scale_convergence_regression` and `large_scale_dense_logit_regression_guard`. Both
+  were red under concurrent nextest at `39e96f017` and pass alone at the pin, in 0.50 s and
+  1.38 s. #2668 recorded on 07-31 that the second one's wall-clock bar cannot separate signal
+  from load.
+
+Not green at the latest run:
+
+| pin | latest verdict | disposition |
+| --- | --- | --- |
+| `sae_logdet_theta_adjoint_matches_fd_on_deflated_fixture_2330`, `ard_log_precision_hessian_trace_from_probes_matches_dense_on_deflated_rows_2712`, `assignment_log_strength_hessian_trace_from_probes_matches_dense_on_deflated_rows_2712`, `sae_row_selected_inverse_from_probes_is_the_deflated_block_2712` | 1190023: no member of the declared anchor family certifies `SomeRowDeflates`. On the softmax ladder the joint exact observed information is indefinite at every member; the ordered Beta–Bernoulli ladders never deflate a row. | #2822, which names all four |
+| `ard_log_precision_trace_matches_dense_fd_pd_region_deflation` | 1190023: no deflated direction. At `7a12efd48e` (regate 1179983) the closest gauge direction sat 4.5e7 to 9.9e7 times above the bar, so the fixture has no near-null orbit. | #2822 |
+| `dense_and_arrow_materialize_the_same_raw_exact_a_2515`, `forced_streaming_has_a_gradient_wherever_the_dense_route_does_2515`, `forced_streaming_admits_a_deflating_state_and_matches_dense_2515` | 1190023: the same anchor-family refusal | #2822, routed to #2267 |
+| `zz_planted_circle_plain_engine_stall_diagnostic_2234` | 1190023: 59 infeasible criterion evaluations returned | #2234, and named on #2822 |
+| `existence_and_intensity_are_separately_identified_1939` | 1190023: the dead atom's held-out contribution is 0.0350 against the weak live atom's 0.0597 (the bar is 0.25×). It passed at `d0e26faca` (census 616588), and its file and fixture builder are unchanged since `4da8f50c1`. | #2822, comment 5720624932 |
+| `sae_outer_objective_never_advertises_finite_difference_curvature_2253`, `two_circle_whitened_k2_recovers_disjoint_signal_2027`, `two_circle_separates_at_narrow_and_wide_widths_2027` | 1190023: refused at entry for an identically zero decoder, which `8f14fd3744` made a refusal | #2822 fix-forward by ad-sae (sae2822-suite), released by i2818 on 09-17 (patch `/scratch.global/sauer354/pool/i2818/fix.patch`, md5 b77d2b15). It seeds each fixture from the data least-squares decoder at its chart and ρ (`refit_decoder_least_squares_at_current_state`), as `8f14fd3744` seeded its siblings. Assertions and bars are unchanged. Pool job 1199628 runs the three pins at `0e9ca555de` without and then with the patch. |
+| `corrected_covariance_nodes_are_criterion_calibrated_2728` | 1190027: the cubature correction has trace −7.49e-2, against 6.48e-2 for the first-order correction | the #2627 root census, among t2627-root's singles |
+| `flex_full_outer_completes_under_budget_683` | 1190027: TIMEOUT at 600 s, run alone | the inner-solve non-termination recorded on #979 |
+| `gaussian_null_size_is_calibrated_where_the_expansion_is_exact_2672` | 1190027: TIMEOUT at 600 s, run alone. The arm is 2 k × 2 n × 120 replicates, and its Poisson and Bernoulli siblings were halved to fit the 300 s slow period; this arm was not. | no owner yet. Pool job 1199425 measures its uncapped wall time at `0e9ca555de`, which decides between a measured nextest override and a production hang. |
+| `survival_marginal_slope_follow_up_mode_response_matches_fd_2765` | verify3.1109689: TIMEOUT at 600 s; not re-run at the pin | #2765, owned by i2765 |
+| `gam_nuts_binomial_logit_recovers_truth_and_is_calibrated` and its real-data arm | verify3.1109689: `REFERENCE_ENV_MISSING:pymc`; the real-data arm hit TIMEOUT | not measured on MSI, because pymc is not installed there |
+
+Logs: `/scratch.global/sauer354/pool/restore2818/verify.1100763.log`,
+`/scratch.global/sauer354/pool/restore2818/verify3.1109689.log`, and
+`/scratch.global/sauer354/pool/i2818/tip1.1190023.log` and `tip2.1190027.log`.
