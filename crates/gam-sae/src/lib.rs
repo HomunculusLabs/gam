@@ -33,6 +33,7 @@ pub mod native_code_source;
 pub mod null_battery;
 pub mod parameter_decomposition;
 pub mod null_sampler;
+pub mod response;
 pub mod routability;
 pub mod row_jet_program;
 pub mod saebench_metrics;
