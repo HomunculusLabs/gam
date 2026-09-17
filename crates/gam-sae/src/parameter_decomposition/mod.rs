@@ -83,7 +83,7 @@ pub mod bounds;
 pub mod codec;
 
 // Matrix-valued parameter fields over GAM bases, with anchored pullbacks.
-// [unlanded: field]
+pub mod field;
 
 // Parameter-family labels: share and split of fixed components into affine fields, scored on decoded code.
 pub mod families;
