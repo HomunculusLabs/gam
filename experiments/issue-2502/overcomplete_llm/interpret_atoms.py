@@ -27,7 +27,6 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fit-dir", required=True)
     ap.add_argument("--acts-dir", required=True)
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B-Base")
     ap.add_argument("--topk", type=int, required=True, help="k blocks per row in the dump")
     ap.add_argument("--block-size", type=int, required=True)
     ap.add_argument("--n-blocks", type=int, required=True)
@@ -51,7 +50,10 @@ def main():
     tokens = tokens[:n]
     print(f"[interp] rows={n} k={k} b={b} G={g}", flush=True)
 
-    tok = AutoTokenizer.from_pretrained(args.model)
+    meta = json.load(open(os.path.join(args.acts_dir, "meta.json")))
+    tok = AutoTokenizer.from_pretrained(
+        meta["model"], trust_remote_code=meta.get("trust_remote_code", False)
+    )
     rng = np.random.default_rng(args.seed)
 
     counts = np.bincount(blocks.reshape(-1), minlength=g)

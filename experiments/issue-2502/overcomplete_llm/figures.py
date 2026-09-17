@@ -258,7 +258,7 @@ def fig_splice(splice, out):
         ax.text(i, v, f"{v:.4f}", ha="center", va="bottom", fontsize=9)
     ax.set_ylabel(r"$\Delta$ cross-entropy (nats), lower = less damage")
     ax.set_title(
-        f"Splicing each reconstruction into layer {splice['layer']} of Qwen3.5-4B-Base\n"
+        f"Splicing each reconstruction into layer {splice['layer']} of {splice['model']}\n"
         f"{splice['scored_tokens']} held-out tokens, clean CE = {splice['clean_ce']:.4f}"
     )
     ax.tick_params(axis="x", rotation=20)

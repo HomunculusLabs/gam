@@ -22,7 +22,6 @@ from transformers import AutoModelForCausalLM
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B-Base")
     ap.add_argument("--acts-dir", required=True)
     ap.add_argument("--arm", action="append", default=[], metavar="NAME=RECON.f32")
     ap.add_argument("--batch", type=int, default=2)
@@ -74,9 +73,17 @@ def main():
     if mean is None or mean.size != p:
         raise SystemExit("could not load a train_mean.f32 of the right width")
 
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16)
+    # The harvest records which model produced the activations and where its block
+    # list lives, so the spliced model is the harvested one by construction.
+    model = AutoModelForCausalLM.from_pretrained(
+        meta["model"],
+        dtype=torch.bfloat16,
+        trust_remote_code=meta.get("trust_remote_code", False),
+    )
     model.eval().cuda()
-    blocks = model.model.layers
+    blocks = model
+    for part in meta["block_path"].split("."):
+        blocks = getattr(blocks, part)
 
     patch = {"tensor": None}
 
@@ -135,7 +142,7 @@ def main():
     handle.remove()
     clean_ce = results["clean"] / counts
     report = {
-        "model": args.model,
+        "model": meta["model"],
         "layer": layer,
         "sequences": n_seq,
         "scored_tokens": counts,

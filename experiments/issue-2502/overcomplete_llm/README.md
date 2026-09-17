@@ -1,4 +1,4 @@
-# Overcomplete manifold dictionary on Qwen3.5-4B-Base (issue #2502)
+# Overcomplete manifold dictionary on a modern LLM (issue #2502)
 
 One substrate, one engine, all seven closing criteria off a single set of fits.
 
@@ -13,7 +13,7 @@ accounting. The Python here only moves bytes: `transformers` forward passes
 
 | stage | command |
 |---|---|
-| harvest | `harvest_qwen35.py --layer 16 --train-rows 300000 --eval-rows 100000 --out-dir $A` |
+| harvest | `harvest_residual_stream.py --model M [--trust-remote-code] --layer L --train-rows 300000 --eval-rows 100000 --out-dir $A` |
 | fit (per arm) | `issue_2502_overcomplete_llm --train $A/train.npy --eval $A/eval.npy --out $F/<arm> --arm <arm> --atoms K --block-size b --block-topk k --gpu required` |
 | causal judge | `splice_eval.py --acts-dir $A --arm over=$F/over/eval_recon.f32 ... --out splice.json` |
 | interpretation | `interpret_atoms.py --fit-dir $F/over --acts-dir $A --topk k --block-size b --n-blocks G --out interp.json` |

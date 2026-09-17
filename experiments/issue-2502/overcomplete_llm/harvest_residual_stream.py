@@ -1,4 +1,4 @@
-"""Harvest residual-stream activations from Qwen3.5-4B-Base (issue #2502).
+"""Harvest residual-stream activations from a causal language model (issue #2502).
 
 Thin PyTorch wrapper: it runs forward passes and writes bytes. No modelling
 math lives here -- the dictionary is fitted by the Rust engine
@@ -24,17 +24,23 @@ import time
 
 import numpy as np
 import torch
+import transformers
 from datasets import load_dataset
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B-Base")
+    ap.add_argument("--model", required=True)
+    ap.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="load a model whose architecture ships as code in its own repository",
+    )
     ap.add_argument("--dataset", default="Salesforce/wikitext")
     ap.add_argument("--dataset-config", default="wikitext-103-raw-v1")
     ap.add_argument("--split", default="train")
-    ap.add_argument("--layer", type=int, default=16)
+    ap.add_argument("--layer", type=int, required=True)
     ap.add_argument("--seq-len", type=int, default=512)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--skip-positions", type=int, default=8)
@@ -56,16 +62,19 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     t0 = time.time()
 
-    tok = AutoTokenizer.from_pretrained(args.model)
-    cfg = AutoConfig.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16)
+    remote = args.trust_remote_code
+    tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=remote)
+    cfg = AutoConfig.from_pretrained(args.model, trust_remote_code=remote)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, dtype=torch.bfloat16, trust_remote_code=remote
+    )
     model.eval()
     model.cuda()
 
-    # The residual stream lives on the text decoder's block list; the class is a
-    # conditional-generation wrapper, so walk to the block list rather than
+    # The residual stream lives on the text decoder's block list; some classes are
+    # conditional-generation wrappers, so walk to the block list rather than
     # assuming a path. Keep the module that OWNS the block list too: calling it
-    # directly skips the 248k-way vocabulary head, which is pure waste here.
+    # directly skips the vocabulary head, which is pure waste here.
     blocks = None
     for path in ("model.language_model", "model", "language_model.model"):
         node = model
@@ -230,8 +239,11 @@ def main():
 
     meta = {
         "model": args.model,
+        "model_revision": getattr(cfg, "_commit_hash", None),
+        "trust_remote_code": remote,
         "dataset": f"{args.dataset}/{args.dataset_config}:{args.split}",
         "layer": args.layer,
+        "num_hidden_layers": len(blocks),
         "block_path": block_path,
         "hidden_size": hidden,
         "seq_len": args.seq_len,
@@ -246,6 +258,7 @@ def main():
         "eval_doc_frac": args.eval_doc_frac,
         "split_rule": "md5(str(doc_index))[:8]/2**32 < eval_doc_frac",
         "torch": torch.__version__,
+        "transformers": transformers.__version__,
         "wall_seconds": time.time() - t0,
     }
     with open(os.path.join(args.out_dir, "meta.json"), "w") as fh:

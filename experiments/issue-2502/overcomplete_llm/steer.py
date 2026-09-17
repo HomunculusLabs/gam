@@ -34,7 +34,6 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fit-dir", required=True)
     ap.add_argument("--acts-dir", required=True)
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B-Base")
     ap.add_argument("--atoms", type=int, required=True)
     ap.add_argument("--topk", type=int, required=True)
     ap.add_argument("--block-size", type=int, required=True)
@@ -76,10 +75,17 @@ def main():
     counts = np.bincount(blocks.reshape(-1), minlength=g)
     chosen = np.argsort(-counts)[: args.blocks]
 
-    tok = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16)
+    # The harvest records which model produced the activations and where its block
+    # list lives, so the steered model is the harvested one by construction.
+    remote = meta.get("trust_remote_code", False)
+    tok = AutoTokenizer.from_pretrained(meta["model"], trust_remote_code=remote)
+    model = AutoModelForCausalLM.from_pretrained(
+        meta["model"], dtype=torch.bfloat16, trust_remote_code=remote
+    )
     model.eval().cuda()
-    layers = model.model.layers
+    layers = model
+    for part in meta["block_path"].split("."):
+        layers = getattr(layers, part)
 
     n_seq = n // keep
     half = min(args.seqs_per_half, n_seq // 2)
