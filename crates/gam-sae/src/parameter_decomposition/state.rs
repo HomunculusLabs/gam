@@ -84,9 +84,10 @@
 //!   [`EvidenceStatus`](super::supports::EvidenceStatus). A violation or a
 //!   separation is a counterexample, a bound over the stated items is a uniform
 //!   bound, an unresolved separation, rank or norm is unresolved, and a rank at
-//!   its ceiling is exact. A verdict selects a violation through the same
-//!   rounded-down predicate the counterexample constructor reads, so the two
-//!   never disagree.
+//!   its ceiling is exact. A verdict decides each evaluated item through the
+//!   status supports.rs owns (its rounded bounds and threshold predicates), the
+//!   derivation the counterexample constructor reads. So a verdict and its
+//!   evidence never disagree, and no copy of that arithmetic lives here.
 
 use std::fmt;
 
@@ -277,10 +278,10 @@ impl QuotientContract<'_> {
                 index,
                 sup_distance(after.value.view(), descended.value.view()),
                 after.roundoff + descended.roundoff,
-            );
+            )?;
         }
         Ok(match record.violation {
-            Some((state, defect, roundoff)) => QuotientContractVerdict::Violated {
+            Some((state, defect, roundoff, _)) => QuotientContractVerdict::Violated {
                 state,
                 defect,
                 roundoff,
@@ -395,10 +396,10 @@ impl RealizationContract<'_> {
                 index,
                 sup_distance(moved.value.view(), represented.value.view()),
                 moved.roundoff + represented.roundoff,
-            );
+            )?;
         }
         Ok(match record.violation {
-            Some((code, defect, roundoff)) => RealizationContractVerdict::Violated {
+            Some((code, defect, roundoff, _)) => RealizationContractVerdict::Violated {
                 code,
                 defect,
                 roundoff,
@@ -564,9 +565,9 @@ pub fn fiber_test(
     let mut vacuous_states = 0;
     let mut largest_upper = 0.0_f64;
     let mut largest_roundoff = 0.0_f64;
-    // The pair with the largest computed `distance − roundoff`: if it is not
-    // certified above the fidelity, no pair is.
-    let mut strongest: Option<(FiberWitness, f64, f64)> = None;
+    // The pair whose evaluated separation has the largest certified lower bound:
+    // if it does not refute the fidelity, no pair does.
+    let mut strongest: Option<(FiberWitness, f64, f64, EvidenceStatus<(), ()>)> = None;
     for (index, state) in states.rows().into_iter().enumerate() {
         let code = evaluated(chart.encoder, state, 0.0, "fiber test: E(h)")?;
         let representative =
@@ -601,12 +602,11 @@ pub fn fiber_test(
             )?;
             let distance = sup_distance(native.value.view(), represented.value.view());
             let roundoff = native.roundoff + represented.roundoff;
-            largest_upper = largest_upper.max(certified_upper(distance, roundoff));
+            let separation = evaluated_defect(distance, roundoff)?;
+            largest_upper = largest_upper.max(certified_upper(&separation));
             largest_roundoff = largest_roundoff.max(roundoff);
             let larger = match &strongest {
-                Some((_, best_distance, best_roundoff)) => {
-                    distance - roundoff > best_distance - best_roundoff
-                }
+                Some((_, _, _, best)) => certified_lower(&separation) > certified_lower(best),
                 None => true,
             };
             if larger {
@@ -619,11 +619,12 @@ pub fn fiber_test(
                     },
                     distance,
                     roundoff,
+                    separation,
                 ));
             }
         }
     }
-    let (witness, distance, roundoff) = match strongest {
+    let (witness, distance, roundoff, separation) = match strongest {
         Some(strongest) => strongest,
         None => {
             return Err(StateError::VacuousFiberTest {
@@ -632,7 +633,7 @@ pub fn fiber_test(
         }
     };
     let futures = futures.len();
-    Ok(if certified_excess(distance, roundoff, fidelity) {
+    Ok(if separation.refutes_at_most(fidelity) {
         FiberVerdict::Separated {
             witness,
             distance,
@@ -652,7 +653,7 @@ pub fn fiber_test(
             tested_states,
             vacuous_states,
             futures,
-            separation_lower_bound: rounded_down_difference(distance, roundoff).max(0.0),
+            separation_lower_bound: certified_lower(&separation).max(0.0),
             separation_upper_bound: largest_upper,
             witness,
         }
@@ -740,8 +741,9 @@ impl ConstantRankCheck {
     }
 
     /// The exact rank of the stacked Jacobian at stated state `state`. At its
-    /// ceiling it is exact (Weyl plus the ceiling); otherwise only the resolved
-    /// lower bound and the ceiling are derived.
+    /// ceiling the certified lower bound (Weyl) collapses onto the ceiling, so the
+    /// rank is fixed by that identity and reported as [`ExactBasis::Algebraic`].
+    /// Otherwise only the resolved lower bound and the ceiling are derived.
     pub fn rank_evidence(
         &self,
         state: usize,
@@ -828,7 +830,7 @@ pub fn constant_rank_check(
         }
         // The spectral norm of a stacked error is at most the root sum of the
         // blocks' squared spectral norms.
-        locals.push(local_quotient(&stacked, formation_squared.sqrt())?);
+        locals.push(resolve_stacked_factor(&stacked, formation_squared.sqrt())?);
     }
     let generic_rank = locals
         .iter()
@@ -841,9 +843,35 @@ pub fn constant_rank_check(
     })
 }
 
-fn local_quotient(stacked: &Array2<f64>, formation: f64) -> Result<LocalQuotient, StateError> {
+/// Resolve the rank and observed directions of a stacked factor whose exact value
+/// lies within `formation` of `stacked` in spectral norm. A Frobenius bound on the
+/// entrywise error is valid. The band is [`factor_singular_band`] plus
+/// `formation`. [`constant_rank_check`] reads this resolver for stacked response
+/// Jacobians. A caller whose factor is not the Jacobian of one native map, such as
+/// a metric's weighted factor, calls it directly, so [`LocalQuotient`] has one
+/// owner.
+pub fn resolve_stacked_factor(
+    stacked: &Array2<f64>,
+    formation: f64,
+) -> Result<LocalQuotient, StateError> {
     let (rows, cols) = stacked.dim();
-    let resolution = resolved_row_space(stacked, formation, "constant rank: stacked Jacobian")?;
+    if rows == 0 || cols == 0 {
+        return Err(StateError::EmptyFamily {
+            context: "stacked factor",
+        });
+    }
+    if !formation.is_finite() || stacked.iter().any(|value| !value.is_finite()) {
+        return Err(StateError::NonFinite {
+            context: "stacked factor",
+        });
+    }
+    if formation < 0.0 {
+        return Err(StateError::NegativeBound {
+            context: "stacked factor: formation",
+            value: formation,
+        });
+    }
+    let resolution = resolved_row_space(stacked, formation, "stacked factor")?;
     Ok(LocalQuotient {
         singular_values: resolution.singular_values,
         band: resolution.band,
@@ -918,6 +946,9 @@ impl LinearStateQuotient {
     /// again. The resolved dimension grows at every step that does not stop and
     /// cannot exceed `d`, so the closure ends without an iteration cap. A rank the
     /// band misjudges is not hidden: it surfaces in the measured quotient bounds.
+    /// The number of chart rows is not a certified dimension, because each step's
+    /// band leaves out the angle error of the previous step's singular vectors.
+    /// The measured bounds are the certificate.
     pub fn close(
         readouts: &[ArrayView2<'_, f64>],
         transitions: &[ArrayView2<'_, f64>],
@@ -1166,6 +1197,8 @@ pub enum StateError {
     },
     /// A stated sample, value, Jacobian or roundoff bound is not finite.
     NonFinite { context: &'static str },
+    /// A bound that must be non-negative is negative.
+    NegativeBound { context: &'static str, value: f64 },
     /// The declared fidelity tolerance is negative or not finite.
     InvalidFidelity { value: f64 },
     /// A native map could not execute.
@@ -1186,6 +1219,8 @@ pub enum StateError {
         context: &'static str,
         source: FaerLinalgError,
     },
+    /// An evaluated defect could not be expressed as an evidence status.
+    Evidence { source: EvidenceStatusError },
 }
 
 impl fmt::Display for StateError {
@@ -1198,6 +1233,9 @@ impl fmt::Display for StateError {
                 found,
             } => write!(formatter, "{context}: expected dimension {expected}, found {found}"),
             Self::NonFinite { context } => write!(formatter, "{context}: non-finite value"),
+            Self::NegativeBound { context, value } => {
+                write!(formatter, "{context}: bound {value} is negative")
+            }
             Self::InvalidFidelity { value } => write!(
                 formatter,
                 "declared fidelity tolerance {value} is not a finite non-negative number"
@@ -1219,6 +1257,9 @@ impl fmt::Display for StateError {
             Self::Svd { context, source } => {
                 write!(formatter, "{context}: singular value decomposition failed: {source}")
             }
+            Self::Evidence { source } => {
+                write!(formatter, "evidence status refused an evaluated defect: {source}")
+            }
         }
     }
 }
@@ -1227,6 +1268,7 @@ impl std::error::Error for StateError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Svd { source, .. } => Some(source),
+            Self::Evidence { source } => Some(source),
             _ => None,
         }
     }
@@ -1235,7 +1277,7 @@ impl std::error::Error for StateError {
 /// The stated item whose certified defect is largest, the uniform bound over all
 /// stated items, the largest combined roundoff, and the number of items.
 struct DefectRecord {
-    violation: Option<(usize, f64, f64)>,
+    violation: Option<(usize, f64, f64, EvidenceStatus<(), ()>)>,
     bound: f64,
     roundoff: f64,
     count: usize,
@@ -1251,44 +1293,48 @@ impl DefectRecord {
         }
     }
 
-    fn observe(&mut self, index: usize, defect: f64, roundoff: f64) {
+    fn observe(&mut self, index: usize, defect: f64, roundoff: f64) -> Result<(), StateError> {
+        let item = evaluated_defect(defect, roundoff)?;
         self.count += 1;
-        self.bound = self.bound.max(certified_upper(defect, roundoff));
+        self.bound = self.bound.max(certified_upper(&item));
         self.roundoff = self.roundoff.max(roundoff);
-        let larger = match self.violation {
-            Some((_, worst_defect, worst_roundoff)) => {
-                defect - roundoff > worst_defect - worst_roundoff
+        if item.refutes_at_most(0.0) {
+            let larger = match &self.violation {
+                Some((_, _, _, worst)) => certified_lower(&item) > certified_lower(worst),
+                None => true,
+            };
+            if larger {
+                self.violation = Some((index, defect, roundoff, item));
             }
-            None => true,
-        };
-        if certified_excess(defect, roundoff, 0.0) && larger {
-            self.violation = Some((index, defect, roundoff));
         }
+        Ok(())
     }
 }
 
-/// `value − err`, rounded down when `err` is nonzero, so the exact difference
-/// bounds it from above.
-fn rounded_down_difference(value: f64, err: f64) -> f64 {
-    let difference = value - err;
-    if err == 0.0 {
-        difference
-    } else {
-        difference.next_down()
-    }
+/// One evaluated defect with its combined roundoff, as the status supports.rs
+/// owns: exact up to numerical error over the single evaluated item. Verdicts
+/// read its rounded bounds and threshold predicates, the derivation
+/// [`EvidenceStatus::counterexample`] reads, so no copy of that arithmetic lives
+/// here.
+fn evaluated_defect(value: f64, roundoff: f64) -> Result<EvidenceStatus<(), ()>, StateError> {
+    EvidenceStatus::exact(
+        value,
+        roundoff,
+        ExactBasis::Exhaustive { cardinality: 1 },
+        None,
+        (),
+    )
+    .map_err(|source| StateError::Evidence { source })
 }
 
-/// `value + err`, rounded up when `err` is nonzero, so it bounds the exact sum.
-fn certified_upper(value: f64, err: f64) -> f64 {
-    let sum = value + err;
-    if err == 0.0 { sum } else { sum.next_up() }
+/// The item's certified lower bound. An exact status always has one.
+fn certified_lower(item: &EvidenceStatus<(), ()>) -> f64 {
+    item.lower_bound().unwrap_or(f64::NEG_INFINITY)
 }
 
-/// Whether `value` exceeds `threshold` by more than its roundoff `err`. This is
-/// the predicate [`EvidenceStatus::counterexample`] reads, so a verdict that
-/// selects a violation through it always converts to a counterexample.
-fn certified_excess(value: f64, err: f64, threshold: f64) -> bool {
-    rounded_down_difference(value, err) > threshold
+/// The item's certified upper bound. An exact status always has one.
+fn certified_upper(item: &EvidenceStatus<(), ()>) -> f64 {
+    item.upper_bound().unwrap_or(f64::INFINITY)
 }
 
 fn evaluated<M: NativeMap + ?Sized>(
@@ -2135,5 +2181,191 @@ mod tests {
         let closed = LinearStateQuotient::close(&[observe_second.view()], &[shear.view()])
             .expect("close");
         assert_eq!(closed.chart.nrows(), 2);
+    }
+
+    /// Verdicts decide each evaluated item through the status supports.rs owns.
+    /// Two items whose unrounded differences tie can differ in certification:
+    /// with zero roundoff the difference is not rounded, otherwise it is rounded
+    /// down. The owned lower bound tells them apart. The counterexample
+    /// constructor reads the same derivation at the tie, and the record keeps the
+    /// certified item.
+    #[test]
+    fn verdicts_decide_through_the_owned_status_the_counterexample_reads() {
+        let tiny = f64::from_bits(1);
+        let (uncertified_value, uncertified_roundoff) = (2.0 * tiny, tiny);
+        let (certified_value, certified_roundoff) = (tiny, 0.0);
+        assert_eq!(
+            uncertified_value - uncertified_roundoff,
+            certified_value - certified_roundoff,
+            "the unrounded differences tie"
+        );
+        let uncertified =
+            evaluated_defect(uncertified_value, uncertified_roundoff).expect("finite item");
+        let certified = evaluated_defect(certified_value, certified_roundoff).expect("finite item");
+        assert!(!uncertified.refutes_at_most(0.0));
+        assert!(certified.refutes_at_most(0.0));
+        assert!(certified_lower(&certified) > certified_lower(&uncertified));
+        assert!(
+            EvidenceStatus::<(), ()>::counterexample(
+                uncertified_value,
+                uncertified_roundoff,
+                0.0,
+                ()
+            )
+            .is_err()
+        );
+        assert!(
+            EvidenceStatus::<(), ()>::counterexample(certified_value, certified_roundoff, 0.0, ())
+                .is_ok()
+        );
+
+        let mut record = DefectRecord::new();
+        record
+            .observe(0, uncertified_value, uncertified_roundoff)
+            .expect("finite item");
+        record
+            .observe(1, certified_value, certified_roundoff)
+            .expect("finite item");
+        assert!(matches!(record.violation, Some((1, _, _, _))));
+    }
+
+    /// The stacked-factor resolver refuses what it cannot resolve: a non-finite
+    /// entry or formation, a negative formation, an empty factor. Control:
+    /// `[[3, 4]]` resolves to rank 1, at its ceiling, with singular value 5 within
+    /// the resolver's own band.
+    #[test]
+    fn stacked_factor_resolver_refuses_invalid_input() {
+        let resolved = resolve_stacked_factor(&array![[3.0, 4.0]], 0.0).expect("resolve");
+        assert_eq!((resolved.resolved_rank, resolved.rank_ceiling), (1, 1));
+        assert!((resolved.singular_values[0] - 5.0).abs() <= resolved.band);
+        assert!(matches!(
+            resolve_stacked_factor(&array![[f64::NAN]], 0.0),
+            Err(StateError::NonFinite { .. })
+        ));
+        assert!(matches!(
+            resolve_stacked_factor(&array![[1.0]], f64::INFINITY),
+            Err(StateError::NonFinite { .. })
+        ));
+        assert!(matches!(
+            resolve_stacked_factor(&array![[1.0]], -1.0),
+            Err(StateError::NegativeBound { value, .. }) if value == -1.0
+        ));
+        assert!(matches!(
+            resolve_stacked_factor(&Array2::<f64>::zeros((0, 2)), 0.0),
+            Err(StateError::EmptyFamily { .. })
+        ));
+    }
+
+    /// Descent carries the mechanism (P13 into P3). A plane rotation by `0.9`,
+    /// hidden in the ½-Hadamard frame, is observed through a readout inside its
+    /// plane.
+    /// * The closure recovers the plane.
+    /// * The landed spectral owner reads the descended map `G = Q T Qᵀ` as exactly
+    ///   one rotation plane.
+    /// * Its certified cosine interval must overlap the one spectral certifies for
+    ///   `T` itself. Both contain the true cosine, so no tolerance is chosen here.
+    ///
+    /// Control: a readout in the rotation's fixed space closes to one row, and
+    /// spectral reads its descended map as the identity.
+    #[test]
+    fn descended_rotation_is_recovered_by_the_spectral_owner() {
+        use crate::parameter_decomposition::spectral::{
+            PlaneRotationRecovery, RotationAmbiguity, RotationClusterKind,
+            recover_plane_rotations,
+        };
+
+        fn single_plane_cosines(recovery: &PlaneRotationRecovery) -> Option<(f64, f64)> {
+            recovery
+                .clusters
+                .iter()
+                .find_map(|cluster| match cluster.kind {
+                    RotationClusterKind::Rotation { planes: 1, .. } => {
+                        Some(cluster.cosine_interval)
+                    }
+                    _ => None,
+                })
+        }
+
+        /// A derived bound on the 2-norm distance from a descended map `G` to the
+        /// orthogonal group. It uses `measure`'s certified section bound `s ≥ ‖QQᵀ − I‖`
+        /// and realization bound `r ≥ ‖R‖` with `R = TQᵀ − QᵀG`, and `t = 2ε + ε²`
+        /// bounds `‖TᵀT − I‖` when `T` lies within `ε` of an orthogonal matrix.
+        /// Expanding
+        /// `GᵀG − I = Gᵀ(I − QQᵀ)G + (QQᵀ − I) + Q(TᵀT − I)Qᵀ − QTᵀR − RᵀTQᵀ + RᵀR`
+        /// with `‖Q‖² ≤ 1 + s` and `‖G‖ ≤ (1 + s)(1 + ε)` bounds `‖GᵀG − I‖`. That
+        /// bounds every `|σᵢ − 1| ≤ |σᵢ² − 1|`.
+        fn descended_orthogonality_error(
+            quotient: &LinearStateQuotient,
+            transition_error: f64,
+        ) -> f64 {
+            let section = quotient.section_bounds.upper;
+            let realization = quotient.realization_bounds[0].upper;
+            let transition_gram = 2.0 * transition_error + transition_error * transition_error;
+            let chart_norm_squared = 1.0 + section;
+            let transition_norm = 1.0 + transition_error;
+            let descended_norm = chart_norm_squared * transition_norm;
+            descended_norm * descended_norm * section
+                + section
+                + chart_norm_squared * transition_gram
+                + 2.0 * chart_norm_squared.sqrt() * transition_norm * realization
+                + realization * realization
+        }
+
+        let (sine, cosine) = 0.9_f64.sin_cos();
+        let frame = dyadic_frame();
+        let block = array![
+            [cosine, -sine, 0.0, 0.0],
+            [sine, cosine, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0]
+        ];
+        let transition = frame.dot(&block).dot(&frame);
+        // T's distance to the orthogonal group, derived. The float block's singular
+        // values are √(c² + s²) and 1, so its distance is at most |c² + s² − 1|,
+        // counted with the rounding of forming it. H is exactly orthogonal (dyadic).
+        // The two 4-term products H·B·H round within 2γ₅·(|H||B||H|) entrywise, whose
+        // Frobenius norm bounds the spectral norm of the formation error.
+        let block_gram = cosine * cosine + sine * sine;
+        let block_defect = (block_gram - 1.0).abs() + accumulation_growth(3) * (block_gram + 1.0);
+        let magnitudes = frame
+            .mapv(f64::abs)
+            .dot(&block.mapv(f64::abs))
+            .dot(&frame.mapv(f64::abs));
+        let transition_error = block_defect
+            + 2.0 * accumulation_growth(5) * magnitudes.iter().map(|m| m * m).sum::<f64>().sqrt();
+        let whole = recover_plane_rotations(transition.view(), transition_error)
+            .expect("recovery of T");
+        let (whole_low, whole_high) =
+            single_plane_cosines(&whole).expect("T rotates exactly one plane");
+
+        let in_plane = frame.slice(s![..1, ..]).to_owned();
+        let closed = LinearStateQuotient::close(&[in_plane.view()], &[transition.view()])
+            .expect("close");
+        assert_eq!(closed.chart.nrows(), 2);
+        let descended =
+            recover_plane_rotations(
+                closed.descended[0].view(),
+                descended_orthogonality_error(&closed, transition_error),
+            )
+            .expect("recovery of G");
+        assert_eq!(descended.clusters.len(), 1);
+        let (low, high) = single_plane_cosines(&descended).expect("G rotates one plane");
+        assert!(
+            low <= whole_high && whole_low <= high,
+            "certified cosine intervals [{low}, {high}] for G and [{whole_low}, {whole_high}] \
+             for T must overlap"
+        );
+        assert_eq!(descended.ambiguities(), vec![RotationAmbiguity::Winding]);
+
+        let fixed_readout = frame.slice(s![2..3, ..]).to_owned();
+        let fixed = LinearStateQuotient::close(&[fixed_readout.view()], &[transition.view()])
+            .expect("close");
+        assert_eq!(fixed.chart.nrows(), 1);
+        let identity = recover_plane_rotations(
+            fixed.descended[0].view(),
+            descended_orthogonality_error(&fixed, transition_error),
+        )
+        .expect("recovery of the fixed descent");
+        assert_eq!(identity.ambiguities(), vec![RotationAmbiguity::Identity]);
     }
 }
