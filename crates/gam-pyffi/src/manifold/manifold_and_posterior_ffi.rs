@@ -2339,11 +2339,14 @@ fn gumbel_schedule_tau(schedule: &Bound<'_, PyDict>, iter: usize) -> PyResult<f6
 /// independent input: an isometry penalty is then constant in the target, so its
 /// target derivatives are exactly zero and its gradient is the returned `∂P/∂J`.
 /// `J` with `H = ∂J/∂t` moves with the target, and the target derivatives are the
-/// total ones through that motion. Returns whether `J` moves with the target.
+/// total ones through that motion. The exact Hessian of that motion also reads the
+/// third decoder jet `K = ∂H/∂t`, which only a moving `J` carries (#2933 F02).
+/// Returns whether `J` moves with the target.
 fn install_isometry_decoder_jets(
     registry: &mut AnalyticPenaltyRegistry,
-    isometry_jacobian: Option<PyReadonlyArray2<'_, f64>>,
-    isometry_jacobian_second: Option<PyReadonlyArray2<'_, f64>>,
+    isometry_jacobian: Option<Array2<f64>>,
+    isometry_jacobian_second: Option<Array2<f64>>,
+    isometry_jacobian_third: Option<Array3<f64>>,
     order: IsometryEvaluationOrder,
     target_len: usize,
 ) -> Result<bool, String> {
@@ -2352,10 +2355,13 @@ fn install_isometry_decoder_jets(
         .iter()
         .any(|penalty| matches!(penalty, AnalyticPenaltyKind::Isometry(_)));
     if !registers_isometry {
-        if isometry_jacobian.is_some() || isometry_jacobian_second.is_some() {
+        if isometry_jacobian.is_some()
+            || isometry_jacobian_second.is_some()
+            || isometry_jacobian_third.is_some()
+        {
             return Err(
-                "isometry_jacobian and isometry_jacobian_second are the decoder jets of an \
-                 isometry penalty, and penalties_json registers none"
+                "isometry_jacobian, isometry_jacobian_second and isometry_jacobian_third are the \
+                 decoder jets of an isometry penalty, and penalties_json registers none"
                     .to_string(),
             );
         }
@@ -2368,13 +2374,22 @@ fn install_isometry_decoder_jets(
                 .to_string(),
         );
     }
-    let jacobian = isometry_jacobian.map(|j| Arc::new(j.as_array().to_owned()));
-    let jacobian_second = isometry_jacobian_second.map(|h| Arc::new(h.as_array().to_owned()));
+    if isometry_jacobian_second.is_none() && isometry_jacobian_third.is_some() {
+        return Err(
+            "isometry_jacobian_third is the motion K = ∂H/∂t of a decoder Jacobian's motion, \
+             and no isometry_jacobian_second was supplied"
+                .to_string(),
+        );
+    }
+    let jacobian = isometry_jacobian.map(Arc::new);
+    let jacobian_second = isometry_jacobian_second.map(Arc::new);
+    let jacobian_third = isometry_jacobian_third.map(Arc::new);
     let moves_with_target = jacobian_second.is_some();
     for penalty in &mut registry.penalties {
         if let AnalyticPenaltyKind::Isometry(inner) = penalty {
             let installed = (**inner).clone();
             installed.refresh_caches(jacobian.clone(), jacobian_second.clone());
+            installed.set_third_decoder_derivative(jacobian_third.clone());
             *penalty = AnalyticPenaltyKind::Isometry(Arc::new(installed));
         }
     }
@@ -2387,8 +2402,9 @@ fn install_isometry_decoder_jets(
         .isometry_evaluation_precondition(read_order, target_len)
         .map_err(|reason| {
             format!(
-                "{reason}; pass J as isometry_jacobian, and H as isometry_jacobian_second only \
-                 when J moves with the target"
+                "{reason}; pass J as isometry_jacobian, H as isometry_jacobian_second only when J \
+                 moves with the target, and K as isometry_jacobian_third for that motion's exact \
+                 Hessian"
             )
         })?;
     Ok(moves_with_target)
@@ -2430,8 +2446,9 @@ fn analytic_penalty_value_grad<'py>(
     let target_view = target.as_array();
     let isometry_jacobian_moves = install_isometry_decoder_jets(
         &mut registry,
-        isometry_jacobian,
-        isometry_jacobian_second,
+        isometry_jacobian.map(|j| j.as_array().to_owned()),
+        isometry_jacobian_second.map(|h| h.as_array().to_owned()),
+        None,
         IsometryEvaluationOrder::Gradient,
         target_view.len(),
     )
@@ -2511,7 +2528,8 @@ fn analytic_penalty_value_grad<'py>(
     v,
     rho = None,
     isometry_jacobian = None,
-    isometry_jacobian_second = None
+    isometry_jacobian_second = None,
+    isometry_jacobian_third = None
 ))]
 fn analytic_penalty_hvp<'py>(
     py: Python<'py>,
@@ -2522,48 +2540,71 @@ fn analytic_penalty_hvp<'py>(
     rho: Option<PyReadonlyArray1<'py, f64>>,
     isometry_jacobian: Option<PyReadonlyArray2<'py, f64>>,
     isometry_jacobian_second: Option<PyReadonlyArray2<'py, f64>>,
+    isometry_jacobian_third: Option<PyReadonlyArray3<'py, f64>>,
 ) -> PyResult<Py<PyArray1<f64>>> {
-    let latents: serde_json::Value = serde_json::from_str(latents_json)
-        .map_err(|err| py_value_error(format!("invalid latents json: {err}")))?;
-    let penalties: serde_json::Value = serde_json::from_str(penalties_json)
-        .map_err(|err| py_value_error(format!("invalid penalties json: {err}")))?;
-    let mut registry = build_analytic_penalty_registry_from_json(Some(&latents), Some(&penalties))
-        .map_err(py_value_error)?;
+    let out = analytic_penalty_hvp_impl(
+        latents_json,
+        penalties_json,
+        target.as_array(),
+        v.as_array(),
+        rho.as_ref().map(|rho| rho.as_array()),
+        isometry_jacobian.map(|j| j.as_array().to_owned()),
+        isometry_jacobian_second.map(|h| h.as_array().to_owned()),
+        isometry_jacobian_third.map(|k| k.as_array().to_owned()),
+    )
+    .map_err(py_value_error)?;
+    Ok(out.into_pyarray(py).unbind())
+}
 
-    let target_view = target.as_array();
+/// The GIL-free core of [`analytic_penalty_hvp`]: the registry Hessian-vector
+/// product at `(target, rho)` with the caller's decoder jets installed.
+fn analytic_penalty_hvp_impl(
+    latents_json: &str,
+    penalties_json: &str,
+    target: ArrayView1<'_, f64>,
+    v: ArrayView1<'_, f64>,
+    rho: Option<ArrayView1<'_, f64>>,
+    isometry_jacobian: Option<Array2<f64>>,
+    isometry_jacobian_second: Option<Array2<f64>>,
+    isometry_jacobian_third: Option<Array3<f64>>,
+) -> Result<Array1<f64>, String> {
+    let latents: serde_json::Value = serde_json::from_str(latents_json)
+        .map_err(|err| format!("invalid latents json: {err}"))?;
+    let penalties: serde_json::Value = serde_json::from_str(penalties_json)
+        .map_err(|err| format!("invalid penalties json: {err}"))?;
+    let mut registry = build_analytic_penalty_registry_from_json(Some(&latents), Some(&penalties))?;
+
     let isometry_jacobian_moves = install_isometry_decoder_jets(
         &mut registry,
         isometry_jacobian,
         isometry_jacobian_second,
+        isometry_jacobian_third,
         IsometryEvaluationOrder::Hessian,
-        target_view.len(),
+        target.len(),
     )
-    .map_err(|reason| py_value_error(format!("analytic_penalty_hvp: {reason}")))?;
+    .map_err(|reason| format!("analytic_penalty_hvp: {reason}"))?;
 
-    let v_view = v.as_array();
-    if v_view.len() != target_view.len() {
-        return Err(py_value_error(format!(
+    if v.len() != target.len() {
+        return Err(format!(
             "analytic_penalty_hvp: v length {} does not match target length {}",
-            v_view.len(),
-            target_view.len()
-        )));
+            v.len(),
+            target.len()
+        ));
     }
     let rho_owned = match rho {
-        Some(rho) => rho.as_array().to_owned(),
+        Some(rho) => rho.to_owned(),
         None => Array1::<f64>::zeros(registry.total_rho_count()),
     };
     if rho_owned.len() != registry.total_rho_count() {
-        return Err(py_value_error(format!(
+        return Err(format!(
             "rho length {} does not match analytic penalty rho_count {}",
             rho_owned.len(),
             registry.total_rho_count()
-        )));
+        ));
     }
-    registry
-        .validate_rho(rho_owned.view())
-        .map_err(py_value_error)?;
+    registry.validate_rho(rho_owned.view())?;
 
-    let mut out = Array1::<f64>::zeros(target_view.len());
+    let mut out = Array1::<f64>::zeros(target.len());
     for (penalty, (rho_slice, tier, _name)) in registry.penalties.iter().zip(registry.rho_layout())
     {
         if matches!(tier, PenaltyTier::Rho) {
@@ -2575,10 +2616,161 @@ fn analytic_penalty_hvp<'py>(
             continue;
         }
         let rho_local = rho_owned.slice(s![rho_slice.clone()]);
-        let contrib = penalty.hvp(target_view.view(), rho_local, v_view.view());
+        let contrib = penalty.hvp(target, rho_local, v);
         out += &contrib;
     }
-    Ok(out.into_pyarray(py).unbind())
+    Ok(out)
+}
+
+/// #2933 F02 — the exact isometry Hessian of a moving decoder Jacobian carries the
+/// residual-curvature term `K_{a,cd}ᵀ W J_b + J_aᵀ W K_{b,cd}`, so it reads the third
+/// decoder jet `K = ∂H/∂t`. The facade takes `K` as `isometry_jacobian_third` and must
+/// compute the exact product with it, not only refuse without it.
+#[cfg(test)]
+mod isometry_decoder_jet_facade_tests {
+    use super::*;
+    use ndarray::array;
+
+    const LATENTS: &str = r#"{"t": {"name": "t", "n": 3, "d": 1}}"#;
+    const ISOMETRY: &str = r#"[{"kind": "isometry", "target": "t", "weight": 1.0, "p_out": 2}]"#;
+
+    type Basis = fn(f64, usize) -> Array1<f64>;
+
+    // d^r/dt^r of [cos ωt, sin ωt] is ω^r [cos(ωt + rπ/2), sin(ωt + rπ/2)].
+    fn periodic(t: f64, order: usize) -> Array1<f64> {
+        let phase = order as f64 * std::f64::consts::FRAC_PI_2;
+        let mut out = Array1::<f64>::zeros(4);
+        for (idx, omega) in [1.0_f64, 2.0].into_iter().enumerate() {
+            let scale = omega.powi(order as i32);
+            out[2 * idx] = scale * (omega * t + phase).cos();
+            out[2 * idx + 1] = scale * (omega * t + phase).sin();
+        }
+        out
+    }
+
+    fn quadratic(t: f64, order: usize) -> Array1<f64> {
+        match order {
+            1 => array![1.0, 2.0 * t],
+            2 => array![0.0, 2.0],
+            _ => array![0.0, 0.0],
+        }
+    }
+
+    /// Decoder jets at latent dimension 1 in the facade layouts: `J` and `H` as
+    /// `(n_obs, p)`, `K` as `(n_obs, p, 1)`, with `B` shaped `(basis, p)`.
+    fn decoder_jets(t: &Array1<f64>, b: &Array2<f64>, basis: Basis) -> (Array2<f64>, Array2<f64>, Array3<f64>) {
+        let (n_obs, p) = (t.len(), b.ncols());
+        let mut j = Array2::<f64>::zeros((n_obs, p));
+        let mut h = Array2::<f64>::zeros((n_obs, p));
+        let mut k = Array3::<f64>::zeros((n_obs, p, 1));
+        for n in 0..n_obs {
+            j.row_mut(n).assign(&b.t().dot(&basis(t[n], 1)));
+            h.row_mut(n).assign(&b.t().dot(&basis(t[n], 2)));
+            k.slice_mut(s![n, .., 0]).assign(&b.t().dot(&basis(t[n], 3)));
+        }
+        (j, h, k)
+    }
+
+    /// Independent oracle for `vᵀ∇²P v`: at latent dimension 1, with the Euclidean
+    /// reference and unit weight, `P = ½ Σ_n (g_n/ḡ − 1)²` with `g_n = ‖J_n‖²`. Its
+    /// central second difference along `v` at `h` and `2h` has truncation error
+    /// `|fd(h) − fd(2h)|/3`, bounded here with a factor-3 margin, and the
+    /// `1e-6·max(1, |fd|)` floor sits far above the roundoff `4·ε·|P|/h² ≈ 1e-9`.
+    fn second_difference(t: &Array1<f64>, v: &Array1<f64>, b: &Array2<f64>, basis: Basis) -> (f64, f64) {
+        let energy_at = |shift: f64| {
+            let (j, _, _) = decoder_jets(&(t + &(v * shift)), b, basis);
+            let g: Vec<f64> = (0..j.nrows()).map(|n| j.row(n).dot(&j.row(n))).collect();
+            let g_bar = g.iter().sum::<f64>() / g.len() as f64;
+            0.5 * g.iter().map(|g_n| (g_n / g_bar - 1.0).powi(2)).sum::<f64>()
+        };
+        let at_step = |h: f64| (energy_at(h) - 2.0 * energy_at(0.0) + energy_at(-h)) / (h * h);
+        let (fine, coarse) = (at_step(1.0e-3), at_step(2.0e-3));
+        (fine, (fine - coarse).abs() + 1.0e-6 * fine.abs().max(1.0))
+    }
+
+    fn facade_hvp(
+        t: &Array1<f64>,
+        v: &Array1<f64>,
+        j: Option<Array2<f64>>,
+        h: Option<Array2<f64>>,
+        k: Option<Array3<f64>>,
+    ) -> Result<Array1<f64>, String> {
+        let rho = array![0.0_f64];
+        analytic_penalty_hvp_impl(LATENTS, ISOMETRY, t.view(), v.view(), Some(rho.view()), j, h, k)
+    }
+
+    /// Premises, free to fail: the closed-form second difference resolves a nonzero
+    /// curvature, and a zero `K` moves the facade product resolvably away from it.
+    /// Claims: the facade with `J`, `H` and `K` of `B·[cos t, sin t, cos 2t, sin 2t]`
+    /// matches the second difference; omitting `K` refuses by naming it; `K` without
+    /// `H` refuses; and `B·[t, t²]`, whose third jet vanishes, matches its own
+    /// second difference with an explicit zero `K`.
+    #[test]
+    fn facade_isometry_hvp_with_the_third_decoder_jet_is_the_exact_hessian_2933() {
+        let t = array![0.3_f64, -0.7, 1.4];
+        let v = array![0.8_f64, -1.3, 0.5];
+        let b_periodic = array![[0.9_f64, -0.4], [0.2, 1.1], [-0.5, 0.3], [0.35, 0.6]];
+        let (j, h, k) = decoder_jets(&t, &b_periodic, periodic);
+        let (oracle, tolerance) = second_difference(&t, &v, &b_periodic, periodic);
+        let with_k = facade_hvp(&t, &v, Some(j.clone()), Some(h.clone()), Some(k.clone()));
+        let zero_k = facade_hvp(
+            &t,
+            &v,
+            Some(j.clone()),
+            Some(h.clone()),
+            Some(Array3::<f64>::zeros(k.dim())),
+        );
+        let without_k = facade_hvp(&t, &v, Some(j.clone()), Some(h.clone()), None);
+        let k_without_h = facade_hvp(&t, &v, Some(j), None, Some(k));
+        let quad = |result: &Result<Array1<f64>, String>| -> Result<f64, String> {
+            result.as_ref().map(|hv| v.dot(hv)).map_err(|reason| reason.clone())
+        };
+        let b_quadratic = array![[0.7_f64, -0.2], [0.45, 0.9]];
+        let (jq, hq, kq) = decoder_jets(&t, &b_quadratic, quadratic);
+        let (quad_oracle, quad_tolerance) = second_difference(&t, &v, &b_quadratic, quadratic);
+        let certified = facade_hvp(&t, &v, Some(jq), Some(hq), Some(kq));
+        eprintln!(
+            "[#2933 F02 facade K] periodic: second difference vᵀHv = {oracle:.9e} (tol \
+             {tolerance:.3e}); with K = {:?}; zero K = {:?}; without K = {without_k:?}; K \
+             without H = {k_without_h:?}; quadratic: second difference = {quad_oracle:.9e} (tol \
+             {quad_tolerance:.3e}), certified-zero K = {:?}",
+            quad(&with_k),
+            quad(&zero_k),
+            quad(&certified)
+        );
+        assert!(
+            oracle.abs() > 100.0 * tolerance && quad_oracle.abs() > 100.0 * quad_tolerance,
+            "premise: both second differences must resolve a nonzero curvature"
+        );
+        assert!(
+            quad(&zero_k).is_ok_and(|zero_quad| (zero_quad - oracle).abs() > 100.0 * tolerance),
+            "premise: a zero K must move the exact isometry Hessian resolvably; got {:?}",
+            quad(&zero_k)
+        );
+        assert!(
+            quad(&with_k).is_ok_and(|with_quad| (with_quad - oracle).abs() <= tolerance),
+            "the facade hvp with J, H and K must be the exact Hessian: {:?} vs {oracle:.9e} (tol \
+             {tolerance:.3e})",
+            quad(&with_k)
+        );
+        assert!(
+            without_k.as_ref().is_err_and(|reason| reason.contains("K = ∂H/∂t")),
+            "the facade hvp without K must refuse by naming K; got {:?}",
+            quad(&without_k)
+        );
+        assert!(
+            k_without_h.as_ref().is_err_and(|reason| reason.contains("isometry_jacobian_third")),
+            "K without H must be refused; got {:?}",
+            quad(&k_without_h)
+        );
+        assert!(
+            quad(&certified)
+                .is_ok_and(|certified_quad| (certified_quad - quad_oracle).abs() <= quad_tolerance),
+            "a certified-zero K must stay exact for a quadratic decoder: {:?} vs \
+             {quad_oracle:.9e} (tol {quad_tolerance:.3e})",
+            quad(&certified)
+        );
+    }
 }
 
 fn parse_manifold_kind(value: &serde_json::Value) -> Result<gam::geometry::ManifoldSpec, String> {

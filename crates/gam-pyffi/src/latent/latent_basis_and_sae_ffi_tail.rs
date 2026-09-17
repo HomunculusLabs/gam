@@ -2155,7 +2155,8 @@ fn interchange_swap_backward<'py>(
 /// REML loop sees a *unique* minimum because the inner Hessian on t is
 /// now bounded below by `μI` (auxiliary). Fixes the audit-revised claim:
 /// dim-selection/ARD alone is not a rotation-gauge fix and must be paired
-/// with AuxPrior or Isometry for identifiability.
+/// with AuxPrior for identifiability; the forward fit installs no decoder jets,
+/// so it refuses an isometry descriptor by name.
 #[pyfunction(signature = (
     t,
     y,

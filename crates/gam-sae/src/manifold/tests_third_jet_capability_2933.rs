@@ -505,12 +505,21 @@ fn subspace_reduction_forwards_the_third_jet_capability_2933() {
 /// isometry Hessian's evaluation precondition refuses by naming K, while the
 /// analytic twin's hvp is nonzero. So a penalty built on an unavailable jet has
 /// no exact curvature to carry.
+///
+/// Positive control of that guard: `hvp` itself, called on the unavailable twin,
+/// must stop by naming K. A zero default reinstated inside the method leaves the
+/// precondition intact, so only this call can see it return a vector instead.
 #[test]
 fn isometry_penalty_refuses_an_unavailable_third_jet_2933() {
     let coords = Array2::from_shape_fn((12, 1), |(row, _)| (row as f64 + 0.3) / 12.0);
     let direction: Array1<f64> = (0..12).map(|row| (0.7 * row as f64).cos()).collect();
     let rho = array![0.0_f64];
-    let refreshed_hvp = |evaluator: Arc<dyn SaeBasisSecondJet>| -> (bool, Result<f64, String>) {
+    let max_abs = |hv: Array1<f64>| hv.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+    let refreshed_hvp = |evaluator: Arc<dyn SaeBasisSecondJet>| -> (
+        bool,
+        Result<f64, String>,
+        Result<f64, String>,
+    ) {
         let (atom, penalty, target_flat) = build_isometry_atom_for_evaluator(
             evaluator,
             SaeAtomBasisKind::Periodic,
@@ -525,21 +534,40 @@ fn isometry_penalty_refuses_an_unavailable_third_jet_2933() {
                 gam_terms::analytic_penalties::IsometryEvaluationOrder::Hessian,
                 target_flat.len(),
             )
-            .map(|()| {
-                penalty
-                    .hvp(target_flat.view(), rho.view(), direction.view())
-                    .iter()
-                    .map(|x| x.abs())
-                    .fold(0.0_f64, f64::max)
-            });
-        (penalty.third_decoder_derivative().is_some(), max_hv)
+            .map(|()| max_abs(penalty.hvp(target_flat.view(), rho.view(), direction.view())));
+        let direct_hv = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            penalty.hvp(target_flat.view(), rho.view(), direction.view())
+        }))
+        .map(|hv| max_abs(hv))
+        .map_err(|payload| {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|reason| reason.to_string()))
+                .unwrap_or_else(|| "non-string panic payload".to_string())
+        });
+        (penalty.third_decoder_derivative().is_some(), max_hv, direct_hv)
     };
-    let (analytic_k, analytic_hv) =
+    let (analytic_k, analytic_hv, analytic_direct) =
         refreshed_hvp(Arc::new(PeriodicHarmonicEvaluator::new(3).expect("periodic basis")));
-    let (unavailable_k, unavailable_hv) = refreshed_hvp(Arc::new(SecondOrderOnlyPeriodic));
+    let (unavailable_k, unavailable_hv, unavailable_direct) =
+        refreshed_hvp(Arc::new(SecondOrderOnlyPeriodic));
     println!(
-        "[#2933 F02] isometry hvp: analytic K = {analytic_k}, max|Hv| = {analytic_hv:?}; \
-         unavailable K = {unavailable_k}, max|Hv| = {unavailable_hv:?}"
+        "[#2933 F02] isometry hvp: analytic K = {analytic_k}, max|Hv| = {analytic_hv:?}, direct \
+         hvp = {analytic_direct:?}; unavailable K = {unavailable_k}, max|Hv| = \
+         {unavailable_hv:?}, direct hvp = {unavailable_direct:?}"
+    );
+    assert!(
+        analytic_direct.as_ref().is_ok_and(|max_hv| *max_hv > 1.0e-6),
+        "positive control: with K installed, hvp evaluates a nonzero exact product \
+         (direct hvp = {analytic_direct:?})"
+    );
+    assert!(
+        unavailable_direct
+            .as_ref()
+            .is_err_and(|reason| reason.contains("K = ∂H/∂t")),
+        "hvp on an unavailable third jet must stop by naming K, not return a vector \
+         (direct hvp = {unavailable_direct:?})"
     );
     assert!(
         analytic_k && analytic_hv.as_ref().is_ok_and(|max_hv| *max_hv > 1.0e-6),

@@ -2794,8 +2794,10 @@ def gaussian_reml_fit_latent(
       at least C1, and the conditional precision is positive-definite on the
       anchored subspace.
     * ``dim_selection_log_precision`` supplies ARD log-precisions, one per
-      latent axis. ARD must be paired with an auxiliary prior or an isometry
-      penalty to identify axes; by itself it is rotation-symmetric.
+      latent axis. ARD must be paired with an auxiliary prior to identify
+      axes; by itself it is rotation-symmetric. An isometry penalty cannot
+      gauge this fit: it installs no decoder jets, so an ``IsometryPenalty``
+      descriptor is refused by name.
 
     Passing neither identifiability option is allowed for mechanical
     experiments, but the latent coordinate is gauge-unfixed and gradients in
