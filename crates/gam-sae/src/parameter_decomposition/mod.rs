@@ -140,6 +140,9 @@ pub mod seed;
 // Plane-rotation and response-projector recovery with derived eigengaps.
 pub mod spectral;
 
+// Invariant planes of non-orthogonal operators with Stewart subspace certificates.
+pub mod schur;
+
 // Sufficient-state quotient and realization contracts.
 pub mod state;
 
