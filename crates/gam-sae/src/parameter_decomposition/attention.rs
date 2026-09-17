@@ -58,18 +58,27 @@
 //! With every mask at one the program executes the original tensors on the
 //! original path ([`NativeAttention::execute`]), bit for bit. Every other result
 //! carries a forward-error radius against the exact value of its own program at
-//! the given inputs: Higham's `γ_k · Σ|monomials|` over the rounded operations
-//! (`gam_linalg::roundoff`), plus the trigonometric input error `u·|φ| + ulp` of
-//! each angle under the platform libm's documented at-most-one-ulp `sin`, `cos`
-//! and `exp`, propagated to first order. Two programs with the same exact value
-//! agree within the sum of their radii.
+//! the given inputs, propagated entry by entry to first order. It collects:
+//! - Higham's `γ_k · Σ|monomials|` over the rounded operations (`gam_linalg::roundoff`);
+//! - each input's own radius;
+//! - the trigonometric input error `u·|φ| + ulp` of each angle;
+//! - the log-softmax evaluation radius from `gam_math::categorical`.
+//!
+//! Two programs with the same exact value agree within the sum of their radii.
+//!
+//! The libm terms rest on the platform's documented accuracy. glibc x86_64's "Known
+//! Maximum Errors" puts `sin`, `cos` and `exp` within one ulp, which covers the MSI
+//! build targets. The tests measure that bound against a double-double reference at
+//! every point the fixtures evaluate. That checks the platform the tests run on; it
+//! does not certify production inputs.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
-use gam_linalg::roundoff::{accumulation_growth, compensated_band};
-use gam_math::categorical::{CategoricalError, log_sum_exp};
-use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2};
+use gam_linalg::roundoff::accumulation_growth;
+use gam_math::categorical::{CategoricalError, log_softmax_with_error};
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ShapeBuilder};
+use serde::{Deserialize, Serialize};
 
 /// Largest position magnitude whose differences stay exact in `f64`:
 /// `|p_s − p_t| ≤ 2^53` is representable, so `Δ as f64` rounds nothing.
@@ -131,7 +140,7 @@ impl fmt::Display for AttentionProgramError {
 impl std::error::Error for AttentionProgramError {}
 
 /// The source attention block's dimensions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttentionGeometry {
     pub model_dim: usize,
     pub n_heads: usize,
@@ -154,14 +163,14 @@ impl AttentionGeometry {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RotaryPairing {
     HalfSplit,
     Interleaved,
 }
 
 /// The source's rotary embedding, as exported from the source module.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RotaryEmbedding {
     pub pairing: RotaryPairing,
     /// The source's `inv_freq` buffer, one frequency per rotated plane.
@@ -201,42 +210,23 @@ fn inner_with_abs(row: ArrayView1<f64>, x: ArrayView1<f64>) -> (f64, f64) {
         .fold((0.0, 0.0), |(value, abs), (w, v)| (value + w * v, abs + (w * v).abs()))
 }
 
-/// The source's joint softmax over one query row, with a radius on each weight.
+/// The source's joint softmax over one causally admissible query row, with a
+/// radius on each weight.
 ///
-/// The weights are `exp(ℓ_s − lse ℓ)`, with `lse` from gam-math's categorical
-/// owner: one max-shift, the exponentials, a twofold-compensated sum `S`, then
-/// `max ℓ + ln S`.
-///
-/// Logits within `r = max_s logit_radius[s]` of exact move each exact weight by
-/// at most the factor `e^{±2r}`, so `|w̃_s − w_s| ≤ w̃_s·expm1(2r)`. Evaluation
-/// adds relative errors, to first order:
-/// - the shift, `γ_1 (max ℓ − min ℓ)`, and one libm ulp per exponential;
-/// - the compensated sum, `3u` (Higham §4.3, with the shift as one formation
-///   rounding);
-/// - one ulp on `ln S`, of size `ε|ln S|`;
-/// - `u|lse|` for adding the shift back and `u|ℓ_s − lse|` for the subtraction;
-/// - one libm ulp on the final exponential.
-pub fn joint_softmax_with_radius(
-    logits: &[f64],
-    logit_radius: &[f64],
-) -> Result<(Vec<f64>, Vec<f64>), CategoricalError> {
-    let normalizer = log_sum_exp(logits)?;
-    let top = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let bottom = logits.iter().copied().fold(f64::INFINITY, f64::min);
-    let unit = accumulation_growth(1);
-    let normalizer_relative = unit * (top - bottom)
-        + f64::EPSILON
-        + compensated_band(1, 1.0)
-        + f64::EPSILON * (normalizer - top).abs()
-        + unit * normalizer.abs();
-    let logit_factor = (2.0 * logit_radius.iter().copied().fold(0.0, f64::max)).exp_m1();
+/// The log weights and their evaluation radii `e_s` come from gam-math's
+/// categorical owner, [`log_softmax_with_error`]. A logit within `r_s` of exact
+/// moves `ℓ_s` by `r_s` and `lse ℓ` by at most `max_t r_t`, so each log weight is
+/// within `b_s = r_s + max_t r_t + e_s` of exact. The weight `exp(log p_s)` adds
+/// one libm ulp, so its radius is `w_s (expm1(b_s) + ε)`.
+fn attention_weights(logits: &[f64], logit_radius: &[f64]) -> Result<(Vec<f64>, Vec<f64>), CategoricalError> {
+    let (log_weights, evaluation_radius) = log_softmax_with_error(logits)?;
+    let widest = logit_radius.iter().copied().fold(0.0, f64::max);
     let mut weights = Vec::with_capacity(logits.len());
     let mut radius = Vec::with_capacity(logits.len());
-    for &logit in logits {
-        let log_weight = logit - normalizer;
+    for ((&log_weight, &evaluation), &own) in log_weights.iter().zip(&evaluation_radius).zip(logit_radius) {
         let weight = log_weight.exp();
         weights.push(weight);
-        radius.push(weight * (logit_factor + normalizer_relative + unit * log_weight.abs() + f64::EPSILON));
+        radius.push(weight * ((own + widest + evaluation).exp_m1() + f64::EPSILON));
     }
     Ok((weights, radius))
 }
@@ -249,12 +239,21 @@ pub struct AffineProjection {
     pub bias: Array1<f64>,
 }
 
-/// The source's causal self-attention block on its original tensors.
+/// The source's causal rotary attention without its projections: the geometry,
+/// the rotary embedding and the score multiplier, validated once at construction.
+/// It holds no tensor, so a program node can carry it by serializing its three
+/// inputs.
 #[derive(Clone, Debug)]
-pub struct NativeAttention {
+pub struct RotaryCausalAttention {
     geometry: AttentionGeometry,
     rotary: RotaryEmbedding,
     score_scale: f64,
+}
+
+/// The source's causal self-attention block on its original tensors.
+#[derive(Clone, Debug)]
+pub struct NativeAttention {
+    attention: RotaryCausalAttention,
     query: AffineProjection,
     key: AffineProjection,
     value: AffineProjection,
@@ -304,6 +303,19 @@ pub struct AttentionExecution {
 pub struct ProjectedRows<'a> {
     pub values: ArrayView2<'a, f64>,
     pub radius: ArrayView2<'a, f64>,
+}
+
+/// The one zero that exact rows view as their radius.
+static EXACT_RADIUS: [f64; 1] = [0.0];
+
+impl<'a> ProjectedRows<'a> {
+    /// Rows taken as exact. The radius is a zero-stride view of one zero, so no
+    /// `tokens × width` matrix is allocated.
+    pub fn exact(values: ArrayView2<'a, f64>) -> Self {
+        let radius = ArrayView2::from_shape(values.dim().strides((0, 0)), &EXACT_RADIUS[..])
+            .expect("a zero-stride view reads only its one entry");
+        Self { values, radius }
+    }
 }
 
 /// The attention block before the output projection, each quantity with its
@@ -356,15 +368,13 @@ fn project(weights: ArrayView2<f64>, x: ArrayView2<f64>) -> (Array2<f64>, Array2
     (value, abs)
 }
 
-impl NativeAttention {
+impl RotaryCausalAttention {
+    /// Query heads share key/value heads in contiguous groups, and the rotated
+    /// planes must fit in one head. Only these checks run; nothing is allocated.
     pub fn new(
         geometry: AttentionGeometry,
         rotary: RotaryEmbedding,
         score_scale: f64,
-        query: AffineProjection,
-        key: AffineProjection,
-        value: AffineProjection,
-        output: AffineProjection,
     ) -> Result<Self, AttentionProgramError> {
         if geometry.n_kv_heads == 0 || geometry.n_heads % geometry.n_kv_heads != 0 {
             return Err(AttentionProgramError::KeyValueHeadsDoNotDivide {
@@ -378,28 +388,10 @@ impl NativeAttention {
                 head_dim: geometry.head_dim,
             });
         }
-        let (model, query_dim, kv_dim) = (
-            geometry.model_dim,
-            geometry.query_dim(),
-            geometry.key_value_dim(),
-        );
-        for (weight_name, bias_name, projection, rows, cols) in [
-            ("query weight", "query bias", &query, query_dim, model),
-            ("key weight", "key bias", &key, kv_dim, model),
-            ("value weight", "value bias", &value, kv_dim, model),
-            ("output weight", "output bias", &output, model, query_dim),
-        ] {
-            expect_shape(weight_name, projection.weight.dim(), (rows, cols))?;
-            expect_shape(bias_name, (projection.bias.len(), 1), (rows, 1))?;
-        }
         Ok(Self {
             geometry,
             rotary,
             score_scale,
-            query,
-            key,
-            value,
-            output,
         })
     }
 
@@ -411,44 +403,6 @@ impl NativeAttention {
             Some(&position) => Err(AttentionProgramError::PositionNotExact { position }),
             None => Ok(()),
         }
-    }
-
-    fn check_input(&self, x: ArrayView2<f64>, positions: &[i64]) -> Result<(), AttentionProgramError> {
-        expect_shape(
-            "input",
-            x.dim(),
-            (positions.len(), self.geometry.model_dim),
-        )?;
-        self.check_positions(positions)
-    }
-
-    /// The source block on its original tensors: project queries, keys and
-    /// values, attend, and project the output.
-    pub fn execute(
-        &self,
-        x: ArrayView2<f64>,
-        positions: &[i64],
-    ) -> Result<AttentionExecution, AttentionProgramError> {
-        self.check_input(x, positions)?;
-        let (queries, query_radius) = project_affine(&self.query, x);
-        let (keys, key_radius) = project_affine(&self.key, x);
-        let (values, value_radius) = project_affine(&self.value, x);
-        let projected = self.attend_projected(
-            ProjectedRows {
-                values: queries.view(),
-                radius: query_radius.view(),
-            },
-            ProjectedRows {
-                values: keys.view(),
-                radius: key_radius.view(),
-            },
-            ProjectedRows {
-                values: values.view(),
-                radius: value_radius.view(),
-            },
-            positions,
-        )?;
-        Ok(self.project_output(projected))
     }
 
     /// The source's attention on already-projected rows: rotate queries and keys
@@ -550,7 +504,7 @@ impl NativeAttention {
                 let logits: Vec<f64> = (0..=t).map(|s| scored.scores[[head, t, s]]).collect();
                 let logit_radius: Vec<f64> = (0..=t).map(|s| scored.radius[[head, t, s]]).collect();
                 let (row, row_radius) =
-                    joint_softmax_with_radius(&logits, &logit_radius).map_err(AttentionProgramError::Categorical)?;
+                    attention_weights(&logits, &logit_radius).map_err(AttentionProgramError::Categorical)?;
                 let mix_growth = accumulation_growth(t + 1);
                 for s in 0..=t {
                     weights[[head, t, s]] = row[s];
@@ -579,9 +533,83 @@ impl NativeAttention {
         })
     }
 
+}
+
+impl NativeAttention {
+    pub fn new(
+        geometry: AttentionGeometry,
+        rotary: RotaryEmbedding,
+        score_scale: f64,
+        query: AffineProjection,
+        key: AffineProjection,
+        value: AffineProjection,
+        output: AffineProjection,
+    ) -> Result<Self, AttentionProgramError> {
+        let attention = RotaryCausalAttention::new(geometry, rotary, score_scale)?;
+        let (model, query_dim, kv_dim) = (
+            geometry.model_dim,
+            geometry.query_dim(),
+            geometry.key_value_dim(),
+        );
+        for (weight_name, bias_name, projection, rows, cols) in [
+            ("query weight", "query bias", &query, query_dim, model),
+            ("key weight", "key bias", &key, kv_dim, model),
+            ("value weight", "value bias", &value, kv_dim, model),
+            ("output weight", "output bias", &output, model, query_dim),
+        ] {
+            expect_shape(weight_name, projection.weight.dim(), (rows, cols))?;
+            expect_shape(bias_name, (projection.bias.len(), 1), (rows, 1))?;
+        }
+        Ok(Self {
+            attention,
+            query,
+            key,
+            value,
+            output,
+        })
+    }
+
+    fn check_input(&self, x: ArrayView2<f64>, positions: &[i64]) -> Result<(), AttentionProgramError> {
+        expect_shape(
+            "input",
+            x.dim(),
+            (positions.len(), self.attention.geometry.model_dim),
+        )?;
+        self.attention.check_positions(positions)
+    }
+
+    /// The source block on its original tensors: project queries, keys and
+    /// values, attend, and project the output.
+    pub fn execute(
+        &self,
+        x: ArrayView2<f64>,
+        positions: &[i64],
+    ) -> Result<AttentionExecution, AttentionProgramError> {
+        self.check_input(x, positions)?;
+        let (queries, query_radius) = project_affine(&self.query, x);
+        let (keys, key_radius) = project_affine(&self.key, x);
+        let (values, value_radius) = project_affine(&self.value, x);
+        let projected = self.attention.attend_projected(
+            ProjectedRows {
+                values: queries.view(),
+                radius: query_radius.view(),
+            },
+            ProjectedRows {
+                values: keys.view(),
+                radius: key_radius.view(),
+            },
+            ProjectedRows {
+                values: values.view(),
+                radius: value_radius.view(),
+            },
+            positions,
+        )?;
+        Ok(self.project_output(projected))
+    }
+
     /// The source's output projection `W_O h_t + b_O` of the head-mixed rows.
     fn project_output(&self, projected: ProjectedAttention) -> AttentionExecution {
-        let g = self.geometry;
+        let g = self.attention.geometry;
         let tokens = projected.mixed.nrows();
         // The `n_heads·head_dim`-term inner product and the bias addition.
         let growth = accumulation_growth(g.query_dim() + 1);
@@ -690,7 +718,7 @@ impl ComponentAttention {
         query: ComponentProjection,
         key: ComponentProjection,
     ) -> Result<Self, AttentionProgramError> {
-        let g = native.geometry;
+        let g = native.attention.geometry;
         expect_shape(
             "query component outputs",
             query.outputs.dim(),
@@ -736,8 +764,8 @@ impl ComponentAttention {
         let queries = masked_head_rows(&self.query, &self.native.query.bias, masks.query.view(), x);
         let keys = masked_head_rows(&self.key, &self.native.key.bias, masks.key.view(), x);
         let (values, value_radius) = project_affine(&self.native.value, x);
-        let g = self.native.geometry;
-        let rotary = &self.native.rotary;
+        let g = self.native.attention.geometry;
+        let rotary = &self.native.attention.rotary;
         let alpha2 = rotary.attention_scaling * rotary.attention_scaling;
         // Per plane: the coordinate product, the in-plane sum, the `cos`/`sin`
         // product and the plane's sum (4), then at most `head_dim` plane additions,
@@ -783,15 +811,15 @@ impl ComponentAttention {
                         pass_propagated +=
                             queries.radius[q] * keys.value[k].abs() + queries.value[q].abs() * keys.radius[k];
                     }
-                    scores[[head, t, s]] = self.native.score_scale * (alpha2 * planes + pass);
-                    radius[[head, t, s]] = self.native.score_scale.abs()
+                    scores[[head, t, s]] = self.native.attention.score_scale * (alpha2 * planes + pass);
+                    radius[[head, t, s]] = self.native.attention.score_scale.abs()
                         * (alpha2.abs() * (planes_propagated + planes_trig)
                             + pass_propagated
                             + growth * (alpha2.abs() * planes_abs + pass_abs));
                 }
             }
         }
-        let projected = self.native.mix(
+        let projected = self.native.attention.mix(
             ScoredHeads { scores, radius },
             ProjectedRows {
                 values: values.view(),
@@ -805,7 +833,7 @@ impl ComponentAttention {
     /// `α² Σ_p [cos(Δθ_p)(u_a w_a + u_b w_b) + sin(Δθ_p)(u_b w_a − u_a w_b)]` plus
     /// the unrotated coordinates.
     pub fn kernel(&self, head: usize, displacement: i64) -> Result<QueryKeyKernel, AttentionProgramError> {
-        let g = self.native.geometry;
+        let g = self.native.attention.geometry;
         if head >= g.n_heads {
             return Err(AttentionProgramError::HeadOutOfRange {
                 head,
@@ -815,7 +843,7 @@ impl ComponentAttention {
         if displacement.unsigned_abs() > 2 * EXACT_POSITION_LIMIT as u64 {
             return Err(AttentionProgramError::DisplacementNotExact { displacement });
         }
-        let rotary = &self.native.rotary;
+        let rotary = &self.native.attention.rotary;
         let alpha2 = rotary.attention_scaling * rotary.attention_scaling;
         let (hd, rotated) = (g.head_dim, rotary.rotary_dim());
         let (qo, ko) = (head * hd, g.key_value_head(head) * hd);
@@ -850,8 +878,8 @@ impl ComponentAttention {
                     pass += u[qo + c] * w[ko + c];
                     pass_abs += (u[qo + c] * w[ko + c]).abs();
                 }
-                values[[i, j]] = self.native.score_scale * (alpha2 * planes + pass);
-                radius[[i, j]] = self.native.score_scale.abs()
+                values[[i, j]] = self.native.attention.score_scale * (alpha2 * planes + pass);
+                radius[[i, j]] = self.native.attention.score_scale.abs()
                     * (growth * (alpha2.abs() * planes_abs + pass_abs) + alpha2.abs() * planes_trig);
             }
         }
@@ -868,6 +896,7 @@ impl ComponentAttention {
 mod tests {
     use super::*;
     use ndarray::array;
+    use qd::Quad;
 
     /// Small dyadic rationals. Every product and sum the fixture forms stays exact
     /// in f64, so the edited tensor `U diag(m) R` and both routes' head-space
@@ -1281,12 +1310,12 @@ mod tests {
                     })
                     .collect();
                 let (joint, joint_radius) =
-                    joint_softmax_with_radius(&summed, &summed_radius).expect("finite summed logits");
+                    attention_weights(&summed, &summed_radius).expect("finite summed logits");
                 let mut mixture = vec![0.0; t + 1];
                 let mut mixture_radius = vec![0.0; t + 1];
                 for i in 0..QUERY_COMPONENTS {
                     let (weights, radius) =
-                        joint_softmax_with_radius(&logits[i], &logit_radius[i]).expect("finite component logits");
+                        attention_weights(&logits[i], &logit_radius[i]).expect("finite component logits");
                     for s in 0..=t {
                         mixture[s] += weights[s] / components;
                         mixture_radius[s] +=
@@ -1308,5 +1337,204 @@ mod tests {
             separate_worst > 1.0,
             "separately normalized component patterns must be refuted, got {separate_worst}"
         );
+    }
+
+    /// Exact rows give bit for bit what explicit zero radii give. A nonzero query
+    /// radius changes the bits, so the comparison sees the radius channel.
+    #[test]
+    fn exact_rows_match_explicit_zero_radii() {
+        let fixture = Fixture::new(RotaryPairing::HalfSplit).biased();
+        let native = fixture.edited(&all_on());
+        let queries = project_affine(&native.query, fixture.x.view()).0;
+        let keys = project_affine(&native.key, fixture.x.view()).0;
+        let values = project_affine(&native.value, fixture.x.view()).0;
+        let (zero_queries, zero_keys, zero_values) = (
+            Array2::zeros(queries.dim()),
+            Array2::zeros(keys.dim()),
+            Array2::zeros(values.dim()),
+        );
+        let bits = |p: &ProjectedAttention| -> Vec<u64> {
+            p.scores
+                .iter()
+                .chain(p.score_radius.iter())
+                .chain(p.weights.iter())
+                .chain(p.weight_radius.iter())
+                .chain(p.mixed.iter())
+                .chain(p.mixed_radius.iter())
+                .map(|v| v.to_bits())
+                .collect()
+        };
+        let explicit = native
+            .attention
+            .attend_projected(
+                ProjectedRows {
+                    values: queries.view(),
+                    radius: zero_queries.view(),
+                },
+                ProjectedRows {
+                    values: keys.view(),
+                    radius: zero_keys.view(),
+                },
+                ProjectedRows {
+                    values: values.view(),
+                    radius: zero_values.view(),
+                },
+                &fixture.positions,
+            )
+            .expect("explicit zero radii");
+        let exact = native
+            .attention
+            .attend_projected(
+                ProjectedRows::exact(queries.view()),
+                ProjectedRows::exact(keys.view()),
+                ProjectedRows::exact(values.view()),
+                &fixture.positions,
+            )
+            .expect("exact rows");
+        assert_eq!(bits(&exact), bits(&explicit), "exact rows must equal explicit zero radii");
+        let widened_queries = Array2::from_elem(queries.dim(), 0.125);
+        let widened = native
+            .attention
+            .attend_projected(
+                ProjectedRows {
+                    values: queries.view(),
+                    radius: widened_queries.view(),
+                },
+                ProjectedRows::exact(keys.view()),
+                ProjectedRows::exact(values.view()),
+                &fixture.positions,
+            )
+            .expect("widened query radius");
+        assert_ne!(bits(&widened), bits(&explicit), "a nonzero query radius must change the radii");
+    }
+
+    /// Double-double unit roundoff: the low word's last place relative to the high
+    /// word, `2^-104`.
+    const QUAD_UNIT: f64 = f64::EPSILON * f64::EPSILON;
+
+    fn ulp(value: f64) -> f64 {
+        value.abs().next_up() - value.abs()
+    }
+
+    /// `sin x` or `cos x` by the alternating Taylor series in double-double. Its
+    /// derived error is `QUAD_UNIT` times three rounded operations per term times the
+    /// largest term, plus the first omitted term: the series alternates, and its terms
+    /// decrease once the order exceeds `|x|`.
+    fn quad_trig(x: f64, sine: bool) -> (Quad, f64) {
+        let square = Quad::from_f64(x) * Quad::from_f64(x);
+        let mut term = if sine {
+            Quad::from_f64(x)
+        } else {
+            Quad::from_f64(1.0)
+        };
+        let mut order = if sine { 1.0_f64 } else { 0.0 };
+        let mut sum = term;
+        let mut largest = term.0.abs();
+        let mut terms = 1usize;
+        loop {
+            let next = Quad::from_f64(0.0) - term * square / Quad::from_f64((order + 1.0) * (order + 2.0));
+            order += 2.0;
+            if order > x.abs() && next.0.abs() <= QUAD_UNIT * largest {
+                return (sum, 3.0 * terms as f64 * QUAD_UNIT * largest + next.0.abs());
+            }
+            term = next;
+            sum = sum + term;
+            largest = largest.max(term.0.abs());
+            terms += 1;
+        }
+    }
+
+    /// `e^x` in double-double through the positive series; for `x < 0` it computes
+    /// `1/e^{-x}`, so no term cancels. Once the order exceeds `2|x|` consecutive terms
+    /// shrink by at least half, so the omitted tail is at most twice the first
+    /// omitted term.
+    fn quad_exp(x: f64) -> (Quad, f64) {
+        let magnitude = x.abs();
+        let mut term = Quad::from_f64(1.0);
+        let mut sum = term;
+        let mut order = 0.0_f64;
+        let mut terms = 1usize;
+        loop {
+            order += 1.0;
+            term = term * Quad::from_f64(magnitude) / Quad::from_f64(order);
+            if order + 1.0 > 2.0 * magnitude && term.0 <= QUAD_UNIT * sum.0 {
+                let relative = 3.0 * terms as f64 * QUAD_UNIT + 2.0 * term.0 / sum.0;
+                return if x < 0.0 {
+                    let inverse = Quad::from_f64(1.0) / sum;
+                    (inverse, inverse.0 * (relative + QUAD_UNIT))
+                } else {
+                    (sum, sum.0 * relative)
+                };
+            }
+            sum = sum + term;
+            terms += 1;
+        }
+    }
+
+    /// `|f_libm − f_ref| ≤ ulp(f_libm) + e_ref`, evaluated in double-double.
+    fn within_one_ulp(computed: f64, (reference, reference_error): (Quad, f64)) -> bool {
+        (Quad::from_f64(computed) - reference).0.abs() <= ulp(computed) + reference_error
+    }
+
+    /// The positive control: `computed` moved 2 ulp further from the reference,
+    /// so its error is at least 2 ulp whichever side libm rounded to.
+    fn moved_away(computed: f64, reference: Quad) -> f64 {
+        if (Quad::from_f64(computed) - reference).0 >= 0.0 {
+            computed.next_up().next_up()
+        } else {
+            computed.next_down().next_down()
+        }
+    }
+
+    /// The radii's libm assumption, checked at every angle and exponent the fixtures
+    /// evaluate: `sin` and `cos` at `p·θ` for `|p| ≤ 9` and `θ ∈ {1, 1/4, 3/4}`, and
+    /// `exp` at every executed log weight. This checks the documented platform bound
+    /// on the platform the tests run on. A value moved 2 ulp away must fail.
+    #[test]
+    fn libm_sin_cos_exp_are_within_one_ulp_at_the_fixture_points() {
+        let mut checked = 0usize;
+        for multiplier in -9..=9 {
+            for frequency in [1.0, 0.25, 0.75] {
+                let angle = f64::from(multiplier) * frequency;
+                let (sin, cos) = angle.sin_cos();
+                for (value, reference) in [(sin, quad_trig(angle, true)), (cos, quad_trig(angle, false))] {
+                    assert!(
+                        within_one_ulp(value, reference),
+                        "libm trig at {angle}: {value} is beyond one ulp"
+                    );
+                    assert!(
+                        !within_one_ulp(moved_away(value, reference.0), reference),
+                        "a value moved 2 ulp away at {angle} must fail"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        let fixture = Fixture::new(RotaryPairing::HalfSplit).biased();
+        let executed = fixture
+            .program()
+            .execute(&continuous_masks(), fixture.x.view(), &fixture.positions)
+            .expect("component execution");
+        for head in 0..fixture.geometry.n_heads {
+            for t in 0..fixture.positions.len() {
+                let row: Vec<f64> = (0..=t).map(|s| executed.scores[[head, t, s]]).collect();
+                let (log_weights, evaluation_radius) = log_softmax_with_error(&row).expect("finite row");
+                assert_eq!(log_weights.len(), evaluation_radius.len(), "one radius per log weight");
+                for &log_weight in &log_weights {
+                    let value = log_weight.exp();
+                    let reference = quad_exp(log_weight);
+                    assert!(
+                        within_one_ulp(value, reference),
+                        "libm exp at {log_weight}: {value} is beyond one ulp"
+                    );
+                    assert!(
+                        !within_one_ulp(moved_away(value, reference.0), reference),
+                        "a value moved 2 ulp away at {log_weight} must fail"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "the libm check must evaluate at least one point");
     }
 }
