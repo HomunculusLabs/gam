@@ -1343,6 +1343,9 @@ fn analytic_penalty_value_for_targets(
     target_t: ArrayView1<'_, f64>,
     target_beta: Option<ArrayView1<'_, f64>>,
 ) -> Result<f64, String> {
+    // The latent fits evaluate the analytic penalties on the latent coordinates alone
+    // and install no decoder jets, so an isometry penalty is refused by name.
+    registry.isometry_evaluation_precondition(IsometryEvaluationOrder::Value, target_t.len())?;
     let rho = Array1::<f64>::zeros(registry.total_rho_count());
     registry.validate_rho(rho.view())?;
     let mut value = 0.0_f64;

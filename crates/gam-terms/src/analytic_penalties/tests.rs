@@ -67,6 +67,14 @@ fn isometry_grad_hvp_majorizer_are_decoder_scale_invariant() {
     base.refresh_caches(Some(j.clone()), Some(h.clone()));
     let scaled = IsometryPenalty::new_euclidean(target.clone(), p);
     scaled.refresh_caches(Some(j_scaled), Some(h_scaled));
+    // The exact Hessian also reads the third decoder jet K = ∂H/∂t, which a decoder
+    // rescale scales by λ too. It is symmetric in its derivative axes (a, c, e).
+    let k = ndarray::Array3::<f64>::from_shape_fn((n_obs, p, d * d * d), |(row, output, axes)| {
+        let (a, c, e) = (axes / (d * d), (axes / d) % d, axes % d);
+        0.11 * (row as f64 + 1.0) - 0.07 * (output as f64) + 0.05 * ((a + c + e) as f64)
+    });
+    base.set_third_decoder_derivative(Some(Arc::new(k.clone())));
+    scaled.set_third_decoder_derivative(Some(Arc::new(k * lambda)));
 
     // value (re-pinned here alongside the rest, on the GN fixture).
     assert_abs_diff_eq!(
@@ -92,6 +100,10 @@ fn isometry_grad_hvp_majorizer_are_decoder_scale_invariant() {
         let hv1 = scaled.hvp(t.view(), rho.view(), v.view());
         let gn0 = base.psd_majorizer_hvp(t.view(), rho.view(), v.view());
         let gn1 = scaled.psd_majorizer_hvp(t.view(), rho.view(), v.view());
+        assert!(
+            hv0.iter().any(|x| x.abs() > 1e-9),
+            "exact Hessian must be non-trivial"
+        );
         assert!(
             gn0.iter().any(|x| x.abs() > 1e-9),
             "majorizer must be non-trivial"
@@ -868,6 +880,83 @@ fn isometry_pullback_metric_rejects_stale_cross_dimension_cache_2294() {
     let pen = IsometryPenalty::new_euclidean(target, p);
     pen.refresh_caches(Some(Arc::new(Array2::<f64>::zeros((n_obs, p * 2)))), None);
     assert!(pen.pullback_metric(1).is_some());
+}
+
+/// #2627: an isometry penalty is a function of the decoder jets its owner installs.
+/// Its evaluation precondition names each missing or misshapen jet by the order
+/// that reads it, and a registry refuses with the penalty's own text. The routes
+/// with no decoder jets (the latent-coordinate fits) refuse through the registry.
+#[test]
+fn isometry_precondition_names_each_missing_decoder_jet_2627() {
+    let (n_obs, p, d, j, h) = isometry_gn_fixture();
+    let n = n_obs * d;
+    let pen = IsometryPenalty::new_euclidean(PsiSlice::full(n, Some(d)), p);
+    let missing_j = pen
+        .evaluation_state_precondition(IsometryEvaluationOrder::Value, n)
+        .expect_err("a penalty with no installed jets has no value");
+    assert!(missing_j.contains("decoder Jacobian J"), "{missing_j}");
+
+    pen.refresh_caches(Some(j.clone()), None);
+    assert_eq!(
+        pen.evaluation_state_precondition(IsometryEvaluationOrder::Value, n),
+        Ok(())
+    );
+    let missing_h = pen
+        .evaluation_state_precondition(IsometryEvaluationOrder::Gradient, n)
+        .expect_err("J alone has no target derivative");
+    assert!(missing_h.contains("H = ∂J/∂t"), "{missing_h}");
+
+    pen.refresh_caches(Some(j), Some(h));
+    assert_eq!(
+        pen.evaluation_state_precondition(IsometryEvaluationOrder::Gradient, n),
+        Ok(())
+    );
+    let missing_k = pen
+        .evaluation_state_precondition(IsometryEvaluationOrder::Hessian, n)
+        .expect_err("J and H have no exact Hessian");
+    assert!(missing_k.contains("K = ∂H/∂t"), "{missing_k}");
+    pen.set_third_decoder_derivative(Some(Arc::new(ndarray::Array3::<f64>::zeros((
+        n_obs,
+        p,
+        d * d * d,
+    )))));
+    assert_eq!(
+        pen.evaluation_state_precondition(IsometryEvaluationOrder::Hessian, n),
+        Ok(())
+    );
+
+    let misshapen = IsometryPenalty::new_euclidean(PsiSlice::full(n, Some(d)), p);
+    misshapen.refresh_caches(Some(Arc::new(Array2::<f64>::zeros((n_obs - 1, p * d)))), None);
+    let wrong_rows = misshapen
+        .evaluation_state_precondition(IsometryEvaluationOrder::Value, n)
+        .expect_err("a Jacobian for another row count does not fit this target");
+    assert!(wrong_rows.contains("decoder Jacobian J has shape"), "{wrong_rows}");
+
+    let mut registry = AnalyticPenaltyRegistry::new();
+    registry.push(AnalyticPenaltyKind::Isometry(Arc::new(
+        IsometryPenalty::new_euclidean(PsiSlice::full(n, Some(d)), p),
+    )));
+    assert_eq!(
+        registry.isometry_evaluation_precondition(IsometryEvaluationOrder::Hessian, n),
+        Err(missing_j)
+    );
+}
+
+/// #2627: an evaluation that skips the precondition stops by name. It used to
+/// return a zero gradient with a log warning, which silently dropped the gauge
+/// from every objective that carried the penalty.
+#[test]
+#[should_panic(expected = "IsometryPenalty::grad_target: IsometryPenalty target derivatives read")]
+fn isometry_grad_target_without_the_jacobian_motion_stops_instead_of_returning_zero_2627() {
+    let (n_obs, p, d, j, ..) = isometry_gn_fixture();
+    let n = n_obs * d;
+    let pen = IsometryPenalty::new_euclidean(PsiSlice::full(n, Some(d)), p);
+    pen.refresh_caches(Some(j), None);
+    let grad = pen.grad_target(Array1::<f64>::zeros(n).view(), array![0.0_f64].view());
+    assert!(
+        grad.iter().any(|x| *x != 0.0),
+        "grad_target without H returned {grad:?} instead of stopping"
+    );
 }
 
 /// Build the canonical smooth-threshold sweep fixture: a logit grid that straddles

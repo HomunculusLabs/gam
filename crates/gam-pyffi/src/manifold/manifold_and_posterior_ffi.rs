@@ -2331,6 +2331,72 @@ fn gumbel_schedule_tau(schedule: &Bound<'_, PyDict>, iter: usize) -> PyResult<f6
     Ok(parsed.current_tau(iter))
 }
 
+/// Install the caller's decoder jets on every isometry penalty in `registry`, and
+/// check each holds the jets an evaluation of `order` reads.
+///
+/// An isometry penalty is a function of the decoder Jacobian `J`, never of the
+/// target directly, so a call without `J` refuses by name. `J` alone is an
+/// independent input: an isometry penalty is then constant in the target, so its
+/// target derivatives are exactly zero and its gradient is the returned `∂P/∂J`.
+/// `J` with `H = ∂J/∂t` moves with the target, and the target derivatives are the
+/// total ones through that motion. Returns whether `J` moves with the target.
+fn install_isometry_decoder_jets(
+    registry: &mut AnalyticPenaltyRegistry,
+    isometry_jacobian: Option<PyReadonlyArray2<'_, f64>>,
+    isometry_jacobian_second: Option<PyReadonlyArray2<'_, f64>>,
+    order: IsometryEvaluationOrder,
+    target_len: usize,
+) -> Result<bool, String> {
+    let registers_isometry = registry
+        .penalties
+        .iter()
+        .any(|penalty| matches!(penalty, AnalyticPenaltyKind::Isometry(_)));
+    if !registers_isometry {
+        if isometry_jacobian.is_some() || isometry_jacobian_second.is_some() {
+            return Err(
+                "isometry_jacobian and isometry_jacobian_second are the decoder jets of an \
+                 isometry penalty, and penalties_json registers none"
+                    .to_string(),
+            );
+        }
+        return Ok(false);
+    }
+    if isometry_jacobian.is_none() && isometry_jacobian_second.is_some() {
+        return Err(
+            "isometry_jacobian_second is the motion H = ∂J/∂t of a decoder Jacobian, and no \
+             isometry_jacobian was supplied"
+                .to_string(),
+        );
+    }
+    let jacobian = isometry_jacobian.map(|j| Arc::new(j.as_array().to_owned()));
+    let jacobian_second = isometry_jacobian_second.map(|h| Arc::new(h.as_array().to_owned()));
+    let moves_with_target = jacobian_second.is_some();
+    for penalty in &mut registry.penalties {
+        if let AnalyticPenaltyKind::Isometry(inner) = penalty {
+            let installed = (**inner).clone();
+            installed.refresh_caches(jacobian.clone(), jacobian_second.clone());
+            *penalty = AnalyticPenaltyKind::Isometry(Arc::new(installed));
+        }
+    }
+    let read_order = if moves_with_target {
+        order
+    } else {
+        IsometryEvaluationOrder::Value
+    };
+    registry
+        .isometry_evaluation_precondition(read_order, target_len)
+        .map_err(|reason| {
+            format!(
+                "{reason}; pass J as isometry_jacobian, and H as isometry_jacobian_second only \
+                 when J moves with the target"
+            )
+        })?;
+    Ok(moves_with_target)
+}
+
+/// Value and gradients `(P, ∂P/∂t, ∂P/∂ρ, ∂P/∂J)` of the analytic-penalty registry
+/// at `(target, rho)`. An isometry penalty reads the decoder jets the caller
+/// supplies; `install_isometry_decoder_jets` states what each combination means.
 #[pyfunction(signature = (
     latents_json,
     penalties_json,
@@ -2361,21 +2427,16 @@ fn analytic_penalty_value_grad<'py>(
         .map_err(py_value_error)?;
 
     let want_jacobian_grad = isometry_jacobian.is_some();
-    if let Some(j) = isometry_jacobian {
-        let j_cache = Arc::new(j.as_array().to_owned());
-        let h_cache = isometry_jacobian_second.map(|h| Arc::new(h.as_array().to_owned()));
-        for penalty in &mut registry.penalties {
-            if let AnalyticPenaltyKind::Isometry(inner) = penalty {
-                let mut cloned = (**inner).clone().with_jacobian_cache(j_cache.clone());
-                if let Some(h) = h_cache.as_ref() {
-                    cloned = cloned.with_jacobian_second_cache(h.clone());
-                }
-                *penalty = AnalyticPenaltyKind::Isometry(Arc::new(cloned));
-            }
-        }
-    }
-
     let target_view = target.as_array();
+    let isometry_jacobian_moves = install_isometry_decoder_jets(
+        &mut registry,
+        isometry_jacobian,
+        isometry_jacobian_second,
+        IsometryEvaluationOrder::Gradient,
+        target_view.len(),
+    )
+    .map_err(|reason| py_value_error(format!("analytic_penalty_value_grad: {reason}")))?;
+
     let rho_owned = match rho {
         Some(rho) => rho.as_array().to_owned(),
         None => Array1::<f64>::zeros(registry.total_rho_count()),
@@ -2402,7 +2463,11 @@ fn analytic_penalty_value_grad<'py>(
         }
         let rho_local = rho_owned.slice(s![rho_slice.clone()]);
         value += penalty.value(target_view.view(), rho_local);
-        grad += &penalty.grad_target(target_view.view(), rho_local);
+        // An isometry penalty reads the target only through the decoder Jacobian, so
+        // with an independent Jacobian its target gradient is exactly zero.
+        if isometry_jacobian_moves || !matches!(penalty, AnalyticPenaltyKind::Isometry(_)) {
+            grad += &penalty.grad_target(target_view.view(), rho_local);
+        }
         let local_grad_rho = penalty.grad_rho(target_view.view(), rho_local);
         for (local, global) in (rho_slice.start..rho_slice.end).enumerate() {
             grad_rho[global] += local_grad_rho[local];
@@ -2436,6 +2501,9 @@ fn analytic_penalty_value_grad<'py>(
 /// makes the contribution of each penalty equal to its descriptor-pinned
 /// weight (no REML shrinkage offset). Pass an explicit `rho` if the caller
 /// is mid-REML and wants the corresponding `exp(ρ)` scaling.
+///
+/// An isometry penalty reads the decoder jets the caller supplies;
+/// `install_isometry_decoder_jets` states what each combination means.
 #[pyfunction(signature = (
     latents_json,
     penalties_json,
@@ -2462,21 +2530,16 @@ fn analytic_penalty_hvp<'py>(
     let mut registry = build_analytic_penalty_registry_from_json(Some(&latents), Some(&penalties))
         .map_err(py_value_error)?;
 
-    if let Some(j) = isometry_jacobian {
-        let j_cache = Arc::new(j.as_array().to_owned());
-        let h_cache = isometry_jacobian_second.map(|h| Arc::new(h.as_array().to_owned()));
-        for penalty in &mut registry.penalties {
-            if let AnalyticPenaltyKind::Isometry(inner) = penalty {
-                let mut cloned = (**inner).clone().with_jacobian_cache(j_cache.clone());
-                if let Some(h) = h_cache.as_ref() {
-                    cloned = cloned.with_jacobian_second_cache(h.clone());
-                }
-                *penalty = AnalyticPenaltyKind::Isometry(Arc::new(cloned));
-            }
-        }
-    }
-
     let target_view = target.as_array();
+    let isometry_jacobian_moves = install_isometry_decoder_jets(
+        &mut registry,
+        isometry_jacobian,
+        isometry_jacobian_second,
+        IsometryEvaluationOrder::Hessian,
+        target_view.len(),
+    )
+    .map_err(|reason| py_value_error(format!("analytic_penalty_hvp: {reason}")))?;
+
     let v_view = v.as_array();
     if v_view.len() != target_view.len() {
         return Err(py_value_error(format!(
@@ -2504,6 +2567,11 @@ fn analytic_penalty_hvp<'py>(
     for (penalty, (rho_slice, tier, _name)) in registry.penalties.iter().zip(registry.rho_layout())
     {
         if matches!(tier, PenaltyTier::Rho) {
+            continue;
+        }
+        // With an independent decoder Jacobian an isometry penalty is constant in the
+        // target, so its target Hessian is exactly zero.
+        if !isometry_jacobian_moves && matches!(penalty, AnalyticPenaltyKind::Isometry(_)) {
             continue;
         }
         let rho_local = rho_owned.slice(s![rho_slice.clone()]);

@@ -169,19 +169,18 @@ pub(crate) fn assert_isometry_psd_majorizer_live_after_atom_refresh(
         build_isometry_atom_for_evaluator(evaluator, kind, &coords, p_out, 0.53);
     let rho = array![0.0_f64];
 
-    // Before any refresh the safe default is the zero block: confirm the
-    // precondition so the post-refresh contrast is the genuine fix, not a
-    // coincidence of a probe direction.
+    // Before any refresh the majorizer's decoder jets are absent, and its
+    // evaluation precondition refuses by name rather than read a zero block.
     let n = target_flat.len();
-    let unit0 = {
-        let mut e = Array1::<f64>::zeros(n);
-        e[0] = 1.0;
-        e
-    };
-    let pre = penalty.psd_majorizer_hvp(target_flat.view(), rho.view(), unit0.view());
+    let pre = penalty
+        .evaluation_state_precondition(
+            gam_terms::analytic_penalties::IsometryEvaluationOrder::Gradient,
+            n,
+        )
+        .expect_err("an unrefreshed isometry penalty has no decoder Jacobian");
     assert!(
-        pre.iter().all(|x| *x == 0.0),
-        "psd_majorizer_hvp without a cache must be the zero block; got {pre:?}"
+        pre.contains("decoder Jacobian J"),
+        "the unrefreshed refusal must name the decoder Jacobian, got: {pre}"
     );
 
     let installed = refresh_isometry_caches_from_atom(&penalty, &atom, coords.view())

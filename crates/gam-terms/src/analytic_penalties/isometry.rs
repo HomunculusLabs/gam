@@ -99,9 +99,13 @@ pub struct IsometryDuchonRadialSource {
 ///
 /// Gotchas:
 ///
-/// * The value path returns the configured missing-cache default when the
-///   first-jet cache is absent; gradient/HVP paths need the first and second
-///   decoder jets and return zeros when the analytic jet source is unavailable.
+/// * The penalty is a function of the decoder jets its owner installs, never of
+///   the target directly: `value` reads `J`, `grad_target` and the Gauss-Newton
+///   majorizer also `H = ∂J/∂t`, and the exact `hvp` also `K = ∂H/∂t`.
+///   [`Self::evaluation_state_precondition`] names a missing or misshapen jet,
+///   and every evaluation route installs the jets or checks it first. An
+///   evaluation without the jets it reads is an owner bug and panics; it never
+///   returns a zero penalty.
 /// * The exact Hessian includes a residual-curvature term requiring the third
 ///   decoder jet. REML/PIRLS curvature should prefer the Gauss-Newton PSD
 ///   majorizer when a positive curvature block is required.
@@ -306,9 +310,22 @@ fn isometry_row_delta_g(
     delta_g
 }
 
-impl IsometryPenalty {
-    pub const DEFAULT_VALUE_ON_MISSING_CACHE: f64 = 0.0;
+/// How far an isometry evaluation differentiates, which fixes the decoder jets
+/// it reads: the value reads `J`, the target gradient and the Gauss-Newton
+/// majorizer also `H = ∂J/∂t`, and the exact Hessian also `K = ∂H/∂t`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IsometryEvaluationOrder {
+    Value,
+    Gradient,
+    Hessian,
+}
 
+/// The decoder Jacobian read after `IsometryPenalty::require_evaluation_state`
+/// has established that it is installed and dimensioned.
+const INSTALLED_JACOBIAN: &str =
+    "the isometry evaluation precondition established an installed, dimensioned decoder Jacobian";
+
+impl IsometryPenalty {
     #[must_use]
     pub fn new_euclidean(target: PsiSlice, p_out: usize) -> Self {
         Self {
@@ -367,10 +384,7 @@ impl IsometryPenalty {
         method: &str,
         latent_dim: usize,
     ) -> Option<Arc<Array2<f64>>> {
-        let Some(jac) = self.jacobian_cache() else {
-            self.missing_cache_default(method, "jacobian_cache is None");
-            return None;
-        };
+        let jac = self.jacobian_cache()?;
         let expected = self
             .p_out
             .checked_mul(latent_dim)
@@ -402,9 +416,9 @@ impl IsometryPenalty {
     /// Per-step refresh entry point. Takes `&self` (no `&mut`) so the SAE
     /// outer loop can install fresh caches on an `Arc<IsometryPenalty>` held
     /// in the analytic-penalty registry without disturbing the surrounding
-    /// dispatcher. Pass `None` for either argument to clear that cache (the
-    /// dispatcher will then either fall back to the Duchon radial source if
-    /// available, or return the zero safe default).
+    /// dispatcher. Pass `None` for either argument to clear that cache (an
+    /// evaluation then reads the Duchon radial source if one is installed, and
+    /// otherwise [`Self::evaluation_state_precondition`] refuses it by name).
     pub fn refresh_caches(&self, jac: Option<Arc<Array2<f64>>>, jac2: Option<Arc<Array2<f64>>>) {
         *self
             .jacobian_cache_slot
@@ -486,44 +500,120 @@ impl IsometryPenalty {
 
     impl_with_weight_schedule!(scalar_weight);
 
-    fn missing_cache_default(&self, method: &str, detail: &str) {
-        log::warn!(
-            "IsometryPenalty::{method} missing required derivative state: {detail}; \
-             returning the zero safe default"
-        );
+    /// Check that the decoder jets an evaluation of `order` reads are installed
+    /// and shaped for a target of `target_len` latent coordinates.
+    ///
+    /// The penalty is a function of the decoder Jacobian `J = ∂f/∂t`, never of
+    /// the target directly: without `J` it has no value, and without `H = ∂J/∂t`
+    /// (or a Duchon radial source) no target derivative. Every evaluation route
+    /// installs the jets it reads (the SAE atom refresh), or checks this first
+    /// and refuses by the returned text (the pyffi `analytic_penalty_*` entry
+    /// points and the latent-coordinate fit routes, through
+    /// [`AnalyticPenaltyRegistry::isometry_evaluation_precondition`]).
+    pub fn evaluation_state_precondition(
+        &self,
+        order: IsometryEvaluationOrder,
+        target_len: usize,
+    ) -> Result<(), String> {
+        let d = self
+            .target
+            .latent_dim
+            .ok_or_else(|| "IsometryPenalty requires latent_dim on its PsiSlice".to_string())?;
+        if d == 0 || target_len % d != 0 {
+            return Err(format!(
+                "IsometryPenalty target length {target_len} is not a positive multiple of \
+                 latent_dim {d}"
+            ));
+        }
+        let n_obs = target_len / d;
+        let p = self.p_out;
+        match self.jacobian_cache() {
+            None => {
+                return Err(format!(
+                    "IsometryPenalty is a function of the decoder Jacobian J = ∂f/∂t, shaped \
+                     (n_obs, p_out·latent_dim) = ({n_obs}, {}), and none is installed",
+                    p * d
+                ));
+            }
+            Some(jac) if jac.dim() != (n_obs, p * d) => {
+                return Err(format!(
+                    "IsometryPenalty decoder Jacobian J has shape {:?}, but this target needs \
+                     (n_obs, p_out·latent_dim) = ({n_obs}, {})",
+                    jac.dim(),
+                    p * d
+                ));
+            }
+            Some(_) => {}
+        }
+        if order == IsometryEvaluationOrder::Value {
+            return Ok(());
+        }
+        match self.jacobian_second_cache() {
+            None if self.duchon_radial_source.is_none() => {
+                return Err(format!(
+                    "IsometryPenalty target derivatives read the decoder Jacobian's motion \
+                     H = ∂J/∂t, shaped (n_obs, p_out·latent_dim²) = ({n_obs}, {}), and neither \
+                     H nor a Duchon radial source is installed",
+                    p * d * d
+                ));
+            }
+            Some(jac2) if jac2.dim() != (n_obs, p * d * d) => {
+                return Err(format!(
+                    "IsometryPenalty decoder Jacobian motion H has shape {:?}, but this target \
+                     needs (n_obs, p_out·latent_dim²) = ({n_obs}, {})",
+                    jac2.dim(),
+                    p * d * d
+                ));
+            }
+            None | Some(_) => {}
+        }
+        if order == IsometryEvaluationOrder::Gradient {
+            return Ok(());
+        }
+        match self.third_decoder_derivative() {
+            None if self.duchon_radial_source.is_none() => {
+                return Err(format!(
+                    "IsometryPenalty exact Hessian reads the third decoder jet K = ∂H/∂t, shaped \
+                     (n_obs, p_out, latent_dim³) = ({n_obs}, {p}, {}), and neither K nor a \
+                     Duchon radial source is installed",
+                    d * d * d
+                ));
+            }
+            Some(jac3) if jac3.dim() != (n_obs, p, d * d * d) => {
+                return Err(format!(
+                    "IsometryPenalty third decoder jet K has shape {:?}, but this target needs \
+                     (n_obs, p_out, latent_dim³) = ({n_obs}, {p}, {})",
+                    jac3.dim(),
+                    d * d * d
+                ));
+            }
+            None | Some(_) => {}
+        }
+        Ok(())
     }
 
-    fn has_jacobian_cache(&self, method: &str) -> bool {
-        if self.jacobian_cache().is_some() {
-            true
-        } else {
-            self.missing_cache_default(method, "jacobian_cache is None");
-            false
+    /// Stop an evaluation that lacks the decoder jets `order` reads. That is an
+    /// owner bug, never a zero penalty.
+    fn require_evaluation_state(
+        &self,
+        method: &str,
+        order: IsometryEvaluationOrder,
+        target_len: usize,
+    ) {
+        if let Err(reason) = self.evaluation_state_precondition(order, target_len) {
+            // SAFETY: every evaluation route installs the decoder jets it reads (the
+            // SAE atom refresh), or checks `evaluation_state_precondition` and refuses
+            // by name before evaluating (the pyffi `analytic_penalty_*` entry points
+            // and the latent-coordinate fit routes). A zero penalty here would
+            // silently drop the gauge from the objective.
+            panic!("IsometryPenalty::{method}: {reason}");
         }
     }
 
-    fn has_jacobian_second_source(&self, method: &str) -> bool {
-        if self.jacobian_second_cache().is_some() || self.duchon_radial_source.is_some() {
-            true
-        } else {
-            self.missing_cache_default(
-                method,
-                "both jacobian_second_cache and duchon_radial_source are None",
-            );
-            false
-        }
-    }
-
-    fn has_jacobian_third_source(&self, method: &str) -> bool {
-        if self.third_decoder_derivative().is_some() || self.duchon_radial_source.is_some() {
-            true
-        } else {
-            self.missing_cache_default(
-                method,
-                "both third_decoder_derivative cache and duchon_radial_source are None",
-            );
-            false
-        }
+    /// Log an evaluation that returns zero because the decoder metric is
+    /// degenerate or a Duchon radial jet failed to materialize.
+    fn log_zero_default(&self, method: &str, detail: &str) {
+        log::warn!("IsometryPenalty::{method} {detail}; returning the zero default");
     }
 
     /// Build `M_n = U_n^T J_n ∈ ℝ^{r_n × d}` for row `n`. For
@@ -716,7 +806,7 @@ impl IsometryPenalty {
         match self.duchon_radial_jacobian_second(target, n_obs, d, source) {
             Ok(jac2) => Some(CowArray::from(jac2)),
             Err(err) => {
-                self.missing_cache_default(
+                self.log_zero_default(
                     "jacobian_second",
                     &format!("failed to materialize Duchon radial second derivative: {err}"),
                 );
@@ -738,7 +828,7 @@ impl IsometryPenalty {
         match self.duchon_radial_jacobian_third(target, n_obs, d, source) {
             Ok(jac3) => Some(CowArray::from(jac3)),
             Err(err) => {
-                self.missing_cache_default(
+                self.log_zero_default(
                     "jacobian_third",
                     &format!("failed to materialize Duchon radial third derivative: {err}"),
                 );
@@ -756,20 +846,15 @@ impl IsometryPenalty {
             .latent_dim
             .expect("IsometryPenalty requires latent_dim on its PsiSlice");
         let n_obs = target.len() / d;
-        if !self.has_jacobian_cache("hvp")
-            || !self.has_jacobian_second_source("hvp")
-            || !self.has_jacobian_third_source("hvp")
-        {
-            return None;
-        }
+        self.require_evaluation_state("hvp", IsometryEvaluationOrder::Hessian, target.len());
         let p = self.p_out;
         let jac2 = self.jacobian_second(target.view(), n_obs, d)?;
         let jac3 = self.jacobian_third(target.view(), n_obs, d)?;
-        let g = self.pullback_metric(d)?;
+        let g = self.pullback_metric(d).expect(INSTALLED_JACOBIAN);
         let metric = self.normalized_metric_state(g, n_obs, d)?;
         let mut wj_rows = Vec::with_capacity(n_obs);
         for n in 0..n_obs {
-            wj_rows.push(self.weighted_jacobian_row(n, d)?);
+            wj_rows.push(self.weighted_jacobian_row(n, d).expect(INSTALLED_JACOBIAN));
         }
         Some(IsometryHvpState {
             d,
@@ -968,7 +1053,7 @@ impl IsometryPenalty {
         let trace_denominator = (n_obs * d) as f64;
         let normalizer = average_trace_per_dim(g.view(), n_obs, d);
         if !(normalizer.is_finite() && normalizer > f64::MIN_POSITIVE) {
-            self.missing_cache_default(
+            self.log_zero_default(
                 "normalized_metric_state",
                 &format!(
                     "unit-average-speed normalizer is non-positive or non-finite: {normalizer}"
@@ -984,7 +1069,7 @@ impl IsometryPenalty {
         // `ref_normalizer == 1.0` exactly, preserving the prior behavior bit-for-bit.
         let ref_normalizer = average_trace_per_dim(g_ref.view(), n_obs, d);
         if !(ref_normalizer.is_finite() && ref_normalizer > f64::MIN_POSITIVE) {
-            self.missing_cache_default(
+            self.log_zero_default(
                 "normalized_metric_state",
                 &format!(
                     "reference-metric normalizer is non-positive or non-finite: {ref_normalizer}"
@@ -1061,20 +1146,18 @@ impl IsometryPenalty {
         let n_obs = target.len() / d;
         let p = self.p_out;
         let mut grad = Array2::<f64>::zeros((n_obs, p * d));
-        if !self.has_jacobian_cache("grad_jacobian") {
-            return grad;
-        }
-        let Some(g) = self.pullback_metric(d) else {
-            return grad;
-        };
+        self.require_evaluation_state(
+            "grad_jacobian",
+            IsometryEvaluationOrder::Value,
+            target.len(),
+        );
+        let g = self.pullback_metric(d).expect(INSTALLED_JACOBIAN);
         let Some(metric) = self.normalized_metric_state(g, n_obs, d) else {
             return grad;
         };
         let mu = validated_learnable_weight(self.scalar_weight, rho[self.rho_index]);
         for n in 0..n_obs {
-            let Some(wj) = self.weighted_jacobian_row(n, d) else {
-                return Array2::<f64>::zeros((n_obs, p * d));
-            };
+            let wj = self.weighted_jacobian_row(n, d).expect(INSTALLED_JACOBIAN);
             for i in 0..p {
                 for c in 0..d {
                     let mut acc = 0.0;
@@ -1115,14 +1198,10 @@ impl AnalyticPenalty for IsometryPenalty {
             .latent_dim
             .expect("IsometryPenalty requires latent_dim on its PsiSlice");
         let n_obs = target.len() / d;
-        if !self.has_jacobian_cache("value") {
-            return Self::DEFAULT_VALUE_ON_MISSING_CACHE;
-        }
-        let Some(g) = self.pullback_metric(d) else {
-            return Self::DEFAULT_VALUE_ON_MISSING_CACHE;
-        };
+        self.require_evaluation_state("value", IsometryEvaluationOrder::Value, target.len());
+        let g = self.pullback_metric(d).expect(INSTALLED_JACOBIAN);
         let Some(metric) = self.normalized_metric_state(g, n_obs, d) else {
-            return Self::DEFAULT_VALUE_ON_MISSING_CACHE;
+            return 0.0;
         };
         let mu = validated_learnable_weight(self.scalar_weight, rho[self.rho_index]);
         let mut acc = 0.0;
@@ -1155,14 +1234,12 @@ impl AnalyticPenalty for IsometryPenalty {
             .latent_dim
             .expect("IsometryPenalty requires latent_dim on its PsiSlice");
         let n_obs = target.len() / d;
-        if !self.has_jacobian_cache("grad_target")
-            || !self.has_jacobian_second_source("grad_target")
-        {
-            return Array1::<f64>::zeros(target.len());
-        }
-        let Some(g) = self.pullback_metric(d) else {
-            return Array1::<f64>::zeros(target.len());
-        };
+        self.require_evaluation_state(
+            "grad_target",
+            IsometryEvaluationOrder::Gradient,
+            target.len(),
+        );
+        let g = self.pullback_metric(d).expect(INSTALLED_JACOBIAN);
         let Some(metric) = self.normalized_metric_state(g, n_obs, d) else {
             return Array1::<f64>::zeros(target.len());
         };
@@ -1175,9 +1252,7 @@ impl AnalyticPenalty for IsometryPenalty {
         assert_eq!(jac2.ncols(), p * d * d);
 
         for n in 0..n_obs {
-            let Some(wj) = self.weighted_jacobian_row(n, d) else {
-                return grad;
-            };
+            let wj = self.weighted_jacobian_row(n, d).expect(INSTALLED_JACOBIAN);
             for c in 0..d {
                 let mut acc = 0.0;
                 for a in 0..d {
@@ -1240,17 +1315,15 @@ impl AnalyticPenalty for IsometryPenalty {
             .latent_dim
             .expect("IsometryPenalty requires latent_dim on its PsiSlice");
         let n_obs = target.len() / d;
-        if !self.has_jacobian_cache("psd_majorizer_hvp")
-            || !self.has_jacobian_second_source("psd_majorizer_hvp")
-        {
-            return Array1::<f64>::zeros(v.len());
-        }
+        self.require_evaluation_state(
+            "psd_majorizer_hvp",
+            IsometryEvaluationOrder::Gradient,
+            target.len(),
+        );
         let Some(jac2) = self.jacobian_second(target, n_obs, d) else {
             return Array1::<f64>::zeros(v.len());
         };
-        let Some(g) = self.pullback_metric(d) else {
-            return Array1::<f64>::zeros(v.len());
-        };
+        let g = self.pullback_metric(d).expect(INSTALLED_JACOBIAN);
         let Some(metric) = self.normalized_metric_state(g, n_obs, d) else {
             return Array1::<f64>::zeros(v.len());
         };
@@ -1259,10 +1332,7 @@ impl AnalyticPenalty for IsometryPenalty {
         let mut out = Array1::<f64>::zeros(v.len());
         let mut wj_rows = Vec::with_capacity(n_obs);
         for n in 0..n_obs {
-            let Some(wj) = self.weighted_jacobian_row(n, d) else {
-                return Array1::<f64>::zeros(v.len());
-            };
-            wj_rows.push(wj);
+            wj_rows.push(self.weighted_jacobian_row(n, d).expect(INSTALLED_JACOBIAN));
         }
         let mut delta_g = Array2::<f64>::zeros((n_obs, d * d));
         for n in 0..n_obs {

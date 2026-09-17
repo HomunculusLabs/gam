@@ -166,7 +166,8 @@ pub(crate) use gam::terms::basis::matern_gradient::{
 pub(crate) use gam::terms::decoders::gated_decoder::GatedSAEDecoder;
 pub(crate) use gam::terms::{
     AnalyticPenalty as AnalyticPenaltyTrait, AnalyticPenaltyKind, AnalyticPenaltyRegistry,
-    EdgeRestriction as CoreEdgeRestriction, IvaeRidgeMeanGauge as IvaeRidgeMeanGaugePenalty,
+    EdgeRestriction as CoreEdgeRestriction, IsometryEvaluationOrder,
+    IvaeRidgeMeanGauge as IvaeRidgeMeanGaugePenalty,
     MechanismSparsityPenalty as CoreMechanismSparsityPenalty, ParametricRowPrecisionPriorPenalty,
     PenaltyTier, PsiSlice, RowPrecisionPriorPenalty,
     SheafConsistencyPenalty as CoreSheafConsistencyPenalty,

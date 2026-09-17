@@ -69,7 +69,7 @@ pub use penalty_spec::{PenaltySpec, validate_penalty_spec_shape};
 pub use analytic_penalties::{
     ARDPenalty, AnalyticPenalty, AnalyticPenaltyKind, AnalyticPenaltyRegistry,
     BlockOrthogonalityPenalty, BlockSparsityPenalty, DecoderIncoherencePenalty, DifferenceOpKind,
-    EdgeRestriction, HarmonicRoughnessPenalty, IsometryDuchonRadialSource,
+    EdgeRestriction, HarmonicRoughnessPenalty, IsometryDuchonRadialSource, IsometryEvaluationOrder,
     IsometryPenalty, IsometryReference, IvaeRidgeMeanGauge, MechanismSparsityPenalty,
     NestedPrefixPenalty, NuclearNormPenalty, OrderedBetaBernoulliHessianDiagThirdChannels,
     OrderedBetaBernoulliPenalty, OrthogonalityPenalty, ParametricRowPrecisionPriorPenalty,

@@ -214,6 +214,23 @@ impl AnalyticPenaltyRegistry {
         );
     }
 
+    /// Check every isometry penalty holds the decoder jets an evaluation of
+    /// `order` reads for a `target_len`-coordinate target, returning the first
+    /// refusal ([`IsometryPenalty::evaluation_state_precondition`]). No other
+    /// registered penalty reads state its owner installs, so the others pass.
+    pub fn isometry_evaluation_precondition(
+        &self,
+        order: IsometryEvaluationOrder,
+        target_len: usize,
+    ) -> Result<(), String> {
+        for penalty in &self.penalties {
+            if let AnalyticPenaltyKind::Isometry(isometry) = penalty {
+                isometry.evaluation_state_precondition(order, target_len)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Returns `(local_rho_slice, target_tier, name)` for each registered
     /// penalty so the outer driver can wire its ρ-views.
     pub fn rho_layout(&self) -> Vec<(std::ops::Range<usize>, PenaltyTier, &str)> {

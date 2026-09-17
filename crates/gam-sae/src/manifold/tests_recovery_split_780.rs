@@ -627,16 +627,19 @@ pub(crate) fn assert_isometry_wiring_matches_fd(
     let penalty = IsometryPenalty::new_euclidean(target_slice, p);
     let rho = Array1::<f64>::zeros(1);
 
-    // Without a refresh, the safe default is zero and the gradient is
-    // all zeros. Confirm the precondition so the post-refresh contrast
-    // is meaningful.
+    // Without a refresh the penalty holds no decoder jets, so its evaluation
+    // precondition refuses by name. The post-refresh evaluation is the wiring
+    // under test.
     let target_flat: Array1<f64> = coords.iter().copied().collect();
-    let v0 = penalty.value(target_flat.view(), rho.view());
-    assert_eq!(v0, IsometryPenalty::DEFAULT_VALUE_ON_MISSING_CACHE);
-    let g0 = penalty.grad_target(target_flat.view(), rho.view());
+    let unrefreshed = penalty
+        .evaluation_state_precondition(
+            gam_terms::analytic_penalties::IsometryEvaluationOrder::Gradient,
+            target_flat.len(),
+        )
+        .expect_err("an unrefreshed isometry penalty has no decoder Jacobian");
     assert!(
-        g0.iter().all(|x| *x == 0.0),
-        "grad_target without cache must be all zeros, got {g0:?}"
+        unrefreshed.contains("decoder Jacobian J"),
+        "the unrefreshed refusal must name the decoder Jacobian, got: {unrefreshed}"
     );
 
     // Refresh and re-evaluate.

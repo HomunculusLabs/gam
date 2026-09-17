@@ -50,3 +50,11 @@ def test_torch_example_runs(example: Path) -> None:
         f"stdout:\n{completed.stdout}\n"
         f"stderr:\n{completed.stderr}"
     )
+    # #2627: the isometry kernel used to return a zero gradient with a log warning
+    # when it lacked a decoder jet, so a demo ran to completion on a penalty that
+    # contributed nothing. Every isometry evaluation now holds the jets it reads.
+    assert "IsometryPenalty::" not in completed.stdout + completed.stderr, (
+        f"{example.name} logged an isometry kernel warning\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}"
+    )

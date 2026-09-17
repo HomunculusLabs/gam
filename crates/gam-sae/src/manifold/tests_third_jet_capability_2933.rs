@@ -501,15 +501,16 @@ fn subspace_reduction_forwards_the_third_jet_capability_2933() {
 /// The exact isometry Hessian reads the same declaration through the cache
 /// refresh, and production must refuse an unavailable third jet there too.
 ///
-/// Premise, free to fail: with no decoder third jet installed, `hvp` returns
-/// its zero default while the analytic twin's is nonzero. So a penalty built on
-/// an unavailable jet would carry zero curvature rather than an exact one.
+/// Premise, free to fail: with no decoder third jet installed, the exact
+/// isometry Hessian's evaluation precondition refuses by naming K, while the
+/// analytic twin's hvp is nonzero. So a penalty built on an unavailable jet has
+/// no exact curvature to carry.
 #[test]
 fn isometry_penalty_refuses_an_unavailable_third_jet_2933() {
     let coords = Array2::from_shape_fn((12, 1), |(row, _)| (row as f64 + 0.3) / 12.0);
     let direction: Array1<f64> = (0..12).map(|row| (0.7 * row as f64).cos()).collect();
     let rho = array![0.0_f64];
-    let refreshed_hvp = |evaluator: Arc<dyn SaeBasisSecondJet>| -> (bool, f64) {
+    let refreshed_hvp = |evaluator: Arc<dyn SaeBasisSecondJet>| -> (bool, Result<f64, String>) {
         let (atom, penalty, target_flat) = build_isometry_atom_for_evaluator(
             evaluator,
             SaeAtomBasisKind::Periodic,
@@ -519,28 +520,39 @@ fn isometry_penalty_refuses_an_unavailable_third_jet_2933() {
         );
         refresh_isometry_caches_from_atom(&penalty, &atom, coords.view())
             .expect("the isometry caches refresh from the atom");
-        let hv = penalty.hvp(target_flat.view(), rho.view(), direction.view());
-        (
-            penalty.third_decoder_derivative().is_some(),
-            hv.iter().map(|x| x.abs()).fold(0.0_f64, f64::max),
-        )
+        let max_hv = penalty
+            .evaluation_state_precondition(
+                gam_terms::analytic_penalties::IsometryEvaluationOrder::Hessian,
+                target_flat.len(),
+            )
+            .map(|()| {
+                penalty
+                    .hvp(target_flat.view(), rho.view(), direction.view())
+                    .iter()
+                    .map(|x| x.abs())
+                    .fold(0.0_f64, f64::max)
+            });
+        (penalty.third_decoder_derivative().is_some(), max_hv)
     };
     let (analytic_k, analytic_hv) =
         refreshed_hvp(Arc::new(PeriodicHarmonicEvaluator::new(3).expect("periodic basis")));
     let (unavailable_k, unavailable_hv) = refreshed_hvp(Arc::new(SecondOrderOnlyPeriodic));
     println!(
-        "[#2933 F02] isometry hvp: analytic K = {analytic_k}, max|Hv| = {analytic_hv:.6e}; \
-         unavailable K = {unavailable_k}, max|Hv| = {unavailable_hv:.6e}"
+        "[#2933 F02] isometry hvp: analytic K = {analytic_k}, max|Hv| = {analytic_hv:?}; \
+         unavailable K = {unavailable_k}, max|Hv| = {unavailable_hv:?}"
     );
     assert!(
-        analytic_k && analytic_hv > 1.0e-6,
+        analytic_k && analytic_hv.as_ref().is_ok_and(|max_hv| *max_hv > 1.0e-6),
         "premise: the analytic twin installs K and has a nonzero exact isometry hvp \
-         (K = {analytic_k}, max|Hv| = {analytic_hv:.6e})"
+         (K = {analytic_k}, max|Hv| = {analytic_hv:?})"
     );
     assert!(
-        !unavailable_k && unavailable_hv == 0.0,
-        "premise: with no K the exact isometry hvp is its zero default \
-         (K = {unavailable_k}, max|Hv| = {unavailable_hv:.6e})"
+        !unavailable_k
+            && unavailable_hv
+                .as_ref()
+                .is_err_and(|reason| reason.contains("K = ∂H/∂t")),
+        "premise: with no K the exact isometry Hessian refuses by naming K \
+         (K = {unavailable_k}, max|Hv| = {unavailable_hv:?})"
     );
 
     let corrected = |evaluator: Arc<dyn SaeBasisEvaluator>| {

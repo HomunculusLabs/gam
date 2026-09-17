@@ -29,9 +29,9 @@ use super::*;
 /// `basis_second_jet` slot holds a [`SaeBasisSecondJet`] implementation
 /// that supplies the analytic Hessian). Returns `Ok(false)` when only the
 /// base [`SaeBasisEvaluator`] is installed (no second jet available) — in
-/// that case only the first-jet `jacobian_cache` is installed and the
-/// penalty's `has_jacobian_second_source` check still has a chance to
-/// succeed via a pre-supplied `duchon_radial_source`. Returns `Err` on
+/// that case only the first-jet `jacobian_cache` is installed, and the
+/// penalty's gradient precondition can still be met by a pre-supplied
+/// `duchon_radial_source`. Returns `Err` on
 /// shape mismatches (which would indicate a buggy evaluator) or when the
 /// second-jet implementation itself fails (e.g. wrong latent dimension).
 ///

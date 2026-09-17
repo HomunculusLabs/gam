@@ -741,6 +741,21 @@ pub(super) fn prepare_standard_latent_coord(
             spec.n
         ));
     }
+    // This route evaluates the analytic penalties on the latent coordinates alone
+    // and installs no decoder jets, so an isometry penalty, a function of the
+    // decoder Jacobian, has no value here and is refused by name.
+    analytic_penalties
+        .isometry_evaluation_precondition(
+            gam_terms::IsometryEvaluationOrder::Hessian,
+            spec.n * spec.d,
+        )
+        .map_err(|reason| {
+            format!(
+                "latent '{}': the latent-coordinate REML route supplies no decoder jets for an \
+                 isometry penalty ({reason})",
+                spec.target
+            )
+        })?;
 
     let matrix = initial_latent_matrix(&spec, y)?;
     let id_mode = latent_id_mode(&spec)?;
