@@ -709,20 +709,16 @@ impl SaeManifoldTerm {
     /// search while the decoder Grams (hence `O`) still move with the trial. The
     /// weight is refreshed every assembly, so across outer iterations it tracks the
     /// converging routing exactly (a self-consistent fixed point), never lagging by
-    /// more than the one in-flight step the repulsion gate also lags. `None` when no
-    /// pair co-fires (the strict no-op); the value/gradient seams fall back to the
-    /// live coactivation in that case so standalone (non-line-search) calls are
-    /// unaffected.
+    /// more than the one in-flight step the repulsion gate also lags.
+    ///
+    /// #2933 F05 — a refresh installs the support it read, EMPTY when no pair
+    /// co-fires (`K < 2`, or a fully disjoint routing — the strict no-op). A frozen
+    /// or declared empty support therefore stays empty while the routing moves.
+    /// Reading the live coactivation there instead would turn the barrier on at a
+    /// trial state whose gradient was assembled without it (#1625), a routing weight
+    /// outside the declared gate set. `None` means only that no refresh ran.
     pub(crate) fn refresh_barrier_coactivation_gate(&mut self) {
-        if self.k_atoms() < 2 {
-            self.barrier_coactivation_gate = None;
-            return;
-        }
         let (pairs, atom_neff) = self.barrier_coactive_support();
-        if pairs.is_empty() {
-            self.barrier_coactivation_gate = None;
-            return;
-        }
         // The Jeffreys barrier freezes the ROUTING-derived quantities only: the
         // coactivation weights `q_jk` AND the per-atom effective sample sizes
         // `N_eff,k` (which set the softening `ε_C` of every component — see

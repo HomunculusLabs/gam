@@ -643,10 +643,12 @@ pub struct SaeManifoldTerm {
     /// Freezing it here at assembly entry (lagged-diffusivity, exactly like the
     /// smoothness Gram and the repulsion gate) makes the barrier a pure function of
     /// the decoder shapes within a Newton step, so it exerts NO phantom force on
-    /// the routing and the inner solve reaches true KKT stationarity. `None` when
-    /// no pair co-fires (`K < 2`, or a fully-disjoint routing — the strict no-op);
-    /// callers fall back to the live coactivation in that case. Transient: not part
-    /// of the persisted term identity (Clone starts `None`, rebuilt next assembly).
+    /// the routing and the inner solve reaches true KKT stationarity. A refresh
+    /// installs an EMPTY support when no pair co-fires (`K < 2`, or a fully-disjoint
+    /// routing — the strict no-op), so a frozen empty support stays empty; `None`
+    /// means no refresh ran, and only then do callers read the live coactivation
+    /// (#2933 F05). Transient: not part of the persisted term identity (Clone starts
+    /// `None`, rebuilt next assembly).
     /// Per-assembly FROZEN separation-barrier support: the co-firing pairs
     /// `(j, k, q_jk)` — the entries of the Jeffreys Fisher `F = Q ∘ O` (see
     /// [`super::penalties::BarrierComponent`]) — TOGETHER with the per-atom

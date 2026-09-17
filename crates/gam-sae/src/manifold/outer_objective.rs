@@ -789,9 +789,9 @@ pub struct SaeManifoldOuterObjective {
     reactive_waypoint_checkpoint: Option<ReactiveWaypointCheckpoint>,
     /// #2933 F05 — the collapse-prevention gates this objective holds for its whole
     /// hyperparameter solve (see [`CollapsePreventionGates`]). `None` until the first
-    /// finite priced root chooses them: that evaluation converges until its root
-    /// reproduces its own gates, and every later drive declares that set on the term
-    /// it drives. Re-deriving them at each ρ would report `L(θ̂; W(θ̂))`, whose
+    /// finite priced root chooses them: that evaluation freezes them where its initial
+    /// joint fit ends and prices its root under them, and every later drive declares
+    /// that set on the term it drives. Re-deriving them at each ρ would report `L(θ̂; W(θ̂))`, whose
     /// ρ-derivative carries `L_w·W_θ·θ̂_ρ` through an implicit Jacobian
     /// `L_θθ + L_θw·W_θ` the analytic gradient does not contain; held, that gradient is
     /// the exact derivative of the reported value. A reactive scalar waypoint installs
@@ -1108,7 +1108,8 @@ impl SaeManifoldOuterObjective {
     /// #2933 F05 — declare this objective's collapse-prevention gates on the term it
     /// is about to drive. Every drive declares them, because a term restored from a
     /// clone (a rejected probe, a basin member, `reset`) carries none. With none
-    /// declared yet, the drive re-derives them and its root chooses them.
+    /// declared yet, the drive freezes them where its initial joint fit ends, and its
+    /// root chooses them.
     fn declare_collapse_prevention_gates_on_term(&mut self) {
         match self.collapse_prevention_gates.as_ref() {
             Some(gates) => self.term.declare_collapse_prevention_gates(gates),

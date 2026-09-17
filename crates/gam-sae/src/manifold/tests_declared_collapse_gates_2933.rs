@@ -236,8 +236,11 @@ fn a_term_handed_in_with_frozen_gates_declares_them_2933() {
     term.streaming_gates_frozen = true;
     let frozen = term.collapse_prevention_gates();
     assert!(
-        frozen.barrier_coactivation.is_some(),
-        "the co-firing fixture must carry a barrier coactivation support: {frozen:?}"
+        frozen
+            .barrier_coactivation
+            .as_ref()
+            .is_some_and(|gate| !gate.pairs.is_empty()),
+        "the co-firing fixture must carry a co-firing barrier pair: {frozen:?}"
     );
     let objective = SaeManifoldOuterObjective::new(
         term,
@@ -338,5 +341,56 @@ fn one_objective_holds_one_gate_set_across_rho_reset_and_waypoint_rollback_2933(
         objective.collapse_prevention_gates.as_ref(),
         Some(&declared),
         "a rollback must restore the checkpointed objective's gates"
+    );
+}
+
+/// A refresh on a routing where no atom pair co-fires freezes an EMPTY support.
+/// Once declared, moving the logits until the pair co-fires must not turn the
+/// separation barrier on: the gradient assembled under that support carries no
+/// barrier force, so a live read would price a routing force the solve never
+/// modelled. Positive control: re-deriving the support at the moved routing prices
+/// a barrier.
+#[test]
+fn a_declared_empty_coactivation_support_stays_empty_when_routing_moves_2933() {
+    let (mut term, _target, _rho) = co_firing_collinear_two_atom_fixture();
+    let n = term.n_obs();
+    // Every row routes to one atom, and the other atom sits far below the co-firing
+    // floor relative to that row's peak.
+    term.assignment.logits = Array2::<f64>::from_shape_fn((n, 2), |(row, atom)| {
+        if (row + atom) % 2 == 0 { 8.0 } else { -8.0 }
+    });
+    term.refresh_decoder_repulsion_gate();
+    term.refresh_barrier_coactivation_gate();
+    term.refresh_amplitude_barrier_gate();
+    let disjoint = term.collapse_prevention_gates();
+    assert!(
+        disjoint
+            .barrier_coactivation
+            .as_ref()
+            .is_none_or(|gate| gate.pairs.is_empty()),
+        "the disjoint routing must have no co-firing pair: {disjoint:?}"
+    );
+    term.declare_collapse_prevention_gates(&disjoint);
+    let before = term.separation_barrier_value(1.0);
+
+    term.assignment.logits.fill(0.0);
+    let after = term.separation_barrier_value(1.0);
+    let mut rederived = term.clone();
+    rederived.refresh_barrier_coactivation_gate();
+    let live = rederived.separation_barrier_value(1.0);
+    eprintln!(
+        "[#2933 F05] declared empty support: before={before:e} after={after:e} \
+         rederived={live:e}"
+    );
+    assert!(
+        live > 0.0,
+        "positive control: the support re-derived at the co-firing routing must price a \
+         barrier, got {live:e}"
+    );
+    assert_eq!(
+        after.to_bits(),
+        before.to_bits(),
+        "a declared empty coactivation support must keep the separation barrier off while \
+         the routing moves (before={before:e}, after={after:e})"
     );
 }
