@@ -2546,6 +2546,14 @@ mod tests {
         fn excess(&self, t: &Array1<f64>) -> f64 {
             self.a * t.iter().map(|&x| x.powi(4)).sum::<f64>()
         }
+        fn excess_rounding_band(&self, t: &Array1<f64>) -> f64 {
+            // Each term squares twice, the sum adds `m − 1` times and `a` scales
+            // once: at most `m + 3` rounded operations along any path.
+            gam_linalg::roundoff::accumulation_band(
+                t.len() + 3,
+                self.a.abs() * t.iter().map(|&x| x.powi(4)).sum::<f64>(),
+            )
+        }
         fn excess_rho_gradient(&self, t: &Array1<f64>) -> Array1<f64> {
             t.mapv(|x| self.a * x.powi(4))
         }
@@ -2737,6 +2745,27 @@ mod tests {
         }
         fn excess(&self, t: &Array1<f64>) -> f64 {
             self.excess_and_ngs(&self.s_of(t)).0
+        }
+        fn excess_rounding_band(&self, t: &Array1<f64>) -> f64 {
+            // Each row term `½s² − 0.1·tanh(y + s)` forms in a handful of correctly
+            // rounded operations and the sum adds `n − 1` times. The design product
+            // `s = X·(V_b·t)` rounds each entry within `γ_{p(m+1)}·Σ_j|x_ij|·‖δ‖∞`,
+            // which moves a term by `|s_i| + 0.1` times that.
+            let delta = self.v_b.dot(t);
+            let s = self.s_of(t);
+            let rows = s.len();
+            let delta_max = delta.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+            let design_growth =
+                gam_linalg::roundoff::accumulation_growth(delta.len() * (t.len() + 1));
+            let mut terms = 0.0_f64;
+            let mut design_band = 0.0_f64;
+            for (i, (value, row)) in s.iter().zip(self.x.rows()).enumerate() {
+                let mu = (self.y[i] + value).tanh();
+                terms += 0.5 * value * value + 0.1 * mu.abs();
+                let row_absolute: f64 = row.iter().map(|entry| entry.abs()).sum();
+                design_band += (value.abs() + 0.1) * design_growth * row_absolute * delta_max;
+            }
+            gam_linalg::roundoff::accumulation_band(rows + 8, terms) + design_band
         }
         fn excess_rho_gradient(&self, t: &Array1<f64>) -> Array1<f64> {
             t.mapv(|x| 0.01 * x)

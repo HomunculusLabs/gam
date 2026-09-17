@@ -1162,6 +1162,9 @@ pub(crate) struct Gam784BlockTarget<'t> {
     pub(crate) base_scaled_half_deviance: f64,
     /// Its per-row eta gradient, cached once for the sampler moment channels.
     pub(crate) base_neg_score_at_mode: Array1<f64>,
+    /// `Σ_i |D_i(eta_hat)/(2 phi)|`, the absolute sum the base half-deviance
+    /// accumulated, for [`BlockExcessTarget::excess_rounding_band`].
+    pub(crate) base_absolute_half_deviance: f64,
 }
 
 impl Gam784BlockTarget<'_> {
@@ -1317,6 +1320,77 @@ impl BlockExcessTarget for Gam784BlockTarget<'_> {
             return f64::INFINITY;
         };
         neg_loglik_diff + penalty_term - 0.5 * curv
+    }
+
+    /// The rounding band of [`Self::excess`] at `t`, from what its sums accumulate:
+    /// - the displaced and base scaled half-deviances, compensated sums over `n`
+    ///   rows. Each row oracle rounds in fewer than `n` operations, so each sum
+    ///   carries at most `accumulation_band(n, Σ|row|)`.
+    /// - the penalty channel `Σ_k λ_k (S_k β̂)·δ`, an inner product over
+    ///   `rho_dim()·p` terms.
+    /// - the observed quadratic `Σ_i W_i s_i²`, a compensated sum over `n` terms.
+    /// - the design product `s = X_t V_b t`, whose entries round within
+    ///   `γ_{p(m+1)}·Σ_j |x_ij|·‖δ‖∞`. That moves the displaced surface by at most
+    ///   `|score_i|` times it, and the quadratic by `|W_i|·|s_i|` times it.
+    ///
+    /// A row surface that does not evaluate returns `+∞`, which no bar passes.
+    fn excess_rounding_band(&self, t: &Array1<f64>) -> f64 {
+        let (delta, s) = self.displacement(t);
+        let eta_disp = &self.eta_hat + &s;
+        let Ok(rows) = crate::pirls::deviance_eta_rows_with_log_measure_scale(
+            self.y.view(),
+            &eta_disp,
+            &self.likelihood,
+            &self.inverse_link,
+            self.prior_weights.view(),
+            -self.phi.ln(),
+        ) else {
+            return f64::INFINITY;
+        };
+        let n = rows.len();
+        let displaced_absolute: f64 = rows.iter().map(|row| row.half_deviance.abs()).sum();
+        let deviance_band = gam_linalg::roundoff::accumulation_band(n, displaced_absolute)
+            + gam_linalg::roundoff::accumulation_band(n, self.base_absolute_half_deviance);
+        let p = delta.len();
+        let penalty_absolute: f64 = self
+            .penalty_scores
+            .iter()
+            .zip(self.lambdas.iter())
+            .map(|(score, &lam)| {
+                lam.abs()
+                    * score
+                        .iter()
+                        .zip(delta.iter())
+                        .map(|(left, right)| (left * right).abs())
+                        .sum::<f64>()
+            })
+            .sum();
+        let penalty_band =
+            gam_linalg::roundoff::accumulation_band(self.lambdas.len() * p, penalty_absolute);
+        let curvature_absolute: f64 = self
+            .weights_obs
+            .iter()
+            .zip(s.iter())
+            .map(|(weight, value)| weight.abs() * value * value)
+            .sum();
+        let curvature_band = gam_linalg::roundoff::accumulation_band(n, curvature_absolute);
+        let delta_max = delta.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let design_growth =
+            gam_linalg::roundoff::accumulation_growth(p * (self.block_lambdas.len() + 1));
+        let mut design_band = 0.0_f64;
+        for (((design_row, row), weight), value) in self
+            .x_transformed
+            .rows()
+            .into_iter()
+            .zip(rows.iter())
+            .zip(self.weights_obs.iter())
+            .zip(s.iter())
+        {
+            let row_absolute: f64 = design_row.iter().map(|entry| entry.abs()).sum();
+            let entry_band = design_growth * row_absolute * delta_max;
+            design_band += (row.eta_score.abs() + weight.abs() * value.abs()) * entry_band;
+        }
+        deviance_band + penalty_band + 0.5 * curvature_band + design_band
     }
 
     fn excess_rho_gradient(&self, t: &Array1<f64>) -> Array1<f64> {
@@ -1505,6 +1579,7 @@ mod exact_deviance_state_cache_tests {
             lambdas: Vec::new(),
             base_scaled_half_deviance: 0.0,
             base_neg_score_at_mode: array![0.0, 0.0],
+            base_absolute_half_deviance: 0.0,
         };
         let s = array![1.0e200, 5.0e199];
         let observed = target

@@ -342,9 +342,21 @@ impl<'a> RemlState<'a> {
         // second time would change the sampled objective. Gamma and Tweedie,
         // by contrast, deliberately report unscaled deviance and need their
         // EDM dispersion here.
-        let phi = match reml_spec(&self.config.likelihood).response {
+        //
+        // The dispersion, the base rows and the row oracle must read the
+        // likelihood the inner solve converged under, `pirls_result.likelihood`,
+        // not the configuration it started from: PIRLS estimates the Gamma shape
+        // from the warm-start η and locks it for the solve, so `β̂`, `H` and the
+        // Laplace Gaussian the quadrature corrects are all at that shape. Scoring
+        // the remainder `ΔF` at the configuration's shape instead measures a
+        // different posterior against that Gaussian. On `y ~ te(x, z)`
+        // gamma-log (n=600) the configured φ = 1 against the solve's 0.2772 made
+        // `log E_q[e^{−ΔF}]` climb past 4.4 without converging, where the solve's
+        // own shape gives −4.5e-3.
+        let likelihood = &pirls_result.likelihood;
+        let phi = match reml_spec(likelihood).response {
             ResponseFamily::Gaussian | ResponseFamily::Beta { .. } => 1.0,
-            _ => reml_fixed_glm_dispersion(&self.config.likelihood)?,
+            _ => reml_fixed_glm_dispersion(likelihood)?,
         };
         if !(phi.is_finite() && phi > 0.0) {
             return Err(EstimationError::InvalidInput(format!(
@@ -361,12 +373,13 @@ impl<'a> RemlState<'a> {
         let base_rows = crate::pirls::deviance_eta_rows_with_log_measure_scale(
             self.y.view(),
             &eta_hat,
-            &self.config.likelihood,
+            likelihood,
             &inverse_link,
             self.weights.view(),
             -phi.ln(),
         )?;
         let base_half_values: Vec<f64> = base_rows.iter().map(|row| row.half_deviance).collect();
+        let base_absolute_half_deviance: f64 = base_half_values.iter().map(|value| value.abs()).sum();
         let base_scaled_half_deviance = crate::pirls::stable_finite_signed_sum(
             &base_half_values,
             "#784 base scaled half-deviance",
@@ -393,7 +406,7 @@ impl<'a> RemlState<'a> {
             weights_obs_log_abs,
             y: self.y.to_owned(),
             prior_weights: self.weights.to_owned(),
-            likelihood: self.config.likelihood.clone(),
+            likelihood: likelihood.clone(),
             inverse_link,
             phi,
             penalty_scores,
@@ -401,6 +414,7 @@ impl<'a> RemlState<'a> {
             lambdas,
             base_scaled_half_deviance,
             base_neg_score_at_mode,
+            base_absolute_half_deviance,
         };
 
         // The correction exists to remove the O(1/n_eff) Laplace term, so its

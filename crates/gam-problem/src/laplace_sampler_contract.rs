@@ -314,6 +314,11 @@ pub trait BlockExcessTarget {
     /// Non-Gaussian remainder `ΔF(t)` at whitened block displacement `t`
     /// (length `block_dim()`).
     fn excess(&self, t: &Array1<f64>) -> f64;
+    /// The rounding band of [`Self::excess`] at `t`: how far the computed `ΔF(t)`
+    /// can sit from the exact one, from the magnitudes its sums accumulate.
+    /// `ΔF` is a cancellation of like-sized terms at small `t`, so a quantity
+    /// formed from differences of `ΔF` is resolved only above this band (#784).
+    fn excess_rounding_band(&self, t: &Array1<f64>) -> f64;
     /// ρ-gradient `∂ΔF/∂ρ_k` at the same `t`, length `rho_dim()` — the explicit
     /// penalty-score channel (a).
     fn excess_rho_gradient(&self, t: &Array1<f64>) -> Array1<f64>;
