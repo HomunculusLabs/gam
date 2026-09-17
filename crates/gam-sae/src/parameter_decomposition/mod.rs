@@ -115,6 +115,9 @@ pub mod moments;
 // Global versus use-specific edits and occurrence scopes.
 // [unlanded: occurrence]
 
+// Implementation-gauge families detected from native tensors, quotiented out of codes and intervention sets.
+pub mod gauge;
+
 // Gauge-covariant group masks, structured parameter paths, Sum and Compose accounting.
 pub mod operators;
 
