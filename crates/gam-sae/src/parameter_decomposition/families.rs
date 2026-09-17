@@ -88,19 +88,25 @@
 //! # Relation to `field`
 //!
 //! A family is `field`'s instance form `P_c = w_c Gamma'(z_c)` over the degree-one
-//! polynomial basis `(1, z_1, ..., z_d)`, with `w_c = 1/n` on the scale gauge and
-//! `Gamma' = n Gamma`.
+//! patch basis `(1, z_1, ..., z_d)`, with `w_c = 1/n` on the scale gauge and
+//! `Gamma' = n Gamma`. [`PrincipalField::parameter_family`] and
+//! [`DecodedFamily::parameter_family`] build that [`ParameterFamily`], so the pullbacks
+//! and the function-space penalty read a proposal through `field`. A literal family has
+//! no label manifold. It is a native tensor, not a field, and it is refused.
 
 use std::fmt;
+use std::sync::Arc;
 
 use super::codec::{
     BitReader, BitString, CodecError, DecodedArtifactScore, decode_prefix_integer, decode_subset,
     encode_prefix_integer, encode_subset,
 };
+use super::field::{FieldCoefficient, MatrixParameterField, ParameterFamily};
 use super::precision::{
     DecodableArtifact, DecodedFidelity, DeclaredPrecision, LatticeCode, decode_then_evaluate,
 };
 use super::supports::EvidenceStatus;
+use crate::basis::{EuclideanPatchEvaluator, SaeBasisEvaluator};
 use faer::Side;
 use gam_linalg::faer_ndarray::{FaerLinalgError, strict_symmetric_eigh};
 use gam_linalg::roundoff::{accumulation_growth, resolved_eigenvalue_count};
@@ -129,6 +135,8 @@ pub enum FamilyError {
     Eigen(FaerLinalgError),
     /// A message could not be written or read.
     Code(String),
+    /// `field` refused the family's instance form, or the family has no label manifold.
+    Field(String),
 }
 
 impl fmt::Display for FamilyError {
@@ -163,6 +171,7 @@ impl fmt::Display for FamilyError {
             ),
             Self::Eigen(error) => write!(f, "family spectrum refused: {error}"),
             Self::Code(reason) => write!(f, "family message refused: {reason}"),
+            Self::Field(reason) => write!(f, "family field refused: {reason}"),
         }
     }
 }
@@ -673,6 +682,62 @@ impl DecodedFamilies {
             value.scaled_add(family.labels[[position, a]], direction);
         }
         Ok(value)
+    }
+}
+
+/// `field`'s instance form of an affine family over the degree-one patch basis.
+///
+/// `EuclideanPatchEvaluator::new(d, 1)` evaluates the raw monomials in the column order
+/// of `monomial_exponents(d, 1)`, which is `(1, z_1, ..., z_d)`. So the coefficients are
+/// `[B_0, U_1, ..., U_d]` as given. The raw weights are one per member.
+/// `ParameterFamily::new` moves their total `n` into the coefficients, so `w_c = 1/n`,
+/// `Gamma' = n Gamma`, and every instance `w_c Gamma'(z_c)` equals `B_0 + sum_a z_ca U_a`
+/// up to rounding.
+fn affine_parameter_family(
+    coefficients: Vec<Array2<f64>>,
+    labels: Array2<f64>,
+) -> Result<ParameterFamily, FamilyError> {
+    let dimension = labels.ncols();
+    if dimension == 0 {
+        return Err(FamilyError::Field(
+            "a literal family (d = 0) has no label manifold, so it is a native tensor, not a field"
+                .to_string(),
+        ));
+    }
+    if coefficients.len() != dimension + 1 {
+        return Err(FamilyError::Field(format!(
+            "{} coefficients for label dimension {dimension}; the degree-one basis has {}",
+            coefficients.len(),
+            dimension + 1
+        )));
+    }
+    let basis: Arc<dyn SaeBasisEvaluator> =
+        Arc::new(EuclideanPatchEvaluator::new(dimension, 1).map_err(FamilyError::Field)?);
+    let field = MatrixParameterField::new(
+        basis,
+        coefficients.into_iter().map(FieldCoefficient::Dense).collect(),
+    )
+    .map_err(FamilyError::Field)?;
+    let weights = ndarray::Array1::from_elem(labels.nrows(), 1.0);
+    ParameterFamily::new(field, labels, weights).map_err(FamilyError::Field)
+}
+
+impl PrincipalField {
+    /// The family as `field` instances over the degree-one patch basis (see the module
+    /// docs). A literal family (`d = 0`) is refused.
+    pub fn parameter_family(&self) -> Result<ParameterFamily, FamilyError> {
+        let mut coefficients = Vec::with_capacity(self.directions.len() + 1);
+        coefficients.push(self.center.clone());
+        coefficients.extend(self.directions.iter().cloned());
+        affine_parameter_family(coefficients, self.labels.clone())
+    }
+}
+
+impl DecodedFamily {
+    /// The decoded family as `field` instances: the reals the artifact carries, as the
+    /// decoder rebuilt them. A literal family (`d = 0`) is refused.
+    pub fn parameter_family(&self) -> Result<ParameterFamily, FamilyError> {
+        affine_parameter_family(self.coefficients.clone(), self.labels.clone())
     }
 }
 
@@ -1661,5 +1726,116 @@ mod tests {
             .decode()
             .expect_err("2^62 components exceed the host");
         assert!(refusal.contains("budget"), "{refusal}");
+    }
+
+    /// `field`'s instance `sum_j s_j B'_j` of `member`, read through the anchor at the mask
+    /// selecting that member with the residual removed:
+    /// `s = sum_k (m_k - m_Delta) w_k phi(z_k)`.
+    fn field_instance(family: &ParameterFamily, member: usize, shape: (usize, usize)) -> Array2<f64> {
+        let mut mask = Array1::<f64>::zeros(family.labels().nrows());
+        mask[member] = 1.0;
+        let weights = family
+            .anchor_basis_weights(mask.view(), 0.0)
+            .expect("anchor weights at a member mask");
+        let mut value = Array2::<f64>::zeros(shape);
+        for (j, coefficient) in family.field().coefficients().iter().enumerate() {
+            assert!(
+                matches!(coefficient, FieldCoefficient::Dense(..)),
+                "coefficient {j} of an affine family is dense"
+            );
+            if let FieldCoefficient::Dense(b) = coefficient {
+                value.scaled_add(weights[j], b);
+            }
+        }
+        value
+    }
+
+    #[test]
+    fn principal_and_decoded_families_are_field_instances_over_the_degree_one_patch_basis() {
+        let components = planted_components();
+        let view = views(&components);
+        let everyone: Vec<usize> = (0..MEMBERS).collect();
+        let principal = principal_field(&view, &everyone, 2).expect("the planted field is resolved");
+        let dimension = principal.directions.len();
+        let family = principal.parameter_family().expect("the planted field converts");
+        assert_eq!(family.field().coefficients().len(), dimension + 1);
+        // Both sides form `B_0 + sum_a z_a U_a`. The field side scales by n and 1/n, forms
+        // `phi_j w`, the product with `B'_j` and the d + 1 accumulations, at most d + 5
+        // operations. The reference takes at most 2d + 1. Each rounds against
+        // `|B_0| + sum_a |z_a| |U_a|` to first order.
+        let growth = accumulation_growth(2 * dimension + 6);
+        let mut exchanged = principal.clone();
+        for a in 0..dimension {
+            exchanged.labels[[0, a]] = principal.labels[[1, a]];
+            exchanged.labels[[1, a]] = principal.labels[[0, a]];
+        }
+        let exchanged_family = exchanged.parameter_family().expect("exchanged labels convert");
+        let mut exchanged_refuted = false;
+        for member in 0..MEMBERS {
+            let mut reference = principal.center.clone();
+            let mut magnitude = principal.center.mapv(f64::abs);
+            for a in 0..dimension {
+                reference.scaled_add(principal.labels[[member, a]], &principal.directions[a]);
+                magnitude.scaled_add(
+                    principal.labels[[member, a]].abs(),
+                    &principal.directions[a].mapv(f64::abs),
+                );
+            }
+            let value = field_instance(&family, member, (ROWS, COLS));
+            let moved = field_instance(&exchanged_family, member, (ROWS, COLS));
+            for ((index, &field_entry), &reference_entry) in value.indexed_iter().zip(reference.iter()) {
+                let band = 2.0 * growth * magnitude[index];
+                assert!(
+                    (field_entry - reference_entry).abs() <= band,
+                    "member {member} entry {index:?}: field instance {field_entry} against \
+                     {reference_entry} (band {band:e})"
+                );
+                exchanged_refuted |= (moved[index] - reference_entry).abs() > band;
+            }
+        }
+        assert!(exchanged_refuted, "negative control: exchanged labels must move some instance");
+
+        // The decoded family is field instances too, at the reals the message carries.
+        let partition = FamilyPartition::new(MEMBERS, vec![FamilySpec { members: everyone.clone(), dimension }])
+            .expect("one family");
+        let decoded = encode_families(&view, &partition, precision())
+            .expect("the family encodes")
+            .decode()
+            .expect("the message decodes");
+        let decoded_family = decoded.families()[0].parameter_family().expect("the decoded family converts");
+        for member in 0..MEMBERS {
+            let rebuilt = decoded.instance(member).expect("a decoded member");
+            let mut magnitude = decoded.families()[0].coefficients[0].mapv(f64::abs);
+            for a in 0..dimension {
+                magnitude.scaled_add(
+                    decoded.families()[0].labels[[member, a]].abs(),
+                    &decoded.families()[0].coefficients[a + 1].mapv(f64::abs),
+                );
+            }
+            let value = field_instance(&decoded_family, member, (ROWS, COLS));
+            for ((index, &field_entry), &rebuilt_entry) in value.indexed_iter().zip(rebuilt.iter()) {
+                assert!(
+                    (field_entry - rebuilt_entry).abs() <= 2.0 * growth * magnitude[index],
+                    "decoded member {member} entry {index:?}: field instance {field_entry} against \
+                     {rebuilt_entry}"
+                );
+            }
+        }
+
+        // Guard: a literal family is a native tensor, not a field (positive control above).
+        let literal = principal_field(&view, &[3], 0).expect("a literal family");
+        assert!(matches!(literal.parameter_family(), Err(FamilyError::Field(..))));
+        let literal_decoded = encode_families(
+            &view,
+            &FamilyPartition::literal(MEMBERS).expect("literal partition"),
+            precision(),
+        )
+        .expect("the literals encode")
+        .decode()
+        .expect("the literals decode");
+        assert!(matches!(
+            literal_decoded.families()[0].parameter_family(),
+            Err(FamilyError::Field(..))
+        ));
     }
 }
