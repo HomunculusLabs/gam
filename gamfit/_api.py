@@ -528,7 +528,7 @@ def _normalize_penalty_descriptors(penalties: Sequence[Any] | None) -> str | Non
                 f"penalties[{index}] must expose to_rust_descriptor() or be a mapping"
             )
         out.append(_jsonable_array(descriptor))
-    return out
+    return json.dumps(out)
 
 
 def _normalize_aux_strength(value: Any) -> float | None:
