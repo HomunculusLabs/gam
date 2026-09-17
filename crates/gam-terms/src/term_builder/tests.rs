@@ -4215,3 +4215,125 @@ fn bug_term_builder_knots_floor_on_constant_column() {
         "Heuristic knot count should keep the documented minimum floor even on constant columns."
     );
 }
+
+/// #1425 / #2469: the partition a fit prices and the partition identifiability
+/// absorbs are one partition, for every basis family the formula builder
+/// realizes.
+///
+/// `canonicalize_penalty_spec` roots each collection penalty; its rank plus the
+/// design's declared `nullspace_dims` entry must be the block dimension, and the
+/// rank must equal `analyze_penalty_block`'s. Each block's smallest eigenvalues
+/// (relative to `λ_max`) are printed beside the eigensolver band `p·ε` and the
+/// relative cutoff in force, so where a family's null eigenvalues sit against the
+/// rank cutoff is read off the run, pass or fail.
+#[test]
+fn canonical_penalty_partition_agrees_with_declared_nullity_across_families_2469() {
+    let n = 240;
+    let rows = (0..n)
+        .map(|i| {
+            let x = i as f64 / (n as f64 - 1.0);
+            let z = ((i * 37) % n) as f64 / (n as f64 - 1.0);
+            vec![(6.0 * x).sin() + z * z, x, z]
+        })
+        .collect();
+    let ds = continuous_dataset(&["y", "x", "z"], rows);
+    let col_map = ds.column_map();
+    let formulas = [
+        "y ~ s(x, bs=ps)",
+        "y ~ s(x, bs=ps, k=40)",
+        "y ~ s(x, bs=ps, double_penalty=false)",
+        "y ~ s(x, bs=cr)",
+        "y ~ s(x, bs=cc)",
+        "y ~ s(x, bs=tp)",
+        "y ~ s(x, z, bs=tp)",
+        "y ~ s(x, bs=duchon)",
+        "y ~ s(x, z, bs=duchon)",
+        "y ~ s(x, bs=matern)",
+        "y ~ s(x, z, bs=matern)",
+        "y ~ te(x, z)",
+    ];
+    let mut built_formulas = 0_usize;
+    let mut disagreements = Vec::new();
+    for formula in formulas {
+        let parsed = parse_formula(formula).expect("the partition probe formulas are well-formed");
+        let mut notes = Vec::new();
+        let spec = match build_termspec(&parsed.terms, &ds, &col_map, &mut notes) {
+            Ok(spec) => spec,
+            Err(err) => {
+                eprintln!("PARTITION {formula}: termspec refused: {err}");
+                continue;
+            }
+        };
+        let design = match crate::smooth::build_term_collection_design(ds.values.view(), &spec) {
+            Ok(design) => design,
+            Err(err) => {
+                eprintln!("PARTITION {formula}: design refused: {err}");
+                continue;
+            }
+        };
+        built_formulas += 1;
+        let p = design.design.ncols();
+        for (idx, (penalty, &declared_nullity)) in design
+            .penalties
+            .iter()
+            .zip(design.nullspace_dims.iter())
+            .enumerate()
+        {
+            let block_dim = penalty.local.nrows();
+            let analysis =
+                crate::basis::analyze_penalty_block(&penalty.local).expect("penalty spectrum");
+            let canonical = crate::construction::canonicalize_penalty_spec(
+                &crate::PenaltySpec::from_blockwise_ref(penalty),
+                p,
+                idx,
+                formula,
+            )
+            .expect("canonical penalty");
+            let canonical_rank = canonical.as_ref().map_or(0, |c| c.rank());
+            let lambda_max = analysis
+                .eigenvalues
+                .iter()
+                .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+            let mut relative = analysis
+                .eigenvalues
+                .iter()
+                .map(|value| value / lambda_max)
+                .collect::<Vec<_>>();
+            relative.sort_by(f64::total_cmp);
+            let smallest = relative
+                .iter()
+                .take(declared_nullity + 3)
+                .map(|value| format!("{value:.3e}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            eprintln!(
+                "PARTITION {formula} block={idx} dim={block_dim} hinted={} declared_nullity={declared_nullity} \
+                 analysis_rank={} analysis_nullity={} analysis_negative={} canonical_rank={canonical_rank} \
+                 eps_band_rel={:.3e} cutoff_rel={:.3e} smallest_rel=[{smallest}]",
+                penalty.structure_hint.is_some(),
+                analysis.rank,
+                analysis.nullity,
+                analysis.negative_dim,
+                block_dim as f64 * f64::EPSILON,
+                analysis.rank_tol / lambda_max,
+            );
+            if canonical_rank + declared_nullity != block_dim || canonical_rank != analysis.rank {
+                disagreements.push(format!(
+                    "{formula} block {idx}: dim={block_dim} declared_nullity={declared_nullity} \
+                     analysis_rank={} canonical_rank={canonical_rank}",
+                    analysis.rank
+                ));
+            }
+        }
+    }
+    assert!(
+        built_formulas >= 8,
+        "the fixture must realize most families, built {built_formulas} of {}",
+        formulas.len()
+    );
+    assert!(
+        disagreements.is_empty(),
+        "canonical root and declared nullity split the spectrum differently:\n{}",
+        disagreements.join("\n")
+    );
+}
