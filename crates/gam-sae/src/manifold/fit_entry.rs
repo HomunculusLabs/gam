@@ -262,6 +262,12 @@ pub struct SaeFitReport {
 /// Exact inner-KKT measurements at one caller-installed external state. No
 /// optimizer is invoked to form these values; they are read directly from the
 /// analytic joint system assembled at the supplied `(term, rho)`.
+///
+/// This variant carries the componentwise diagonal-scaled residual `|g_i|/H_ii`
+/// against the iterate scale. It is reported and never certifies (#2933 F08): a
+/// diagonal cannot see coupled weakly curved directions, so a small value is not a
+/// small remaining displacement. For `H = c·[[1, 1−ε], [1−ε, 1]]` at `θ − θ* =
+/// (1, −1)` it is `ε` while the Newton displacement `H⁻¹g` is `(1, −1)`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SaeParameterSpaceKktAudit {
     Resolved {
@@ -272,7 +278,9 @@ pub enum SaeParameterSpaceKktAudit {
 }
 
 impl SaeParameterSpaceKktAudit {
-    pub fn certifies(&self) -> bool {
+    /// Whether the diagonal-scaled residual is within its bound. A diagnostic
+    /// only; [`SaeInstalledInnerKktAudit::certifies`] does not read it.
+    pub fn within_bound(&self) -> bool {
         match self {
             Self::Resolved {
                 scaled_gradient_max,
@@ -316,13 +324,15 @@ pub struct SaeInstalledInnerKktAudit {
 }
 
 impl SaeInstalledInnerKktAudit {
+    /// The currencies the native inner solve accepts on. The diagonal-scaled
+    /// residual in [`Self::parameter_space`] is reported beside them and is not
+    /// one of them (#2933 F08).
     pub fn certifies(&self) -> bool {
         SaeManifoldTerm::quasi_laplace_kkt_stationary(
             self.raw_gradient_norm,
             self.quotient_gradient_norm,
             self.stationarity_bound,
-        ) || self.parameter_space.certifies()
-            || self
+        ) || self
                 .newton_decrement_relative
                 .as_ref()
                 .is_ok_and(|relative| SaeManifoldTerm::inner_decrement_certifies(*relative))

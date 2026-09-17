@@ -2348,7 +2348,12 @@ impl SaeManifoldTerm {
             + sys.gb.iter().map(|&v| v * v).sum::<f64>()
     }
 
-    /// Largest componentwise Jacobi-scaled KKT gradient in parameter units.
+    /// Largest componentwise Jacobi-scaled KKT gradient: a diagonal-preconditioned
+    /// first-order residual in parameter units.
+    ///
+    /// It is not the remaining Newton displacement `H⁻¹g` (#2933 F08). A diagonal
+    /// cannot see coupled weakly curved directions, so it is reported and certifies
+    /// nothing.
     ///
     /// Each gradient component is divided by the diagonal curvature of its own
     /// block before the blocks are aggregated. The ordering is load-bearing:
@@ -2458,10 +2463,10 @@ impl SaeManifoldTerm {
     /// `1e-5 · (1 + ‖x‖₂)`, whose right side grows only like `sqrt(#params)`.
     /// `system_scaled_grad_max` / `inner_iterate_max` are the componentwise,
     /// Jacobi-curvature-scaled pair whose own doc says they "remove row-count,
-    /// atom-count, and basis-scale extensivity" — and
-    /// `SaeInstalledInnerKktAudit::certifies` already accepts that pair as
-    /// SUFFICIENT. Its only production consumer is `installed_inner_kkt_audit`
-    /// (the external-state certification entry), so no refusal raised by this
+    /// atom-count, and basis-scale extensivity". The installed-state audit reports
+    /// that pair and, since #2933 F08, does not certify on it: a diagonal-scaled
+    /// residual is not a displacement. Its only production consumer is
+    /// `installed_inner_kkt_audit` (the external-state certification entry), so no refusal raised by this
     /// loop has ever reported the intensive ratio and nobody can tell a units
     /// artefact from a genuinely non-stationary iterate. Reporting it costs one
     /// assembly on a path that is already returning `Err`.

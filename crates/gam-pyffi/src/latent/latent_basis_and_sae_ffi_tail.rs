@@ -1385,7 +1385,7 @@ fn sae_manifold_certify_external<'py>(
                 Err(reason) => inner.set_item("newton_decrement_unresolved", reason.as_str())?,
             }
             let parameter_space = PyDict::new(py);
-            let parameter_certifies = report.inner.parameter_space.certifies();
+            let parameter_within_bound = report.inner.parameter_space.within_bound();
             match &report.inner.parameter_space {
                 gam::terms::sae::manifold::SaeParameterSpaceKktAudit::Resolved {
                     scaled_gradient_max,
@@ -1401,7 +1401,7 @@ fn sae_manifold_certify_external<'py>(
                     parameter_space.set_item("reason", reason.to_string())?;
                 }
             }
-            parameter_space.set_item("certifies", parameter_certifies)?;
+            parameter_space.set_item("within_bound", parameter_within_bound)?;
             inner.set_item("parameter_space", parameter_space)?;
             inner.set_item("certifies", report.inner.certifies())?;
             out.set_item("inner_kkt", inner)?;

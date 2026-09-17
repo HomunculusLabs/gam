@@ -6,7 +6,7 @@ use gam_sae::manifold::{
 use gam_solve::arrow_schur::ArrowSchurSystem;
 
 /// Row replication changes gradient-space L2 norms but must not change the
-/// componentwise parameter displacement. Decoder gradient and curvature both
+/// componentwise diagonal-scaled residual. Decoder gradient and curvature both
 /// grow with the number of rows; coordinate blocks remain row-local.
 #[test]
 fn parameter_scale_is_intensive_under_row_replication() {
@@ -45,7 +45,7 @@ fn parameter_scale_is_intensive_under_row_replication() {
 }
 
 /// A missing curvature scale may not be skipped: zero curvature with nonzero
-/// gradient is a typed non-certificate, not a zero contribution to the max.
+/// gradient is a typed unresolved measurement, not a zero contribution to the max.
 #[test]
 fn parameter_scale_refuses_unscaled_gradient() {
     let mut system = ArrowSchurSystem::new(0, 0, 1);
@@ -63,32 +63,64 @@ fn parameter_scale_refuses_unscaled_gradient() {
     ));
 }
 
+/// #2933 F08 — a diagonal-scaled gradient is not a remaining Newton displacement,
+/// so the installed-state audit may not certify on it. The shared decoder block
+/// `H = c·[[1, 1−ε], [1−ε, 1]]` at the state `θ − θ* = (1, −1)` has gradient
+/// `g = H·(1, −1) = cε·(1, −1)`. Its diagonal-scaled residual is `ε`, while the
+/// displacement `H⁻¹g`, solved here in closed form, is `(1, −1)`. The curvature
+/// scale `c` keeps the raw gradient-norm limb above its bound, so the diagonal limb
+/// is the only one that could accept this state.
 #[test]
-fn audit_accepts_either_valid_stationarity_currency() {
-    let parameter_certified = SaeInstalledInnerKktAudit {
-        raw_gradient_norm: 1.0,
-        quotient_gradient_norm: 1.0,
-        stationarity_bound: 1.0e-5,
+fn audit_does_not_certify_on_a_diagonal_scaled_residual_2933_f08() {
+    let epsilon = 1.0e-10;
+    let curvature = 1.0e6;
+    let mut system = ArrowSchurSystem::new(0, 0, 2);
+    system.hbb[[0, 0]] = curvature;
+    system.hbb[[0, 1]] = curvature * (1.0 - epsilon);
+    system.hbb[[1, 0]] = curvature * (1.0 - epsilon);
+    system.hbb[[1, 1]] = curvature;
+    system.gb[0] = system.hbb[[0, 0]] - system.hbb[[0, 1]];
+    system.gb[1] = system.hbb[[1, 0]] - system.hbb[[1, 1]];
+
+    let determinant =
+        system.hbb[[0, 0]] * system.hbb[[1, 1]] - system.hbb[[0, 1]] * system.hbb[[1, 0]];
+    let displacement = [
+        (system.hbb[[1, 1]] * system.gb[0] - system.hbb[[0, 1]] * system.gb[1]) / determinant,
+        (system.hbb[[0, 0]] * system.gb[1] - system.hbb[[1, 0]] * system.gb[0]) / determinant,
+    ];
+    assert!(
+        (displacement[0] - 1.0).abs() <= 1.0e-3 && (displacement[1] + 1.0).abs() <= 1.0e-3,
+        "the fixture must sit one unit from its optimum: displacement {displacement:?}"
+    );
+
+    let scaled = SaeManifoldTerm::system_scaled_grad_max(&system)
+        .expect("positive diagonal curvature");
+    assert!(
+        scaled <= 2.0 * epsilon,
+        "the diagonal must see only ε: scaled residual {scaled:e}"
+    );
+    let raw_gradient_norm = system.gb.dot(&system.gb).sqrt();
+    let stationarity_bound = 1.0e-5 * (1.0 + 2.0_f64.sqrt());
+    assert!(
+        raw_gradient_norm > stationarity_bound,
+        "the raw limb must not be the one deciding: ‖g‖ {raw_gradient_norm:e} vs {stationarity_bound:e}"
+    );
+
+    let audit = SaeInstalledInnerKktAudit {
+        raw_gradient_norm,
+        quotient_gradient_norm: raw_gradient_norm,
+        stationarity_bound,
         parameter_space: SaeParameterSpaceKktAudit::Resolved {
-            scaled_gradient_max: 9.0e-6,
-            stationarity_bound: 1.0e-5,
+            scaled_gradient_max: scaled,
+            stationarity_bound: 1.0e-5 * (1.0 + 1.0),
         },
         newton_decrement_relative: Err("not priced in this unit fixture".to_string()),
     };
-    assert!(parameter_certified.certifies());
-
-    let unresolved = SaeInstalledInnerKktAudit {
-        parameter_space: SaeParameterSpaceKktAudit::Unresolved(
-            SaeInnerKktScaleError::InvalidCurvature {
-                block: SaeInnerKktScaleBlock::SharedDecoder,
-                component: 0,
-                gradient: 1.0,
-                curvature: 0.0,
-            },
-        ),
-        ..parameter_certified
-    };
-    assert!(!unresolved.certifies());
+    assert!(
+        !audit.certifies(),
+        "a state one unit from its optimum must not certify: displacement {displacement:?}, \
+         diagonal-scaled residual {scaled:e}"
+    );
 }
 
 /// #2263 — the native inner solve accepts a state on the affine-invariant
