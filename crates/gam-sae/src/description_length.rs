@@ -81,12 +81,12 @@ fn exact_weighted_water_level(breakpoints: &mut Vec<(f64, f64)>, total_distortio
 /// how far below zero a rounded zero eigenvalue can fall. Such values are clipped
 /// to zero. A nonfinite value, or one more negative than that bound, is malformed
 /// input and is reported rather than silently deleted from the variance.
-fn validated_variance_spectrum(spectrum: &[f64], context: &str) -> Result<Vec<f64>, String> {
+fn validated_variance_spectrum(spectrum: &[f64], component: usize) -> Result<Vec<f64>, String> {
     let mut scale = 0.0_f64;
     for (index, &value) in spectrum.iter().enumerate() {
         if !value.is_finite() {
             return Err(format!(
-                "{context}: eigenvalue [{index}] must be finite, got {value}"
+                "component {component} spectrum: eigenvalue [{index}] must be finite, got {value}"
             ));
         }
         scale = scale.max(value.abs());
@@ -98,8 +98,9 @@ fn validated_variance_spectrum(spectrum: &[f64], context: &str) -> Result<Vec<f6
         .map(|(index, &value)| {
             if value < -rounding_bound {
                 Err(format!(
-                    "{context}: eigenvalue [{index}] = {value} lies below the eigensolver \
-                     rounding bound -{rounding_bound}; the covariance is not positive semidefinite"
+                    "component {component} spectrum: eigenvalue [{index}] = {value} lies below \
+                     the eigensolver rounding bound -{rounding_bound}; the covariance is not \
+                     positive semidefinite"
                 ))
             } else {
                 Ok(value.max(0.0))
@@ -138,8 +139,7 @@ fn solve_weighted_allocation(
                 "component weight must be finite and nonnegative, got {weight}"
             ));
         }
-        let variances =
-            validated_variance_spectrum(spectrum, &format!("component {index} spectrum"))?;
+        let variances = validated_variance_spectrum(spectrum, index)?;
         for &variance in &variances {
             total_variance += *weight * variance;
             if *weight > 0.0 {

@@ -12,7 +12,7 @@ use super::tests_row_jet_and_outer_objective_780::{
     begin_row_jet_allocation_measurement, end_row_jet_allocation_measurement,
 };
 use crate::atom_codes::SparseAtomCodes;
-use crate::description_length::manifold_fit_description_length;
+use crate::description_length::{DictionaryCode, manifold_fit_description_length};
 use std::collections::BTreeSet;
 
 /// Sequential Krichevsky–Trofimov code length of a binary sequence, replaying
@@ -57,23 +57,19 @@ fn native_support_code_report_allocates_linearly_at_32768_atoms_2933_f43() {
             }
         }
     }
-    let atom_coord_dims = vec![1.0_f64; k_atoms];
-    let coord_variances = [1.0_f64, 0.5];
+    let atom_code_spectra = vec![vec![1.0_f64]; k_atoms];
+    let dictionary = DictionaryCode::DeclaredPrecision {
+        n_params: 0,
+        bits_per_scalar: 0.0,
+    };
 
     // The support coder is serial, so the calling thread's ledger sees every
     // allocation it makes. The ledger sums allocated bytes without subtracting
     // frees, which bounds the peak from above.
     begin_row_jet_allocation_measurement();
-    let report = manifold_fit_description_length(
-        &codes,
-        &coord_variances,
-        0.3,
-        &atom_coord_dims,
-        0.9,
-        0,
-        None,
-    );
+    let report = manifold_fit_description_length(&codes, &atom_code_spectra, 0.3, 0.9, &dictionary);
     let (allocation_calls, allocated_bytes) = end_row_jet_allocation_measurement();
+    let report = report.unwrap();
 
     // Every array the report keeps is indexed by an atom, a row, an active
     // entry or a co-firing pair, and together, Vec growth included, they hold
