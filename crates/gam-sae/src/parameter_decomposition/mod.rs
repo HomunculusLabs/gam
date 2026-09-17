@@ -2,18 +2,22 @@
 //!
 //! The object is an executable decomposition of a network's parameterized
 //! computation, not a reconstruction of its activations: `crate::manifold` fits
-//! `Z_i ~= sum_k a_ik g_k(t_ik)` and has no source-weight action. Here every
-//! operation stays tied to the original tensors, every approximation has an exact
-//! native reference, and fidelity is checked under declared finite interventions,
-//! not only at the all-on point.
+//! `Z_i ~= sum_k a_ik g_k(t_ik)` and has no source-weight action. Every file here
+//! must keep each operation tied to the original tensors, give each approximation
+//! an exact native reference, and check fidelity under declared finite
+//! interventions rather than only at the all-on point.
 //!
 //! # Four objects
 //!
-//! * **Native lift** (`lift`, `occurrence`, `apply`). A tensor registry (stable
-//!   ids, shapes, alias and transpose ties, use sites, a teacher hash). A global
-//!   edit acts on every tied use of a tensor and a use-specific edit acts on one
-//!   occurrence; they are different experiments. Components enter through the
-//!   exact residual anchor
+//! Each object names its owner files in parentheses. They land one at a time; the
+//! slot list below records which are present.
+//!
+//! * **Native lift** (`lift`, `occurrence`, `apply`). A tensor registry: stable
+//!   ids, shapes, aliases, use sites with the orientation of the matrix each use
+//!   multiplies by, and a
+//!   teacher fingerprint. A global edit acts on every use of a stored tensor and a
+//!   use-specific edit acts on one occurrence; they are different experiments.
+//!   Components enter through the exact residual anchor
 //!
 //!   ```text
 //!   Theta(m) = m_Delta Theta_* + B sum_c (m_c - m_Delta) v_c
@@ -21,8 +25,9 @@
 //!
 //!   which equals `sum_c m_c P_c + m_Delta (Theta_* - sum_c P_c)` with
 //!   `P_c = B v_c`, so the residual is carried exactly and never refitted. The
-//!   anchor is applied matrix-free. Algebraic equality is not bitwise equality, so
-//!   the all-on setting executes the original tensors on their original path.
+//!   anchor must be applied matrix-free. Algebraic equality is not bitwise
+//!   equality, so the all-on setting must execute the original tensors on their
+//!   original path.
 //! * **Parameter field** (`field`). `Gamma(z) = sum_j phi_j(z) B_j` over GAM's
 //!   existing bases, with fixed instances `P_c = w_c Gamma(z_c)` and
 //!   `v_c = w_c phi(z_c)`. The labels `z_c` and scales `w_c` do not depend on the
@@ -34,10 +39,10 @@
 //!   of Sum, Compose, native primitives, reads and writes, and calls to shared
 //!   bodies, with its interface, native reference, code and validity domain.
 //!
-//! Exact execution under masks is `rewrite` (MLP component coordinates),
+//! Exact execution under masks belongs to `rewrite` (MLP component coordinates),
 //! `gated_rewrite` (gated activations, norms, biases, residuals) and `attention`
 //! (the component query-key kernel under the source's joint softmax). Gauge and
-//! operator structure is `operators`, `spectral` and `state`.
+//! operator structure belongs to `operators`, `spectral` and `state`.
 //!
 //! # Types that are never coerced into one another
 //!
@@ -52,17 +57,17 @@
 //!
 //! # Evidence and inputs
 //!
-//! Every reported quantity carries its evidence status: exact (algebraic, or
+//! Every reported quantity must carry its evidence status: exact (algebraic, or
 //! exhaustive over a stated finite family), a uniform bound over a stated region
 //! including numerical error, a statistical estimate with its law and standard
 //! error, a counterexample, or unresolved (lower witness, upper bound, gap). A
-//! result never returns a stronger status than it proved; a stochastic-mask mean,
-//! an observed worst case and a certified bound are three different numbers.
+//! result must never return a stronger status than it proved; a stochastic-mask
+//! mean, an observed worst case and a certified bound are three different numbers.
 //!
 //! The mask domain and the fidelity tolerance are experiment declarations with no
-//! default. Every other tolerance is derived (a roundoff bound, an eigengap, a
-//! Lipschitz covering). Derivatives are analytic; finite differences appear only
-//! in tests.
+//! default. Every other tolerance must be derived (a roundoff bound, an eigengap, a
+//! Lipschitz covering). Derivatives must be analytic; finite differences belong in
+//! tests only.
 
 // Executed-stage receipts against the native lift.
 pub mod receipts;
@@ -102,7 +107,7 @@ pub mod fit;
 pub mod gated_rewrite;
 
 // Tensor registry and the exact residual anchor.
-// [unlanded: lift]
+pub mod lift;
 
 // Mask moments, the admissible zonotope, support function and affine-logit adversary.
 pub mod moments;
