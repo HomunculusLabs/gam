@@ -893,13 +893,12 @@ pub fn run_sae_manifold_fit(mut request: SaeFitRequest) -> Result<SaeFitOutcome,
         // Empty target (N = 0): nothing to peel; the inner entry validates shapes.
         return run_sae_manifold_fit_on_target(request);
     };
-    for mut row in request.target.rows_mut() {
-        row -= &mu;
-    }
+    // The residual sum of squares about μ, summed over `z − μ` in the same row-major order.
     let tier0_residual_sum_squares = request
         .target
         .iter()
-        .map(|value| value * value)
+        .zip(mu.iter().cycle())
+        .map(|(value, mean)| (value - mean) * (value - mean))
         .sum::<f64>();
     // Tier-0 INPUT STANDARDIZATION — the conditioning half of the peel. There is
     // no column equilibration anywhere else in the fit path, so a raw activation
@@ -926,7 +925,8 @@ pub fn run_sae_manifold_fit(mut request: SaeFitRequest) -> Result<SaeFitOutcome,
         let n = request.target.nrows() as f64;
         let mut sigma = Array1::<f64>::zeros(request.target.ncols());
         for (col_idx, col) in request.target.columns().into_iter().enumerate() {
-            sigma[col_idx] = (col.iter().map(|v| v * v).sum::<f64>() / n).sqrt();
+            let mean = mu[col_idx];
+            sigma[col_idx] = (col.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n).sqrt();
         }
         let sigma_max = sigma.iter().cloned().fold(0.0_f64, f64::max);
         if sigma_max.is_finite() && sigma_max > 0.0 {
@@ -936,24 +936,6 @@ pub fn run_sae_manifold_fit(mut request: SaeFitRequest) -> Result<SaeFitOutcome,
                     *s = 1.0;
                 }
             }
-            for mut row in request.target.rows_mut() {
-                row /= &sigma;
-            }
-            // The standardization is a CHANGE OF COORDINATES on the output
-            // space, so it must map EVERY fit input into the internal frame —
-            // the target AND the seed state. The seed was constructed by the
-            // caller in raw units; leaving its decoder raw would hand the fit
-            // a warm start mis-scaled by up to the per-column RMS ratio
-            // (x̂_int must satisfy σ ⊙ x̂_int ≈ x_raw ⇒ B_int[:,c] =
-            // B_raw[:,c]/σ_c). Latent coordinates and gate logits are
-            // unit-free and untouched; a cold all-zero decoder is a no-op.
-            for atom in &mut request.base_term.atoms {
-                for (col_idx, s) in sigma.iter().enumerate() {
-                    for coeff in atom.decoder_coefficients_mut().column_mut(col_idx).iter_mut() {
-                        *coeff /= *s;
-                    }
-                }
-            }
             Some(sigma)
         } else {
             None
@@ -961,24 +943,34 @@ pub fn run_sae_manifold_fit(mut request: SaeFitRequest) -> Result<SaeFitOutcome,
     } else {
         None
     };
+    // #2822 — one frame owns every map between raw units and the fit frame. The standardization is a
+    // CHANGE OF COORDINATES on the output space, so it must map EVERY fit input into the internal frame:
+    // the target AND the seed state. The seed was constructed by the caller in raw units; leaving its
+    // decoder raw would hand the fit a warm start mis-scaled by up to the per-column RMS ratio (x̂_int must
+    // satisfy σ ⊙ x̂_int ≈ x_raw ⇒ B_int[:,c] = B_raw[:,c]/σ_c). Latent coordinates and gate logits are
+    // unit-free and untouched; a cold all-zero decoder is a no-op. The same frame lifts the returned
+    // reconstruction and is installed on the returned term, which is the frame `run_sae_manifold_certify`
+    // detaches to price the objective this fit optimized.
+    let tier0_frame = super::construction::SaeTier0Frame {
+        mean: Some(mu.clone()),
+        scale: sigma,
+    };
+    tier0_frame.map_target_into_fit_frame(&mut request.target);
+    for atom in &mut request.base_term.atoms {
+        tier0_frame.map_decoder_into_fit_frame(atom.decoder_coefficients_mut());
+    }
     let mut outcome = run_sae_manifold_fit_on_target(request)?;
     match &mut outcome {
         SaeFitOutcome::Manifold(report) => {
+            tier0_frame.lift_reconstruction(&mut report.fitted);
             report
                 .term
-                .set_tier0_mean(mu.clone())
+                .install_tier0_frame(tier0_frame)
                 .map_err(SaeFitError::Fit)?;
-            if let Some(sigma) = sigma.as_ref() {
-                report
-                    .term
-                    .set_tier0_scale(sigma.clone())
-                    .map_err(SaeFitError::Fit)?;
-            }
-            lift_tier0_rows(&mut report.fitted, &mu, sigma.as_ref());
         }
         SaeFitOutcome::Null(report) => {
-            report.tier0 = Tier0Mean { mean: mu.clone() };
-            lift_tier0_rows(&mut report.fitted, &mu, sigma.as_ref());
+            report.tier0 = Tier0Mean { mean: mu };
+            tier0_frame.lift_reconstruction(&mut report.fitted);
             report.residual_sum_squares = tier0_residual_sum_squares;
             report.reconstruction_r2 = 0.0;
         }
@@ -1116,18 +1108,6 @@ mod vanished_stage_tests {
     }
 }
 
-/// Lift an `N×p` reconstruction produced against the standardized de-meaned
-/// target back to raw-target space: `x̂ ← μ + σ ⊙ x̂`. Mirrors
-/// [`SaeManifoldTerm::add_tier0_mean_inplace`] for the report's standalone
-/// reconstruction arrays.
-fn lift_tier0_rows(recon: &mut Array2<f64>, mu: &Array1<f64>, sigma: Option<&Array1<f64>>) {
-    for mut row in recon.rows_mut() {
-        if let Some(sigma) = sigma {
-            row *= sigma;
-        }
-        row += mu;
-    }
-}
 
 /// Post-solve pipeline shared by the native fit entry and the
 /// zero-optimization certification entry (#2263/#2266): the #977/#997
@@ -1967,6 +1947,8 @@ fn run_sae_manifold_fit_on_target(request: SaeFitRequest) -> Result<SaeFitOutcom
 /// inner solve, so those switches have nothing to govern.
 pub struct SaeCertifyRequest {
     pub base_term: SaeManifoldTerm,
+    /// The raw target, in the units the term's reconstructions are reported in. A term that carries
+    /// a tier-0 frame has this target mapped through that frame before the audit (#2822).
     pub target: Array2<f64>,
     pub registry: AnalyticPenaltyRegistry,
     pub initial_rho: SaeManifoldRho,
@@ -1994,6 +1976,37 @@ pub struct SaeCertifyRequest {
 /// certificates) is the same code the native fit entry runs — both call
 /// `finalize_sae_fit_report` (#2266).
 pub fn run_sae_manifold_certify(
+    mut request: SaeCertifyRequest,
+) -> Result<SaeExternalCertificationOutcome, SaeFitError> {
+    // #2822 — certify prices the objective the fit optimized, and `target` is always the raw data. A
+    // native fit runs on its tier-0 frame `(Z − μ)/σ` and returns that frame installed on its term, and
+    // every reconstruction lifts through an installed frame. So the frame comes off the term and the
+    // target is mapped into it: the audit and the shared postlude price the fit-frame objective, with the
+    // term in the state the native entry finalizes in. `Certified` is the only outcome that carries a
+    // term, so the frame goes back on here and the reported reconstruction is lifted, exactly as the
+    // native entry does. A refusal and an error carry no term, so no frame-less term leaves certify. A
+    // term without a frame passes through unchanged. (g4 job 1139818: the raw audit of a native p=2048
+    // fit read |g| 5.2e3; the same term against `(Z − μ)/σ` certified at the native criterion.)
+    let tier0_frame = request.base_term.detach_tier0_frame();
+    tier0_frame.map_target_into_fit_frame(&mut request.target);
+    match certify_installed_state_in_fit_frame(request)? {
+        SaeExternalCertificationOutcome::Certified(mut report) => {
+            tier0_frame.lift_reconstruction(&mut report.fitted);
+            report
+                .term
+                .install_tier0_frame(tier0_frame)
+                .map_err(SaeFitError::Fit)?;
+            Ok(SaeExternalCertificationOutcome::Certified(report))
+        }
+        SaeExternalCertificationOutcome::NonStationary(refusal) => {
+            Ok(SaeExternalCertificationOutcome::NonStationary(refusal))
+        }
+    }
+}
+
+/// The body of [`run_sae_manifold_certify`]: the installed-state audit and the shared postlude over
+/// a frame-free term and a fit-frame target. The tier-0 frame is owned by the caller around it.
+fn certify_installed_state_in_fit_frame(
     request: SaeCertifyRequest,
 ) -> Result<SaeExternalCertificationOutcome, SaeFitError> {
     let SaeCertifyRequest {

@@ -217,6 +217,56 @@ mod tests {
         }
     }
 
+    /// #2822 — a state converged in its tier-0 fit frame certifies against the raw target.
+    /// A native fit runs on `(Z − μ)/σ`, installs μ/σ on the term it returns, and every reconstruction
+    /// lifts back as `σ ⊙ x̂ + μ`, while certify receives the raw target. This builds that object
+    /// without the native entry: the fixture converges through the native outer objective, an exact
+    /// binary frame is installed on the converged term, and the raw target is `σ ⊙ Z + μ`. Auditing
+    /// the fit-frame decoders against the raw target refused a converged fit (lane probe g4, job
+    /// 1139818: NonStationary against raw Z, Certified against (Z − μ)/σ). The certified term must
+    /// come back carrying the frame bit for bit, or its later reconstructions would not lift.
+    #[test]
+    fn framed_converged_state_certifies_against_its_raw_target_2822() {
+        let (fit_target, mut term, rho, pin, provenance) = native_converged_state();
+        let mean = ndarray::Array1::from(vec![3.0, -2.0]);
+        let scale = ndarray::Array1::from(vec![4.0, 0.5]);
+        let mut raw_target = fit_target;
+        for mut row in raw_target.rows_mut() {
+            row *= &scale;
+            row += &mean;
+        }
+        term.set_tier0_mean(mean.clone())
+            .expect("the frame mean has the output width");
+        term.set_tier0_scale(scale.clone())
+            .expect("the frame scale is finite and positive");
+        let bits = |values: Option<&ndarray::Array1<f64>>| {
+            values.map(|values| values.iter().map(|value| value.to_bits()).collect::<Vec<u64>>())
+        };
+        let installed_frame = (bits(Some(&mean)), bits(Some(&scale)));
+        let outcome =
+            run_sae_manifold_certify(certify_request(raw_target, term, rho, pin, provenance))
+                .expect("the certify audit evaluates");
+        match outcome {
+            SaeExternalCertificationOutcome::Certified(report) => {
+                assert!(
+                    report.penalized_quasi_laplace_criterion.is_finite(),
+                    "a certified report carries a finite criterion"
+                );
+                assert_eq!(
+                    (bits(report.term.tier0_mean()), bits(report.term.tier0_scale())),
+                    installed_frame,
+                    "the certified term must carry the installed tier-0 frame bit for bit"
+                );
+            }
+            SaeExternalCertificationOutcome::NonStationary(report) => panic!(
+                "a state converged in its fit frame must certify against its raw target: {} \
+                 (inner KKT certifies: {})",
+                report.reason,
+                report.inner.certifies()
+            ),
+        }
+    }
+
     #[test]
     fn raw_external_seed_is_a_typed_nonfit() {
         let (target, term, rho, pin, provenance) = seeded_external_fixture();

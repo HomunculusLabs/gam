@@ -797,10 +797,11 @@ pub fn run_sae_manifold_steer_to_target(
 /// frozen dictionary [`run_sae_manifold_oos`] / [`run_sae_manifold_steer`]
 /// rebuild from [`SaeOosAtomSpec`] + trained coordinates/logits — no
 /// coordinate or decoder solve; the caller's own (e.g. torch) training loop
-/// already produced them. It maps physical target/decoder columns into the
-/// explicitly declared Tier-0 frame, installs that exact state as
-/// [`SaeCertifyRequest::base_term`], and delegates to
-/// [`run_sae_manifold_certify`] for the shared post-fit diagnostics /
+/// already produced them. It maps the physical decoder columns into the
+/// explicitly declared Tier-0 frame, installs that frame on the exact rebuilt
+/// state as [`SaeCertifyRequest::base_term`], and delegates the raw target to
+/// [`run_sae_manifold_certify`], which maps it through the installed frame and
+/// lifts the certified reconstruction back, for the shared post-fit diagnostics /
 /// anytime-valid structure certificate pipeline. This is the entry a torch-lane
 /// fit uses to obtain the same certificates a native closed-form fit gets,
 /// without pretending a stationarity certificate exists for state this entry
@@ -859,13 +860,13 @@ pub struct SaeCertifyExternalRequest {
 /// [`run_sae_manifold_oos`] / [`run_sae_manifold_steer`] (same
 /// [`SaeOosAtomSpec`] contract) so a torch-lane caller's decoder/coords/logits
 /// rebuild into the identical dictionary a native fit or OOS encode would, then
-/// hands the exact rebuilt internal-frame term to
-/// [`run_sae_manifold_certify`].
+/// hands the exact rebuilt internal-frame term, with its Tier-0 frame
+/// installed, and the raw target to [`run_sae_manifold_certify`].
 pub fn run_sae_manifold_certify_external(
     request: SaeCertifyExternalRequest,
 ) -> Result<super::SaeExternalCertificationOutcome, SaeFitError> {
     let SaeCertifyExternalRequest {
-        mut target,
+        target,
         atoms: mut atom_specs,
         tier0_mean,
         tier0_scale,
@@ -921,9 +922,6 @@ pub fn run_sae_manifold_certify_external(
             )
             .into());
         }
-        for mut row in target.rows_mut() {
-            row -= mean;
-        }
     }
     if let Some(scale) = tier0_scale.as_ref() {
         if scale.len() != p_out || !scale.iter().all(|value| value.is_finite() && *value > 0.0) {
@@ -933,7 +931,7 @@ pub fn run_sae_manifold_certify_external(
             )
             .into());
         }
-        for (atom_index, spec) in atom_specs.iter_mut().enumerate() {
+        for (atom_index, spec) in atom_specs.iter().enumerate() {
             if spec.decoder.ncols() != p_out {
                 return Err(format!(
                     "run_sae_manifold_certify_external: atoms[{atom_index}] decoder must have {p_out} output columns before Tier-0 conversion; got {}",
@@ -941,15 +939,17 @@ pub fn run_sae_manifold_certify_external(
                 )
                 .into());
             }
-            for (column, value) in spec.decoder.columns_mut().into_iter().zip(scale) {
-                for coefficient in column {
-                    *coefficient /= *value;
-                }
-            }
         }
-        for mut row in target.rows_mut() {
-            row /= scale;
-        }
+    }
+    // #2822 — the declared tier-0 frame is one value. The persisted decoders are physical, so they move
+    // into the fit frame through it here. The frame is installed on the rebuilt term below, and
+    // `run_sae_manifold_certify` maps the raw target through it and lifts the certified reconstruction.
+    let tier0_frame = super::construction::SaeTier0Frame {
+        mean: tier0_mean,
+        scale: tier0_scale,
+    };
+    for spec in &mut atom_specs {
+        tier0_frame.map_decoder_into_fit_frame(spec.decoder.view_mut());
     }
     if logits.dim() != (n_obs, k_atoms) || !logits.iter().all(|value| value.is_finite()) {
         return Err(format!(
@@ -1039,10 +1039,11 @@ pub fn run_sae_manifold_certify_external(
     if let Some(metric) = fisher_metric {
         base_term.set_row_metric(metric)?;
     }
+    base_term.install_tier0_frame(tier0_frame)?;
 
     let initial_rho = build_rho(regularization, &latent_dims, &base_term.assignment)?;
 
-    let outcome = run_sae_manifold_certify(SaeCertifyRequest {
+    run_sae_manifold_certify(SaeCertifyRequest {
         base_term,
         target,
         registry,
@@ -1055,36 +1056,7 @@ pub fn run_sae_manifold_certify_external(
         isometry_pin_active,
         metric_provenance,
         run_structure_search,
-    })?;
-    let mut report = match outcome {
-        super::SaeExternalCertificationOutcome::Certified(report) => report,
-        super::SaeExternalCertificationOutcome::NonStationary(report) => {
-            return Ok(super::SaeExternalCertificationOutcome::NonStationary(
-                report,
-            ));
-        }
-    };
-    if let Some(mean) = tier0_mean.as_ref() {
-        report
-            .term
-            .set_tier0_mean(mean.clone())
-            .map_err(SaeFitError::Fit)?;
-    }
-    if let Some(scale) = tier0_scale.as_ref() {
-        report
-            .term
-            .set_tier0_scale(scale.clone())
-            .map_err(SaeFitError::Fit)?;
-    }
-    for mut row in report.fitted.rows_mut() {
-        if let Some(scale) = tier0_scale.as_ref() {
-            row *= scale;
-        }
-        if let Some(mean) = tier0_mean.as_ref() {
-            row += mean;
-        }
-    }
-    Ok(super::SaeExternalCertificationOutcome::Certified(report))
+    })
 }
 
 #[cfg(test)]

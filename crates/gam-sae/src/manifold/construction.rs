@@ -10,6 +10,73 @@ use crate::identifiability::{
 use gam_linalg::faer_ndarray::FaerEigh;
 use super::fit_drivers::GaugeOrbitDescent;
 
+/// #2822 — a term's tier-0 fit frame: the shared column mean μ and the per-column scale σ.
+///
+/// A native fit runs on `(Z − μ)/σ` with decoders `B/σ`, installs this frame on the term it returns,
+/// and every reconstruction lifts back as `σ ⊙ x̂ + μ`. This type owns all three maps, so the native
+/// entry, the certify entry and the external certify route apply one frame instead of each carrying
+/// its own copy. With neither a mean nor a scale, every map is the identity.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SaeTier0Frame {
+    pub(crate) mean: Option<Array1<f64>>,
+    pub(crate) scale: Option<Array1<f64>>,
+}
+
+impl SaeTier0Frame {
+    /// The raw target into the fit frame, in place: `z ← (z − μ)/σ`.
+    pub(crate) fn map_target_into_fit_frame(&self, target: &mut Array2<f64>) {
+        if let Some(mean) = self.mean.as_ref() {
+            for mut row in target.rows_mut() {
+                row -= mean;
+            }
+        }
+        if let Some(scale) = self.scale.as_ref() {
+            for mut row in target.rows_mut() {
+                row /= scale;
+            }
+        }
+    }
+
+    /// A raw-units decoder into the fit frame, in place: `B[:, c] ← B[:, c] / σ_c`.
+    pub(crate) fn map_decoder_into_fit_frame(&self, mut decoder: ndarray::ArrayViewMut2<'_, f64>) {
+        if let Some(scale) = self.scale.as_ref() {
+            for (col_idx, s) in scale.iter().enumerate() {
+                for coeff in decoder.column_mut(col_idx).iter_mut() {
+                    *coeff /= *s;
+                }
+            }
+        }
+    }
+
+    /// A fit-frame reconstruction back to raw-target space, in place: `x̂ ← σ ⊙ x̂ + μ`.
+    pub(crate) fn lift_reconstruction(&self, out: &mut Array2<f64>) {
+        lift_tier0_reconstruction(out, self.mean.as_ref(), self.scale.as_ref());
+    }
+}
+
+/// `x̂ ← σ ⊙ x̂ + μ` in place. The scale multiplies before the mean adds, because the fit frame is
+/// `(Z − μ)/σ`. The one lift shared by [`SaeTier0Frame`] and a term's installed frame.
+fn lift_tier0_reconstruction(
+    out: &mut Array2<f64>,
+    mean: Option<&Array1<f64>>,
+    scale: Option<&Array1<f64>>,
+) {
+    if let Some(scale) = scale {
+        for mut out_row in out.rows_mut() {
+            for (out_col, s) in out_row.iter_mut().zip(scale.iter()) {
+                *out_col *= *s;
+            }
+        }
+    }
+    if let Some(mean) = mean {
+        for mut out_row in out.rows_mut() {
+            for (out_col, m) in out_row.iter_mut().zip(mean.iter()) {
+                *out_col += *m;
+            }
+        }
+    }
+}
+
 // ── The rank charge is a named criterion convention (#2933 F30–F32) ──────────
 //
 // Each atom's birth/death evidence charge is `½·r_k·edf_k·ln max(N_eff,k, 1)`,
@@ -1341,6 +1408,27 @@ impl SaeManifoldTerm {
         self.tier0_scale.as_ref()
     }
 
+    /// #2822 — take the installed tier-0 frame off the term. The term is left in its fit frame, so its
+    /// reconstructions no longer lift. Round-trips with [`Self::install_tier0_frame`].
+    pub(crate) fn detach_tier0_frame(&mut self) -> SaeTier0Frame {
+        SaeTier0Frame {
+            mean: self.tier0_mean.take(),
+            scale: self.tier0_scale.take(),
+        }
+    }
+
+    /// #2822 — install a tier-0 frame, validating each part as [`Self::set_tier0_mean`] and
+    /// [`Self::set_tier0_scale`] do.
+    pub(crate) fn install_tier0_frame(&mut self, frame: SaeTier0Frame) -> Result<(), String> {
+        if let Some(mean) = frame.mean {
+            self.set_tier0_mean(mean)?;
+        }
+        if let Some(scale) = frame.scale {
+            self.set_tier0_scale(scale)?;
+        }
+        Ok(())
+    }
+
     /// #2023 C4 — lift an assembled `Σ_k a_k g_k` reconstruction from the
     /// internal (standardized, de-meaned) frame back to raw-target space, in
     /// place: `x̂ ← μ + σ ⊙ x̂`. A strict no-op on the historical path
@@ -1349,20 +1437,7 @@ impl SaeManifoldTerm {
     /// when Tier-0 is inactive. The scale multiplies BEFORE the mean adds —
     /// the fit frame is `(Z − μ)/σ`, so the inverse is `σ·x̂ + μ`.
     pub(crate) fn add_tier0_mean_inplace(&self, out: &mut Array2<f64>) {
-        if let Some(scale) = self.tier0_scale.as_ref() {
-            for mut out_row in out.rows_mut() {
-                for (out_col, s) in out_row.iter_mut().zip(scale.iter()) {
-                    *out_col *= *s;
-                }
-            }
-        }
-        if let Some(mean) = self.tier0_mean.as_ref() {
-            for mut out_row in out.rows_mut() {
-                for (out_col, m) in out_row.iter_mut().zip(mean.iter()) {
-                    *out_col += *m;
-                }
-            }
-        }
+        lift_tier0_reconstruction(out, self.tier0_mean.as_ref(), self.tier0_scale.as_ref());
     }
 
     /// Per-atom effective sample size `N_eff,k = Σ_i w_{ik}²` read through the
