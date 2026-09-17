@@ -2638,7 +2638,7 @@ pub(crate) fn piecewise_polynomial_function_gram(
 
 /// Exact Gram of the raw (free-end) B-spline basis over its modeling interval
 /// `[t_d, t_{K−1−d}]` (the span where the partition of unity holds).
-pub(crate) fn bspline_function_gram(
+pub fn bspline_function_gram(
     knots: &Array1<f64>,
     degree: usize,
 ) -> Result<Array2<f64>, BasisError> {

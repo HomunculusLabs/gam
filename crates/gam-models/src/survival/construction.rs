@@ -27,8 +27,9 @@ use gam_solve::mixture_link::{state_from_beta_logisticspec, state_from_sasspec, 
 use gam_terms::basis::{
     BSplineBasisSpec, BSplineBoundaryConditions, BSplineIdentifiability, BSplineKnotSpec,
     BasisMetadata, BasisOptions, Dense, ISplineBoundary, KnotSource, OneDimensionalBoundary,
-    build_bspline_basis_1d, create_basis, evaluate_bspline_derivative_scalar,
-    ispline_modelling_interval, ispline_value, ispline_value_and_first_derivative,
+    bspline_derivative_penalty_matrix, build_bspline_basis_1d, create_basis,
+    evaluate_bspline_derivative_scalar, ispline_modelling_interval, ispline_value,
+    ispline_value_and_first_derivative,
 };
 use gam_terms::inference::formula_dsl::{LinkWiggleFormulaSpec, parse_link_choice};
 use ndarray::{Array1, Array2, Array3, array, s};
@@ -4897,7 +4898,7 @@ fn finish_time_varying_survival_covariate_template(
     time_degree: usize,
     knots: Array1<f64>,
     time_design_exit: Array2<f64>,
-    time_penalties: Vec<Array2<f64>>,
+    mut time_penalties: Vec<Array2<f64>>,
     block_name: &str,
 ) -> Result<SurvivalCovariateTermBlockTemplate, String> {
     if age_entry.len() != age_exit.len() {
@@ -4945,6 +4946,27 @@ fn finish_time_varying_survival_covariate_template(
             Ok(())
         })?;
 
+    // The roughness `∫ f″(u)² du` the basis builder ships leaves `{1, u}`
+    // unpenalized (`u = log t`), so a linear drift of the block along follow-up
+    // is never shrunk and no smoothing parameter can take the block back to one
+    // that does not move along follow-up (SPEC rules 12, 14). `∫ f′(u)² du` over
+    // the same modeling interval is the functional whose null space is exactly
+    // the constants: beside the roughness, the joint null is the time-constant
+    // block, and its constant stays unpenalized. Frobenius-normalized, as the
+    // builder normalizes the roughness (#1365).
+    let mut drift = bspline_derivative_penalty_matrix(knots.view(), time_degree, 1)
+        .map_err(|e| format!("failed to build {block_name} time-margin drift penalty: {e}"))?;
+    let drift_norm = drift.iter().map(|value| value * value).sum::<f64>().sqrt();
+    if !(drift_norm.is_finite() && drift_norm > 0.0) {
+        return Err(format!(
+            "{block_name} time-margin drift penalty has Frobenius norm {drift_norm}"
+        ));
+    }
+    drift.mapv_inplace(|value| value / drift_norm);
+    time_penalties.push(drift);
+    let time_gram =
+        crate::survival::time_margin_metric::time_margin_mean_gram(&knots, time_degree, block_name)?;
+
     Ok(SurvivalCovariateTermBlockTemplate::TimeVarying {
         time_basis: SurvivalCovariateTimeBasis {
             degree: time_degree,
@@ -4954,6 +4976,7 @@ fn finish_time_varying_survival_covariate_template(
         time_basis_exit: time_design_exit,
         time_basis_derivative_exit: time_design_derivative_exit,
         time_penalties,
+        time_gram,
     })
 }
 
@@ -7122,6 +7145,98 @@ mod tests {
                     single_derivative[[0, col]].to_bits(),
                     "single-row tangent replay disagrees with the batch at ({row}, {col})"
                 );
+            }
+        }
+    }
+
+    /// gam#2765 / gam#2767, SPEC rules 12 and 14: the follow-up margin's
+    /// penalties must vanish jointly on exactly the functions that do not move
+    /// along follow-up. The roughness `∫ f″(u)²` alone also annihilates the
+    /// linear drift in `u = log t`, so no smoothing parameter could take a fitted
+    /// slope (or threshold, or log-σ) back to a time-constant one.
+    ///
+    /// Null directions are counted with the rank rule the fit uses for these
+    /// penalties (`λ ≤ λ_max · p · ε`, `symmetric_nullspace_dimension`). The
+    /// constant is `Σ Bᵢ = 1`; the drift is `u = Σ ξᵢ Bᵢ` with `ξᵢ` the Greville
+    /// abscissae, which a clamped B-spline basis reproduces exactly.
+    #[test]
+    fn time_margin_penalties_vanish_only_on_time_constant_functions_2765() {
+        use faer::Side;
+        use gam_linalg::faer_ndarray::FaerEigh;
+
+        let age_exit = Array1::from_iter((1..=40).map(|i| 0.25 + 0.35 * f64::from(i)));
+        let age_entry = age_exit.mapv(|t| (t - 0.2).max(1e-3));
+        for (k, degree) in [(4usize, 2usize), (5, 3), (8, 3)] {
+            let fitted = build_time_varying_survival_covariate_template(
+                &age_entry, &age_exit, k, degree, "slope",
+            )
+            .expect("fit-time margin");
+            let SurvivalCovariateTermBlockTemplate::TimeVarying {
+                time_basis,
+                time_penalties,
+                ..
+            } = &fitted
+            else {
+                panic!("a time-varying request must produce a time-varying template");
+            };
+            let p = time_basis.knots.len() - degree - 1;
+            assert_eq!(p, k, "the margin must own k columns");
+            let mut total = Array2::<f64>::zeros((p, p));
+            for penalty in time_penalties {
+                assert_eq!(penalty.dim(), (p, p));
+                total += penalty;
+            }
+
+            let (eigenvalues, _) = total.eigh(Side::Lower).expect("penalty eigendecomposition");
+            let largest = eigenvalues.iter().fold(0.0_f64, |acc, value| acc.max(*value));
+            assert!(largest > 0.0, "k={k} degree={degree}: the margin penalties are zero");
+            let floor = largest * (p as f64) * f64::EPSILON;
+            let null_dimension = eigenvalues.iter().filter(|value| **value <= floor).count();
+            assert_eq!(
+                null_dimension, 1,
+                "k={k} degree={degree}: the margin penalties must leave exactly the \
+                 time-constant functions unpenalized; eigenvalues {eigenvalues:?}, floor {floor:e}"
+            );
+
+            let constant = Array1::<f64>::ones(p);
+            let constant_quotient = constant.dot(&total.dot(&constant)) / constant.dot(&constant);
+            assert!(
+                constant_quotient <= floor,
+                "k={k} degree={degree}: the time-constant function must stay unpenalized; \
+                 Rayleigh quotient {constant_quotient:e} against floor {floor:e}"
+            );
+
+            let greville = Array1::from_iter((0..p).map(|i| {
+                time_basis.knots[i + 1..=i + degree].iter().sum::<f64>() / degree as f64
+            }));
+            let centered = &greville - greville.mean().expect("non-empty margin");
+            let drift_quotient = centered.dot(&total.dot(&centered)) / centered.dot(&centered);
+            assert!(
+                drift_quotient > floor,
+                "k={k} degree={degree}: a linear drift in log t must be penalized; \
+                 Rayleigh quotient {drift_quotient:e} against floor {floor:e}"
+            );
+
+            let replayed = super::replay_time_varying_survival_covariate_template(
+                &age_entry, &age_exit, time_basis, "slope",
+            )
+            .expect("replayed margin");
+            let SurvivalCovariateTermBlockTemplate::TimeVarying {
+                time_penalties: replayed_penalties,
+                ..
+            } = &replayed
+            else {
+                panic!("a replayed margin must be time-varying");
+            };
+            assert_eq!(replayed_penalties.len(), time_penalties.len());
+            for (fit_penalty, replay_penalty) in time_penalties.iter().zip(replayed_penalties) {
+                for (fit_value, replay_value) in fit_penalty.iter().zip(replay_penalty.iter()) {
+                    assert_eq!(
+                        fit_value.to_bits(),
+                        replay_value.to_bits(),
+                        "the replayed margin must carry the fitted penalties"
+                    );
+                }
             }
         }
     }

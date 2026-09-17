@@ -194,6 +194,9 @@ pub enum SurvivalCovariateTermBlockTemplate {
         time_basis_exit: Array2<f64>,
         time_basis_derivative_exit: Array2<f64>,
         time_penalties: Vec<Array2<f64>>,
+        /// The margin's mean Gram `∫_D B Bᵀ du / |D|` over its modeling
+        /// interval: the time factor a covariate penalty is tensored against.
+        time_gram: Array2<f64>,
     },
 }
 

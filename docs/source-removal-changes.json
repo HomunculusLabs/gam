@@ -1525,6 +1525,16 @@
     "evidence": "At dc325f190, git grep -nw over crates, src, tests, examples, bench and benches names every removed public item only at its own definition or in doc prose, and that prose is rewritten here. The private helpers binomial, fact_f64, dirichlet_ref_simplex and discrete_walk, and the discrete-arm types SymmetricAugmentedFit, DiscreteCandidate and DiscreteFullConformalSet, are read only by removed items (all file-local in cubic_bspline_moments.rs and full_conformal.rs). Tests keep their checks on production code: the #1101 covariance test calls integrate_multinomial_design_moments directly, the Lipschitz positive control samples the sensitivity with its own Cholesky, and the re-selection test keeps its stationarity assertion."
   },
   {
+    "base": "89de91a5698251f5457e71ec341f72b14b5b4ba0",
+    "items": [
+      "crates/gam-models/src/survival/marginal_slope/fit_setup.rs:fn:symmetric_nullspace_dimension",
+      "crates/gam-models/src/survival/marginal_slope/fit_setup.rs:fn:transform_penalty",
+      "crates/gam-models/src/survival/marginal_slope/fit_setup.rs:struct:SlopeTimeMarginPsiTransform"
+    ],
+    "reason": "#2765/#2767 (SPEC rule 5): a time-varying survival covariate block's penalties are now functionals of its fitted surface, S_x ⊗ Ḡ_t and G_x ⊗ S_t, not S_x ⊗ I_t and I_x ⊗ S_t. SlopeTimeMarginPsiTransform lifted the slope block's spatial ψ penalty derivatives by I_t, the coefficient metric this commit retires. survival/time_margin_metric.rs replaces it with TimeMarginPenaltyMetric, which implements SpatialPsiBlockTransform with the Ḡ_t lift and also publishes the margin penalties' own ψ components (∂G_x ⊗ S_t). Its transform_penalty impl is deleted with it. symmetric_nullspace_dimension moves unchanged from fit_setup.rs into time_margin_metric.rs, where kronecker_nullspace_dimension reads it for both margin-penalty builders.",
+    "evidence": "At the base, git grep -n -w SlopeTimeMarginPsiTransform finds its declaration and SpatialPsiBlockTransform impl in survival/marginal_slope/fit_setup.rs and its one construction in survival/marginal_slope/fit_entry.rs. This commit rewrites that construction to TimeMarginPenaltyMetric::from_template. transform_penalty's other declarations stay: the trait default and the identity transform in spatial_psi_bridge.rs, and SurvivalTimeVaryingPsiTransform's impl in location_scale/covariate_blocks.rs, which now lifts by the metric. symmetric_nullspace_dimension was called only from tensorize_slope_design_over_time in fit_setup.rs. That call is replaced by kronecker_nullspace_dimension, and the moved function keeps its body. No test, bench, example, FFI or Python source names any of the three. source_removal_guard.py at the gate pin eefc8670b1 (MSI job 1183172) blocked exactly these three items before this entry."
+  },
+  {
     "base": "36bf99559b084974eedd1298d5a8a31af2ec4349",
     "items": [
       "crates/gam-solve/src/arrow_schur/newton_step.rs:const:CHUNK",

@@ -24,6 +24,7 @@ pub mod risk_calibration;
 pub mod royston_parmar;
 pub mod surface;
 pub(crate) mod time_constraints;
+pub(crate) mod time_margin_metric;
 
 pub use base::*;
 pub use construction::*;

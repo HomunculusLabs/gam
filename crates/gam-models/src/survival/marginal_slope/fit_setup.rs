@@ -1063,13 +1063,18 @@ pub(crate) fn tensorize_slope_design_over_time(
             "a follow-up-varying slope needs a non-empty tensor product, got {p_cov}x{p_time}"
         ));
     }
-    let identity_time = Array2::<f64>::eye(p_time);
-    let identity_cov = Array2::<f64>::eye(p_cov);
+    let metric = crate::survival::time_margin_metric::TimeMarginPenaltyMetric::from_template(
+        template,
+        &design.design,
+        design.penalties.len(),
+        "slope",
+    )?
+    .ok_or_else(|| "a time-varying slope template produced no time-margin metric".to_string())?;
 
     let mut penalties = Vec::with_capacity(design.penalties.len() + time_penalties.len());
     let mut nullspace_dims = Vec::with_capacity(penalties.capacity());
     for (index, penalty) in design.penalties.iter().enumerate() {
-        let local = gam_problem::penalty_matrix::kronecker_product(&penalty.local, &identity_time);
+        let local = metric.covariate_penalty(&penalty.local);
         let start = penalty.col_range.start * p_time;
         let end = penalty.col_range.end * p_time;
         penalties.push(BlockwisePenalty {
@@ -1079,8 +1084,8 @@ pub(crate) fn tensorize_slope_design_over_time(
             structure_hint: None,
             op: None,
         });
-        // `null(S ⊗ I_t) = null(S) ⊗ R^{p_t}`, so the declared null dimension
-        // scales exactly by the time width.
+        // `Ḡ_t` is positive definite, so `null(S ⊗ Ḡ_t) = null(S) ⊗ R^{p_t}` and
+        // the declared null dimension scales exactly by the time width.
         nullspace_dims.push(
             design
                 .nullspace_dims
@@ -1090,7 +1095,7 @@ pub(crate) fn tensorize_slope_design_over_time(
                 * p_time,
         );
     }
-    for time_penalty in time_penalties {
+    for (time_penalty, local) in time_penalties.iter().zip(metric.margin_penalties()) {
         if time_penalty.dim() != (p_time, p_time) {
             return Err(format!(
                 "slope time-margin penalty is {}x{} but the margin has {p_time} columns",
@@ -1098,15 +1103,19 @@ pub(crate) fn tensorize_slope_design_over_time(
                 time_penalty.ncols(),
             ));
         }
+        nullspace_dims.push(
+            crate::survival::time_margin_metric::kronecker_nullspace_dimension(
+                &metric.covariate_gram,
+                time_penalty,
+            )?,
+        );
         penalties.push(BlockwisePenalty {
             col_range: 0..p_cov * p_time,
-            local: gam_problem::penalty_matrix::kronecker_product(&identity_cov, time_penalty),
+            local,
             prior_mean: gam_problem::CoefficientPriorMean::Zero,
             structure_hint: None,
             op: None,
         });
-        // `null(I_c ⊗ S_t) = R^{p_c} ⊗ null(S_t)`.
-        nullspace_dims.push(p_cov * symmetric_nullspace_dimension(time_penalty)?);
     }
 
     let cov_design = design.design.clone();
@@ -1146,33 +1155,6 @@ pub(crate) fn tensorize_slope_design_over_time(
 /// each covariate row onto the three channel designs from the layout's stored
 /// margin. Each penalty derivative is `S_ψ ⊗ I_t`, the derivative of the tensored
 /// penalty `S ⊗ I_t` that [`tensorize_slope_design_over_time`] builds (gam#2767).
-pub(crate) struct SlopeTimeMarginPsiTransform {
-    pub(crate) time_width: usize,
-}
-
-impl crate::spatial_psi_bridge::SpatialPsiBlockTransform for SlopeTimeMarginPsiTransform {
-    fn transform_penalty(&self, penalty: Array2<f64>) -> Array2<f64> {
-        gam_problem::penalty_matrix::kronecker_product(&penalty, &Array2::<f64>::eye(self.time_width))
-    }
-}
-
-/// Dimension of the null space of a symmetric positive-semidefinite penalty,
-/// measured against the same relative eigenvalue floor the penalty spectrum
-/// machinery uses elsewhere.
-fn symmetric_nullspace_dimension(matrix: &Array2<f64>) -> Result<usize, String> {
-    use gam_linalg::faer_ndarray::FaerEigh;
-    use faer::Side;
-    let (eigenvalues, _) = matrix
-        .eigh(Side::Lower)
-        .map_err(|error| format!("slope time-margin penalty eigendecomposition: {error}"))?;
-    let largest = eigenvalues.iter().fold(0.0_f64, |acc, value| acc.max(*value));
-    if largest <= 0.0 {
-        return Ok(matrix.nrows());
-    }
-    let floor = largest * (matrix.nrows() as f64) * f64::EPSILON;
-    Ok(eigenvalues.iter().filter(|value| **value <= floor).count())
-}
-
 /// Attach the follow-up channels a time-margined slope design produced, if
 /// any. Kept as one helper so the two layout-materialisation sites in the fit
 /// entry cannot disagree about whether the slope varies.

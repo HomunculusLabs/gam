@@ -97,8 +97,6 @@ use crate::model_types::{
     FitGeometry, ensure_finite_scalar_estimation, validate_all_finite_estimation,
 };
 
-use gam_problem::penalty_matrix::kronecker_product;
-
 use gam_problem::{InverseLink, StandardLink};
 
 use ndarray::{Array1, Array2, ArrayView1, Axis, s};

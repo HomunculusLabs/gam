@@ -285,15 +285,10 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             .into());
         }
     }
-    // Width of the follow-up margin the slope covariate factor is tensored against:
-    // a spatial term on the slope surface differentiates that covariate factor, and
-    // its penalty derivatives must carry the same `⊗ I_t` the block's penalties do.
-    let slope_time_width = match &spec.slope_template {
-        SurvivalCovariateTermBlockTemplate::TimeVarying {
-            time_basis_exit, ..
-        } => Some(time_basis_exit.ncols()),
-        SurvivalCovariateTermBlockTemplate::Static => None,
-    };
+    // A spatial term on the slope surface differentiates the covariate factor the
+    // follow-up margin is tensored against, so its penalty derivatives carry the
+    // metric the block's penalties do (`time_margin_metric`).
+    let slope_psi_template = spec.slope_template.clone();
     let slope_template = spec.slope_template.clone();
     // The outer spatial/kappa search rebuilds the block designs from their term
     // specs on every probe, so the time margin has to be applied where the
@@ -1608,13 +1603,18 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 Vec::new()
             },
             if slope_has_spatial {
-                match slope_time_width {
-                    Some(time_width) => {
+                match crate::survival::time_margin_metric::TimeMarginPenaltyMetric::from_template(
+                    &slope_psi_template,
+                    &designs[1].design,
+                    designs[1].penalties.len(),
+                    "slope",
+                )? {
+                    Some(metric) => {
                         crate::spatial_psi_bridge::build_block_spatial_psi_derivatives_with_transform(
                             data,
                             &specs[1],
                             &designs[1],
-                            &SlopeTimeMarginPsiTransform { time_width },
+                            &metric,
                         )?
                     }
                     None => build_block_spatial_psi_derivatives(data, &specs[1], &designs[1])?,

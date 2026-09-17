@@ -577,26 +577,30 @@ pub(crate) fn build_survival_covariate_block_from_design(
                 );
             }
             let p_cov = cov_design.design.ncols();
-            let p_time = time_basis_exit.ncols();
             let design_covariates = cov_design.design.clone();
-            let i_cov = Array2::<f64>::eye(p_cov);
-            let i_time = Array2::<f64>::eye(p_time);
-            let cov_dense_for_kronecker: Vec<Array2<f64>> = cov_design
-                .penalties
-                .iter()
-                .map(|bp| bp.to_global(p_cov))
-                .collect();
+            // SPEC rule 5: each covariate penalty against the margin's mean Gram,
+            // each margin penalty against the covariate Gram (`time_margin_metric`).
+            let metric =
+                crate::survival::time_margin_metric::TimeMarginPenaltyMetric::from_template(
+                    template,
+                    &cov_design.design,
+                    cov_design.penalties.len(),
+                    "survival location-scale time-varying covariate block",
+                )?
+                .ok_or_else(|| {
+                    "a time-varying covariate template produced no time-margin metric".to_string()
+                })?;
             let mut penalties =
-                Vec::with_capacity(cov_dense_for_kronecker.len() + time_penalties.len());
-            for s_cov in &cov_dense_for_kronecker {
+                Vec::with_capacity(cov_design.penalties.len() + time_penalties.len());
+            for penalty in &cov_design.penalties {
                 penalties.push(PenaltyMatrix::KroneckerFactored {
-                    left: s_cov.clone(),
-                    right: i_time.clone(),
+                    left: penalty.to_global(p_cov),
+                    right: metric.time_gram.clone(),
                 });
             }
             for s_time in time_penalties {
                 penalties.push(PenaltyMatrix::KroneckerFactored {
-                    left: i_cov.clone(),
+                    left: metric.covariate_gram.clone(),
                     right: s_time.clone(),
                 });
             }
@@ -621,7 +625,8 @@ pub(crate) fn build_survival_covariate_block_from_design(
 /// A time-dependent survival covariate represents each spatial design row as the
 /// rowwise-Kronecker of the (spatial) base row against three time bases — exit,
 /// entry, and the exit-time derivative — stacked vertically, while each spatial
-/// penalty is Kronecker-multiplied against the time identity. This is a *uniform*
+/// penalty is Kronecker-multiplied against the margin's mean Gram and the margin
+/// penalties' covariate Gram moves with ψ (`time_margin_metric`). This is a *uniform*
 /// coordinate change applied to every block the shared engine assembles, so we
 /// invert the dependency: the engine owns the spatial-ψ block construction and
 /// this adapter only supplies the tensorization via [`SpatialPsiBlockTransform`].
@@ -629,6 +634,7 @@ pub(crate) struct SurvivalTimeVaryingPsiTransform {
     pub(crate) time_basis_entry: Array2<f64>,
     pub(crate) time_basis_exit: Array2<f64>,
     pub(crate) time_basis_derivative_exit: Array2<f64>,
+    pub(crate) metric: crate::survival::time_margin_metric::TimeMarginPenaltyMetric,
 }
 
 impl crate::spatial_psi_bridge::SpatialPsiBlockTransform for SurvivalTimeVaryingPsiTransform {
@@ -667,8 +673,17 @@ impl crate::spatial_psi_bridge::SpatialPsiBlockTransform for SurvivalTimeVarying
     }
 
     fn transform_penalty(&self, base: Array2<f64>) -> Array2<f64> {
-        let i_time = Array2::<f64>::eye(self.time_basis_exit.ncols());
-        kronecker_product(&base, &i_time)
+        self.metric.covariate_penalty(&base)
+    }
+
+    fn owned_penalty_psi_components(
+        &self,
+        axes: &[crate::spatial_psi_bridge::SpatialPsiAxisDesign],
+    ) -> Result<crate::spatial_psi_bridge::OwnedPenaltyPsiComponents, String> {
+        crate::spatial_psi_bridge::SpatialPsiBlockTransform::owned_penalty_psi_components(
+            &self.metric,
+            axes,
+        )
     }
 }
 
@@ -697,10 +712,21 @@ pub(crate) fn build_survival_covariate_block_psi_derivatives(
             time_basis_derivative_exit,
             ..
         } => {
+            let metric =
+                crate::survival::time_margin_metric::TimeMarginPenaltyMetric::from_template(
+                    template,
+                    &design.design,
+                    design.penalties.len(),
+                    "survival location-scale time-varying covariate block",
+                )?
+                .ok_or_else(|| {
+                    "a time-varying covariate template produced no time-margin metric".to_string()
+                })?;
             let transform = SurvivalTimeVaryingPsiTransform {
                 time_basis_entry: time_basis_entry.clone(),
                 time_basis_exit: time_basis_exit.clone(),
                 time_basis_derivative_exit: time_basis_derivative_exit.clone(),
+                metric,
             };
             crate::spatial_psi_bridge::build_block_spatial_psi_derivatives_with_transform(
                 data,

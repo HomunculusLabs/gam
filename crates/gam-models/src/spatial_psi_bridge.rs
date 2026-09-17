@@ -47,7 +47,7 @@ pub(crate) fn wrap_spatial_implicit_psi_operator(
 /// against a time basis — invert the dependency by *providing a transform* here
 /// instead of re-implementing the assembly loop.
 ///
-/// All three hooks default to the identity, so the canonical (untransformed)
+/// Every hook defaults to the identity, so the canonical (untransformed)
 /// path is just [`build_block_spatial_psi_derivatives`].
 pub(crate) trait SpatialPsiBlockTransform {
     /// Transform an assembled implicit ψ-derivative operator (already embedded
@@ -67,6 +67,45 @@ pub(crate) trait SpatialPsiBlockTransform {
     /// Transform a materialized (already embedded) penalty block. Default: identity.
     fn transform_penalty(&self, penalty: Array2<f64>) -> Array2<f64> {
         penalty
+    }
+
+    /// ψ-derivatives of penalties the transform adds beside the term
+    /// collection's own (a time margin's `G_x ⊗ S_t`, whose covariate Gram moves
+    /// with every spatial axis of the block), given each axis's untransformed
+    /// design derivative. Default: the transform owns no penalties.
+    fn owned_penalty_psi_components(
+        &self,
+        axes: &[SpatialPsiAxisDesign],
+    ) -> Result<OwnedPenaltyPsiComponents, String> {
+        Ok(OwnedPenaltyPsiComponents::none(axes.len()))
+    }
+}
+
+/// One spatial ψ axis of a block as the engine assembles it, before any
+/// transform: the embedded design-derivative operator (`None` when the axis
+/// moves no design column), the operator's axis index, the anisotropy group and
+/// the block columns the axis moves.
+pub(crate) struct SpatialPsiAxisDesign {
+    pub(crate) operator: Option<Arc<dyn CustomFamilyPsiDerivativeOperator>>,
+    pub(crate) axis: usize,
+    pub(crate) group: Option<usize>,
+    pub(crate) range: Range<usize>,
+}
+
+/// ψ-derivative components of penalties a transform owns: `first[a]` and
+/// `second[a][b]`, each a list of `(block penalty index, matrix)`.
+pub(crate) struct OwnedPenaltyPsiComponents {
+    pub(crate) first: Vec<Vec<(usize, Array2<f64>)>>,
+    pub(crate) second: Vec<Vec<Vec<(usize, Array2<f64>)>>>,
+}
+
+impl OwnedPenaltyPsiComponents {
+    /// No owned penalties along `psi_dim` axes.
+    pub(crate) fn none(psi_dim: usize) -> Self {
+        Self {
+            first: vec![Vec::new(); psi_dim],
+            second: vec![vec![Vec::new(); psi_dim]; psi_dim],
+        }
     }
 }
 
@@ -362,31 +401,54 @@ pub(crate) fn build_block_spatial_psi_derivatives_with_transform(
                 .map(|gid| ((gid, info.implicit_axis), idx))
         })
         .collect();
+    let axes = info_list
+        .iter()
+        .map(|info| -> Result<SpatialPsiAxisDesign, String> {
+            let operator = match info.implicit_operator.as_ref() {
+                Some(op) => Some(wrap_spatial_implicit_psi_operator(
+                    Arc::clone(op),
+                    info.global_range.clone(),
+                    info.total_p,
+                )),
+                None if !info.x_psi_local.is_empty() => Some(
+                    build_embedded_dense_psi_operator(
+                        &info.x_psi_local,
+                        &info.x_psi_psi_local,
+                        info.aniso_cross_designs.as_ref(),
+                        info.global_range.clone(),
+                        info.total_p,
+                        info.implicit_axis,
+                    )
+                    .map_err(|error| error.to_string())?,
+                ),
+                None => None,
+            };
+            Ok(SpatialPsiAxisDesign {
+                operator,
+                axis: info.implicit_axis,
+                group: info.aniso_group_id,
+                range: info.global_range.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut owned = transform.owned_penalty_psi_components(&axes)?;
+    if owned.first.len() != psi_dim
+        || owned.second.len() != psi_dim
+        || owned.second.iter().any(|row| row.len() != psi_dim)
+    {
+        return Err(format!(
+            "spatial psi transform published owned penalty components for {} axes, the block has \
+             {psi_dim}",
+            owned.first.len()
+        ));
+    }
     let collected: Result<Vec<CustomFamilyBlockPsiDerivative>, String> = info_list
         .into_iter()
         .enumerate()
         .map(|(psi_idx, info)| {
-            let implicit_operator = info.implicit_operator.as_ref().map(|op| {
-                wrap_spatial_implicit_psi_operator(
-                    Arc::clone(op),
-                    info.global_range.clone(),
-                    info.total_p,
-                )
-            });
-            let dense_operator = if implicit_operator.is_none() && !info.x_psi_local.is_empty() {
-                Some(build_embedded_dense_psi_operator(
-                    &info.x_psi_local,
-                    &info.x_psi_psi_local,
-                    info.aniso_cross_designs.as_ref(),
-                    info.global_range.clone(),
-                    info.total_p,
-                    info.implicit_axis,
-                ).map_err(|error| error.to_string())?)
-            } else {
-                None
-            };
-            let design_operator = implicit_operator
-                .or(dense_operator)
+            let design_operator = axes[psi_idx]
+                .operator
+                .clone()
                 .map(|op| transform.transform_operator(op))
                 .transpose()?;
             let materialize_dense_design =
@@ -415,7 +477,7 @@ pub(crate) fn build_block_spatial_psi_derivatives_with_transform(
                 };
                 transform.transform_penalty(embedded)
             };
-            let s_components: Vec<(usize, Array2<f64>)> = info
+            let mut s_components: Vec<(usize, Array2<f64>)> = info
                 .penalty_indices
                 .into_iter()
                 .zip(
@@ -424,6 +486,7 @@ pub(crate) fn build_block_spatial_psi_derivatives_with_transform(
                         .map(|local| embed_penalty(&local)),
                 )
                 .collect();
+            s_components.extend(std::mem::take(&mut owned.first[psi_idx]));
             // Build x_psi_psi rows with cross-derivative designs
             let x_psi_psi_rows = if materialize_dense_design {
                 let mut rows =
@@ -468,6 +531,12 @@ pub(crate) fn build_block_spatial_psi_derivatives_with_transform(
                         .zip(local_components.iter().map(embed_penalty))
                         .collect();
                 }
+            }
+            for (row, owned_row) in s_psi_psi_comp_rows
+                .iter_mut()
+                .zip(std::mem::take(&mut owned.second[psi_idx]))
+            {
+                row.extend(owned_row);
             }
             Ok(CustomFamilyBlockPsiDerivative {
                 penalty_index: Some(info.penalty_index),
