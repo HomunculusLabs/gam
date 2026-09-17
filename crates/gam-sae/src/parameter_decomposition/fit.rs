@@ -32,10 +32,13 @@
 //!
 //! is the same quadratic form for every output coordinate, with blocks
 //! `S_jk R_jᵀ R_k`. The output coordinates are coordinates of one vector-valued
-//! observation, so the block is exactly the shared-dispersion multi-response
-//! Gaussian REML problem of [`gaussian_reml_multi_shared_dispersion_closed_form`].
-//! Its posterior mean and smoothing strength are taken from that owner and never
-//! refitted here. A dense basis matrix is the case `R_j = I_{d_in}`: the design row
+//! observation, so the block is exactly the shared-dispersion multi-response,
+//! multi-penalty Gaussian REML problem of [`GaussianRemlMultiPenaltyProblem`].
+//! Each field penalty (the energy and the null-space form) is assembled the same
+//! way and keeps its own smoothing strength. The block declares a zero null space,
+//! so a penalty set that leaves some direction free is refused (SPEC 12/14). The
+//! posterior mean and smoothing strengths come from that owner's certified fit and
+//! are never refitted here. A dense basis matrix is the case `R_j = I_{d_in}`: the design row
 //! is `β(m_r) ⊗ h_r` and the penalty is `S ⊗ I_{d_in}`.
 //!
 //! # Rows that are refused
@@ -49,13 +52,28 @@
 //! row is refused. The refusal keys on the declared mask values, never on a
 //! computed moment. `β(m_r)` can vanish by cancellation at the current labels and
 //! weights while its derivatives in them do not, and such a row is admitted.
+//!
+//! # Structural proposals
+//!
+//! A proposal (share, split, refine, reduce, expose) is decided on decoded
+//! artifacts only:
+//! * the decoded reference must meet the declared tolerance;
+//! * the candidate's fidelity status over the mask domain must be a bound on the
+//!   supremum, not an estimate, and must not refute `sup d ≤ ε`;
+//! * the decoded candidate must meet the tolerance with a strictly shorter code.
+//!
+//! Fidelity alone never accepts. An operator that interpolates the teacher still
+//! loses when its code is longer.
 
 use std::fmt;
 
+use super::codec::{DecodedArtifactScore, code_saving_at_declared_fidelity};
+use super::supports::{EvidenceStatus, Extremum};
 use gam_linalg::matrix::dense_rowwise_kronecker;
+use gam_linalg::roundoff::accumulation_growth;
 use gam_solve::estimate::EstimationError;
-use gam_solve::gaussian_reml::{
-    GaussianRemlMultiResult, gaussian_reml_multi_shared_dispersion_closed_form,
+use gam_solve::gaussian_reml_multi_penalty::{
+    GaussianRemlMultiPenaltyFit, GaussianRemlMultiPenaltyProblem,
 };
 use ndarray::{Array2, ArrayView1, ArrayView2, s};
 
@@ -81,9 +99,11 @@ pub struct GaussianBlockRows<'a> {
 pub struct GaussianBlockFit {
     /// Posterior-mean left factors `L_j`, each `d_out × r_j`.
     pub left_factors: Vec<Array2<f64>>,
-    /// The shared-dispersion REML fit of the block. Its coefficients are in design
-    /// order (row `offset_j + a`, one column per output coordinate).
-    pub reml: GaussianRemlMultiResult,
+    /// The reduced REML problem, kept for the envelope derivatives at this fit.
+    pub problem: GaussianRemlMultiPenaltyProblem,
+    /// The certified multi-penalty REML fit of the block. Its coefficients are in
+    /// design order (row `offset_j + a`, one column per output coordinate).
+    pub reml: GaussianRemlMultiPenaltyFit,
 }
 
 /// Why a conditionally Gaussian coefficient block was not fitted.
@@ -111,10 +131,28 @@ pub enum GaussianBlockError {
         rank: usize,
         input_dim: usize,
     },
+    /// No field penalty was given, so no prior is declared.
+    NoFieldPenalties,
     PenaltyShape {
+        penalty: usize,
         basis: usize,
         rows: usize,
         cols: usize,
+    },
+    /// A field penalty is not exactly symmetric.
+    AsymmetricFieldPenalty {
+        penalty: usize,
+        row: usize,
+        col: usize,
+    },
+    /// An assembled penalty pair differs by more than the derived rounding band of the
+    /// products that formed it, so the difference is an assembly error, not rounding.
+    AssembledPenaltyAsymmetric {
+        penalty: usize,
+        row: usize,
+        col: usize,
+        gap: f64,
+        band: f64,
     },
     NonFinite {
         what: &'static str,
@@ -174,10 +212,35 @@ impl fmt::Display for GaussianBlockError {
                 "conditionally Gaussian block refused: right factor {basis} is {rows}×{rank}; it \
                  needs {input_dim} rows and a positive rank"
             ),
-            Self::PenaltyShape { basis, rows, cols } => write!(
+            Self::NoFieldPenalties => write!(
                 f,
-                "conditionally Gaussian block refused: the field penalty must be {basis}×{basis} \
-                 to match the basis; got {rows}×{cols}"
+                "conditionally Gaussian block refused: at least one field penalty is required"
+            ),
+            Self::PenaltyShape {
+                penalty,
+                basis,
+                rows,
+                cols,
+            } => write!(
+                f,
+                "conditionally Gaussian block refused: field penalty {penalty} must be \
+                 {basis}×{basis} to match the basis; got {rows}×{cols}"
+            ),
+            Self::AsymmetricFieldPenalty { penalty, row, col } => write!(
+                f,
+                "conditionally Gaussian block refused: field penalty {penalty} is not exactly \
+                 symmetric at ({row}, {col})"
+            ),
+            Self::AssembledPenaltyAsymmetric {
+                penalty,
+                row,
+                col,
+                gap,
+                band,
+            } => write!(
+                f,
+                "conditionally Gaussian block refused: assembled penalty {penalty} differs from its \
+                 transpose at ({row}, {col}) by {gap:e}, beyond its derived rounding band {band:e}"
             ),
             Self::NonFinite { what } => write!(
                 f,
@@ -215,19 +278,23 @@ impl std::error::Error for GaussianBlockError {}
 /// Fits one conditionally Gaussian coefficient block exactly.
 ///
 /// * `right_factors` holds the fixed `R_j`, `d_in × r_j`, one per basis matrix.
-/// * `field_penalty` is the `K × K` function-space penalty `S` of the family's field.
+/// * `field_penalties` holds the `K × K` function-space penalties of the family's
+///   field, e.g. the energy `S` and the null-space form over the functions `S` leaves
+///   free. Each gets its own smoothing strength.
 ///
 /// Refuses:
-/// * an empty or mis-shaped block, or non-finite input;
+/// * an empty or mis-shaped block, an empty penalty list, or non-finite input;
 /// * a row whose declared mask is a native multiple (see the module docs);
 /// * a block whose dense state exceeds the host in-core budget.
 ///
-/// Everything else is decided by the REML owner, whose refusals are returned
-/// unchanged.
+/// The block declares a zero null space. So the REML owner refuses a penalty set
+/// whose summed null space it resolves as non-empty, since a direction of the left
+/// factors with a flat prior can never shrink to no effect (SPEC 12/14). That refusal
+/// and every other one from the owner are returned unchanged.
 pub fn fit_gaussian_coefficient_block(
     rows: GaussianBlockRows<'_>,
     right_factors: &[ArrayView2<'_, f64>],
-    field_penalty: ArrayView2<'_, f64>,
+    field_penalties: &[ArrayView2<'_, f64>],
 ) -> Result<GaussianBlockFit, GaussianBlockError> {
     let n = rows.moments.nrows();
     let components = rows.component_masks.ncols();
@@ -273,19 +340,36 @@ pub fn fit_gaussian_coefficient_block(
             });
         }
     }
-    if field_penalty.nrows() != basis || field_penalty.ncols() != basis {
-        return Err(GaussianBlockError::PenaltyShape {
-            basis,
-            rows: field_penalty.nrows(),
-            cols: field_penalty.ncols(),
-        });
+    if field_penalties.is_empty() {
+        return Err(GaussianBlockError::NoFieldPenalties);
+    }
+    for (penalty, field_penalty) in field_penalties.iter().enumerate() {
+        if field_penalty.nrows() != basis || field_penalty.ncols() != basis {
+            return Err(GaussianBlockError::PenaltyShape {
+                penalty,
+                basis,
+                rows: field_penalty.nrows(),
+                cols: field_penalty.ncols(),
+            });
+        }
+        if field_penalty.iter().any(|value| !value.is_finite()) {
+            return Err(GaussianBlockError::NonFinite {
+                what: "field penalty entries",
+            });
+        }
+        for row in 0..basis {
+            for col in (row + 1)..basis {
+                if field_penalty[[row, col]] != field_penalty[[col, row]] {
+                    return Err(GaussianBlockError::AsymmetricFieldPenalty { penalty, row, col });
+                }
+            }
+        }
     }
     for (what, values) in [
         ("component masks", rows.component_masks),
         ("moments", rows.moments),
         ("inputs", rows.inputs),
         ("responses", rows.responses),
-        ("field penalty entries", field_penalty),
     ] {
         if values.iter().any(|value| !value.is_finite()) {
             return Err(GaussianBlockError::NonFinite { what });
@@ -319,21 +403,25 @@ pub fn fit_gaussian_coefficient_block(
     admit_dense_block(
         n,
         &ranks,
+        field_penalties.len(),
         output_dim,
         crate::manifold::sae_host_in_core_budget_bytes().0,
     )?;
     let design = block_design(rows.moments, rows.inputs, right_factors);
-    let penalty = block_penalty(field_penalty, right_factors);
-    let reml = gaussian_reml_multi_shared_dispersion_closed_form(
-        design.view(),
-        rows.responses,
-        penalty.view(),
-        None,
-        None,
-    )
-    .map_err(GaussianBlockError::Reml)?;
+    let penalties = field_penalties
+        .iter()
+        .enumerate()
+        .map(|(penalty, field_penalty)| block_penalty(penalty, *field_penalty, right_factors))
+        .collect::<Result<Vec<Array2<f64>>, GaussianBlockError>>()?;
+    let problem = GaussianRemlMultiPenaltyProblem::new(design.view(), rows.responses, &penalties, 0)
+        .map_err(GaussianBlockError::Reml)?;
+    let reml = problem.fit(None).map_err(GaussianBlockError::Reml)?;
     let left_factors = left_factors_from_design_order(reml.coefficients.view(), right_factors);
-    Ok(GaussianBlockFit { left_factors, reml })
+    Ok(GaussianBlockFit {
+        left_factors,
+        problem,
+        reml,
+    })
 }
 
 /// `[0, r_0, r_0 + r_1, …, Σ_j r_j]`: where each basis matrix's block starts.
@@ -368,20 +456,64 @@ fn block_design(
 
 /// The penalty in design order: block `(j, k)` is `S_jk R_jᵀ R_k`, the quadratic
 /// form `Σ_jk S_jk ⟨L_j R_jᵀ, L_k R_kᵀ⟩_F` of one output coordinate.
-fn block_penalty(field_penalty: ArrayView2<'_, f64>, right_factors: &[ArrayView2<'_, f64>]) -> Array2<f64> {
+///
+/// `S` is exactly symmetric (checked by the caller), so blocks `(j, k)` and `(k, j)`
+/// are the same numbers reached through two separate Gram products. Each entry sums
+/// `d_in` products and is then scaled once, so each computed side is within
+/// `γ_{d_in+1}` times its absolute monomial sum. [`symmetrized_within_band`] refuses a
+/// wider gap and averages the rest. `penalty` names the penalty in a refusal.
+fn block_penalty(
+    penalty: usize,
+    field_penalty: ArrayView2<'_, f64>,
+    right_factors: &[ArrayView2<'_, f64>],
+) -> Result<Array2<f64>, GaussianBlockError> {
     let offsets = design_offsets(right_factors);
     let columns = offsets[right_factors.len()];
-    let mut penalty = Array2::<f64>::zeros((columns, columns));
+    let mut assembled = Array2::<f64>::zeros((columns, columns));
+    let mut absolute = Array2::<f64>::zeros((columns, columns));
     for (j, left) in right_factors.iter().enumerate() {
+        let left_absolute = left.mapv(f64::abs);
         for (k, right) in right_factors.iter().enumerate() {
             let strength = field_penalty[[j, k]];
-            let gram = left.t().dot(right);
-            penalty
+            assembled
                 .slice_mut(s![offsets[j]..offsets[j + 1], offsets[k]..offsets[k + 1]])
-                .assign(&gram.mapv(|value| strength * value));
+                .assign(&left.t().dot(right).mapv(|value| strength * value));
+            absolute
+                .slice_mut(s![offsets[j]..offsets[j + 1], offsets[k]..offsets[k + 1]])
+                .assign(&left_absolute.t().dot(&right.mapv(f64::abs)).mapv(|value| strength.abs() * value));
         }
     }
-    penalty
+    let input_dim = right_factors.first().map_or(0, |factor| factor.nrows());
+    symmetrized_within_band(penalty, assembled, &absolute, accumulation_growth(input_dim + 1))
+}
+
+/// Averages `assembled` with its transpose, after refusing any pair whose gap exceeds
+/// `growth` times the two sides' absolute monomial sums. Averaging then removes only
+/// rounding and cannot hide an assembly error. An exactly symmetric pair is unchanged,
+/// since (a + a)·½ = a.
+fn symmetrized_within_band(
+    penalty: usize,
+    assembled: Array2<f64>,
+    absolute: &Array2<f64>,
+    growth: f64,
+) -> Result<Array2<f64>, GaussianBlockError> {
+    let columns = assembled.nrows();
+    for row in 0..columns {
+        for col in (row + 1)..columns {
+            let gap = (assembled[[row, col]] - assembled[[col, row]]).abs();
+            let band = growth * (absolute[[row, col]] + absolute[[col, row]]);
+            if !(gap <= band) {
+                return Err(GaussianBlockError::AssembledPenaltyAsymmetric {
+                    penalty,
+                    row,
+                    col,
+                    gap,
+                    band,
+                });
+            }
+        }
+    }
+    Ok((&assembled + &assembled.t()) * 0.5)
 }
 
 /// Reads design-order coefficients (row `offset_j + a`, column `o`) as `L_j[[o, a]]`.
@@ -404,26 +536,31 @@ fn left_factors_from_design_order(
 
 /// A lower bound on the block's peak dense state in bytes, or `None` on overflow.
 ///
-/// With `p = Σ_j r_j`, it counts what this file materializes together with the
-/// state any dense eigen-REML on `p` coefficients must hold:
-/// * the design, `n·p`, and the widest projected input `R_jᵀ h`, `n·max_j r_j`,
-///   while it is folded into the design;
-/// * the penalty in design order, `p²`;
-/// * the Gram `XᵀWX` and its eigenbasis, `2p²`;
-/// * the coefficients, `p·d_out`.
+/// With `p = Σ_j r_j`, `K` penalties and `m = d_out`, it counts what this file
+/// materializes together with what the multi-penalty REML owner holds, as read at
+/// eb05457fdd:
+/// * here: the design `n·p`, the widest projected input `n·max_j r_j` while it is
+///   folded in, and the assembled penalties `K·p²`;
+/// * the owner: its penalty copies `K·p²`, the design factor `R`
+///   (`min(n, p)·p`), the rotated head `Z` (`min(n, p)·m`), the stacked root, at
+///   least `p²`, and the coefficients `p·m`.
 ///
-/// The REML owner's transient factorization workspace is on top of this. So the
-/// bound is necessary, not sufficient: it refuses a block that cannot fit, and it
-/// does not certify one that can.
-fn dense_block_bytes(rows: usize, ranks: &[usize], outputs: usize) -> Option<usize> {
+/// The owner's transient workspace (the penalty roots, the compressed head, QR
+/// reflectors) is on top of this. So the bound is necessary, not sufficient: it
+/// refuses a block that cannot fit, and it does not certify one that can.
+fn dense_block_bytes(rows: usize, ranks: &[usize], penalties: usize, outputs: usize) -> Option<usize> {
     let columns = ranks
         .iter()
         .try_fold(0usize, |total, &rank| total.checked_add(rank))?;
     let widest = ranks.iter().copied().max().unwrap_or(0);
+    let squares = columns.checked_mul(columns)?;
+    let penalty_squares = penalties.checked_mul(squares)?.checked_mul(2)?;
     let design = rows.checked_mul(columns.checked_add(widest)?)?;
-    let squares = columns.checked_mul(columns)?.checked_mul(3)?;
+    let reduction = rows.min(columns).checked_mul(columns.checked_add(outputs)?)?;
     let coefficients = columns.checked_mul(outputs)?;
     design
+        .checked_add(penalty_squares)?
+        .checked_add(reduction)?
         .checked_add(squares)?
         .checked_add(coefficients)?
         .checked_mul(std::mem::size_of::<f64>())
@@ -432,10 +569,11 @@ fn dense_block_bytes(rows: usize, ranks: &[usize], outputs: usize) -> Option<usi
 fn admit_dense_block(
     rows: usize,
     ranks: &[usize],
+    penalties: usize,
     outputs: usize,
     budget_bytes: usize,
 ) -> Result<(), GaussianBlockError> {
-    match dense_block_bytes(rows, ranks, outputs) {
+    match dense_block_bytes(rows, ranks, penalties, outputs) {
         Some(required) if required <= budget_bytes => Ok(()),
         required_bytes => Err(GaussianBlockError::AdmissionRefused {
             required_bytes,
@@ -444,10 +582,146 @@ fn admit_dense_block(
     }
 }
 
+/// A structural proposal on the current artifact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProposalKind {
+    /// Two families of one shape class and label-manifold type become one field, or
+    /// tied uses call one shared body.
+    Share,
+    /// A component becomes two whose sum is that component at the start.
+    Split,
+    /// One more basis function or label dimension, starting at its prior mean.
+    Refine,
+    /// A component, a rank or a basis function is removed, or a tensor returns to its
+    /// native primitive.
+    Reduce,
+    /// A component is born from the residual at a violating witness, or a recovered
+    /// structured coordinate becomes a program node.
+    Expose,
+}
+
+/// An accepted structural proposal.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProposalAcceptance<W, D> {
+    pub kind: ProposalKind,
+    /// `L(reference) − L(candidate)` in bits. Always strictly positive.
+    pub saving_bits: i128,
+    /// Whether the fidelity status proves `sup d ≤ ε` over its domain. When false, no
+    /// violation was proved either, and the status is carried as it was proved.
+    pub fidelity_certified: bool,
+    /// The decoded candidate's fidelity status over the declared mask domain.
+    pub fidelity: EvidenceStatus<W, D>,
+}
+
+/// Why a structural proposal was not accepted.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProposalRejection<W, D> {
+    /// The decoded reference misses the declared tolerance. The declared precision
+    /// and tolerance are then inconsistent, so the loop is refused, not only this
+    /// proposal.
+    ReferenceMissesTolerance(String),
+    /// The decoded candidate misses the declared tolerance over the declared input
+    /// family.
+    CandidateMissesTolerance(String),
+    /// The candidate's code is not strictly shorter.
+    NoShorterCode { saving_bits: i128 },
+    /// The fidelity status proves the supremum exceeds the tolerance.
+    FidelityRefuted(EvidenceStatus<W, D>),
+    /// A statistical estimate is about a mean, not the supremum the fidelity check
+    /// needs (A6).
+    EstimateIsNotAFidelityBound(EvidenceStatus<W, D>),
+    /// The status brackets an infimum. Bounding an infimum from above says nothing
+    /// about the supremum.
+    NotASupremum(EvidenceStatus<W, D>),
+}
+
+impl<W: fmt::Debug, D: fmt::Debug> fmt::Display for ProposalRejection<W, D> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReferenceMissesTolerance(message) => write!(
+                f,
+                "structural loop refused: the decoded reference misses the declared tolerance, so \
+                 the declared precision and tolerance are inconsistent ({message})"
+            ),
+            Self::CandidateMissesTolerance(message) => {
+                write!(f, "proposal rejected: the decoded candidate misses the tolerance ({message})")
+            }
+            Self::NoShorterCode { saving_bits } => write!(
+                f,
+                "proposal rejected: the candidate's code is not strictly shorter (saving \
+                 {saving_bits} bits)"
+            ),
+            Self::FidelityRefuted(status) => {
+                write!(f, "proposal rejected: the fidelity status refutes the tolerance: {status:?}")
+            }
+            Self::EstimateIsNotAFidelityBound(status) => write!(
+                f,
+                "proposal refused: a statistical estimate bounds no supremum: {status:?}"
+            ),
+            Self::NotASupremum(status) => write!(
+                f,
+                "proposal refused: the fidelity status brackets an infimum, not the supremum: \
+                 {status:?}"
+            ),
+        }
+    }
+}
+
+impl<W: fmt::Debug, D: fmt::Debug> std::error::Error for ProposalRejection<W, D> {}
+
+/// Decides one structural proposal.
+///
+/// `reference` and `candidate` score the decoded artifacts over the declared input
+/// family. `fidelity` is the separation oracle's status for `sup d` over the declared
+/// mask domain, on the decoded candidate. The rule reuses the owners' predicates
+/// (`code_saving_at_declared_fidelity`, `EvidenceStatus::refutes_at_most` and
+/// `certifies_at_most`) and writes no second comparison:
+/// 1. The decoded reference must meet `tolerance`; otherwise the loop is refused.
+/// 2. An estimate or an infimum bracket is refused. A status that refutes
+///    `sup d ≤ tolerance` rejects the candidate.
+/// 3. The decoded candidate must meet `tolerance`, and its code must be strictly
+///    shorter.
+pub fn decide_proposal<W, D>(
+    kind: ProposalKind,
+    tolerance: f64,
+    reference: &DecodedArtifactScore,
+    candidate: &DecodedArtifactScore,
+    fidelity: EvidenceStatus<W, D>,
+) -> Result<ProposalAcceptance<W, D>, ProposalRejection<W, D>> {
+    code_saving_at_declared_fidelity(tolerance, reference, reference)
+        .map_err(ProposalRejection::ReferenceMissesTolerance)?;
+    match fidelity {
+        EvidenceStatus::StatisticalEstimate { .. } => {
+            return Err(ProposalRejection::EstimateIsNotAFidelityBound(fidelity));
+        }
+        EvidenceStatus::Unresolved {
+            extremum: Extremum::Infimum,
+            ..
+        } => return Err(ProposalRejection::NotASupremum(fidelity)),
+        EvidenceStatus::Exact { .. }
+        | EvidenceStatus::UniformBound { .. }
+        | EvidenceStatus::Counterexample { .. }
+        | EvidenceStatus::Unresolved { .. } => {}
+    }
+    if fidelity.refutes_at_most(tolerance) {
+        return Err(ProposalRejection::FidelityRefuted(fidelity));
+    }
+    let saving_bits = code_saving_at_declared_fidelity(tolerance, reference, candidate)
+        .map_err(ProposalRejection::CandidateMissesTolerance)?;
+    if saving_bits <= 0 {
+        return Err(ProposalRejection::NoShorterCode { saving_bits });
+    }
+    Ok(ProposalAcceptance {
+        kind,
+        saving_bits,
+        fidelity_certified: fidelity.certifies_at_most(tolerance),
+        fidelity,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gam_linalg::roundoff::accumulation_growth;
     use ndarray::{Array1, array};
 
     const COMPONENTS: usize = 3;
@@ -512,9 +786,15 @@ mod tests {
         responses: Array2<f64>,
         right: Vec<Array2<f64>>,
         penalty: Array2<f64>,
+        null_penalty: Array2<f64>,
     }
 
     impl Fixture {
+        /// The energy penalty and its null-space form: a proper summed prior.
+        fn penalty_views(&self) -> Vec<ArrayView2<'_, f64>> {
+            vec![self.penalty.view(), self.null_penalty.view()]
+        }
+
         fn rows(&self) -> GaussianBlockRows<'_> {
             GaussianBlockRows {
                 component_masks: self.component_masks.view(),
@@ -572,6 +852,14 @@ mod tests {
         // The second-difference penalty D₂ᵀD₂ on three coefficients has rank 1, so
         // constant and linear fields are unpenalized.
         let penalty = array![[1.0, -2.0, 1.0], [-2.0, 4.0, -2.0], [1.0, -2.0, 1.0]];
+        // The orthogonal projector onto null(D₂ᵀD₂) = span{(1, 1, 1), (−1, 0, 1)}. It
+        // penalizes exactly the fields the energy leaves free, so the summed prior is
+        // proper. This is a test stand-in for field.rs's null-space form.
+        let null_penalty = array![
+            [5.0 / 6.0, 1.0 / 3.0, -1.0 / 6.0],
+            [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+            [-1.0 / 6.0, 1.0 / 3.0, 5.0 / 6.0]
+        ];
         Fixture {
             component_masks,
             residual_masks,
@@ -580,6 +868,7 @@ mod tests {
             responses,
             right,
             penalty,
+            null_penalty,
         }
     }
 
@@ -587,7 +876,7 @@ mod tests {
     fn block_fit_reads_left_factors_in_design_order() {
         let data = fixture(&SUFFICIENCY_MASKS, generic_right_factors());
         let right = data.right_views();
-        let fit = fit_gaussian_coefficient_block(data.rows(), &right, data.penalty.view())
+        let fit = fit_gaussian_coefficient_block(data.rows(), &right, &data.penalty_views())
             .expect("the full-rank sufficiency fixture is admitted and fitted");
         assert_eq!(fit.left_factors.len(), BASIS);
         for factor in &fit.left_factors {
@@ -665,10 +954,11 @@ mod tests {
     fn block_penalty_is_the_function_space_penalty_of_each_output() {
         let data = fixture(&SUFFICIENCY_MASKS, generic_right_factors());
         let right = data.right_views();
-        let fit = fit_gaussian_coefficient_block(data.rows(), &right, data.penalty.view())
+        let fit = fit_gaussian_coefficient_block(data.rows(), &right, &data.penalty_views())
             .expect("the full-rank sufficiency fixture is admitted and fitted");
         let columns = BASIS * RANK;
-        let penalty = block_penalty(data.penalty.view(), &right);
+        let penalty = block_penalty(0, data.penalty.view(), &right)
+            .expect("the symmetric fixture penalty assembles within its band");
         // Negative control: S ⊗ I_r, which wrongly treats every Gram R_jᵀ R_k as the identity.
         let gram_blind = Array2::from_shape_fn((columns, columns), |(a, b)| {
             if a % RANK == b % RANK {
@@ -760,7 +1050,8 @@ mod tests {
             }
         });
         assert_eq!(
-            block_penalty(data.penalty.view(), &right),
+            block_penalty(0, data.penalty.view(), &right)
+                .expect("the symmetric fixture penalty assembles within its band"),
             kronecker,
             "with R_j = I the penalty is S ⊗ I exactly"
         );
@@ -792,7 +1083,7 @@ mod tests {
             masks.push(native_multiple);
             let data = fixture(&masks, generic_right_factors());
             let right = data.right_views();
-            let refused = fit_gaussian_coefficient_block(data.rows(), &right, data.penalty.view());
+            let refused = fit_gaussian_coefficient_block(data.rows(), &right, &data.penalty_views());
             assert!(
                 matches!(
                     refused,
@@ -808,9 +1099,9 @@ mod tests {
         let admitted = fixture(&ablation, generic_right_factors());
         let admitted_right = admitted.right_views();
         let fit =
-            fit_gaussian_coefficient_block(admitted.rows(), &admitted_right, admitted.penalty.view());
+            fit_gaussian_coefficient_block(admitted.rows(), &admitted_right, &admitted.penalty_views());
         assert!(
-            matches!(&fit, Ok(block) if block.reml.reml_score.is_finite()),
+            matches!(&fit, Ok(block) if block.reml.evaluation.reml_score.is_finite()),
             "a residual-on ablation row must be admitted and fitted, got {fit:?}"
         );
 
@@ -825,11 +1116,83 @@ mod tests {
         let cancelled_fit = fit_gaussian_coefficient_block(
             cancelled.rows(),
             &cancelled_right,
-            cancelled.penalty.view(),
+            &cancelled.penalty_views(),
         );
         assert!(
-            matches!(&cancelled_fit, Ok(block) if block.reml.reml_score.is_finite()),
+            matches!(&cancelled_fit, Ok(block) if block.reml.evaluation.reml_score.is_finite()),
             "a row with a vanishing moment but a non-native mask must be admitted, got {cancelled_fit:?}"
+        );
+    }
+
+    #[test]
+    fn penalties_are_symmetrized_only_within_their_derived_assembly_band() {
+        let data = fixture(&SUFFICIENCY_MASKS, generic_right_factors());
+        let right = data.right_views();
+        let mut lopsided = data.penalty.clone();
+        lopsided[[0, 1]] = -2.0 + 1e-3;
+        let refused = fit_gaussian_coefficient_block(
+            data.rows(),
+            &right,
+            &[lopsided.view(), data.null_penalty.view()],
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(GaussianBlockError::AsymmetricFieldPenalty { penalty: 0, row: 0, col: 1 })
+            ),
+            "a field penalty that is not exactly symmetric must be refused, got {refused:?}"
+        );
+
+        // The assembly guard, on a symmetric matrix, a rounding-sized gap and a wider one.
+        let columns = 4;
+        let symmetric = Array2::from_shape_fn((columns, columns), |(a, b)| 1.0 + (a + b) as f64);
+        let absolute = symmetric.mapv(f64::abs);
+        let growth = accumulation_growth(INPUT_DIM + 1);
+        let unchanged = symmetrized_within_band(0, symmetric.clone(), &absolute, growth);
+        assert!(
+            matches!(&unchanged, Ok(averaged) if *averaged == symmetric),
+            "an exactly symmetric penalty is unchanged by averaging, got {unchanged:?}"
+        );
+        let band = growth * (absolute[[0, 1]] + absolute[[1, 0]]);
+        let mut rounded = symmetric.clone();
+        rounded[[0, 1]] += 0.5 * band;
+        assert!(
+            symmetrized_within_band(0, rounded, &absolute, growth).is_ok(),
+            "a gap inside the derived band is rounding and is averaged away"
+        );
+        // Positive control: a deliberately asymmetric block beyond the band is refused.
+        let mut broken = symmetric.clone();
+        broken[[0, 1]] += 8.0 * band;
+        let refused_assembly = symmetrized_within_band(1, broken, &absolute, growth);
+        assert!(
+            matches!(
+                refused_assembly,
+                Err(GaussianBlockError::AssembledPenaltyAsymmetric { penalty: 1, row: 0, col: 1, .. })
+            ),
+            "an assembled gap beyond the band must be refused, got {refused_assembly:?}"
+        );
+    }
+
+    #[test]
+    fn an_energy_penalty_alone_is_refused_because_its_null_space_escapes_shrinkage() {
+        let data = fixture(&SUFFICIENCY_MASKS, generic_right_factors());
+        let right = data.right_views();
+        let energy_only = fit_gaussian_coefficient_block(data.rows(), &right, &[data.penalty.view()]);
+        assert!(
+            matches!(energy_only, Err(GaussianBlockError::Reml(..))),
+            "the energy penalty leaves constant and linear fields free, so the owner must refuse \
+             the declared zero null space, got {energy_only:?}"
+        );
+        // Positive control: the same rows with the null-space form added have a proper prior.
+        let proper = fit_gaussian_coefficient_block(data.rows(), &right, &data.penalty_views());
+        assert!(
+            matches!(&proper, Ok(block) if block.reml.evaluation.reml_score.is_finite()),
+            "energy plus null-space penalty must be admitted and fitted, got {proper:?}"
+        );
+        let empty = fit_gaussian_coefficient_block(data.rows(), &right, &[]);
+        assert!(
+            matches!(empty, Err(GaussianBlockError::NoFieldPenalties)),
+            "an empty penalty list declares no prior and must be refused, got {empty:?}"
         );
     }
 
@@ -838,19 +1201,24 @@ mod tests {
         let rows = SUFFICIENCY_MASKS.len() * INPUT_ROWS;
         let ranks = [RANK; BASIS];
         let columns = BASIS * RANK;
-        let expected = (rows * (columns + RANK) + 3 * columns * columns + columns * OUTPUT_DIM)
+        let penalties = 2;
+        let expected = (rows * (columns + RANK)
+            + 2 * penalties * columns * columns
+            + rows.min(columns) * (columns + OUTPUT_DIM)
+            + columns * columns
+            + columns * OUTPUT_DIM)
             * std::mem::size_of::<f64>();
         assert_eq!(
-            dense_block_bytes(rows, &ranks, OUTPUT_DIM),
+            dense_block_bytes(rows, &ranks, penalties, OUTPUT_DIM),
             Some(expected),
-            "the ledger counts the design and widest projection, the penalty, the Gram and \
-             eigenbasis, and the coefficients"
+            "the ledger counts the design and widest projection, both penalty copies, the owner's \
+             reduction and stacked root, and the coefficients"
         );
         assert!(
-            admit_dense_block(rows, &ranks, OUTPUT_DIM, expected).is_ok(),
+            admit_dense_block(rows, &ranks, penalties, OUTPUT_DIM, expected).is_ok(),
             "a budget equal to the ledger admits the block"
         );
-        let refused = admit_dense_block(rows, &ranks, OUTPUT_DIM, expected - 1);
+        let refused = admit_dense_block(rows, &ranks, penalties, OUTPUT_DIM, expected - 1);
         assert!(
             matches!(
                 refused,
@@ -859,7 +1227,7 @@ mod tests {
             ),
             "one byte below the ledger must refuse, got {refused:?}"
         );
-        let overflow = admit_dense_block(usize::MAX, &[2], 1, usize::MAX);
+        let overflow = admit_dense_block(usize::MAX, &[2], 1, 1, usize::MAX);
         assert!(
             matches!(
                 overflow,
@@ -867,5 +1235,185 @@ mod tests {
             ),
             "an overflowing ledger must refuse, got {overflow:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod proposal_tests {
+    use super::*;
+    use crate::parameter_decomposition::supports::ExactBasis;
+
+    /// The declared fidelity tolerance of these fixtures.
+    const TOLERANCE: f64 = 0.1;
+
+    type Status = EvidenceStatus<Vec<f64>, &'static str>;
+
+    fn score(code_bits: u64, decoded_distortion: f64, distortion_roundoff: f64) -> DecodedArtifactScore {
+        DecodedArtifactScore {
+            code_bits,
+            decoded_distortion,
+            distortion_roundoff,
+        }
+    }
+
+    fn certified() -> Status {
+        EvidenceStatus::uniform_bound(0.09, 0.001, "declared mask box").expect("a valid uniform bound")
+    }
+
+    #[test]
+    fn a_shorter_certified_candidate_is_accepted_and_code_that_is_not_shorter_is_rejected() {
+        let reference = score(1000, 0.05, 0.001);
+        let accepted = decide_proposal(
+            ProposalKind::Split,
+            TOLERANCE,
+            &reference,
+            &score(900, 0.08, 0.001),
+            certified(),
+        );
+        assert!(
+            matches!(
+                &accepted,
+                Ok(ProposalAcceptance { kind: ProposalKind::Split, saving_bits: 100, fidelity_certified: true, .. })
+            ),
+            "a 100-bit shorter certified candidate must be accepted, got {accepted:?}"
+        );
+        let equal = decide_proposal(
+            ProposalKind::Share,
+            TOLERANCE,
+            &reference,
+            &score(1000, 0.08, 0.001),
+            certified(),
+        );
+        assert!(
+            matches!(equal, Err(ProposalRejection::NoShorterCode { saving_bits: 0 })),
+            "equal code is not a strict decrease, got {equal:?}"
+        );
+        // An operator that interpolates the teacher at equal fidelity with a longer code
+        // (mpd-modadd's rank caveat) loses on code alone.
+        let interpolating = decide_proposal(
+            ProposalKind::Expose,
+            TOLERANCE,
+            &reference,
+            &score(1200, 0.05, 0.001),
+            certified(),
+        );
+        assert!(
+            matches!(interpolating, Err(ProposalRejection::NoShorterCode { saving_bits: -200 })),
+            "a longer interpolating operator must lose on code, got {interpolating:?}"
+        );
+    }
+
+    #[test]
+    fn a_refuting_estimated_or_infimum_fidelity_status_rejects_even_a_shorter_candidate() {
+        let reference = score(1000, 0.05, 0.001);
+        let shorter = score(900, 0.08, 0.001);
+        let mask = vec![1.0, 0.0, 1.0];
+        let refuting: [Status; 3] = [
+            EvidenceStatus::counterexample(0.3, 0.001, TOLERANCE, mask.clone()).expect("a violation"),
+            EvidenceStatus::exact(0.2, 0.0, ExactBasis::Exhaustive { cardinality: 8 }, None, "binary masks")
+                .expect("a valid exact value"),
+            EvidenceStatus::unresolved(0.12, f64::INFINITY, Extremum::Supremum, Some(mask.clone()), "mask box")
+                .expect("a valid bracket"),
+        ];
+        for status in refuting {
+            let decision = decide_proposal(ProposalKind::Reduce, TOLERANCE, &reference, &shorter, status);
+            assert!(
+                matches!(decision, Err(ProposalRejection::FidelityRefuted(..))),
+                "a status whose lower bound exceeds the tolerance must reject, got {decision:?}"
+            );
+        }
+
+        let estimate: Status =
+            EvidenceStatus::statistical_estimate(0.02, 0.001, 64, "iid uniform masks").expect("a valid estimate");
+        let estimated = decide_proposal(ProposalKind::Refine, TOLERANCE, &reference, &shorter, estimate);
+        assert!(
+            matches!(estimated, Err(ProposalRejection::EstimateIsNotAFidelityBound(..))),
+            "a stochastic-mask mean must never stand in for the supremum, got {estimated:?}"
+        );
+        // Positive control: the same figure as a uniform bound is accepted.
+        let bound: Status =
+            EvidenceStatus::uniform_bound(0.02, 0.001, "declared mask box").expect("a valid uniform bound");
+        let bounded = decide_proposal(ProposalKind::Refine, TOLERANCE, &reference, &shorter, bound);
+        assert!(bounded.is_ok(), "the same figure as a uniform bound must be accepted, got {bounded:?}");
+
+        let infimum =
+            EvidenceStatus::unresolved(0.04, 0.09, Extremum::Infimum, Some(mask.clone()), "mask box").expect("a valid bracket");
+        let infimum_decision = decide_proposal(ProposalKind::Expose, TOLERANCE, &reference, &shorter, infimum);
+        assert!(
+            matches!(infimum_decision, Err(ProposalRejection::NotASupremum(..))),
+            "an infimum bracket certifies nothing about the supremum, got {infimum_decision:?}"
+        );
+        // Positive control: the same bracket about the supremum certifies.
+        let supremum = decide_proposal(
+            ProposalKind::Expose,
+            TOLERANCE,
+            &reference,
+            &shorter,
+            EvidenceStatus::unresolved(0.04, 0.09, Extremum::Supremum, Some(mask), "mask box").expect("a valid bracket"),
+        );
+        assert!(
+            matches!(&supremum, Ok(acceptance) if acceptance.fidelity_certified),
+            "the same bracket about the supremum must certify, got {supremum:?}"
+        );
+    }
+
+    #[test]
+    fn an_unrefuted_uncertified_fidelity_is_accepted_without_a_certificate() {
+        let decision = decide_proposal(
+            ProposalKind::Split,
+            TOLERANCE,
+            &score(1000, 0.05, 0.001),
+            &score(900, 0.08, 0.001),
+            EvidenceStatus::unresolved(0.04, f64::INFINITY, Extremum::Supremum, Some(vec![1.0, 1.0]), "mask box")
+                .expect("a valid bracket"),
+        );
+        assert!(
+            matches!(
+                &decision,
+                Ok(acceptance) if !acceptance.fidelity_certified
+                    && matches!(acceptance.fidelity, EvidenceStatus::Unresolved { .. })
+            ),
+            "a lower witness below the tolerance with no derived upper bound is accepted as \
+             uncertified, got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn the_decoded_reference_and_candidate_must_meet_the_tolerance() {
+        let shorter = score(900, 0.08, 0.001);
+        let inconsistent = decide_proposal(
+            ProposalKind::Split,
+            TOLERANCE,
+            &score(1000, 0.2, 0.001),
+            &shorter,
+            certified(),
+        );
+        assert!(
+            matches!(inconsistent, Err(ProposalRejection::ReferenceMissesTolerance(..))),
+            "a decoded reference that misses the tolerance must refuse the loop, got {inconsistent:?}"
+        );
+        let reference = score(1000, 0.05, 0.001);
+        // Distortion plus roundoff is 0.101 > 0.1: the candidate misses.
+        let missing = decide_proposal(
+            ProposalKind::Split,
+            TOLERANCE,
+            &reference,
+            &score(900, 0.099, 0.002),
+            certified(),
+        );
+        assert!(
+            matches!(missing, Err(ProposalRejection::CandidateMissesTolerance(..))),
+            "a decoded candidate that misses the tolerance must be rejected, got {missing:?}"
+        );
+        // Positive control: 0.097 + 0.002 = 0.099 is within the tolerance by far more
+        // than one ulp, so the outcome does not rest on rounding.
+        let meeting = decide_proposal(
+            ProposalKind::Split,
+            TOLERANCE,
+            &reference,
+            &score(900, 0.097, 0.002),
+            certified(),
+        );
+        assert!(meeting.is_ok(), "a candidate at the tolerance must be accepted, got {meeting:?}");
     }
 }
