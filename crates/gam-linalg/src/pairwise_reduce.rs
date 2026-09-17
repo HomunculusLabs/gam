@@ -144,6 +144,24 @@ pub fn pairwise_sum(xs: &[f64]) -> f64 {
     pairwise_reduce(xs, |a, b| a + b, 0.0)
 }
 
+/// The largest number of floating-point additions any one summand passes through in
+/// [`pairwise_sum`] of `len` values (#2933 F08).
+///
+/// It follows the tree the reduction actually builds: a leaf block of at most
+/// [`BASE_CHUNK`] values is folded from its first element, so it takes `len − 1`
+/// additions, and an internal node adds one to the deeper of its two subtrees, split
+/// where the reduction splits them. [`par_pairwise_map_reduce`] and the deterministic
+/// block folds use the same split, so this is their depth too wherever their base folds
+/// sequentially. Higham's per-summand bound then gives `|ŝ − s| ≤ γ_d·Σ|xᵢ|`, with `d`
+/// this depth and `γ_d = d·u/(1 − d·u)`.
+pub fn pairwise_sum_max_depth(len: usize) -> usize {
+    if len <= BASE_CHUNK {
+        return len.saturating_sub(1);
+    }
+    let mid = left_split(len);
+    pairwise_sum_max_depth(mid).max(pairwise_sum_max_depth(len - mid)) + 1
+}
+
 /// Parallel, bit-reproducible pairwise map-reduce over the index range
 /// `0..n`.
 ///
@@ -380,6 +398,54 @@ mod tests {
     fn pairwise_sum_two_base_chunks() {
         let xs = vec![1.0f64; 2 * BASE_CHUNK];
         assert_eq!(pairwise_sum(&xs), (2 * BASE_CHUNK) as f64);
+    }
+
+    // ── pairwise_sum_max_depth ───────────────────────────────────────────────
+
+    /// #2933 F08 — the depth owner equals the depth the reductions really accumulate, at
+    /// the leaf boundary, around the tree's power-of-two levels, and at one large count.
+    /// Every `combine` is one floating-point addition and a leaf block is folded from its
+    /// first element, so tracing `max(a, b) + 1` over zeros through the real recursion
+    /// measures the deepest summand's addition count. The block folds are traced with a
+    /// sequential base, as the data fit folds its rows.
+    #[test]
+    fn pairwise_sum_max_depth_equals_the_traced_reduction_depth_2933_f08() {
+        for n in [
+            1usize,
+            2,
+            BASE_CHUNK - 1,
+            BASE_CHUNK,
+            BASE_CHUNK + 1,
+            255,
+            256,
+            257,
+            511,
+            512,
+            513,
+            1023,
+            1024,
+            1025,
+            1_000_003,
+        ] {
+            let owner = pairwise_sum_max_depth(n);
+            let sequential = pairwise_reduce(&vec![0usize; n], |a, b| a.max(b) + 1, 0);
+            let block_fold = par_deterministic_block_fold(
+                n,
+                |range: core::ops::Range<usize>| range.len() - 1,
+                |a: usize, b: usize| a.max(b) + 1,
+            )
+            .expect("n > 0");
+            let try_block_fold = par_deterministic_try_block_fold(
+                n,
+                |range: core::ops::Range<usize>| Ok::<usize, String>(range.len() - 1),
+                |a: usize, b: usize| Ok(a.max(b) + 1),
+            )
+            .expect("no error")
+            .expect("n > 0");
+            assert_eq!(sequential, owner, "pairwise_reduce trace at n={n}");
+            assert_eq!(block_fold, owner, "par_deterministic_block_fold trace at n={n}");
+            assert_eq!(try_block_fold, owner, "par_deterministic_try_block_fold trace at n={n}");
+        }
     }
 
     // ── parallel deterministic reductions ────────────────────────────────────

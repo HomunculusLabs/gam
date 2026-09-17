@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::priority_selection::{PriorityCandidate, rank_priority_candidates};
 use gam_linalg::faer_ndarray::FaerEigh;
-use gam_linalg::pairwise_reduce::{BASE_CHUNK, pairwise_sum};
+use gam_linalg::pairwise_reduce::{pairwise_sum, pairwise_sum_max_depth};
 use gam_math::special::bessel_i0_log_minus_abs_and_ratio;
 
 // ---------------------------------------------------------------------------
@@ -1485,20 +1485,6 @@ fn gaussian_mixture_monotonicity_uncertainty(
     let reduction_roundoff = current_reduction_roundoff + next_reduction_roundoff;
     let composite_map_resolution = f64::EPSILON.sqrt() * objective_scale;
     reduction_roundoff.max(composite_map_resolution)
-}
-
-fn pairwise_sum_max_depth(term_count: usize) -> usize {
-    if term_count <= 1 {
-        return 0;
-    }
-    let within_block = term_count.min(BASE_CHUNK) - 1;
-    let blocks = term_count.div_ceil(BASE_CHUNK);
-    let tree_levels = if blocks <= 1 {
-        0
-    } else {
-        (usize::BITS - (blocks - 1).leading_zeros()) as usize
-    };
-    within_block.saturating_add(tree_levels)
 }
 
 fn pairwise_mean_with_roundoff(values: &[f64]) -> Result<(f64, f64), String> {
