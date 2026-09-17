@@ -1648,4 +1648,106 @@ mod right_preconditioned_gmres_tests {
             sae_norm(&residual) / sae_norm(&rhs),
         );
     }
+
+    /// `diag(3, 2)` on the coordinate block and zero on a one-dimensional border: no
+    /// correction represents a border component of the right-hand side, so every
+    /// Krylov iterate leaves it in the residual.
+    fn singular_border_operator(value: &SaeArrowVector) -> Result<SaeArrowVector, String> {
+        Ok(SaeArrowVector {
+            t: array![3.0 * value.t[0], 2.0 * value.t[1]],
+            beta: array![0.0],
+        })
+    }
+
+    fn singular_border_rhs(border_component: f64) -> SaeArrowVector {
+        SaeArrowVector {
+            t: array![6.0e-15_f64, -4.0e-15],
+            beta: array![border_component],
+        }
+    }
+
+    /// #2933 F08 — a right-hand side known only to its rounding band certifies at that
+    /// band. On [`singular_border_operator`] the border component `1e-17` sits inside
+    /// the declared band `4e-17`, so it is round-off and the solve must return the
+    /// planted coordinates `(2e-15, −2e-15)`. The relative bar `√ε‖rhs‖ ≈ 1.1e-22` lies
+    /// below that component, so the relative-only solve must refuse the same system.
+    #[test]
+    fn rounding_floor_certifies_a_right_hand_side_known_only_to_its_band_2933_f08() {
+        let band = 4.0e-17;
+        let rhs = singular_border_rhs(1.0e-17);
+        let zero = SaeArrowVector {
+            t: Array1::zeros(2),
+            beta: Array1::zeros(1),
+        };
+        let identity =
+            |value: &SaeArrowVector| -> Result<SaeArrowVector, String> { Ok(value.clone()) };
+
+        let (solved, _) = solve_b_preconditioned_gmres_to_rounding_floor(
+            &rhs,
+            &zero,
+            singular_border_operator,
+            identity,
+            band,
+        )
+        .expect("a border component inside the declared band is round-off and must certify");
+        let applied = singular_border_operator(&solved).expect("physical operator");
+        let residual = SaeArrowVector {
+            t: &rhs.t - &applied.t,
+            beta: &rhs.beta - &applied.beta,
+        };
+        // `γ_dim·‖A‖·‖x‖` is below 1e-29 here, so the floor is the band.
+        assert!(
+            sae_norm(&residual) <= 2.0 * band,
+            "certified residual {:.3e} vs band {band:.3e}",
+            sae_norm(&residual),
+        );
+        assert!(
+            (solved.t[0] - 2.0e-15).abs() <= band && (solved.t[1] + 2.0e-15).abs() <= band,
+            "planted coordinates (2e-15, -2e-15), solved ({:.6e}, {:.6e})",
+            solved.t[0],
+            solved.t[1],
+        );
+
+        let relative = solve_b_preconditioned_gmres_to(
+            &rhs,
+            &zero,
+            singular_border_operator,
+            identity,
+            f64::EPSILON.sqrt(),
+        );
+        assert!(
+            relative.is_err(),
+            "the relative bar cannot be met below the border component, yet the solve returned {:?}",
+            relative.map(|(solution, _)| solution),
+        );
+    }
+
+    /// #2933 F08 — the rounding floor does not absorb a component above its band. The
+    /// same singular system with the border component planted at `1e-16`, 2.5x the
+    /// declared band, is an inconsistent right-hand side rather than round-off, and the
+    /// solve must refuse it.
+    #[test]
+    fn rounding_floor_refuses_an_unrepresentable_component_above_its_band_2933_f08() {
+        let band = 4.0e-17;
+        let rhs = singular_border_rhs(1.0e-16);
+        let zero = SaeArrowVector {
+            t: Array1::zeros(2),
+            beta: Array1::zeros(1),
+        };
+        let identity =
+            |value: &SaeArrowVector| -> Result<SaeArrowVector, String> { Ok(value.clone()) };
+
+        let refused = solve_b_preconditioned_gmres_to_rounding_floor(
+            &rhs,
+            &zero,
+            singular_border_operator,
+            identity,
+            band,
+        );
+        assert!(
+            refused.is_err(),
+            "a border component 2.5x the band must not certify, yet the solve returned {:?}",
+            refused.map(|(solution, _)| solution),
+        );
+    }
 }

@@ -9427,17 +9427,25 @@ mod tests {
         )
     }
 
-    /// #2933 F08 — a support fit converged to round-off certifies. At this fixture's
-    /// fixed point the gradient is round-off, and `exact_newton_solve` asked GMRES for a
-    /// residual of `√ε‖g‖`, which no representable correction reaches: every
-    /// `support_outer` test on this fixture refused at 69befd10c5 with a residual of
-    /// 1.02e-17 at relative 4.68e-3 (job 1109683). Certified at the gradient's rounding
-    /// band plus the matvec's backward error, the fixed point returns with its
-    /// displacement inside the bound.
+    /// #2933 F08 — a support fit driven to round-off certifies. `support_outer`'s
+    /// objective asks this fixture's fixed point for `1e-9`, below the fixture's
+    /// resolution `fixed_point_tolerance()` (≈ 2.3e-8 at six cells), so the fixed point
+    /// runs on to a state whose gradient is round-off. There `‖g − AΔ‖ ≤ √ε‖g‖` is
+    /// unreachable: with the floor removed, `support_penalized_deviance_derivative_
+    /// equals_penalty_energy` (same fixture and tolerance) refused at ‖g‖ 3.2e-15 against
+    /// a rounding band of 1.7e-15, relative residual 3.3e-3 (job 1117261). Only the
+    /// rounding floor `β_g + γ_dim·‖A‖·‖Δ‖` certifies that state. At
+    /// `fixed_point_tolerance()` the certificate already passed above round-off, so this
+    /// test passed with the floor removed and did not pin it (same job).
     #[test]
     fn fixed_point_certifies_a_state_converged_to_roundoff_2933_f08() {
         let (mut term, target, lambda, ard) = support_outer_fixture_2933();
-        let tolerance = term.fixed_point_tolerance();
+        // `support_outer`'s inner tolerance, which drives this fixture to round-off.
+        let tolerance = 1.0e-9;
+        assert!(
+            tolerance < term.fixed_point_tolerance(),
+            "the control must ask for less than the fixture resolves, or it never reaches round-off",
+        );
         let report = term
             .solve_fixed_point(target.view(), &lambda, &ard, 5000, tolerance, 1.0)
             .expect("a support fit converged to round-off must certify");
