@@ -136,6 +136,10 @@ pub struct SaeReconstructionDispersion {
     pub likelihood_dispersion: f64,
     /// Units and scalar-observation count of [`Self::likelihood_dispersion`].
     pub likelihood_frame: SaeLikelihoodFrame,
+    /// The routing both scales hold fixed. `φ̂` is conditional on the fitted
+    /// routing and omits its search degrees of freedom, so it is biased low
+    /// (#2933 F37; see [`SaeSelectionConditioning`]).
+    pub selection_conditioning: SaeSelectionConditioning,
 }
 
 impl SaeReconstructionDispersion {
@@ -151,6 +155,26 @@ impl SaeReconstructionDispersion {
     pub fn posterior_covariance_scale(&self) -> f64 {
         self.likelihood_dispersion
     }
+}
+
+/// The routing a noise scale or a shape covariance holds fixed (#2933 F37).
+///
+/// The TopK support, a frozen routing, or the basin the inner solve converged to
+/// is chosen from the same data the fit is scored on. Holding that choice fixed
+/// omits its search degrees of freedom. For fixed candidates `±a` and
+/// `y ~ N(μ, σ²)`, the selection `a·sign(y)` has `(2a/σ)·φ(μ/σ)` of them, a function
+/// of the unknown mean. A statistic `T` of one draw has `E T(y) = (T ∗ N(0, σ²))(μ)`,
+/// so an unbiased `T` would have to be a point mass, and a resampling estimate that
+/// reruns routing and the joint fit would make every criterion evaluation
+/// stochastic. The selection is therefore conditioned on, not estimated. By
+/// `E‖y − f̂‖² = E‖f̂ − μ‖² + N·φ − 2φ·df`, each omitted search degree of freedom
+/// lowers the expected RSS by `2φ` at fixed risk, so the routing-conditional `φ̂`
+/// is biased low.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaeSelectionConditioning {
+    /// The fitted routing is held fixed. Its search degrees of freedom are omitted,
+    /// not estimated, and `φ̂` is biased low by them.
+    ConditionalOnFittedRouting,
 }
 
 /// Whether a shape covariance integrates over the learned Grassmann decoder
@@ -305,6 +329,10 @@ pub struct SaeShapeUncertainty {
     pub operator: SaeShapeCovarianceOperator,
     /// One entry per atom, in atom order.
     pub atoms: Vec<SaeAtomShapeUncertainty>,
+    /// The routing the report holds fixed. `A` is the information at the selected
+    /// support and basin, and [`Self::dispersion`] is routing-conditional, so the
+    /// bands omit selection uncertainty and `φ̂` is biased low (#2933 F37).
+    pub selection_conditioning: SaeSelectionConditioning,
 }
 
 /// The row-sandwich meat of the joint estimating equations, with the carriers of
@@ -1578,6 +1606,7 @@ mod robust_shape_band_tests {
             raw_output_noise_variance: 0.25,
             likelihood_dispersion: 0.25,
             likelihood_frame: SaeLikelihoodFrame::RawOutput,
+            selection_conditioning: SaeSelectionConditioning::ConditionalOnFittedRouting,
         };
         for reason in [
             SaeShapeCovarianceUnavailable::NoDenseObservedInformation,

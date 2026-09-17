@@ -180,6 +180,7 @@ impl SaeManifoldTerm {
             raw_output_noise_variance: raw_rss / raw_scalars.max(1.0),
             likelihood_dispersion: likelihood_rss / likelihood_scalars.max(1.0),
             likelihood_frame,
+            selection_conditioning: SaeSelectionConditioning::ConditionalOnFittedRouting,
         })
     }
 
@@ -370,6 +371,7 @@ impl SaeManifoldTerm {
                 response.likelihood_residual_dof - frame_dimension,
             )?,
             likelihood_frame,
+            selection_conditioning: SaeSelectionConditioning::ConditionalOnFittedRouting,
         })
     }
 
@@ -577,6 +579,7 @@ impl SaeManifoldTerm {
                 frame_conditioning: covariance.frame_conditioning,
             },
             atoms,
+            selection_conditioning: SaeSelectionConditioning::ConditionalOnFittedRouting,
         })
     }
 
@@ -682,6 +685,7 @@ impl SaeManifoldTerm {
             dispersion,
             operator: SaeShapeCovarianceOperator::Unavailable(reason),
             atoms,
+            selection_conditioning: SaeSelectionConditioning::ConditionalOnFittedRouting,
         }
     }
 

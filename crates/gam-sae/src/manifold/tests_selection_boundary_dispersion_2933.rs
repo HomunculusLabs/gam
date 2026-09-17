@@ -25,6 +25,11 @@
 //! historical `N − tr R`, fails it while staying linear in the RSS. The fixtures
 //! have no row metric, so the raw and likelihood frames coincide and both scales
 //! are checked.
+//!
+//! The selection is conditioned on, not estimated, since no statistic of one draw
+//! estimates the search degrees of freedom without bias. The label test requires
+//! every noise scale and shape report to name
+//! `SaeSelectionConditioning::ConditionalOnFittedRouting`.
 
 use super::tests::{TestPeriodicEvaluator, periodic_basis};
 use super::*;
@@ -348,5 +353,63 @@ fn dispersion_is_the_explicit_root_of_its_scale_equation_2933_f38() {
                 );
             }
         }
+    }
+}
+
+/// F37 refusal. The factored and unfactored dispersions, the shape report
+/// assembled on the production route and its unavailable twin must each name the
+/// fitted routing they hold fixed.
+#[test]
+fn dispersion_and_shape_reports_name_the_routing_they_condition_on_2933_f37() {
+    let targets = symmetric_targets(40);
+    let (mut term, rho, target) =
+        two_center_term(&targets, AssignmentMode::top_k_support(1), 1.0, 0.0);
+    let (loss, cache, residual) = dispersion_inputs(&mut term, &rho, &target);
+    let factored = term
+        .reconstruction_dispersion(&loss, &cache, &rho, residual.view())
+        .expect("the TopK two-center dispersion is defined");
+    let unfactored = term
+        .unfactored_reconstruction_dispersion(target.view(), &rho)
+        .expect("the unfactored two-center dispersion is defined");
+    let route = term
+        .shape_information_route(&rho, target.view(), &cache)
+        .expect("the two-center state has a shape information route");
+    let information = term
+        .shape_information(&route, &rho, target.view(), None, &cache)
+        .expect("the two-center shape information is defined");
+    let assembled = term
+        .assemble_shape_uncertainty(&information, factored)
+        .expect("the two-center shape report assembles");
+    let unavailable = term.unavailable_shape_uncertainty(
+        unfactored,
+        SaeShapeCovarianceUnavailable::NoDenseObservedInformation,
+    );
+    eprintln!(
+        "[#2933 F37 label] assembled operator {}, unavailable operator {}",
+        assembled.operator.as_str(),
+        unavailable.operator.as_str()
+    );
+    let conditioning = SaeSelectionConditioning::ConditionalOnFittedRouting;
+    for (label, dispersion) in [
+        ("factored dispersion", factored),
+        ("unfactored dispersion", unfactored),
+    ] {
+        assert_eq!(
+            dispersion.selection_conditioning, conditioning,
+            "the {label} must name the fitted routing it holds fixed"
+        );
+    }
+    for (label, report) in [
+        ("assembled shape report", &assembled),
+        ("unavailable shape report", &unavailable),
+    ] {
+        assert_eq!(
+            report.selection_conditioning, conditioning,
+            "the {label} must name the fitted routing it holds fixed"
+        );
+        assert_eq!(
+            report.dispersion.selection_conditioning, conditioning,
+            "the dispersion of the {label} must name the fitted routing it holds fixed"
+        );
     }
 }
