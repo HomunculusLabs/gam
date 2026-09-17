@@ -35,6 +35,59 @@
     "evidence": "At the base, git grep -n for each removed name finds only its declaration in flex_jet.rs, the base_moment_jets doc comment in flex_jet.rs and the base_moment_jets paragraph in docs/issue-932-reopening-audit.md, both rewritten in this commit to name the replacement. No other test, bench, example or production source names either function."
   },
   {
+    "base": "1709c813457d0f2a5a1bc9497764e534c6639826",
+    "items": [
+      "crates/gam-sae/src/parameter_decomposition/codec.rs:fn:gamma"
+    ],
+    "reason": "#2951 P12/P18, mpd-codec landing 68ba64f84c: \"mpd-spec NOTE 3 (#2951 comment 5718398990): the A8 test carried its own `gamma(m) = m*eps/(1 - m*eps)`, which is gamma_{2m}, a second owner of Higham's growth factor. It now calls `gam_linalg::roundoff::accumulation_growth(m)`, which is m*u/(1 - m*u) with u = eps/2, the owner every other MPD file calls.\" Ledger entry omitted at landing; added by mpd-tipwatch in one consolidated follow-up (gam-67 ruling).",
+    "evidence": "Test-scoped helper in the codec.rs test module. At the base 1709c81345, git grep -cw gamma finds 2 lines in crates/gam-sae/src/parameter_decomposition/codec.rs and none at 68ba64f84c, whose A8 test calls gam_linalg::roundoff::accumulation_growth. The 254 other files naming gamma at the base name different items, and the same 254 files name it at the head. Before this entry, source_removal_guard.py --base 68ba64f84c~1 --head 68ba64f84c refused exactly this identity (RC 1)."
+  },
+  {
+    "base": "e616f3cfee21a638ac3260d9af56cf8d49e2f473",
+    "items": [
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:check_write",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:residual_write"
+    ],
+    "reason": "#2951 P5, mpd-rewrite landing 8d63a783f5: \"NativeMlp::written(activations) and ComponentMlp::written(activations, mask) return the MLP write W2 a + b2 (or Ubar Mbar Rbar a + b2) without the residual.\" \"write(inputs, activations[, mask]) keeps its signature and is now written(...) plus the residual added last: h + (W2 a + b2).\" \"The native and component writes share one add_residual, so the all-on block stays bit-identical to NativeMlp::execute.\" Ledger entry omitted at landing; added by mpd-tipwatch in one consolidated follow-up (gam-67 ruling).",
+    "evidence": "Private production fns of crates/gam-sae/src/parameter_decomposition/rewrite.rs. At the base e616f3cfee, git grep -cw finds check_write on 3 lines and residual_write on 3 lines, all in rewrite.rs. No other file under crates, gamfit, tests or examples names either, and neither name occurs anywhere at 8d63a783f5. tipwatch-6 at acdf183fe6, which contains this landing, passed parameter_decomposition:: 124/124. Before this entry, source_removal_guard.py --base 8d63a783f5~1 --head 8d63a783f5 refused exactly these identities (RC 1)."
+  },
+  {
+    "base": "8d63a783f5865565a041d529cd9474e5b51020e3",
+    "items": [
+      "crates/gam-sae/src/parameter_decomposition/supports.rs:fn:bound_rank",
+      "crates/gam-sae/src/parameter_decomposition/supports.rs:fn:strength_orders_bounds_and_leaves_estimates_and_counterexamples_incomparable"
+    ],
+    "reason": "#2951 P12, mpd-supports landing b7c022c795 (mpd-verify review of 0f667b7ddc): \"EvidenceStatus::compare_strength at 0f667b7ddc ranked Exact > UniformBound > Unresolved by kind. That claims an exact value proves at least what any uniform bound proves, which is false.\" \"Now compare_strength(&self, other: &Self) -> Option<Ordering>, where D: PartialEq: self is stronger when its proven interval [lower_bound or -inf, upper_bound or +inf] lies inside other's.\" \"Test strength_is_containment_of_the_proven_interval_on_one_domain replaces the kind-order test.\" Ledger entry omitted at landing; added by mpd-tipwatch in one consolidated follow-up (gam-67 ruling).",
+    "evidence": "Items of crates/gam-sae/src/parameter_decomposition/supports.rs. At the base 8d63a783f5, git grep -cw finds bound_rank on 2 lines and strength_orders_bounds_and_leaves_estimates_and_counterexamples_incomparable on 1 line, all in supports.rs. No other file under crates, gamfit, tests or examples names either, and neither name occurs at b7c022c795. compare_strength has no caller outside supports.rs at the base or at acdf183fe6. Before this entry, source_removal_guard.py --base b7c022c795~1 --head b7c022c795 refused exactly these identities (RC 1)."
+  },
+  {
+    "base": "c40fa5b07834114f3ed8e9bf03f56387b81dc0c9",
+    "items": [
+      "crates/gam-sae/src/parameter_decomposition/attention.rs:fn:attend",
+      "crates/gam-sae/src/parameter_decomposition/attention.rs:fn:masked_head_vectors",
+      "crates/gam-sae/src/parameter_decomposition/attention.rs:struct:HeadVectors"
+    ],
+    "reason": "#2951 P6, mpd-attention landing acdf183fe6: \"`NativeAttention::attend_projected(queries, keys, values, positions)` is the source attention on already-projected rows.\" \"`execute` is now project, then `attend_projected`, then the output projection, so there is one attend path.\" Ledger entry omitted at landing; added by mpd-tipwatch in one consolidated follow-up (gam-67 ruling).",
+    "evidence": "Private items of crates/gam-sae/src/parameter_decomposition/attention.rs. At the base c40fa5b078, git grep -cw finds attend on 3 lines, masked_head_vectors on 3 and HeadVectors on 5, all in attention.rs, and no other file under crates, gamfit, tests or examples names them. At acdf183fe6, masked_head_vectors and HeadVectors occur nowhere. attend remains on 1 line of attention.rs, but the guard measures the declaration count of attention.rs:fn:attend falling from 1 to 0. Before this entry, source_removal_guard.py --base acdf183fe6~1 --head acdf183fe6 refused exactly these identities (RC 1)."
+  },
+  {
+    "base": "ae7db4719e9cbfeb2acb5c029803aa3790ea8aae",
+    "items": [
+      "crates/gam-sae/src/parameter_decomposition/precision.rs:fn:decode_then_evaluate_refuses_an_undeclared_tolerance_or_an_invalid_distortion",
+      "crates/gam-sae/src/parameter_decomposition/precision.rs:fn:meets_tolerance"
+    ],
+    "reason": "#2951 P18, mpd-precision landing e08fb74d21: \"meets_tolerance() is deleted. `!meets` could read as a proven violation. No caller existed outside precision.rs on main aca8759c14; a git grep for decode_then_evaluate, DecodedFidelity, meets_tolerance and DecodableArtifact over crates and gamfit matched only precision.rs, 24 lines.\" DecodedFidelity now carries an EvidenceStatus with verdict() -> FidelityVerdict { Meets, Violates, Unresolved }, and the refusal test is restated as decode_then_evaluate_refuses_an_undeclared_tolerance_or_a_refused_distortion. Ledger entry omitted at landing; added by mpd-tipwatch in one consolidated follow-up (gam-67 ruling).",
+    "evidence": "Items of crates/gam-sae/src/parameter_decomposition/precision.rs. At the base ae7db4719e, git grep -cw finds meets_tolerance on 4 lines and decode_then_evaluate_refuses_an_undeclared_tolerance_or_an_invalid_distortion on 1 line, all in precision.rs. No other file under crates, gamfit, tests or examples names either, and neither name occurs at e08fb74d21. git grep -nE for meets_tolerance, decode_then_evaluate, DecodedFidelity and DecodableArtifact over crates and gamfit found no occurrence outside precision.rs at ae7db4719e or at be06286325; precision.rs itself holds 20 matching lines at the base. Before this entry, source_removal_guard.py --base e08fb74d21~1 --head e08fb74d21 refused exactly these identities (RC 1)."
+  },
+  {
+    "base": "706aaa4145e8f7354186c59726a7b08b1650d0a2",
+    "items": [
+      "crates/gam-sae/src/parameter_decomposition/attention.rs:fn:joint_softmax_with_radius"
+    ],
+    "reason": "#2951 P6, mpd-attention landing f076f9d85b: \"The pub `joint_softmax_with_radius` is dropped (mpd-spec NOTE 1, gam-67's ruling). Each causal row's log weights and evaluation radii e_s come from `gam_math::categorical::log_softmax_with_error` (mpd-bounds, 5511d014fd).\" Ledger entry omitted at landing; added by mpd-tipwatch in one consolidated follow-up (gam-67 ruling).",
+    "evidence": "Pub fn of crates/gam-sae/src/parameter_decomposition/attention.rs. At the base 706aaa4145, git grep -cw finds joint_softmax_with_radius on 4 lines, all in attention.rs. No other file under crates, gamfit, tests or examples names it, and it occurs nowhere at f076f9d85b or at be06286325. Its gate was dx3 attention-l3c (tree 821a4e6a8c, 7/7, DONE_SENTINEL_0), whose attention.rs equals the landed blob 41eda16c8e. Before this entry, source_removal_guard.py --base f076f9d85b~1 --head f076f9d85b refused exactly this identity (RC 1)."
+  },
+  {
     "base": "31911505dd573d127ccfcfb2d2b621beab6b5303",
     "items": [
       "crates/gam-geometry/src/manifold.rs:fn:quad_form",

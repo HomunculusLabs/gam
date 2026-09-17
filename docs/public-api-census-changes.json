@@ -1,5 +1,21 @@
 [
   {
+    "base": "ae7db4719e9cbfeb2acb5c029803aa3790ea8aae",
+    "removed": {
+      "crates/gam-sae/src/parameter_decomposition/precision.rs::meets_tolerance": 1
+    },
+    "reason": "#2951 P18, mpd-precision landing e08fb74d21: \"meets_tolerance() is deleted. `!meets` could read as a proven violation.\" DecodedFidelity now carries an EvidenceStatus, and callers read verdict() -> FidelityVerdict { Meets, Violates, Unresolved }, where Meets is certifies_at_most(tolerance). Ledger entry omitted at landing; added by mpd-tipwatch in one consolidated follow-up (gam-67 ruling).",
+    "evidence": "Replacement: DecodedFidelity::verdict() in crates/gam-sae/src/parameter_decomposition/precision.rs at e08fb74d21. At the base ae7db4719e, meets_tolerance occurs on 4 lines, all in precision.rs; no file under crates, gamfit, tests or examples calls it from outside, and no line names it at e08fb74d21 or at be06286325. Before this entry, public_api_census.py --base e08fb74d21~1 --head e08fb74d21 refused exactly this removal."
+  },
+  {
+    "base": "706aaa4145e8f7354186c59726a7b08b1650d0a2",
+    "removed": {
+      "crates/gam-sae/src/parameter_decomposition/attention.rs::joint_softmax_with_radius": 1
+    },
+    "reason": "#2951 P6, mpd-attention landing f076f9d85b: \"The pub `joint_softmax_with_radius` is dropped (mpd-spec NOTE 1, gam-67's ruling). Each causal row's log weights and evaluation radii e_s come from `gam_math::categorical::log_softmax_with_error` (mpd-bounds, 5511d014fd).\" Ledger entry omitted at landing; added by mpd-tipwatch in one consolidated follow-up (gam-67 ruling).",
+    "evidence": "Replacement: gam_math::categorical::log_softmax_with_error, called from the causal joint softmax in crates/gam-sae/src/parameter_decomposition/attention.rs at f076f9d85b. At the base 706aaa4145, joint_softmax_with_radius occurs on 4 lines, all in attention.rs; no file under crates, gamfit, tests or examples calls it from outside, and no line names it at f076f9d85b or at be06286325. Before this entry, public_api_census.py --base f076f9d85b~1 --head f076f9d85b refused exactly this removal."
+  },
+  {
     "base": "31911505dd573d127ccfcfb2d2b621beab6b5303",
     "removed": {
       "crates/gam-geometry/src/manifold.rs::quad_form": 1
