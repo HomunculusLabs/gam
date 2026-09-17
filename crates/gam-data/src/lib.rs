@@ -1520,10 +1520,21 @@ fn parse_cell_with_schema(
     col_name: &str,
     unseen_policy: &UnseenCategoryPolicy,
 ) -> Result<f64, DataError> {
+    // This reader encodes a prediction file against a frozen training schema, and
+    // only the columns the model reads (`load_datasetwith_schema_projected`). A
+    // missing marker in a numeric schema column is the missing value (#2495), not
+    // a parse failure and not a level, and the model cannot read a missing value.
+    // Refuse it here with the text `project_encoded_to_schema` gives the same cell
+    // in a typed table, so every front door names the row and the column instead
+    // of handing NaN to the design.
+    if matches!(meta.kind, ColumnKindTag::Continuous | ColumnKindTag::Binary)
+        && is_missing_marker(raw)
+    {
+        return Err(DataError::InvalidValue {
+            reason: format!("non-finite value at row {row}, column '{col_name}'"),
+        });
+    }
     let val = match meta.kind {
-        // A schema-declared numeric column still has to accept the missing
-        // marker as the missing value (#2495), not fail to parse it.
-        ColumnKindTag::Continuous if is_missing_marker(raw) => f64::NAN,
         ColumnKindTag::Continuous => raw.parse::<f64>().map_err(|err| {
             DataError::SchemaMismatch {
                 reason: format!(
@@ -1532,7 +1543,6 @@ fn parse_cell_with_schema(
                 ),
             }
         })?,
-        ColumnKindTag::Binary if is_missing_marker(raw) => f64::NAN,
         ColumnKindTag::Binary => {
             let v = raw
                 .parse::<f64>()
@@ -1572,10 +1582,7 @@ fn parse_cell_with_schema(
             }
         }
     };
-    // The NaN produced for a missing marker (#2495) IS the encoded value here,
-    // so it must not be re-rejected by the non-finite guard. Every other route
-    // to a non-finite value still fails loudly.
-    if !val.is_finite() && !is_missing_marker(raw) {
+    if !val.is_finite() {
         return Err(DataError::InvalidValue {
             reason: format!("non-finite value at row {}, column '{}'", row, col_name),
         });
@@ -3262,6 +3269,57 @@ mod tests {
                 ColumnKindTag::Binary,
             ]
         );
+    }
+
+    /// A prediction file's `NA` in a numeric column the model reads used to encode
+    /// as NaN and reach the design, whose refusal counted rows from 0 and named no
+    /// column. The typed-table projection refuses the same cell naming the row and
+    /// the column, and the delimited reader now gives that text.
+    #[test]
+    fn delimited_schema_load_refuses_a_missing_marker_in_a_read_numeric_column() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("schema_missing.csv");
+        let schema = DataSchema {
+            columns: vec![
+                SchemaColumn {
+                    name: "x".to_string(),
+                    kind: ColumnKindTag::Continuous,
+                    levels: Vec::new(),
+                },
+                SchemaColumn {
+                    name: "flag".to_string(),
+                    kind: ColumnKindTag::Binary,
+                    levels: Vec::new(),
+                },
+            ],
+        };
+        let read = ["x".to_string(), "flag".to_string()];
+
+        std::fs::write(&path, "x,flag,note\n0.5,1,first\nNA,0,second\n").expect("write csv");
+        let continuous = String::from(
+            load_datasetwith_schema_projected(&path, &schema, UnseenCategoryPolicy::Error, &read)
+                .expect_err("a missing marker in a read continuous column is refused"),
+        );
+        assert!(
+            continuous.contains("non-finite value at row 2, column 'x'"),
+            "got: {continuous}"
+        );
+
+        std::fs::write(&path, "x,flag,note\n0.5,1,first\n1.5,NA,second\n").expect("write csv");
+        let binary = String::from(
+            load_datasetwith_schema_projected(&path, &schema, UnseenCategoryPolicy::Error, &read)
+                .expect_err("a missing marker in a read binary column is refused"),
+        );
+        assert!(
+            binary.contains("non-finite value at row 2, column 'flag'"),
+            "got: {binary}"
+        );
+
+        std::fs::write(&path, "x,flag,note\n0.5,1,first\n1.5,0,NA\n").expect("write csv");
+        let loaded =
+            load_datasetwith_schema_projected(&path, &schema, UnseenCategoryPolicy::Error, &read)
+                .expect("a marker in a column the model does not read is never parsed");
+        assert_eq!(loaded.values.row(1).to_vec(), vec![1.5, 0.0]);
     }
 
     #[test]
