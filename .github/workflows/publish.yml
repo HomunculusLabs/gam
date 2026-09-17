@@ -97,7 +97,11 @@ jobs:
           publish_one() {
             local crate="$1"
             local out status
-            out=$(cargo publish -p "$crate" --no-verify --allow-dirty 2>&1); status=$?
+            # Verified: cargo builds the packaged sources against crates.io
+            # alone, so a crate whose dependency exists only at a git revision
+            # (opt =0.8.1 against a 0.9.0 API left gam-solve 0.3.157 unbuildable)
+            # is refused before upload instead of published broken.
+            out=$(cargo publish -p "$crate" --allow-dirty 2>&1); status=$?
             echo "$out"
             [ "$status" -eq 0 ] && { echo "published $crate"; return 0; }
             # Idempotent: a mid-sequence retry skips already-published
