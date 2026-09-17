@@ -3557,7 +3557,6 @@ impl BernoulliMarginalSlopeFamily {
         let tail_tail_gram = Self::primary_tail_tail_gram(primary.total, rank, factor, &tail_pairs);
         let n_chunks = n.div_ceil(rows_per_chunk);
         let started = std::time::Instant::now();
-        let completed_chunks = AtomicUsize::new(0);
         let progress_step = (n_chunks / 10).max(1);
         if log_exact_work(n) {
             log::info!(
@@ -3570,65 +3569,70 @@ impl BernoulliMarginalSlopeFamily {
                 n_dirs
             );
         }
-        let traces = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
-            n_chunks,
-            |chunk_range| -> Result<Vec<f64>, String> {
-                let mut outer_acc = vec![0.0; n_dirs];
-                for chunk_idx in chunk_range {
-                // This chunk runs on a Rayon worker and issues `fast_ab` GEMMs
-                // below; `with_nested_parallel` pins their faer parallelism to
-                // `Par::Seq` so they do not re-fan the global Rayon pool against
-                // this already-parallel row fan-out (the rayon×BLAS
-                // oversubscription that intermittently stalled the joint-Newton
-                // `hessian_qp` cycle). Bit-identical: faer partitions the matmul
-                // output, never the contracted axis.
-                let chunk_acc: Vec<f64> = gam_problem::with_nested_parallel(|| -> Result<Vec<f64>, String> {
-                let start = chunk_idx * rows_per_chunk;
-                let end = (start + rows_per_chunk).min(n);
-                let rows = start..end;
-                // Zero-copy fast path: when BOTH designs are materialised dense
-                // the chunk rows are read straight from the stored matrix as
-                // borrowed `ArrayView2` slices. `try_row_chunk` would `.to_owned()`
-                // a fresh `(rows × p)` `Array2` for every chunk on every
-                // outer derivative evaluation — the dominant `OwnedRepr<f64>`
-                // alloc/`drop_in_place` churn of the cold marginal-slope fit.
-                // `fast_ab` is generic over `Data<Elem = f64>`, so the view feeds
-                // the identical BLAS-3 kernel with identical arithmetic.
-                let (proj_m, proj_g, dir_proj_m, dir_proj_g) = match (
-                    self.marginal_design.as_dense_ref(),
-                    self.slope_design.as_dense_ref(),
-                ) {
-                    (Some(x_full), Some(g_full)) => {
-                        let x_chunk = x_full.slice(s![rows.clone(), ..]);
-                        let g_chunk = g_full.slice(s![rows.clone(), ..]);
-                        (
-                            gam_linalg::faer_ndarray::fast_ab(&x_chunk, &factor_m),
-                            gam_linalg::faer_ndarray::fast_ab(&g_chunk, &factor_g),
-                            gam_linalg::faer_ndarray::fast_ab(&x_chunk, &dir_m),
-                            gam_linalg::faer_ndarray::fast_ab(&g_chunk, &dir_g),
-                        )
-                    }
-                    _ => {
-                        let x_chunk = self
-                            .marginal_design
-                            .try_row_chunk(rows.clone())
-                            .map_err(|err| format!("marginal trace row chunk failed: {err}"))?;
-                        let g_chunk = self
-                            .slope_design
-                            .try_row_chunk(rows.clone())
-                            .map_err(|err| format!("slope trace row chunk failed: {err}"))?;
-                        (
-                            gam_linalg::faer_ndarray::fast_ab(&x_chunk, &factor_m),
-                            gam_linalg::faer_ndarray::fast_ab(&g_chunk, &factor_g),
-                            gam_linalg::faer_ndarray::fast_ab(&x_chunk, &dir_m),
-                            gam_linalg::faer_ndarray::fast_ab(&g_chunk, &dir_g),
-                        )
-                    }
-                };
+        // The rows of each memory chunk fold over the deterministic pairwise tree,
+        // whose base blocks run on Rayon workers. This pass used to fold over CHUNK
+        // indices, and the tree splits only above `BASE_CHUNK` indices, so a fit with
+        // fewer than that many chunks ran every row on one thread: the n=2000 flex
+        // smoke fit is one chunk, and this pass took 146.3 s of its 212.4 s alone on
+        // 24 cpus (#979). The association tree is a pure function of each chunk's
+        // row count, so the traces do not depend on the thread count.
+        let mut traces = vec![0.0; n_dirs];
+        for chunk_idx in 0..n_chunks {
+            let start = chunk_idx * rows_per_chunk;
+            let end = (start + rows_per_chunk).min(n);
+            let rows = start..end;
+            // Zero-copy fast path: when BOTH designs are materialised dense
+            // the chunk rows are read straight from the stored matrix as
+            // borrowed `ArrayView2` slices. `try_row_chunk` would `.to_owned()`
+            // a fresh `(rows × p)` `Array2` for every chunk on every
+            // outer derivative evaluation — the dominant `OwnedRepr<f64>`
+            // alloc/`drop_in_place` churn of the cold marginal-slope fit.
+            // `fast_ab` is generic over `Data<Elem = f64>`, so the view feeds
+            // the identical BLAS-3 kernel with identical arithmetic.
+            let (proj_m, proj_g, dir_proj_m, dir_proj_g) = match (
+                self.marginal_design.as_dense_ref(),
+                self.slope_design.as_dense_ref(),
+            ) {
+                (Some(x_full), Some(g_full)) => {
+                    let x_chunk = x_full.slice(s![rows.clone(), ..]);
+                    let g_chunk = g_full.slice(s![rows.clone(), ..]);
+                    (
+                        gam_linalg::faer_ndarray::fast_ab(&x_chunk, &factor_m),
+                        gam_linalg::faer_ndarray::fast_ab(&g_chunk, &factor_g),
+                        gam_linalg::faer_ndarray::fast_ab(&x_chunk, &dir_m),
+                        gam_linalg::faer_ndarray::fast_ab(&g_chunk, &dir_g),
+                    )
+                }
+                _ => {
+                    let x_chunk = self
+                        .marginal_design
+                        .try_row_chunk(rows.clone())
+                        .map_err(|err| format!("marginal trace row chunk failed: {err}"))?;
+                    let g_chunk = self
+                        .slope_design
+                        .try_row_chunk(rows.clone())
+                        .map_err(|err| format!("slope trace row chunk failed: {err}"))?;
+                    (
+                        gam_linalg::faer_ndarray::fast_ab(&x_chunk, &factor_m),
+                        gam_linalg::faer_ndarray::fast_ab(&g_chunk, &factor_g),
+                        gam_linalg::faer_ndarray::fast_ab(&x_chunk, &dir_m),
+                        gam_linalg::faer_ndarray::fast_ab(&g_chunk, &dir_g),
+                    )
+                }
+            };
+            let chunk_acc = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+                end - start,
+                |local_range| -> Result<Vec<f64>, String> {
+                // This block runs on a Rayon worker, and the per-row kernels may
+                // issue faer GEMMs; `with_nested_parallel` pins their parallelism to
+                // `Par::Seq` so they do not re-fan the global Rayon pool against this
+                // row fan-out (the rayon×BLAS oversubscription that intermittently
+                // stalled the joint-Newton `hessian_qp` cycle).
+                gam_problem::with_nested_parallel(|| -> Result<Vec<f64>, String> {
                 let mut acc = vec![0.0; n_dirs];
                 let mut gram = vec![0.0; primary.total * primary.total];
                 let mut row_dir = Array1::<f64>::zeros(primary.total);
-                for local in 0..(end - start) {
+                for local in local_range {
                     let row = start + local;
                     gram.copy_from_slice(&tail_tail_gram);
                     let mut qq = 0.0;
@@ -3717,35 +3721,34 @@ impl BernoulliMarginalSlopeFamily {
                         acc[dir_idx] += trace;
                     }
                 }
-                if log_exact_work(n) {
-                    let done = completed_chunks.fetch_add(1, Ordering::Relaxed) + 1;
-                    if done == n_chunks || done % progress_step == 0 {
-                        log::info!(
-                            "[BMS rho-correction-trace] full progress chunks={}/{} rows={}/{} elapsed={:.3}s",
-                            done,
-                            n_chunks,
-                            (done * rows_per_chunk).min(n),
-                            n,
-                            started.elapsed().as_secs_f64()
-                        );
-                    }
-                }
                 Ok(acc)
-                })?;
-                for (o, c) in outer_acc.iter_mut().zip(chunk_acc.iter()) {
-                    *o += *c;
+                })
+                },
+                |mut left, right| -> Result<_, String> {
+                    for (l, r) in left.iter_mut().zip(right.iter()) {
+                        *l += *r;
+                    }
+                    Ok(left)
+                },
+            )?
+            .unwrap_or_else(|| vec![0.0; n_dirs]);
+            for (total, value) in traces.iter_mut().zip(chunk_acc.iter()) {
+                *total += *value;
+            }
+            if log_exact_work(n) {
+                let done = chunk_idx + 1;
+                if done == n_chunks || done % progress_step == 0 {
+                    log::info!(
+                        "[BMS rho-correction-trace] full progress chunks={}/{} rows={}/{} elapsed={:.3}s",
+                        done,
+                        n_chunks,
+                        end,
+                        n,
+                        started.elapsed().as_secs_f64()
+                    );
                 }
-                }
-                Ok(outer_acc)
-            },
-            |mut left, right| -> Result<_, String> {
-                for (l, r) in left.iter_mut().zip(right.iter()) {
-                    *l += *r;
-                }
-                Ok(left)
-            },
-        )?
-        .unwrap_or_else(|| vec![0.0; n_dirs]);
+            }
+        }
         if log_exact_work(n) {
             log::info!(
                 "[BMS rho-correction-trace] full done n={} chunks={} p={} rank={} dirs={} elapsed={:.3}s",
