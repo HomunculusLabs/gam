@@ -6554,41 +6554,46 @@ impl SaeManifoldTerm {
             .collect()
     }
 
-    /// #2330 Patch D — raw basis THIRD jets `∂³φ` per atom, `Some(Array5)` shaped
-    /// `(n_obs, basis, d, d, d)` when the atom's base evaluator exposes an
-    /// analytic third jet (`SaeBasisThirdJet::third_jet_dyn`), else `None`. Used
-    /// only by the exact-A θ-adjoint's residual-curvature leg `⟨error_metric,
-    /// ∂³f⟩` on the dense route; an atom without a third jet contributes no such
-    /// leg (skipped, not errored) so mixed-basis terms degrade to the
-    /// second-order-only exact-A gradient rather than refusing.
-    pub(crate) fn atom_third_jets(&self) -> Result<Vec<Option<ndarray::Array5<f64>>>, String> {
+    /// #2330 Patch D — raw basis THIRD jets `∂³φ` per atom, for the exact-A
+    /// θ-adjoint's residual-curvature leg `⟨error_metric, ∂³f⟩` on the dense and
+    /// from-probes routes. Each atom's evaluator must supply its analytic jet,
+    /// shaped `(n_obs, basis, d, d, d)`, or certify that every third partial
+    /// vanishes. An atom whose jet is unavailable, including one with no
+    /// evaluator, is refused with [`ThirdJetUnavailable`] (#2933 F02): an absent
+    /// derivative is not a zero one, and omitting its leg would return an
+    /// incomplete gradient as exact.
+    pub(crate) fn atom_third_jets(&self) -> Result<Vec<AtomThirdJet>, String> {
         let mut out = Vec::with_capacity(self.k_atoms());
         for (atom_idx, atom) in self.atoms.iter().enumerate() {
+            let unavailable = || {
+                ThirdJetUnavailable {
+                    atom: atom.name.clone(),
+                }
+                .to_string()
+            };
+            let evaluator = atom.basis_evaluator.as_ref().ok_or_else(unavailable)?;
             let coords = self.assignment.coords[atom_idx].as_matrix();
-            let jet = match atom.basis_evaluator.as_ref() {
-                Some(ev) => match ev.third_jet_dyn(coords.view()) {
-                    Some(Ok(jet)) => {
-                        let expected = (
-                            atom.n_obs(),
-                            atom.basis_size(),
-                            atom.latent_dim(),
-                            atom.latent_dim(),
-                            atom.latent_dim(),
-                        );
-                        if jet.dim() != expected {
-                            return Err(format!(
-                                "atom_third_jets: atom '{}' third jet shape {:?}, expected {:?}",
-                                atom.name,
-                                jet.dim(),
-                                expected
-                            ));
-                        }
-                        Some(jet)
+            let jet = match evaluator.third_jet_dyn(coords.view())? {
+                SaeBasisThirdJetCapability::Analytic(jet) => {
+                    let expected = (
+                        atom.n_obs(),
+                        atom.basis_size(),
+                        atom.latent_dim(),
+                        atom.latent_dim(),
+                        atom.latent_dim(),
+                    );
+                    if jet.dim() != expected {
+                        return Err(format!(
+                            "atom_third_jets: atom '{}' third jet shape {:?}, expected {:?}",
+                            atom.name,
+                            jet.dim(),
+                            expected
+                        ));
                     }
-                    Some(Err(e)) => return Err(e),
-                    None => None,
-                },
-                None => None,
+                    AtomThirdJet::Analytic(jet)
+                }
+                SaeBasisThirdJetCapability::CertifiedZero => AtomThirdJet::CertifiedZero,
+                SaeBasisThirdJetCapability::Unavailable => return Err(unavailable()),
             };
             out.push(jet);
         }
@@ -7472,14 +7477,16 @@ impl SaeManifoldTerm {
                 self.patchd_row_error_metric(row, patchd_w_row, tgt, &assignments, whiten_row_jets)
             });
             let patchd_sqrt_w = patchd_w_row.sqrt();
-            let patchd_ctx: Option<PatchDResidualCtx<'_>> =
-                patchd_error_metric.as_deref().map(|em| PatchDResidualCtx {
+            let patchd_ctx: Option<PatchDResidualCtx<'_>> = patchd_error_metric
+                .as_deref()
+                .zip(patchd_third_jets.as_deref())
+                .map(|(em, third_jets)| PatchDResidualCtx {
                     row,
                     error_metric: em,
                     sqrt_w: patchd_sqrt_w,
                     assignments: &assignments,
                     second_jets: &second_jets,
-                    third_jets: patchd_third_jets.as_deref(),
+                    third_jets,
                     is_obb: patchd_is_obb,
                     inv_tau: patchd_obb_inv_tau,
                 });

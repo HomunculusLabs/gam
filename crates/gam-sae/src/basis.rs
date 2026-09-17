@@ -149,18 +149,22 @@ pub trait SaeBasisEvaluator: Send + Sync + std::fmt::Debug {
     /// declaration, not a default sentinel hidden in the trait.
     fn second_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array4<f64>, String>>;
 
-    /// Object-safe forwarder to the basis third jet
+    /// Object-safe declaration of the basis third jet
     /// `T[n, m, a, c, e] = ∂³Φ_m / ∂t_a ∂t_c ∂t_e`, for callers holding
     /// `&dyn SaeBasisEvaluator` / `Arc<dyn SaeBasisSecondJet>`. The exact
     /// isometry Hessian (`IsometryPenalty::hvp`) needs the *decoder* third jet
-    /// `K = Σ_m T[..,m,..]·B[m,:]` for its residual·curvature term; without it
-    /// that exact Hessian silently drops the residual and collapses to
-    /// Gauss-Newton (issue #458).
+    /// `K = Σ_m T[..,m,..]·B[m,:]` for its residual·curvature term (issue #458),
+    /// and the exact-A θ-adjoint needs it for the residual leg `⟨Mr, ∂³f⟩`.
     ///
-    /// Implementations return `Some(result)` only when an analytic third jet
-    /// exists for this evaluator. Evaluators without one return `None`
-    /// explicitly; there is no finite-difference fallback.
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>>;
+    /// Every implementation declares one of the three
+    /// [`SaeBasisThirdJetCapability`] states. A jet the evaluator does not expose
+    /// is `Unavailable`, never a zero, and a consumer that needs exact third
+    /// derivatives refuses on it (#2933 F02). There is no finite-difference
+    /// fallback. `Err` is a malformed call or a failing analytic evaluation.
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String>;
 }
 
 /// Curvature-homotopy column split `Phi_eta = [base, eta*curved]`.
@@ -292,6 +296,24 @@ pub trait SaeBasisThirdJet: SaeBasisSecondJet {
     fn third_jet(&self, coords: ArrayView2<'_, f64>) -> Result<Array5<f64>, String>;
 }
 
+/// What an evaluator declares about its third jet (#2933 F02). Missing data is
+/// not a numerical zero, so "no analytic jet" and "the jet is identically zero"
+/// are distinct states.
+#[derive(Debug, Clone)]
+pub enum SaeBasisThirdJetCapability {
+    /// The closed-form third jet, shape `(n_rows, n_basis, d, d, d)`.
+    Analytic(Array5<f64>),
+    /// Every mixed third partial of every column vanishes identically: the basis
+    /// is a polynomial of total degree at most two in the latent coordinates, or
+    /// piecewise constant. Quadratic in each axis separately is not enough
+    /// (`t₀²t₁` has `∂³/∂t₀²∂t₁ = 2`).
+    CertifiedZero,
+    /// No third jet is exposed. The function need not have zero third
+    /// derivatives (`sin t` has `−cos t`), so a consumer that needs exact third
+    /// derivatives must refuse rather than contribute zero.
+    Unavailable,
+}
+
 /// Periodic harmonic basis evaluator for a single-dimensional circle latent.
 ///
 /// [`PeriodicHarmonicEvaluator::new`] accepts the **total odd basis width**
@@ -340,8 +362,11 @@ impl SaeBasisEvaluator for PeriodicHarmonicEvaluator {
         Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
-        Some(<Self as SaeBasisThirdJet>::third_jet(self, coords))
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
+        <Self as SaeBasisThirdJet>::third_jet(self, coords).map(SaeBasisThirdJetCapability::Analytic)
     }
 
     fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
@@ -752,8 +777,11 @@ impl SaeBasisEvaluator for SphericalHarmonicEvaluator {
         Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
-        Some(<Self as SaeBasisThirdJet>::third_jet(self, coords))
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
+        <Self as SaeBasisThirdJet>::third_jet(self, coords).map(SaeBasisThirdJetCapability::Analytic)
     }
 
     fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
@@ -1140,8 +1168,11 @@ impl SaeBasisEvaluator for AmbientSphereHarmonicEvaluator {
         Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
-        Some(<Self as SaeBasisThirdJet>::third_jet(self, coords))
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
+        <Self as SaeBasisThirdJet>::third_jet(self, coords).map(SaeBasisThirdJetCapability::Analytic)
     }
 
     fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
@@ -1415,8 +1446,11 @@ impl SaeBasisEvaluator for TorusHarmonicEvaluator {
         Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
-        Some(<Self as SaeBasisThirdJet>::third_jet(self, coords))
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
+        <Self as SaeBasisThirdJet>::third_jet(self, coords).map(SaeBasisThirdJetCapability::Analytic)
     }
 
     fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
@@ -2182,8 +2216,11 @@ impl SaeBasisEvaluator for QuotientSpectralEvaluator {
         Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
-        Some(<Self as SaeBasisThirdJet>::third_jet(self, coords))
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
+        <Self as SaeBasisThirdJet>::third_jet(self, coords).map(SaeBasisThirdJetCapability::Analytic)
     }
 }
 
@@ -2360,8 +2397,11 @@ impl SaeBasisEvaluator for DuchonCoordinateEvaluator {
         Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
-        Some(<Self as SaeBasisThirdJet>::third_jet(self, coords))
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
+        <Self as SaeBasisThirdJet>::third_jet(self, coords).map(SaeBasisThirdJetCapability::Analytic)
     }
 
     fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
@@ -2489,8 +2529,11 @@ impl SaeBasisEvaluator for EuclideanPatchEvaluator {
         Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
-        Some(<Self as SaeBasisThirdJet>::third_jet(self, coords))
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
+        <Self as SaeBasisThirdJet>::third_jet(self, coords).map(SaeBasisThirdJetCapability::Analytic)
     }
 
     fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
@@ -2981,8 +3024,11 @@ impl SaeBasisEvaluator for CylinderHarmonicEvaluator {
         Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
-        Some(<Self as SaeBasisThirdJet>::third_jet(self, coords))
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
+        <Self as SaeBasisThirdJet>::third_jet(self, coords).map(SaeBasisThirdJetCapability::Analytic)
     }
 
     fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
@@ -3305,8 +3351,11 @@ impl SaeBasisEvaluator for MobiusHarmonicEvaluator {
         Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
-        Some(<Self as SaeBasisThirdJet>::third_jet(self, coords))
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
+        <Self as SaeBasisThirdJet>::third_jet(self, coords).map(SaeBasisThirdJetCapability::Analytic)
     }
 
     fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
@@ -3536,22 +3585,21 @@ impl SaeBasisEvaluator for SubspaceReducedEvaluator {
         Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
-        match self.inner.third_jet_dyn(coords) {
-            Some(Ok(t3)) => {
-                if let Err(err) = self.check_inner_width(t3.shape()[1], "third_jet_dyn") {
-                    return Some(Err(err));
-                }
-                Some(
-                    remix_cols_along_basis(t3.view().into_dyn(), &self.q).and_then(|out| {
-                        out.into_dimensionality::<ndarray::Ix5>().map_err(|err| {
-                            format!("SubspaceReducedEvaluator: third jet dim: {err}")
-                        })
-                    }),
-                )
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
+        // The column remix is linear, so a certified-zero or unavailable inner
+        // jet stays exactly that after the reduction.
+        match self.inner.third_jet_dyn(coords)? {
+            SaeBasisThirdJetCapability::Analytic(t3) => {
+                self.check_inner_width(t3.shape()[1], "third_jet_dyn")?;
+                remix_cols_along_basis(t3.view().into_dyn(), &self.q)?
+                    .into_dimensionality::<ndarray::Ix5>()
+                    .map(SaeBasisThirdJetCapability::Analytic)
+                    .map_err(|err| format!("SubspaceReducedEvaluator: third jet dim: {err}"))
             }
-            Some(Err(err)) => Some(Err(err)),
-            None => None,
+            capability => Ok(capability),
         }
     }
 
@@ -3610,10 +3658,18 @@ impl SaeBasisEvaluator for AnchorIndicatorEvaluator {
         Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
+        if coords.ncols() != 1 {
+            return Err(format!(
+                "AnchorIndicatorEvaluator::third_jet_dyn: expected latent_dim == 1, got {}",
+                coords.ncols()
+            ));
+        }
         // The indicator design is piecewise constant, so every jet order is zero.
-        let n = coords.nrows();
-        Some(Ok(Array5::<f64>::zeros((n, self.anchors, 1, 1, 1))))
+        Ok(SaeBasisThirdJetCapability::CertifiedZero)
     }
 
     fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {

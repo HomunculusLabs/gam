@@ -664,9 +664,41 @@ struct PatchDResidualCtx<'a> {
     sqrt_w: f64,
     assignments: &'a Array1<f64>,
     second_jets: &'a [Array4<f64>],
-    third_jets: Option<&'a [Option<ndarray::Array5<f64>>]>,
+    third_jets: &'a [AtomThirdJet],
     is_obb: bool,
     inv_tau: f64,
+}
+
+/// #2933 F02 — one atom's third jet as the exact-A residual leg consumes it.
+/// [`SaeManifoldTerm::atom_third_jets`] refuses an evaluator that declares its
+/// jet unavailable, so both states here are derivatives the leg contracts
+/// exactly.
+pub(crate) enum AtomThirdJet {
+    /// The evaluator's closed-form `∂³φ`, shaped `(n_obs, basis, d, d, d)`.
+    Analytic(ndarray::Array5<f64>),
+    /// Every third partial of the basis vanishes identically, so the coord³ leg
+    /// is zero without materializing the tensor.
+    CertifiedZero,
+}
+
+/// #2933 F02 — the capability refusal of an exact observed-information
+/// derivative whose atom's evaluator does not expose its third jet. It is not a
+/// numerical failure: the leg `⟨Mr, ∂³f⟩` that jet feeds is nonzero in general
+/// (`sin t` has third derivative `−cos t`), so there is no value to return.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ThirdJetUnavailable {
+    pub(crate) atom: String,
+}
+
+impl std::fmt::Display for ThirdJetUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "exact observed-information derivative refused: atom '{}' has no analytic or \
+             certified-zero basis third jet, so the residual leg <Mr, d3f> cannot be formed",
+            self.atom
+        )
+    }
 }
 
 /// #2500 — what the assignment prior's sparse log-strength curvature operator
@@ -2302,8 +2334,10 @@ impl SaeManifoldTerm {
         let mut d_c = vec![0.0_f64; p];
         match coord_axes.len() {
             3 => {
-                let Some(tj) = third_jets.and_then(|t| t[atom_idx].as_ref()) else {
-                    return 0.0; // no analytic third jet for this atom
+                let tj = match &third_jets[atom_idx] {
+                    AtomThirdJet::Analytic(tj) => tj,
+                    // Every third partial of this basis vanishes identically.
+                    AtomThirdJet::CertifiedZero => return 0.0,
                 };
                 let (a0, a1, a2) = (coord_axes[0], coord_axes[1], coord_axes[2]);
                 for m in 0..basis {
@@ -2469,14 +2503,16 @@ impl SaeManifoldTerm {
                 self.patchd_row_error_metric(row, w_row, tgt, &assignments, whiten_row_jets)
             });
             let patchd_sqrt_w = w_row.sqrt();
-            let patchd_ctx: Option<PatchDResidualCtx<'_>> =
-                patchd_error_metric.as_deref().map(|em| PatchDResidualCtx {
+            let patchd_ctx: Option<PatchDResidualCtx<'_>> = patchd_error_metric
+                .as_deref()
+                .zip(patchd_third_jets.as_deref())
+                .map(|(em, third_jets)| PatchDResidualCtx {
                     row,
                     error_metric: em,
                     sqrt_w: patchd_sqrt_w,
                     assignments: &assignments,
                     second_jets: &second_jets,
-                    third_jets: patchd_third_jets.as_deref(),
+                    third_jets,
                     is_obb: patchd_is_obb,
                     inv_tau: patchd_obb_inv_tau,
                 });

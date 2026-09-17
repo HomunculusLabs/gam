@@ -1237,14 +1237,18 @@ impl SaeBasisEvaluator for SnapshotLinearSecondJet2521 {
         Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
         if coords.ncols() != 1 {
-            return Some(Err(format!(
+            return Err(format!(
                 "SnapshotLinearSecondJet2521: coordinate width {} != 1",
                 coords.ncols()
-            )));
+            ));
         }
-        None
+        // `[1, t]` is affine, so every third partial vanishes identically.
+        Ok(SaeBasisThirdJetCapability::CertifiedZero)
     }
 
     fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
@@ -6475,12 +6479,15 @@ impl SaeBasisEvaluator for TestPeriodicEvaluator {
     /// Third derivative of `[1, sin(2πt), cos(2πt)]`:
     /// `Φ''' = [0, -(2π)³ cos(2πt), +(2π)³ sin(2πt)]` (sin→ωc→−ω²s→−ω³c,
     /// cos→−ωs→−ω²c→+ω³s).
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
         if coords.ncols() != 1 {
-            return Some(Err(format!(
+            return Err(format!(
                 "TestPeriodicEvaluator::third_jet_dyn: expected latent_dim 1, got {}",
                 coords.ncols()
-            )));
+            ));
         }
         let n = coords.nrows();
         let two_pi = 2.0 * std::f64::consts::PI;
@@ -6491,7 +6498,7 @@ impl SaeBasisEvaluator for TestPeriodicEvaluator {
             h[[row, 1, 0, 0, 0]] = -freq3 * angle.cos();
             h[[row, 2, 0, 0, 0]] = freq3 * angle.sin();
         }
-        Some(Ok(h))
+        Ok(SaeBasisThirdJetCapability::Analytic(h))
     }
 
     fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {

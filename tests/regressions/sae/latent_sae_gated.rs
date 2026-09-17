@@ -55,16 +55,15 @@ impl gam::terms::sae::basis::SaeBasisEvaluator for PrecomputedAffineBasis {
         Some(<Self as gam::terms::sae::basis::SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<gam::terms::sae::basis::SaeBasisThirdJetCapability, String> {
         // Affine in the coordinates, so the third jet is exactly zero as well.
         let d = self.latent_dim();
-        Some(Ok(Array5::<f64>::zeros((
-            coords.nrows(),
-            self.n_basis(),
-            d,
-            d,
-            d,
-        ))))
+        Ok(gam::terms::sae::basis::SaeBasisThirdJetCapability::Analytic(
+            Array5::<f64>::zeros((coords.nrows(), self.n_basis(), d, d, d)),
+        ))
     }
 }
 
@@ -94,9 +93,14 @@ impl gam::terms::sae::basis::SaeBasisEvaluator for IdentityBasis {
         Some(<Self as gam::terms::sae::basis::SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<gam::terms::sae::basis::SaeBasisThirdJetCapability, String> {
         let (n, d) = coords.dim();
-        Some(Ok(Array5::zeros((n, d, d, d, d))))
+        Ok(gam::terms::sae::basis::SaeBasisThirdJetCapability::Analytic(
+            Array5::zeros((n, d, d, d, d)),
+        ))
     }
 }
 

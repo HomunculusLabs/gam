@@ -21,12 +21,12 @@
 //! bar; the warped raw coordinate does not, and only the arc-length correction
 //! recovers it.
 
-use ndarray::{Array1, Array2, Array3, Array4, Array5, ArrayView2};
+use ndarray::{Array1, Array2, Array3, Array4, ArrayView2};
 
 use crate::chart_canonicalization::{
     CanonicalChartTopology, chart_arclength_coordinates, chart_unit_speed_defect,
 };
-use crate::manifold::SaeBasisEvaluator;
+use crate::manifold::{SaeBasisEvaluator, SaeBasisThirdJetCapability};
 
 use super::coordinate_fidelity::watson_u2_uniform;
 
@@ -66,11 +66,14 @@ impl SaeBasisEvaluator for CircleHarmonicEvaluator {
         None
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
         if coords.ncols() != 1 {
-            return Some(Err("CircleHarmonicEvaluator: d = 1 evaluator".to_string()));
+            return Err("CircleHarmonicEvaluator: d = 1 evaluator".to_string());
         }
-        None
+        Ok(SaeBasisThirdJetCapability::Unavailable)
     }
 }
 

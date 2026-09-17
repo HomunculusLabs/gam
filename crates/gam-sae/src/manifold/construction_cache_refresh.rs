@@ -122,18 +122,18 @@ pub fn refresh_isometry_caches_from_atom(
     // feeds the residual-curvature term of the exact isometry Hessian
     //   B_{ab,cd} = K_{a,cd}^T W J_b + H_{a,c}^T W H_{b,d}
     //             + H_{a,d}^T W H_{b,c} + J_a^T W K_{b,cd}.
-    // Sourced from the base evaluator's object-safe `third_jet_dyn` forwarder
-    // (closed-form analytic override for every basis with an analytic Hessian:
-    // sphere/circle/torus/affine/euclidean/duchon; `None` otherwise — no
-    // finite-difference fallback). Installed only when the penalty
+    // Sourced from the base evaluator's object-safe `third_jet_dyn` capability
+    // (no finite-difference fallback). An analytic jet is contracted with the
+    // decoder, a certified-zero jet installs `K = 0`, and an unavailable jet
+    // installs no `K`, so the penalty reports a missing third source rather than
+    // holding a fabricated zero one (#2933 F02). Installed only when the penalty
     // has no `duchon_radial_source` — a Duchon penalty already carries its own
     // analytic third source and `jacobian_third` would shadow it with this
     // cache. Always written (Some or None) so a stale K from a prior outer step
     // never survives a refresh.
     let jac3_opt = if penalty.duchon_radial_source.is_none() {
-        match evaluator.third_jet_dyn(coords) {
-            Some(third) => {
-                let t3 = third?;
+        match evaluator.third_jet_dyn(coords)? {
+            SaeBasisThirdJetCapability::Analytic(t3) => {
                 if t3.dim() != (n_obs, m, d, d, d) {
                     return Err(format!(
                         "refresh_isometry_caches_from_atom: evaluator third jet has shape {:?}, expected ({n_obs}, {m}, {d}, {d}, {d})",
@@ -164,7 +164,10 @@ pub fn refresh_isometry_caches_from_atom(
                     })?;
                 Some(Arc::new(jac3))
             }
-            None => None,
+            SaeBasisThirdJetCapability::CertifiedZero => {
+                Some(Arc::new(ndarray::Array3::<f64>::zeros((n_obs, p, d * d * d))))
+            }
+            SaeBasisThirdJetCapability::Unavailable => None,
         }
     } else {
         None

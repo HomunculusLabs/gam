@@ -3117,20 +3117,16 @@ mod patch_flow_tests {
         fn third_jet_dyn(
             &self,
             coords: ArrayView2<'_, f64>,
-        ) -> Option<Result<ndarray::Array5<f64>, String>> {
+        ) -> Result<crate::basis::SaeBasisThirdJetCapability, String> {
             if coords.ncols() != 2 {
-                return Some(Err(format!(
+                return Err(format!(
                     "MockPatchEvaluator::third_jet_dyn: expected 2 cols, got {}",
                     coords.ncols()
-                )));
+                ));
             }
-            Some(Ok(ndarray::Array5::<f64>::zeros((
-                coords.nrows(),
-                3,
-                2,
-                2,
-                2,
-            ))))
+            Ok(crate::basis::SaeBasisThirdJetCapability::Analytic(
+                ndarray::Array5::<f64>::zeros((coords.nrows(), 3, 2, 2, 2)),
+            ))
         }
     }
 

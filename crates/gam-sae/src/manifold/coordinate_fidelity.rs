@@ -1310,7 +1310,7 @@ mod coordinate_fidelity_tests {
     use crate::manifold::{
         SAE_FINAL_EV_DEGRADATION_TOL, SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL, SaeBasisEvaluator,
     };
-    use ndarray::{Array1, Array2, Array3, Array4, Array5, ArrayView2};
+    use ndarray::{Array1, Array2, Array3, Array4, ArrayView2};
 
     /// A minimal circle-harmonic evaluator for the arc-length-defect tests:
     /// `Φ(t) = [cos 2πt, sin 2πt, cos 4πt, sin 4πt, …]` up to `harmonics`
@@ -1363,14 +1363,14 @@ mod coordinate_fidelity_tests {
         fn third_jet_dyn(
             &self,
             coords: ArrayView2<'_, f64>,
-        ) -> Option<Result<Array5<f64>, String>> {
+        ) -> Result<crate::basis::SaeBasisThirdJetCapability, String> {
             if coords.ncols() != 1 {
-                return Some(Err(format!(
+                return Err(format!(
                     "CircleHarmonicEvaluator::third_jet_dyn: d = 1 evaluator got {} coords",
                     coords.ncols()
-                )));
+                ));
             }
-            None
+            Ok(crate::basis::SaeBasisThirdJetCapability::Unavailable)
         }
     }
 
@@ -1409,14 +1409,15 @@ mod coordinate_fidelity_tests {
         fn third_jet_dyn(
             &self,
             coords: ArrayView2<'_, f64>,
-        ) -> Option<Result<Array5<f64>, String>> {
+        ) -> Result<crate::basis::SaeBasisThirdJetCapability, String> {
             if coords.ncols() != 1 {
-                return Some(Err(format!(
+                return Err(format!(
                     "IntervalLinearEvaluator::third_jet_dyn: d = 1 evaluator got {} coords",
                     coords.ncols()
-                )));
+                ));
             }
-            None
+            // `[1, t]` is affine, so every third partial vanishes identically.
+            Ok(crate::basis::SaeBasisThirdJetCapability::CertifiedZero)
         }
     }
 
@@ -1555,8 +1556,11 @@ mod coordinate_fidelity_tests {
             "d = 1 coords must decline the second jet with None"
         );
         assert!(
-            ev.third_jet_dyn(good.view()).is_none(),
-            "d = 1 coords must decline the third jet with None"
+            matches!(
+                ev.third_jet_dyn(good.view()),
+                Ok(crate::basis::SaeBasisThirdJetCapability::Unavailable)
+            ),
+            "d = 1 coords must declare the third jet Unavailable"
         );
         // Malformed coords (d = 2): the evaluator must consume the argument and
         // reject the contract violation, not silently decline.
@@ -1568,9 +1572,7 @@ mod coordinate_fidelity_tests {
             second.is_err(),
             "second_jet_dyn must reject d != 1 coords, got {second:?}"
         );
-        let third = ev
-            .third_jet_dyn(bad.view())
-            .expect("wrong-dimension coords must not silently decline the third jet");
+        let third = ev.third_jet_dyn(bad.view());
         assert!(
             third.is_err(),
             "third_jet_dyn must reject d != 1 coords, got {third:?}"

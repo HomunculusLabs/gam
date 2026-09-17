@@ -198,14 +198,14 @@ impl SaeBasisEvaluator for RichSphereHarmonicEvaluator {
     fn third_jet_dyn(
         &self,
         coords: ndarray::ArrayView2<'_, f64>,
-    ) -> Option<Result<ndarray::Array5<f64>, String>> {
+    ) -> Result<gam::terms::sae::manifold::SaeBasisThirdJetCapability, String> {
         if coords.ncols() != 2 {
-            return Some(Err(format!(
+            return Err(format!(
                 "RichSphereHarmonicEvaluator::third_jet_dyn: expected latent_dim == 2, got {}",
                 coords.ncols()
-            )));
+            ));
         }
-        None
+        Ok(gam::terms::sae::manifold::SaeBasisThirdJetCapability::Unavailable)
     }
 }
 

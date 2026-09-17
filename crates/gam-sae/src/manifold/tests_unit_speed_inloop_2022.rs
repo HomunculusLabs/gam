@@ -19,7 +19,7 @@
 //! integration test (the active path is rarely fired for finite bases).
 
 use crate::assignment::{AssignmentMode, SaeAssignment};
-use crate::basis::SaeBasisEvaluator;
+use crate::basis::{SaeBasisEvaluator, SaeBasisThirdJetCapability};
 use crate::chart_canonicalization::{CanonicalChartTopology, unit_speed_retraction};
 use crate::manifold::{SaeAtomBasisKind, SaeManifoldAtom, SaeManifoldRho, SaeManifoldTerm};
 use gam_terms::latent::LatentManifold;
@@ -250,14 +250,23 @@ impl SaeBasisEvaluator for MonomialLineEvaluator {
     }
 
     /// `∂³Φ/∂t³ = 0` — `[1, t, t²]` is quadratic, so every third derivative vanishes.
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeBasisThirdJetCapability, String> {
         if coords.ncols() != 1 {
-            return Some(Err(format!(
+            return Err(format!(
                 "MonomialLineEvaluator::third_jet_dyn: expected latent_dim 1, got {}",
                 coords.ncols()
-            )));
+            ));
         }
-        Some(Ok(Array5::<f64>::zeros((coords.nrows(), 3, 1, 1, 1))))
+        Ok(SaeBasisThirdJetCapability::Analytic(Array5::<f64>::zeros((
+            coords.nrows(),
+            3,
+            1,
+            1,
+            1,
+        ))))
     }
 
     fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {

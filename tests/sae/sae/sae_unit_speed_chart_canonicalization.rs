@@ -432,13 +432,16 @@ impl SaeBasisEvaluator for MonomialEvaluator {
         Some(Ok(h))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<gam::terms::sae::manifold::SaeBasisThirdJetCapability, String> {
         let n = coords.nrows();
         let mut t3 = Array5::<f64>::zeros((n, 4, 1, 1, 1));
         for row in 0..n {
             t3[[row, 3, 0, 0, 0]] = 6.0;
         }
-        Some(Ok(t3))
+        Ok(gam::terms::sae::manifold::SaeBasisThirdJetCapability::Analytic(t3))
     }
 }
 

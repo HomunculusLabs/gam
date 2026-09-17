@@ -64,9 +64,14 @@ impl SaeBasisEvaluator for ZeroBasis {
         Some(Ok(Array4::<f64>::zeros((n, M, d, d))))
     }
 
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<gam::terms::sae::manifold::SaeBasisThirdJetCapability, String> {
         let (n, d) = coords.dim();
-        Some(Ok(Array5::<f64>::zeros((n, M, d, d, d))))
+        Ok(gam::terms::sae::manifold::SaeBasisThirdJetCapability::Analytic(
+            Array5::<f64>::zeros((n, M, d, d, d)),
+        ))
     }
 }
 

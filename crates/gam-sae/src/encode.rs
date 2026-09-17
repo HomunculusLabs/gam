@@ -3449,15 +3449,16 @@ mod encode_fix_tests {
         fn third_jet_dyn(
             &self,
             coords: ndarray::ArrayView2<'_, f64>,
-        ) -> Option<Result<ndarray::Array5<f64>, String>> {
+        ) -> Result<crate::basis::SaeBasisThirdJetCapability, String> {
             if coords.ncols() != self.d {
-                return Some(Err(format!(
+                return Err(format!(
                     "ConstantPhi::third_jet_dyn: expected d = {}, got {} coords",
                     self.d,
                     coords.ncols()
-                )));
+                ));
             }
-            None
+            // A constant basis has every derivative identically zero.
+            Ok(crate::basis::SaeBasisThirdJetCapability::CertifiedZero)
         }
     }
 
