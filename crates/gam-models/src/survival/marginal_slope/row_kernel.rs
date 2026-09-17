@@ -1348,18 +1348,33 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
                 let chunk_rows = (PANEL_BUDGET_BYTES / bytes_per_row)
                     .max(1)
                     .min(MAX_CHUNK_ROWS);
-                for start in (0..n).step_by(chunk_rows) {
-                    let end = (start + chunk_rows).min(n);
-                    let left_chunk =
-                        dense_chunk(left, start..end, &format!("{label}/left"))?;
-                    let right_chunk =
-                        dense_chunk(right, start..end, &format!("{label}/right"))?;
-                    let local_weights = weights.slice(s![start..end]).to_owned();
-                    let gram = gam_linalg::faer_ndarray::fast_xt_diag_y(
-                        &left_chunk,
-                        &local_weights,
-                        &right_chunk,
-                    );
+                // Each chunk's Gram is closed on its own worker with a
+                // sequential GEMM, then added into the target in chunk order.
+                // Issued from a serial chunk loop, every GEMM fanned out to the
+                // whole pool and the pool spent the assembly waiting at faer's
+                // barrier (gnomon#2337). The additions below keep the serial
+                // loop's order, so the assembled block is unchanged.
+                use rayon::iter::{IntoParallelIterator, ParallelIterator};
+                let starts: Vec<usize> = (0..n).step_by(chunk_rows).collect();
+                let grams = starts
+                    .into_par_iter()
+                    .map(|start| -> Result<Array2<f64>, String> {
+                        gam_problem::with_nested_parallel(|| {
+                            let end = (start + chunk_rows).min(n);
+                            let left_chunk =
+                                dense_chunk(left, start..end, &format!("{label}/left"))?;
+                            let right_chunk =
+                                dense_chunk(right, start..end, &format!("{label}/right"))?;
+                            let local_weights = weights.slice(s![start..end]).to_owned();
+                            Ok(gam_linalg::faer_ndarray::fast_xt_diag_y(
+                                &left_chunk,
+                                &local_weights,
+                                &right_chunk,
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                for gram in grams {
                     target.scaled_add(1.0, &gram);
                 }
                 Ok(())

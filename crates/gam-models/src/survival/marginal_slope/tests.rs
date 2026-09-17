@@ -6463,6 +6463,71 @@ fn zz_diag_failure1_flex_vs_rigid_vs_fdhess() {
     }
 }
 
+/// gnomon#2337: the survival dense Hessian closes its row-chunk Grams on parallel
+/// workers and adds them in chunk order, so the assembled Hessian is the same bits
+/// whatever the worker count. `n` spans three 8,192-row Gram chunks.
+#[test]
+fn survival_dense_hessian_is_bitwise_invariant_to_the_worker_count_2337() {
+    use crate::row_kernel::{RowKernel, RowSet};
+
+    let n = 20_000usize;
+    let z: Vec<f64> = (0..n).map(|r| ((r as f64) * 0.37).sin() * 1.1).collect();
+    let weights: Vec<f64> = (0..n).map(|r| 0.7 + 0.5 * ((r % 5) as f64) / 5.0).collect();
+    let event: Vec<f64> = (0..n).map(|r| ((r % 3 == 0) as u8) as f64).collect();
+    let marginal_design = Array2::from_shape_fn((n, 2), |(r, j)| {
+        0.2 + 0.05 * (r as f64).cos() + 0.11 * (j as f64) - 0.013 * (r as f64) / (n as f64)
+    });
+    let slope_design = Array2::from_shape_fn((n, 2), |(r, j)| {
+        0.1 + 0.07 * (r as f64).sin() - 0.09 * (j as f64) + 0.004 * (r as f64) / (n as f64)
+    });
+    let beta_marginal = Array1::from_vec(vec![0.18, -0.12]);
+    let beta_slope = Array1::from_vec(vec![-0.2, 0.13]);
+    let mut family = oracle_rigid_family(n, &z, &weights, &event, None);
+    family.marginal_design = DesignMatrix::from(marginal_design.clone());
+    family
+        .slope_layout
+        .replace_coefficient_design(DesignMatrix::from(slope_design.clone()));
+    let block_states = vec![
+        ParameterBlockState {
+            beta: array![0.65],
+            eta: Array1::zeros(n),
+        },
+        ParameterBlockState {
+            beta: beta_marginal.clone(),
+            eta: marginal_design.dot(&beta_marginal),
+        },
+        ParameterBlockState {
+            beta: beta_slope.clone(),
+            eta: slope_design.dot(&beta_slope),
+        },
+    ];
+    let kernel = SurvivalMarginalSlopeRowKernel::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>::new(
+        family,
+        block_states,
+    );
+    let cache = crate::row_kernel::build_row_kernel_cache(&kernel, &RowSet::All)
+        .expect("rigid row-kernel cache");
+    let assemble = |workers: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .expect("test worker pool")
+            .install(|| crate::row_kernel::row_kernel_hessian_dense(&kernel, &cache, &RowSet::All))
+            .expect("dense survival Hessian")
+    };
+    let one_worker = assemble(1);
+    let four_workers = assemble(4);
+    let p = RowKernel::n_coefficients(&kernel);
+    assert_eq!(one_worker.dim(), (p, p));
+    for (index, (a, b)) in one_worker.iter().zip(four_workers.iter()).enumerate() {
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "dense Hessian entry {index}: 1 worker {a:e} vs 4 workers {b:e}"
+        );
+    }
+}
+
 /// gam#979 build-once equality contract for the rigid survival marginal-slope
 /// kernel.
 ///
