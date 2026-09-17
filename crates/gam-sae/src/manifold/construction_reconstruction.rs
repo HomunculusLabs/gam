@@ -918,7 +918,11 @@ impl SaeManifoldTerm {
                 band_sd_robust: None,
             })
             .collect();
-        SaeShapeUncertainty { dispersion, atoms }
+        SaeShapeUncertainty {
+            dispersion,
+            operator: SaeShapeCovarianceOperator::Unavailable(reason),
+            atoms,
+        }
     }
 
 }
