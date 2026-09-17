@@ -98,7 +98,7 @@ fn main() -> Result<(), String> {
             v.atom_a,
             v.atom_b,
             pr.dl_old - pr.dl_new,
-            pr.verdict.radius,
+            pr.verdict.rms_radius,
             pr.verdict.kappa,
             pr.span,
             pr.firing_rate * n_rows as f64,

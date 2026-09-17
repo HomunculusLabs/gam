@@ -110,7 +110,7 @@ fn main() -> Result<(), String> {
     let mut n_chart = 0usize;
     for proposal in &census.proposals {
         if proposal.accept {
-            chart_radius[proposal.block] = proposal.verdict.radius;
+            chart_radius[proposal.block] = proposal.verdict.rms_radius;
             n_chart += 1;
         }
     }

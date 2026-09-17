@@ -64,8 +64,11 @@ use rayon::prelude::*;
 /// `Δ²/12` is the small-cell law, so this crossover is a high-resolution
 /// approximation, accurate only while `πR̂/(√3σ)` is large; near the crossover
 /// the codebook holds a few cells and the finite code
-/// (`description_length::circle_phase_code`) differs. It only screens which
-/// planes race; the race and the permutation null adjudicate (#2933 F23).
+/// (`description_length::circle_phase_code`) differs. It prices neither the
+/// support nor the decoder, so it cannot decide whether a ring pays: the atomic
+/// replacement ledger ([`crate::manifold::curve_promotion`]) adjudicates on
+/// [`ring_recognition`] and its own finite codebook and never reads this screen
+/// (#2933 F23). [`CurlVerdict::geometry_ok`] still conjoins it.
 pub const RD_CROSSOVER_FACTOR: f64 = 1.8137993642342178; // π / √3
 
 /// The evidence level the κ / resultant gates fire at (a 2σ screen, matching the
@@ -189,14 +192,79 @@ fn circular_resultants(alpha: ArrayView1<f64>, beta: ArrayView1<f64>) -> (f64, f
     (r1, r2)
 }
 
+/// The witnesses a centered circle leaves in its joint amplitude law, read with no
+/// coding price and no noise scale (#2933 F23).
+#[derive(Debug, Clone)]
+pub struct RingRecognition {
+    /// `κ = E[r⁴]/E[r²]²` on `r² = α² + β²`. `1` ring, `2` Gaussian fill.
+    pub kappa: f64,
+    /// Influence-function standard error of `κ`.
+    pub kappa_se: f64,
+    /// `(2 − κ)/se` — how many σ below the Gaussian-fill value `2` the radius
+    /// law sits.
+    pub z_below_gaussian: f64,
+    /// First circular resultant `R₁ = |E[e^{iθ}]|` (coverage; `→ 0` full ring).
+    pub resultant1: f64,
+    /// Second circular resultant `R₂ = |E[e^{2iθ}]|` (`→ 1` diameter/line).
+    pub resultant2: f64,
+    /// `√E[r²]`, the RMS in-plane radius, measured with no noise model.
+    pub rms_radius: f64,
+    /// The angle is covered (`R₁` small) and the plane is not a diameter (`R₂`
+    /// small).
+    pub covered: bool,
+    /// κ resolvably below the Gaussian-fill value 2 (2σ) and `covered`.
+    pub recognized: bool,
+}
+
+fn recognize(law: &RadiusLaw, alpha: ArrayView1<f64>, beta: ArrayView1<f64>) -> RingRecognition {
+    let (resultant1, resultant2) = circular_resultants(alpha, beta);
+    let z_below_gaussian = if law.kappa_se > 0.0 {
+        (2.0 - law.kappa) / law.kappa_se
+    } else if law.kappa < 2.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
+    // Coverage / degeneracy screens: a full ring has R₁ ≈ 0 and R₂ ≈ 0; a
+    // diameter (line through the origin) has R₂ ≈ 1. Screen R₁, R₂ at the same
+    // 2σ level using the uniform-null SE 1/√n for each resultant.
+    let res_se = 1.0 / (law.n as f64).sqrt();
+    let coverage_ok = resultant1 < CURL_Z * res_se + 0.15; // lenient absolute floor
+    let not_diameter = resultant2 < 0.5;
+    let covered = coverage_ok && not_diameter;
+    RingRecognition {
+        kappa: law.kappa,
+        kappa_se: law.kappa_se,
+        z_below_gaussian,
+        resultant1,
+        resultant2,
+        rms_radius: law.m2.sqrt(),
+        covered,
+        recognized: z_below_gaussian > CURL_Z && covered,
+    }
+}
+
+/// Recognize a candidate plane `(α, β)` as a ring: κ resolvably below the
+/// Gaussian-fill value 2 (2σ), full angular coverage (`R₁` small), and no diameter
+/// degeneracy (`R₂` not saturated). No noise scale enters and nothing is priced; a
+/// caller that prices the replacement in bits decides acceptance on this and its
+/// own ledger, not on the small-cell screen of [`curl_verdict`] (#2933 F23).
+pub fn ring_recognition(
+    alpha: ArrayView1<f64>,
+    beta: ArrayView1<f64>,
+) -> Result<RingRecognition, String> {
+    let law = radius_law(alpha, beta)?;
+    Ok(recognize(&law, alpha, beta))
+}
+
 /// Adjudicate a candidate flat pair `(α, β)` for promotion to a circle.
 ///
 /// `sigma` is the ambient per-coordinate noise scale (the RD reference),
 /// `n_eff = Σ a²` the pattern's effective occupancy (NOT the raw row count),
 /// `delta_charge` the module-4 charge at that occupancy. The recommendation is a
-/// conjunction: κ resolvably below the Gaussian-fill value 2 (2σ), the RD screen
-/// paying (`R̂ > σ·π/√3` and net evidence positive), full angular coverage
-/// (`R₁` small), and no diameter degeneracy (`R₂` not saturated).
+/// conjunction: [`ring_recognition`] and the small-cell RD screen paying
+/// (`R̂ > σ·π/√3` and net evidence positive). The screen is a high-resolution
+/// approximation that prices no support dividend (see [`RD_CROSSOVER_FACTOR`]).
 pub fn curl_verdict(
     alpha: ArrayView1<f64>,
     beta: ArrayView1<f64>,
@@ -208,7 +276,7 @@ pub fn curl_verdict(
         return Err(format!("curl: sigma must be finite and > 0, got {sigma}"));
     }
     let law = radius_law(alpha, beta)?;
-    let (resultant1, resultant2) = circular_resultants(alpha, beta);
+    let recognition = recognize(&law, alpha, beta);
     // Noise-debiased radius. `(α, β)` are the plane coords on the ACTIVE SUPPORT
     // (the co-firing rows the driver passes), so a noisy ring
     // `x = R(cosθ, sinθ) + ε`, `ε ~ N(0, σ²I₂)`, has `E[r²] = R² + 2σ²`: each of
@@ -230,31 +298,17 @@ pub fn curl_verdict(
         0.5 * (3.0 * radius * radius / (PI * PI * sigma * sigma)).ln()
     };
     let net_evidence_nats = n_eff * gain_nats_per_row - delta_charge;
-    let z_below_gaussian = if law.kappa_se > 0.0 {
-        (2.0 - law.kappa) / law.kappa_se
-    } else if law.kappa < 2.0 {
-        f64::INFINITY
-    } else {
-        0.0
-    };
-
-    // Coverage / degeneracy screens: a full ring has R₁ ≈ 0 and R₂ ≈ 0; a
-    // diameter (line through the origin) has R₂ ≈ 1. Screen R₁, R₂ at the same
-    // 2σ level using the uniform-null SE 1/√n for each resultant.
-    let res_se = 1.0 / (law.n as f64).sqrt();
-    let coverage_ok = resultant1 < CURL_Z * res_se + 0.15; // lenient absolute floor
-    let not_diameter = resultant2 < 0.5;
 
     let rd_pays = radius > sigma * RD_CROSSOVER_FACTOR && net_evidence_nats > 0.0;
-    let geometry_ok = rd_pays && coverage_ok && not_diameter;
-    let recommend_curl = z_below_gaussian > CURL_Z && geometry_ok;
+    let geometry_ok = rd_pays && recognition.covered;
+    let recommend_curl = recognition.z_below_gaussian > CURL_Z && geometry_ok;
 
     Ok(CurlVerdict {
-        kappa: law.kappa,
-        kappa_se: law.kappa_se,
-        z_below_gaussian,
-        resultant1,
-        resultant2,
+        kappa: recognition.kappa,
+        kappa_se: recognition.kappa_se,
+        z_below_gaussian: recognition.z_below_gaussian,
+        resultant1: recognition.resultant1,
+        resultant2: recognition.resultant2,
         radius,
         gain_nats_per_row,
         net_evidence_nats,

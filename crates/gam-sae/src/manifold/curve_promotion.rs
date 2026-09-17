@@ -76,14 +76,15 @@
 //! chart geometry, records the #2233 birth proposal priority, and emits a typed
 //! [`CurvePromotionProposal`]. The structural controller consumes the proposal
 //! later; whether `accept` is set is a pure function of the DL ledger and the ring
-//! geometry screens. The priority is a spectra-only heuristic and never vetoes it
-//! (#2933 F22).
+//! recognition (κ, coverage, no diameter). The priority is a spectra-only heuristic
+//! and never vetoes it (#2933 F22), and neither does the small-cell circle screen
+//! of [`super::curl::curl_verdict`], which prices no support dividend (#2933 F23).
 
 use faer::Side;
 use gam_linalg::faer_ndarray::FaerEigh;
 use ndarray::{Array1, Array2, ArrayView2};
 
-use super::curl::{CircleSeed, CurlVerdict, curl_seed, curl_verdict};
+use super::curl::{CircleSeed, RingRecognition, curl_seed, ring_recognition};
 use super::geometry_plan::SaeAtomGeometryPlan;
 use crate::description_length::{
     BirthMdlPrescreen, BirthProposalPriority, CirclePhaseCode, DescriptionLengthScoreKind,
@@ -116,9 +117,10 @@ pub struct PromotionContext {
     pub g_dict: usize,
     /// Mean active atoms per token `L0` (the support-budget denominator).
     pub l0: f64,
-    /// Per-coordinate distortion floor `δ` (a reconstruction-tolerance SCALE, the
-    /// RD reference and the quantisation cell the coordinate is coded to). Both
-    /// the ring RD screen (`sigma = δ`) and the code bits (`δ²`) read it.
+    /// Per-coordinate distortion floor `δ` (a reconstruction-tolerance SCALE and the
+    /// quantisation cell the coordinate is coded to). The code bits (`δ²`) and the
+    /// phase code's in-plane budget read it. It is not a noise annulus, so the ring
+    /// recognition never reads it.
     pub tolerance: f64,
 }
 
@@ -133,8 +135,8 @@ pub struct CurvePromotionProposal {
     pub n_linear_atoms: usize,
     /// The candidate curved chart in the engine's periodic-harmonic layout.
     pub curved_candidate: CircleSeed,
-    /// The ring geometry verdict on the block's code cloud (κ, resultants, RD).
-    pub verdict: CurlVerdict,
+    /// The ring recognition on the block's code cloud (κ, resultants, coverage).
+    pub verdict: RingRecognition,
     /// Ambient span `ŝ` (participation ratio of the block's energy spectrum).
     pub span: f64,
     /// Firing rate `ρ = f/N` of the community.
@@ -151,16 +153,16 @@ pub struct CurvePromotionProposal {
     /// The least circle phase codebook meeting the flat arm's in-plane distortion,
     /// or `None` when the ring's radial spread alone exceeds that distortion.
     pub curved_phase_code: Option<CirclePhaseCode>,
-    /// `true` iff the ring geometry screens pass AND the atomic ledger strictly
-    /// prefers the curved chart (`dl_new < dl_old`). Never depends on residual
-    /// explained variance or on the birth proposal priority.
+    /// `true` iff the ring is recognized AND the atomic ledger strictly prefers the
+    /// curved chart (`dl_new < dl_old`). Never depends on residual explained
+    /// variance, on the birth proposal priority, or on the small-cell circle screen.
     pub accept: bool,
 }
 
 /// Adjudicate the atomic replacement of a linear community by a single curved
 /// chart. Returns `Ok(None)` when the community's own contribution has fewer than
 /// two effective ambient dimensions (no 2-plane to host a ring); `Ok(Some(_))`
-/// otherwise, with `accept` decided purely by the DL ledger and geometry screens.
+/// otherwise, with `accept` decided purely by the DL ledger and ring recognition.
 pub fn propose_curve_promotion(
     community: LinearCommunity<'_>,
     ctx: &PromotionContext,
@@ -264,11 +266,11 @@ pub fn propose_curve_promotion(
         beta[i] = zi.dot(&psi2);
     }
 
-    // ---- Ring geometry verdict on the code cloud (κ, resultants, RD screen).
-    //      n_eff = f (each active firing contributes one occupancy count);
-    //      delta_charge = 0 keeps curl's `recommend` a pure geometry gate — the
-    //      DL charge accounting lives in the atomic ledger below (no double count).
-    let verdict = curl_verdict(alpha.view(), beta.view(), ctx.tolerance, f as f64, 0.0)?;
+    // ---- Ring recognition on the code cloud (κ, resultants). Whether the ring pays is
+    //      the atomic ledger's question below: the small-cell circle screen prices no
+    //      support dividend, and read at `sigma = δ` it would debias a noiseless ring
+    //      by a noise annulus the codes do not carry (#2933 F23).
+    let verdict = ring_recognition(alpha.view(), beta.view())?;
 
     // Curved topology matched to the ambient span (circle ŝ≈2 ⇒ (d,m)=(1,3)).
     let (d, m) = curved_topology_for_span(span)?;
@@ -366,7 +368,7 @@ pub fn propose_curve_promotion(
         },
         ScoreComparison::ExplicitHeuristic,
     )?;
-    let accept = verdict.recommend_curl && ledger_saving > 0.0;
+    let accept = verdict.recognized && ledger_saving > 0.0;
 
     Ok(Some(CurvePromotionProposal {
         block: community.block_id,
@@ -560,11 +562,11 @@ mod curve_promotion_tests {
         );
         assert!(
             proposal.accept,
-            "zero-residual circle must be accepted by DL (prescreen={:?}, dl_old={}, dl_new={}, recommend={})",
+            "zero-residual circle must be accepted by DL (prescreen={:?}, dl_old={}, dl_new={}, recognized={})",
             proposal.crossover_prescreen,
             proposal.dl_old,
             proposal.dl_new,
-            proposal.verdict.recommend_curl
+            proposal.verdict.recognized
         );
     }
 
@@ -594,7 +596,7 @@ mod curve_promotion_tests {
             .expect("still yields a proposal");
 
         // The ring is still recognised geometrically (same cloud) ...
-        assert!(proposal.verdict.recommend_curl || proposal.span > 1.9);
+        assert!(proposal.verdict.recognized || proposal.span > 1.9);
         // ... but the atomic ledger refuses to pay for the decoder columns.
         assert!(
             proposal.dl_new > proposal.dl_old,
@@ -802,7 +804,7 @@ mod curve_promotion_tests {
         .expect("a 2-plane ring yields a proposal");
         let surcharge = p as f64 * 0.5 * (n as f64).log2();
         let saving = proposal.dl_old - proposal.dl_new;
-        assert!(proposal.verdict.recommend_curl, "planted premise: a clean ring");
+        assert!(proposal.verdict.recognized, "planted premise: a clean ring");
         assert!(
             proposal.crossover_prescreen.bits().is_some_and(|bits| bits < 0.0),
             "planted premise: with G = L0 the prescreen is negative, got {:?}",
@@ -816,6 +818,127 @@ mod curve_promotion_tests {
             proposal.accept,
             "a ring the atomic ledger and geometry both prefer must not be vetoed by the \
              spectra-only prescreen"
+        );
+    }
+
+    /// #2933 F23: the small-cell circle screen prices neither the support nor the
+    /// decoder, so it may not veto a ring the atomic ledger buys. A noiseless full
+    /// ring of radius 1.5 at tolerance δ = 1: read at `sigma = δ`, the screen debiases
+    /// the radius to `√(1.5² − 2) = 0.5 < π/√3` and refuses. The ledger codes two
+    /// amplitudes of variance 1.125 at `log₂ 1.125` bits against the least phase
+    /// codebook meeting the in-plane budget `2·min(1.125, 1) = 2` (`M = 1` leaves
+    /// `2.25`, `M = 2` leaves `2.25·(1 − 4/π²) = 1.338`, so one bit), plus
+    /// `log₂(G/L0) = 4` bits per atom slot per firing. Over 1024 firings the one-slot
+    /// support pays for the extra decoder row `4·½log₂4096 = 24` bits many times.
+    #[test]
+    fn a_small_cell_screen_does_not_veto_a_ring_the_ledger_buys_2933() {
+        let (n, p, radius, tolerance) = (1024usize, 4usize, 1.5_f64, 1.0_f64);
+        let (atoms, codes) = ring_community(n, radius, p);
+        let ctx = PromotionContext {
+            n_tokens: 4096.0,
+            g_dict: 64,
+            l0: 4.0,
+            tolerance,
+        };
+        let proposal = propose_curve_promotion(
+            LinearCommunity {
+                block_id: 0,
+                atoms: atoms.view(),
+                codes: codes.view(),
+            },
+            &ctx,
+        )
+        .expect("proposal producer runs")
+        .expect("a 2-plane ring yields a proposal");
+        let screen = crate::manifold::curl_verdict(
+            codes.column(0),
+            codes.column(1),
+            tolerance,
+            n as f64,
+            0.0,
+        )
+        .expect("the planted plane has in-plane energy");
+        let l_param = 0.5 * ctx.n_tokens.log2();
+        let unit_sel = (ctx.g_dict as f64 / ctx.l0).log2();
+        let expected_old =
+            n as f64 * (1.125_f64.log2() + 2.0 * unit_sel) + 2.0 * p as f64 * l_param;
+        let expected_new = n as f64 * (1.0 + unit_sel) + 3.0 * p as f64 * l_param;
+        println!(
+            "PROBE_F23_SCREEN_VETO screen_recommend={} screen_radius={} z={} r1={} r2={} \
+             dl_old={} dl_new={} accept={}",
+            screen.recommend_curl,
+            screen.radius,
+            screen.z_below_gaussian,
+            screen.resultant1,
+            screen.resultant2,
+            proposal.dl_old,
+            proposal.dl_new,
+            proposal.accept
+        );
+        assert!(
+            screen.z_below_gaussian > 2.0 && screen.resultant1 < 0.05 && screen.resultant2 < 0.05,
+            "planted premise: a covered ring with κ far below the Gaussian fill"
+        );
+        assert!(
+            !screen.recommend_curl && (screen.radius - 0.5).abs() < 1.0e-9,
+            "planted premise: the small-cell screen refuses at the debiased radius 0.5, got {}",
+            screen.radius
+        );
+        assert!(
+            (proposal.dl_old - expected_old).abs() <= 1.0e-9 * expected_old
+                && (proposal.dl_new - expected_new).abs() <= 1.0e-9 * expected_new,
+            "the ledger must price the flat arm at {expected_old} and the 2-cell phase code at \
+             {expected_new}, got dl_old={} dl_new={}",
+            proposal.dl_old,
+            proposal.dl_new
+        );
+        assert!(
+            proposal.accept,
+            "a recognized ring the atomic ledger buys by {} bits must not be vetoed by the \
+             small-cell screen",
+            proposal.dl_old - proposal.dl_new
+        );
+    }
+
+    /// The negative control for the test above: the same ring at `G = L0` earns no
+    /// support dividend, so one phase bit per firing against `log₂ 1.125` for the
+    /// amplitudes, plus the extra decoder row, loses and the ring is refused.
+    /// Recognition alone never accepts.
+    #[test]
+    fn a_recognized_ring_the_ledger_refuses_is_not_accepted_2933() {
+        let (n, p, radius, tolerance) = (1024usize, 4usize, 1.5_f64, 1.0_f64);
+        let (atoms, codes) = ring_community(n, radius, p);
+        let ctx = PromotionContext {
+            n_tokens: 4096.0,
+            g_dict: 4,
+            l0: 4.0,
+            tolerance,
+        };
+        let proposal = propose_curve_promotion(
+            LinearCommunity {
+                block_id: 0,
+                atoms: atoms.view(),
+                codes: codes.view(),
+            },
+            &ctx,
+        )
+        .expect("proposal producer runs")
+        .expect("a 2-plane ring yields a proposal");
+        let l_param = 0.5 * ctx.n_tokens.log2();
+        let expected_old = n as f64 * 1.125_f64.log2() + 2.0 * p as f64 * l_param;
+        let expected_new = n as f64 + 3.0 * p as f64 * l_param;
+        assert!(
+            (proposal.dl_old - expected_old).abs() <= 1.0e-9 * expected_old
+                && (proposal.dl_new - expected_new).abs() <= 1.0e-9 * expected_new,
+            "the ledger must price the flat arm at {expected_old} and the 2-cell phase code at \
+             {expected_new}, got dl_old={} dl_new={}",
+            proposal.dl_old,
+            proposal.dl_new
+        );
+        assert!(
+            !proposal.accept,
+            "a ring the atomic ledger refuses by {} bits must not be accepted",
+            proposal.dl_new - proposal.dl_old
         );
     }
 }

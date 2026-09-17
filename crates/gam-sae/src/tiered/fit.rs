@@ -969,9 +969,9 @@ mod fit_tests {
             proposal.curved_phase_code,
             proposal.verdict
         );
-        // Recognition: the ring geometry is seen (span ≈ 2, ring screens pass).
+        // Recognition: the ring geometry is seen (span ≈ 2, κ ring, full coverage).
         assert!(
-            proposal.verdict.recommend_curl,
+            proposal.verdict.recognized,
             "the census must recognize the planted ring geometrically: {proposal:?}"
         );
         // At G = L0 the support dividend is zero and the priority is negative …
