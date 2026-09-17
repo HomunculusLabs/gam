@@ -159,11 +159,16 @@ fn validate_posterior_mean_backend(
             validate_dense_prediction_covariance(covariance.view(), expected_dim, label)
                 .map_err(EstimationError::InvalidInput)
         }
-        PredictionCovarianceBackend::Factorized { dim, .. } if *dim == expected_dim => Ok(()),
-        PredictionCovarianceBackend::Factorized { dim, .. } => {
+        PredictionCovarianceBackend::Factorized { .. }
+            if backend.parameter_dim() == expected_dim =>
+        {
+            Ok(())
+        }
+        PredictionCovarianceBackend::Factorized { .. } => {
             Err(EstimationError::InvalidInput(format!(
                 "{label} covariance/backend dimension mismatch: expected parameter dimension \
-                 {expected_dim}, got {dim}"
+                 {expected_dim}, got {}",
+                backend.parameter_dim()
             )))
         }
     }
@@ -202,29 +207,48 @@ where
     Ok(local)
 }
 
+/// The saved penalized precision and, when it lives on active coordinates, the
+/// coefficient gauge section that lifts it. A saved precision is `H_θ` on the
+/// active coordinates of `β = T·θ + a` (`FitGeometry`); prediction rows are on
+/// the saved coefficients, whose covariance is `T·Cov(θ)·Tᵀ` (#1561).
 fn usable_penalized_hessian<'a>(
     fit: &'a UnifiedFitResult,
     expected_dim: usize,
     label: &str,
-) -> Option<&'a Array2<f64>> {
-    if fit
+) -> Option<(&'a Array2<f64>, Option<ArrayView2<'a, f64>>)> {
+    let gauge = fit
         .geometry
         .as_ref()
-        .is_some_and(|geometry| !geometry.coefficient_gauge.is_identity())
-    {
-        log::warn!(
-            "{label}: ignoring active-gauge penalized Hessian; prediction rows are in the saved/raw coefficient frame"
-        );
-        return None;
-    }
+        .map(|geometry| &geometry.coefficient_gauge)
+        .filter(|gauge| !gauge.is_identity());
+    let (active_dim, lift) = match gauge {
+        Some(gauge) => {
+            if let Err(reason) = gauge.validate() {
+                log::warn!(
+                    "{label}: ignoring penalized Hessian behind an invalid coefficient gauge: {reason}"
+                );
+                return None;
+            }
+            if gauge.raw_total() != expected_dim {
+                log::warn!(
+                    "{label}: ignoring penalized Hessian whose coefficient gauge lifts to {} \
+                     coefficients; expected {expected_dim}",
+                    gauge.raw_total()
+                );
+                return None;
+            }
+            (gauge.reduced_total(), Some(gauge.t_full.view()))
+        }
+        None => (expected_dim, None),
+    };
     let hessian = fit.penalized_hessian()?;
-    if hessian.nrows() != expected_dim || hessian.ncols() != expected_dim {
+    if hessian.nrows() != active_dim || hessian.ncols() != active_dim {
         log::warn!(
             "{label}: ignoring penalized Hessian with shape {}x{}; expected {}x{}",
             hessian.nrows(),
             hessian.ncols(),
-            expected_dim,
-            expected_dim
+            active_dim,
+            active_dim
         );
         return None;
     }
@@ -232,7 +256,7 @@ fn usable_penalized_hessian<'a>(
         log::warn!("{label}: ignoring zero penalized Hessian placeholder");
         return None;
     }
-    Some(hessian)
+    Some((hessian, lift))
 }
 
 fn conditional_prediction_backend<'a>(
@@ -265,7 +289,7 @@ fn conditional_prediction_backend<'a>(
             Err(reason) => log::warn!("{label}: ignoring invalid conditional {reason}"),
         }
     }
-    if let Some(hessian) = usable_penalized_hessian(fit, expected_dim, label) {
+    if let Some((hessian, gauge_lift)) = usable_penalized_hessian(fit, expected_dim, label) {
         // The penalized Hessian is the *unscaled* precision `H = X'WX + S`,
         // and the conditional covariance the predict path expects is
         // `Vb = coefficient_covariance_scale · H^{-1}` — exactly the scale the
@@ -291,7 +315,11 @@ fn conditional_prediction_backend<'a>(
             SymmetricMatrix::Dense(hessian.clone()),
             scale,
             constrained_correction,
-        ) {
+        )
+        .and_then(|backend| match gauge_lift {
+            Some(lift) => backend.with_gauge_lift(lift),
+            None => Ok(backend),
+        }) {
             Ok(backend) => return Ok(Some(backend)),
             Err(err) => {
                 log::warn!(
@@ -4938,3 +4966,6 @@ mod dispersion_location_scale_observation_interval_symmetric_1346_tests;
 
 #[cfg(test)]
 mod gamma_dispersion_location_scale_predictable_1119_tests;
+
+#[cfg(test)]
+mod gaussian_location_scale_gauge_lifted_precision_1561_tests;

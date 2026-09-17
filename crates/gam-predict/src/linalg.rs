@@ -22,6 +22,12 @@ pub enum PredictionCovarianceBackend<'a> {
         /// lives on the same φ-scaled covariance metric returned by this
         /// backend, so it is subtracted after the ambient precision solve.
         constrained_correction: Option<&'a ConstrainedPosteriorCorrection>,
+        /// The coefficient gauge's section `T` when the factorized precision
+        /// lives on active coordinates `θ` of `β = T·θ + a` rather than on the
+        /// saved coefficients. The backend then applies `T·Cov(θ)·Tᵀ`, the
+        /// covariance of the saved coefficients; the affine shift moves no
+        /// covariance.
+        gauge_lift: Option<ArrayView2<'a, f64>>,
     },
 }
 
@@ -74,13 +80,51 @@ impl<'a> PredictionCovarianceBackend<'a> {
             dim,
             phi_scale,
             constrained_correction,
+            gauge_lift: None,
         })
+    }
+
+    /// Carry a factorized active-coordinate precision to the saved coefficient
+    /// frame through the coefficient gauge section `T` (#1561).
+    pub fn with_gauge_lift(self, lift: ArrayView2<'a, f64>) -> Result<Self, String> {
+        match self {
+            Self::Dense(covariance) => Err(format!(
+                "a dense {}x{} prediction covariance is already on the saved coefficients; \
+                 only a factorized active-coordinate precision takes a gauge lift",
+                covariance.nrows(),
+                covariance.ncols()
+            )),
+            Self::Factorized {
+                factor,
+                dim,
+                phi_scale,
+                constrained_correction,
+                ..
+            } => {
+                if lift.ncols() != dim {
+                    return Err(format!(
+                        "the coefficient gauge lifts {} active coordinates but the factorized \
+                         precision is {dim}x{dim}",
+                        lift.ncols()
+                    ));
+                }
+                Ok(Self::Factorized {
+                    factor,
+                    dim,
+                    phi_scale,
+                    constrained_correction,
+                    gauge_lift: Some(lift),
+                })
+            }
+        }
     }
 
     pub fn parameter_dim(&self) -> usize {
         match self {
             Self::Dense(covariance) => covariance.nrows(),
-            Self::Factorized { dim, .. } => *dim,
+            Self::Factorized {
+                dim, gauge_lift, ..
+            } => gauge_lift.as_ref().map_or(*dim, |lift| lift.nrows()),
         }
     }
 
@@ -105,20 +149,28 @@ impl<'a> PredictionCovarianceBackend<'a> {
                 factor,
                 phi_scale,
                 constrained_correction,
+                gauge_lift,
                 ..
             } => {
-                let mut solved = factor.solvemulti(rhs)?;
+                // Through a gauge the right-hand side is carried to the active
+                // coordinates, solved and corrected there, and lifted back.
+                let active_rhs = gauge_lift.as_ref().map(|lift| lift.t().dot(rhs));
+                let rhs_active = active_rhs.as_ref().unwrap_or(rhs);
+                let mut solved = factor.solvemulti(rhs_active)?;
                 if (*phi_scale - 1.0).abs() > 0.0 {
                     solved.mapv_inplace(|v| v * *phi_scale);
                 }
                 if let Some(correction) = constrained_correction {
-                    let normal_rhs = correction.lift.t().dot(rhs);
+                    let normal_rhs = correction.lift.t().dot(rhs_active);
                     let removed = correction
                         .lift
                         .dot(&correction.removed_normal_variance.dot(&normal_rhs));
                     solved -= &removed;
                 }
-                Ok(solved)
+                Ok(match gauge_lift {
+                    Some(lift) => lift.dot(&solved),
+                    None => solved,
+                })
             }
         }
     }
@@ -393,6 +445,76 @@ mod tests {
         for (&left, &right) in actual.iter().zip(expected.iter()) {
             assert!((left - right).abs() <= 2e-12, "{left} != {right}");
         }
+    }
+
+    #[test]
+    fn gauge_lifted_factorized_backend_applies_the_saved_coefficient_covariance_1561() {
+        // A precision on 3 active coordinates behind a section that lifts to 5 saved
+        // coefficients: saved coefficient 1 was dropped (a zero row), and saved
+        // coefficient 4 mixes all three active coordinates.
+        let precision = array![[4.0, 0.6, 0.1], [0.6, 3.0, -0.2], [0.1, -0.2, 2.5]];
+        let phi = 1.7;
+        let lift = array![
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.5, -0.25, 0.75]
+        ];
+        let correction = ConstrainedPosteriorCorrection {
+            lift: array![[0.3, -0.1], [0.2, 0.25], [-0.05, 0.4]],
+            removed_normal_variance: array![[0.8, 0.1], [0.1, 0.5]],
+            normal_mean_shift: array![0.2, 0.1],
+            rows: vec![0, 1],
+            normal_upper_limits: vec![f64::INFINITY, f64::INFINITY],
+        };
+        let factor = SymmetricMatrix::Dense(precision.clone())
+            .factorize()
+            .expect("factorize active precision");
+        let mut active_covariance = factor
+            .solvemulti(&Array2::eye(3))
+            .expect("active covariance");
+        active_covariance *= phi;
+        correction.apply_to_covariance_in_place(&mut active_covariance);
+        let saved_covariance = lift.dot(&active_covariance).dot(&lift.t());
+
+        let backend = PredictionCovarianceBackend::from_factorized_hessian_scaled_with_correction(
+            SymmetricMatrix::Dense(precision.clone()),
+            phi,
+            Some(&correction),
+        )
+        .expect("factorized constrained covariance")
+        .with_gauge_lift(lift.view())
+        .expect("a 5x3 section lifts a 3x3 precision");
+        assert_eq!(backend.parameter_dim(), 5);
+        assert_eq!(backend.nrows(), 5);
+        let rhs = array![[1.0, -0.5], [0.2, 2.0], [-0.7, 0.3], [0.4, 0.0], [-1.1, 0.6]];
+        let actual = backend.apply_columns(&rhs).expect("saved covariance columns");
+        let expected = saved_covariance.dot(&rhs);
+        for (&left, &right) in actual.iter().zip(expected.iter()) {
+            assert!((left - right).abs() <= 2e-12, "{left} != {right}");
+        }
+        assert!(
+            actual.row(1).iter().all(|value| value.abs() <= 2e-12),
+            "the dropped saved coefficient carries no covariance"
+        );
+
+        let narrow = array![[1.0, 0.0], [0.0, 1.0], [0.0, 0.0], [0.0, 0.0], [1.0, 1.0]];
+        let refusal = PredictionCovarianceBackend::from_factorized_hessian_scaled(
+            SymmetricMatrix::Dense(precision),
+            phi,
+        )
+        .expect("factorized covariance")
+        .with_gauge_lift(narrow.view());
+        assert!(
+            refusal.is_err(),
+            "a 5x2 section must not lift a 3x3 precision"
+        );
+        let dense = PredictionCovarianceBackend::from_dense(saved_covariance.view());
+        assert!(
+            dense.with_gauge_lift(lift.view()).is_err(),
+            "a dense saved covariance takes no gauge lift"
+        );
     }
 
     #[test]
