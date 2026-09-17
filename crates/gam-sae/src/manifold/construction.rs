@@ -5243,6 +5243,13 @@ impl SaeManifoldTerm {
             if rho.log_ard[atom_idx].is_empty() {
                 continue;
             }
+            // A reflection-only deck group leaves the prior family and partition
+            // unchanged, so the quotient normalizer divides out its sheet count per
+            // row (#2933 F25; see `SaeAtomBasisKind::ard_quotient_log_sheets`).
+            acc -= n_eff
+                * self.atoms[atom_idx]
+                    .basis_kind()
+                    .ard_quotient_log_sheets(coord.latent_dim());
             // Per-axis prior period selects the smooth von-Mises energy on
             // wrapped (Circle) axes and the quadratic energy on every other axis.
             // A quotient atom's half-turned axis carries its deck-invariant half

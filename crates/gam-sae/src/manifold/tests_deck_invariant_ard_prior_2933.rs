@@ -369,3 +369,84 @@ fn klein_bottle_ard_prior_integrates_to_one_over_the_quotient_2933() {
         "Klein-bottle ARD prior mass over one fundamental domain is {mass:.15}, not 1"
     );
 }
+
+/// Product-rule mass of `exp(-ard_value)` over ambient `S²` points in surface
+/// measure `dS = dz·dφ`: midpoint rule in `z` on `2·z_cells` cells of `[-1, 1]`,
+/// trapezoid in `φ`. `upper_half_only` keeps exactly the cells with `z > 0`.
+/// Returns the mass and the range of the negative log density it saw.
+fn ambient_sphere_prior_mass(
+    case: &QuotientCase,
+    rho: &SaeManifoldRho,
+    upper_half_only: bool,
+) -> (f64, f64) {
+    let z_cells = 48usize;
+    let phi_nodes = 32usize;
+    let manifold = case.kind.latent_manifold(case.latent_dim);
+    let mut term = dense_term(case, &array![[0.0, 0.0, 1.0]]);
+    let first_cell = if upper_half_only { z_cells } else { 0 };
+    let mut mass = 0.0_f64;
+    let mut min_neg_log = f64::INFINITY;
+    let mut max_neg_log = f64::NEG_INFINITY;
+    for cell in first_cell..2 * z_cells {
+        let z = -1.0 + (cell as f64 + 0.5) / z_cells as f64;
+        let radius = (1.0 - z * z).sqrt();
+        for node in 0..phi_nodes {
+            let phi = std::f64::consts::TAU * node as f64 / phi_nodes as f64;
+            let point = array![[radius * phi.cos(), radius * phi.sin(), z]];
+            term.assignment.coords[0] = LatentCoordValues::from_matrix_with_manifold(
+                point.view(),
+                LatentIdMode::None,
+                manifold.clone(),
+            );
+            let neg_log_density = term.ard_value(rho).expect("ard value");
+            min_neg_log = min_neg_log.min(neg_log_density);
+            max_neg_log = max_neg_log.max(neg_log_density);
+            mass += (-neg_log_density).exp();
+        }
+    }
+    mass *= (1.0 / z_cells as f64) * (std::f64::consts::TAU / phi_nodes as f64);
+    (mass, max_neg_log - min_neg_log)
+}
+
+/// Normalization over the quotient for a reflection-only deck group. `RP²` on its
+/// ambient cover has the antipodal deck `u ~ -u` and no half-turned axis, so its
+/// prior keeps the sphere's energy and partition family, and one fundamental domain
+/// is a hemisphere. The quotient prior must carry over that hemisphere the same mass
+/// the `S²` prior carries over the whole sphere; a prior normalized over the cover
+/// carries only half of it. The hemisphere's nodes are exactly the upper half of the
+/// sphere's and the energy is even in `z`, so the comparison is free of quadrature
+/// error and of whatever per-factor constant convention the sphere partition uses.
+#[test]
+fn projective_plane_ambient_prior_carries_the_quotient_sheet_count_2933() {
+    let rp2 = quotient_cases()
+        .into_iter()
+        .find(|case| case.name == "projective_plane_ambient")
+        .expect("ambient rp2 case");
+    let sphere = QuotientCase {
+        name: "sphere",
+        kind: SaeAtomBasisKind::Sphere,
+        latent_dim: 3,
+        evaluator: Arc::new(AmbientSphereHarmonicEvaluator::new(2).expect("sphere basis")),
+        coords: rp2.coords.clone(),
+        deck: Vec::new(),
+        other_points: rp2.other_points.clone(),
+        log_ard: rp2.log_ard.clone(),
+    };
+    let rho = SaeManifoldRho::new(
+        0.0,
+        0.0,
+        vec![array![2.6_f64.ln(), 0.9_f64.ln(), 4.3_f64.ln()]],
+    );
+    let (sphere_mass, sphere_range) = ambient_sphere_prior_mass(&sphere, &rho, false);
+    let (quotient_mass, _) = ambient_sphere_prior_mass(&rp2, &rho, true);
+    assert!(
+        sphere_range > 0.5,
+        "the anisotropic prior must be materially non-uniform on S², else the sheet count \
+         is untested: range {sphere_range}"
+    );
+    assert!(
+        (quotient_mass - sphere_mass).abs() <= 1.0e-12 * sphere_mass,
+        "RP² prior mass over a hemisphere is {quotient_mass:.15}, but the S² prior's mass \
+         over the sphere is {sphere_mass:.15}"
+    );
+}
