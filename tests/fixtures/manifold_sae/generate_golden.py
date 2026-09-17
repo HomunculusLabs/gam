@@ -65,7 +65,15 @@ def build_payload() -> dict[str, Any]:
 
     decoder_blocks = [_arange(m[k], p, start=1.0 + k) for k in range(3)]
     coords = [_arange(N, d[k], start=0.1 * (k + 1), step=0.3) for k in range(3)]
-    per_atom_assign = [_arange(N, start=0.05 * (k + 1), step=0.11) for k in range(3)]
+    logits = _arange(N, 3, start=-1.0, step=0.13)
+    # TopK routing: the hard support gate is exactly 1 on a row's top_k largest
+    # logits (ties toward the lower atom index) and 0 elsewhere, which is what a
+    # TopK fit persists. The native description length reconstructs the gates
+    # under that model, so a non-unit gate here is charged as decoded distortion.
+    top_k = 2
+    assignments = np.zeros((N, 3))
+    for row in range(N):
+        assignments[row, np.argsort(-logits[row], kind="stable")[:top_k]] = 1.0
 
     atoms: list[dict[str, Any]] = []
     for k in range(3):
@@ -88,7 +96,7 @@ def build_payload() -> dict[str, Any]:
         atoms.append(
             {
                 "decoder_coefficients": decoder_blocks[k].tolist(),
-                "assignments": per_atom_assign[k].tolist(),
+                "assignments": assignments[:, k].tolist(),
                 "coords": coords[k].tolist(),
                 "coords_u_arc": None if u_arc is None else u_arc.tolist(),
                 "evidence": -12.5 - k,
@@ -107,8 +115,6 @@ def build_payload() -> dict[str, Any]:
         )
 
     fitted = _arange(N, p, start=0.5, step=0.07)
-    assignments = _arange(N, 3, start=0.02, step=0.09)
-    logits = _arange(N, 3, start=-1.0, step=0.13)
     training_mean = _arange(p, start=0.4, step=0.25)
 
     diagnostics = {
@@ -180,7 +186,7 @@ def build_payload() -> dict[str, Any]:
         "learning_rate": 0.03,
         "max_iter": 42,
         "random_state": 7,
-        "top_k": 2,
+        "top_k": top_k,
         "threshold_gate_threshold": 0.15,
         "solver_plan": {"stages": ["seed", "refine"], "max_outer": 3},
         "dispersion": 1.07,
