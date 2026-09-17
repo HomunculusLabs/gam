@@ -7,8 +7,11 @@ The issue remains unresolved.
 `tests/data/issue_2668_regressions.json` records all 30 original identities. It
 explicitly maps the remaining renamed seed test. The original irrelevant-term
 shrinkage test has since been restored, so its mapping again uses its original
-identity. The runner resolves
-each identity against the executable's actual inventory, requires exactly one
+identity. Each entry also names the test binary that holds it: `regressions` or
+`gam-predict-lib` (#2899 moved rows 5 and 18 into gam-predict's lib tests). The
+runner builds `gam-cli`'s `gam` and both test binaries under the test profile,
+refuses an unoptimized `gam`, resolves
+each identity against its binary's actual inventory, requires exactly one
 match, and requires a terminal verdict of one passed test. Missing, ambiguous,
 failed, and timed-out entries cannot contribute to the pass count.
 
@@ -96,10 +99,10 @@ compiled directly from the edited test files against the already-built coherent
 GAM libraries. No scanner was disabled, and these diagnostic passes do not
 substitute for a successful current-source build and complete remeasurement.
 
-Reproduce the inventory accounting on a successfully built current executable:
+Reproduce the inventory accounting at the current tree (the runner builds its own binaries):
 
 ```sh
-python3.11 scripts/verify_issue_2668.py /path/to/regressions /shared/path/to/receipt
+python3.11 scripts/verify_issue_2668.py /shared/path/to/receipt
 ```
 
 Completion requires fixing the criterion and its derivatives together, replacing
