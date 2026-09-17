@@ -41,12 +41,7 @@ impl SaeManifoldTerm {
         let second_jets = self.atom_second_jets()?;
         let border = self.border_channels_for_cache(cache)?;
         let row_loss_w = self.row_loss_weights.as_deref();
-        let ard_axis_periods: Vec<Vec<Option<f64>>> = self
-            .assignment
-            .coords
-            .iter()
-            .map(|coord| coord.effective_axis_periods())
-            .collect();
+        let ard_axis_periods: Vec<Vec<Option<f64>>> = self.all_ard_axis_periods();
         let ard_precisions = self.validated_ard_precisions(rho)?;
         let mut out = SaeArrowVector {
             t: Array1::<f64>::zeros(total_t),

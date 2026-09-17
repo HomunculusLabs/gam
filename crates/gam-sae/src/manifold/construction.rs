@@ -5286,9 +5286,11 @@ impl SaeManifoldTerm {
             if rho.log_ard[atom_idx].is_empty() {
                 continue;
             }
-            // Per-axis periodicity selects the smooth von-Mises energy on
-            // wrapped (Circle) axes and the Gaussian on Euclidean axes.
-            let periods = coord.effective_axis_periods();
+            // Per-axis prior period selects the smooth von-Mises energy on
+            // wrapped (Circle) axes and the Gaussian on Euclidean axes. A
+            // quotient atom's half-turned axis carries its deck-invariant half
+            // period, so this normalizer is over the quotient (#2933 F25).
+            let periods = self.ard_axis_periods(atom_idx);
             for axis in 0..d {
                 let log_alpha = rho.log_ard[atom_idx][axis];
                 let alpha = ard_precisions[atom_idx][axis];

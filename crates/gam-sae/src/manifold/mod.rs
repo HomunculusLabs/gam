@@ -316,6 +316,8 @@ mod tests_softmax_residual_third_jet_2933;
 mod tests_sparse_curvature_operator_2500;
 #[cfg(test)]
 mod tests_threshold_gate_majorizer_2520;
+#[cfg(test)]
+mod tests_deck_invariant_ard_prior_2933;
 
 #[cfg(test)]
 mod tests_streaming_materialize_chunk_1801;

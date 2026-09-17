@@ -816,7 +816,7 @@ impl<'a> EncodeObjective<'a> {
         };
         let mut l = 0.0;
         for axis in 0..atom.latent_dim().min(alpha.len()) {
-            if let Some(period) = latent_axis_period(atom, axis) {
+            if let Some(period) = latent_ard_axis_period(atom, axis) {
                 let kappa = std::f64::consts::TAU / period;
                 l += alpha[axis].abs() * kappa;
             }
@@ -1009,7 +1009,7 @@ fn joint_encode_value_grad_hess(
             let prior = crate::manifold::ArdAxisPrior::eval(
                 alpha[axis],
                 coords[atom_idx][axis],
-                latent_axis_period(atom, axis),
+                latent_ard_axis_period(atom, axis),
             );
             value += prior.value;
             grad[start + axis] += prior.grad;
@@ -1336,7 +1336,7 @@ pub(crate) fn encode_grad_hess_core(
             let pr = crate::manifold::ArdAxisPrior::eval(
                 alpha_axis,
                 t[axis],
-                latent_axis_period(atom, axis),
+                latent_ard_axis_period(atom, axis),
             );
             g[axis] += pr.grad;
             h[[axis, axis]] += pr.hess;
@@ -1871,13 +1871,34 @@ fn latent_coordinate_distance(
     acc.sqrt()
 }
 
+/// Wrap period of `atom`'s chart on `axis`, read from the kind's own latent
+/// manifold — the chart the fit retracts on. A hand-kept kind table used to stand
+/// here; it still wrapped axis 1 of the (deleted) sphere lat/lon chart by `2π`,
+/// which on the live ambient sphere sent a negative `u_y` to `u_y + 2π`, and it
+/// left the Klein-bottle and Möbius cover circles unwrapped.
 fn latent_axis_period(atom: &SaeManifoldAtom, axis: usize) -> Option<f64> {
-    use crate::manifold::SaeAtomBasisKind::*;
-    match atom.basis_kind() {
-        Periodic | Torus => Some(1.0),
-        Cylinder if axis == 0 => Some(1.0),
-        Sphere if axis == 1 => Some(std::f64::consts::TAU),
-        _ => None,
+    latent_chart_axis_periods(atom).get(axis).copied().flatten()
+}
+
+/// Period of `atom`'s ARD coordinate prior on `axis`, through the same kind seam
+/// the fit reads ([`crate::manifold::SaeAtomBasisKind::ard_axis_periods`]), so an
+/// encode charges the prior the fit was scored with, deck-invariant half periods
+/// included (#2933 F25).
+fn latent_ard_axis_period(atom: &SaeManifoldAtom, axis: usize) -> Option<f64> {
+    atom.basis_kind()
+        .ard_axis_periods(&latent_chart_axis_periods(atom))
+        .get(axis)
+        .copied()
+        .flatten()
+}
+
+fn latent_chart_axis_periods(atom: &SaeManifoldAtom) -> Vec<Option<f64>> {
+    let dim = atom.latent_dim();
+    let manifold = atom.basis_kind().latent_manifold(dim);
+    if manifold.is_euclidean() {
+        vec![None; dim]
+    } else {
+        manifold.axis_periods()
     }
 }
 
@@ -3183,6 +3204,107 @@ mod encode_fix_tests {
             "tiny", kind, latent_dim, phi, jet, dec, smooth,
         )
         .expect("tiny atom builds")
+    }
+
+    /// The joint encode step wraps each chart axis by the chart's own period. The
+    /// old hand-kept kind table still wrapped axis 1 of the deleted sphere lat/lon
+    /// chart by `2π`, so on the live ambient sphere a zero step sent `u_y = -0.48`
+    /// to `u_y + 2π`, off the unit sphere; and it left the Möbius cover circle
+    /// (period 2) unwrapped.
+    #[test]
+    fn joint_encode_step_wraps_by_the_chart_period_2933() {
+        let sphere = [tiny_atom(SaeAtomBasisKind::Sphere, 3)];
+        let u = ndarray::array![0.6_f64, -0.48, 0.64];
+        let stepped = joint_encode_add_step(
+            &sphere,
+            std::slice::from_ref(&u),
+            Array1::<f64>::zeros(3).view(),
+            1.0,
+        );
+        assert_eq!(stepped[0], u, "a zero step must leave the ambient unit vector in place");
+
+        let mobius = [tiny_atom(SaeAtomBasisKind::Mobius, 2)];
+        let stepped = joint_encode_add_step(
+            &mobius,
+            &[ndarray::array![1.9_f64, 0.3]],
+            ndarray::array![0.4_f64, 0.0].view(),
+            1.0,
+        );
+        assert!(
+            (stepped[0][0] - 0.3).abs() <= 1.0e-12,
+            "the Möbius cover angle wraps modulo 2: got {}",
+            stepped[0][0]
+        );
+        assert_eq!(stepped[0][1], 0.3);
+    }
+
+    /// #2933 F25 — encode charges the fit's coordinate prior, so a Klein-bottle
+    /// point and its deck twin `(theta + 1/2, -phi)` must have the same encode
+    /// objective, and gradients/Hessians related by the deck's axis signs
+    /// `(+1, -1)`. A quarter turn in `theta` is a different point, and the
+    /// objective must tell it apart.
+    #[test]
+    fn joint_encode_objective_is_deck_invariant_on_the_klein_bottle_2933() {
+        let evaluator = std::sync::Arc::new(
+            crate::basis::QuotientSpectralEvaluator::klein_bottle(2).expect("klein basis"),
+        );
+        let cover = ndarray::array![0.17_f64, 0.23];
+        let twin = ndarray::array![0.67_f64, 0.77];
+        let other = ndarray::array![0.42_f64, 0.23];
+        let (phi, jet) = evaluator
+            .evaluate(cover.view().insert_axis(ndarray::Axis(0)))
+            .expect("evaluate");
+        let width = phi.ncols();
+        let decoder = Array2::from_shape_fn((width, 2), |(basis, out)| {
+            0.4 * (0.61 * (5 * basis + 2 * out + 1) as f64).sin()
+        });
+        let mut atom = SaeManifoldAtom::new_with_provided_function_gram(
+            "klein",
+            SaeAtomBasisKind::KleinBottle,
+            2,
+            phi,
+            jet,
+            decoder,
+            Array2::<f64>::eye(width),
+        )
+        .expect("klein atom")
+        .with_basis_evaluator(evaluator);
+        atom.ard_precisions = Some(ndarray::array![40.0_f64, 2.5]);
+        let atoms = [atom];
+        let x = ndarray::array![0.3_f64, -0.2];
+        let amplitudes = ndarray::array![0.9_f64];
+        let objective = |coords: &Array1<f64>| {
+            joint_encode_value_grad_hess(
+                &atoms,
+                std::slice::from_ref(coords),
+                x.view(),
+                amplitudes.view(),
+                None,
+            )
+            .expect("encode objective")
+        };
+        let (cover_value, cover_grad, cover_hess) = objective(&cover);
+        let (twin_value, twin_grad, twin_hess) = objective(&twin);
+        let (other_value, _, _) = objective(&other);
+        let close = |label: &str, got: f64, want: f64| {
+            let scale = 1.0 + got.abs().max(want.abs());
+            assert!(
+                (got - want).abs() <= 1.0e-9 * scale,
+                "{label}: twin {got:.17e} vs cover {want:.17e}"
+            );
+        };
+        close("value", twin_value, cover_value);
+        let signs = [1.0, -1.0];
+        for a in 0..2 {
+            close("gradient", twin_grad[a], signs[a] * cover_grad[a]);
+            for b in 0..2 {
+                close("hessian", twin_hess[[a, b]], signs[a] * signs[b] * cover_hess[[a, b]]);
+            }
+        }
+        assert!(
+            (other_value - cover_value).abs() > 1.0e-2,
+            "the encode objective must distinguish a non-equivalent point: cover {cover_value}, other {other_value}"
+        );
     }
 
     #[test]

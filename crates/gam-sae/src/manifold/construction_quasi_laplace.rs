@@ -6810,7 +6810,7 @@ impl SaeManifoldTerm {
         atom: usize,
         axis: usize,
     ) -> f64 {
-        let periods = self.assignment.coords[atom].effective_axis_periods();
+        let periods = self.ard_axis_periods(atom);
         let t = self.assignment.coords[atom].row(row)[axis];
         match periods[axis] {
             None => 0.0,
@@ -6855,7 +6855,7 @@ impl SaeManifoldTerm {
         atom: usize,
         axis: usize,
     ) -> f64 {
-        let periods = self.assignment.coords[atom].effective_axis_periods();
+        let periods = self.ard_axis_periods(atom);
         match periods[axis] {
             None => 0.0,
             Some(period) => {
@@ -6956,7 +6956,7 @@ impl SaeManifoldTerm {
                         continue;
                     }
                     let alpha = ard_precisions[atom][axis];
-                    let periods = self.assignment.coords[atom].effective_axis_periods();
+                    let periods = self.ard_axis_periods(atom);
                     let row_w = self.row_loss_weights.as_deref();
                     for row in 0..self.n_obs() {
                         let row_t = self.assignment.coords[atom].row(row);

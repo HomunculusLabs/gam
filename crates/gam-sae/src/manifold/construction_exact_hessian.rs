@@ -1176,12 +1176,7 @@ impl SaeManifoldTerm {
         let k_atoms = self.k_atoms();
         let total_t = cache.delta_t_len();
         let row_loss_w = self.row_loss_weights.as_deref();
-        let ard_axis_periods: Vec<Vec<Option<f64>>> = self
-            .assignment
-            .coords
-            .iter()
-            .map(|coord| coord.effective_axis_periods())
-            .collect();
+        let ard_axis_periods: Vec<Vec<Option<f64>>> = self.all_ard_axis_periods();
         let ard_precisions = self.validated_ard_precisions(rho)?;
 
         // Optional softmax exact-entropy-minus-majorizer delta operator (#1419).
@@ -1663,12 +1658,7 @@ impl SaeManifoldTerm {
         if self.k_atoms() == 0 {
             return Ok(e_diag);
         }
-        let ard_axis_periods: Vec<Vec<Option<f64>>> = self
-            .assignment
-            .coords
-            .iter()
-            .map(|coord| coord.effective_axis_periods())
-            .collect();
+        let ard_axis_periods: Vec<Vec<Option<f64>>> = self.all_ard_axis_periods();
         let ard_precisions = self.validated_ard_precisions(rho)?;
         let row_loss_w = self.row_loss_weights.as_deref();
         // #2520 — the ThresholdGate's own concave half is the SAME kind of
@@ -1965,12 +1955,7 @@ impl SaeManifoldTerm {
         let ard_precisions = self.validated_ard_precisions(rho)?;
         let row_w = self.row_loss_weights.as_deref();
         let coord_offsets = self.assignment.coord_offsets();
-        let periods: Vec<Vec<Option<f64>>> = self
-            .assignment
-            .coords
-            .iter()
-            .map(LatentCoordValues::effective_axis_periods)
-            .collect();
+        let periods: Vec<Vec<Option<f64>>> = self.all_ard_axis_periods();
         for row in 0..self.n_obs() {
             let w_row = row_w.map_or(1.0, |w| w[row]);
             let base = cache.row_offsets[row];
@@ -2090,12 +2075,7 @@ impl SaeManifoldTerm {
         let k_atoms = self.k_atoms();
         let ard_precisions = self.validated_ard_precisions(rho)?;
         let row_w = self.row_loss_weights.as_deref();
-        let ard_axis_periods: Vec<Vec<Option<f64>>> = self
-            .assignment
-            .coords
-            .iter()
-            .map(|coord| coord.effective_axis_periods())
-            .collect();
+        let ard_axis_periods: Vec<Vec<Option<f64>>> = self.all_ard_axis_periods();
         let softmax_delta: Option<(usize, f64)> = match self.assignment.mode {
             AssignmentMode::Softmax {
                 temperature,
@@ -4425,12 +4405,7 @@ impl SaeManifoldTerm {
         if self.k_atoms() == 0 {
             return Ok(dt);
         }
-        let ard_axis_periods: Vec<Vec<Option<f64>>> = self
-            .assignment
-            .coords
-            .iter()
-            .map(|coord| coord.effective_axis_periods())
-            .collect();
+        let ard_axis_periods: Vec<Vec<Option<f64>>> = self.all_ard_axis_periods();
         let ard_precisions = self.validated_ard_precisions(rho)?;
         let row_loss_w = self.row_loss_weights.as_deref();
         for row in 0..self.n_obs() {
@@ -4892,12 +4867,7 @@ impl SaeManifoldTerm {
         let second_jets = self.atom_second_jets()?;
         let border = self.border_channels_for_border_dim(border_dim)?;
         let row_loss_w = self.row_loss_weights.as_deref();
-        let ard_axis_periods: Vec<Vec<Option<f64>>> = self
-            .assignment
-            .coords
-            .iter()
-            .map(|coord| coord.effective_axis_periods())
-            .collect();
+        let ard_axis_periods: Vec<Vec<Option<f64>>> = self.all_ard_axis_periods();
         let ard_precisions = self.validated_ard_precisions(rho)?;
 
         // Softmax entropy-minus-majorizer scale (#1419); `None` off softmax.

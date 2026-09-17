@@ -617,15 +617,11 @@ impl SaeManifoldTerm {
         // Dense full-support index `[0, k_atoms)`, used by the row loop when no
         // compact layout is engaged so the active-atom iteration is uniform.
         let all_atoms_index: Vec<usize> = (0..k_atoms).collect();
-        // Per-atom per-axis periodicity, hoisted out of the row loop. Selects
+        // Per-atom per-axis prior period, hoisted out of the row loop. Selects
         // the smooth von-Mises coordinate prior on wrapped (Circle) axes and
-        // the Gaussian prior on Euclidean axes; see `ArdAxisPrior`.
-        let ard_axis_periods: Vec<Vec<Option<f64>>> = self
-            .assignment
-            .coords
-            .iter()
-            .map(|coord| coord.effective_axis_periods())
-            .collect();
+        // the Gaussian prior on Euclidean axes; see `ArdAxisPrior`. Quotient
+        // atoms carry their deck-invariant periods (#2933 F25).
+        let ard_axis_periods: Vec<Vec<Option<f64>>> = self.all_ard_axis_periods();
         struct SaeAssemblyRow {
             pub(crate) row: usize,
             pub(crate) gb_delta: Vec<(usize, f64)>,

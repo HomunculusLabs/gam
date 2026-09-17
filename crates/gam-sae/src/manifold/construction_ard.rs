@@ -5,6 +5,25 @@ use super::*;
 use gam_math::special::bessel_i0_centered_terms_from_log_abs;
 
 impl SaeManifoldTerm {
+    /// Per-axis period of atom `atom`'s ARD coordinate prior: the kind's
+    /// [`SaeAtomBasisKind::ard_axis_periods`] of the coordinate block's wrap
+    /// periods, so a quotient atom's half-turned axis carries its deck-invariant
+    /// half period (#2933 F25). Every prior consumer (value, gradient, curvature,
+    /// traces, IFT channels) reads this seam; `effective_axis_periods` stays the
+    /// retraction's wrap period.
+    pub(crate) fn ard_axis_periods(&self, atom: usize) -> Vec<Option<f64>> {
+        self.atoms[atom]
+            .basis_kind()
+            .ard_axis_periods(&self.assignment.coords[atom].effective_axis_periods())
+    }
+
+    /// [`Self::ard_axis_periods`] for every atom, hoisted out of row loops.
+    pub(crate) fn all_ard_axis_periods(&self) -> Vec<Vec<Option<f64>>> {
+        (0..self.assignment.coords.len())
+            .map(|atom| self.ard_axis_periods(atom))
+            .collect()
+    }
+
     /// Validate the ARD table against this term's atom geometry and materialize
     /// each physical precision exactly once. This is the structural choke point
     /// shared by assembly, value, traces, exact-Hessian, and IFT channels.
@@ -53,9 +72,9 @@ impl SaeManifoldTerm {
         // `w_row = 1`, bit-for-bit the historical sum.
         let row_w = self.row_loss_weights.as_deref();
         let mut out = Vec::with_capacity(self.k_atoms());
-        for coord in &self.assignment.coords {
+        for (atom_idx, coord) in self.assignment.coords.iter().enumerate() {
             let d = coord.latent_dim();
-            let periods = coord.effective_axis_periods();
+            let periods = self.ard_axis_periods(atom_idx);
             let mut sq = Array1::<f64>::zeros(d);
             for row in 0..coord.n_obs() {
                 let w_row = row_w.map_or(1.0, |w| w[row]);
@@ -239,12 +258,7 @@ impl SaeManifoldTerm {
                 .latent_block_inverse_diagonal()
                 .map_err(|e| format!("ard_shrinkage_traces: {e}"))?
         };
-        let periods: Vec<Vec<Option<f64>>> = self
-            .assignment
-            .coords
-            .iter()
-            .map(|coord| coord.effective_axis_periods())
-            .collect();
+        let periods: Vec<Vec<Option<f64>>> = self.all_ard_axis_periods();
         // Hoisting the per-axis coordinate columns is not possible (the factor is
         // per row AND per axis), but the period lookup and the coordinate read are
         // both O(1), so this stays one pass over the same slots.
@@ -451,12 +465,7 @@ impl SaeManifoldTerm {
             Ok(jets) => jets,
             Err(_) => return Ok(0.0),
         };
-        let ard_axis_periods: Vec<Vec<Option<f64>>> = self
-            .assignment
-            .coords
-            .iter()
-            .map(LatentCoordValues::effective_axis_periods)
-            .collect();
+        let ard_axis_periods: Vec<Vec<Option<f64>>> = self.all_ard_axis_periods();
         let whitens = self
             .row_metric
             .as_ref()
@@ -641,7 +650,7 @@ impl SaeManifoldTerm {
                 out.push(atom_out);
                 continue;
             }
-            let periods = coord.effective_axis_periods();
+            let periods = self.ard_axis_periods(atom_idx);
             for axis in 0..d {
                 let log_alpha = rho.log_ard[atom_idx][axis];
                 let alpha = ard_precisions[atom_idx][axis];
@@ -708,12 +717,7 @@ impl SaeManifoldTerm {
         let n = self.n_obs();
         let total_t = cache.delta_t_len();
         let coord_offsets = self.assignment.coord_offsets();
-        let ard_axis_periods: Vec<Vec<Option<f64>>> = self
-            .assignment
-            .coords
-            .iter()
-            .map(LatentCoordValues::effective_axis_periods)
-            .collect();
+        let ard_axis_periods: Vec<Vec<Option<f64>>> = self.all_ard_axis_periods();
         let mut traces: Vec<Array1<f64>> = self
             .assignment
             .coords
@@ -897,12 +901,7 @@ impl SaeManifoldTerm {
         let row_w = self.row_loss_weights.as_deref();
         let n = self.n_obs();
         let coord_offsets = self.assignment.coord_offsets();
-        let ard_axis_periods: Vec<Vec<Option<f64>>> = self
-            .assignment
-            .coords
-            .iter()
-            .map(LatentCoordValues::effective_axis_periods)
-            .collect();
+        let ard_axis_periods: Vec<Vec<Option<f64>>> = self.all_ard_axis_periods();
         let mut traces: Vec<Array1<f64>> = self
             .assignment
             .coords

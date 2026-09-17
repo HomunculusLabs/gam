@@ -241,6 +241,70 @@ impl SaeAtomBasisKind {
             | Self::Precomputed(_) => LatentManifold::Euclidean,
         }
     }
+
+    /// The deck generator of the quotient this kind's cover chart represents,
+    /// one action per chart axis, or `None` when the chart is the manifold itself.
+    ///
+    /// * Möbius band on `Circle{2} × [-1, 1]`: `(s, w) ~ (s + 1, -w)`.
+    /// * Klein bottle on `T²`: `(theta, phi) ~ (theta + 1/2, -phi)`.
+    /// * `RP²` on the `(lat, lon)` cover: `(lat, lon) ~ (-lat, lon + π)`.
+    /// * `RP²` on the ambient cover: `u ~ -u`.
+    ///
+    /// The decoder bases already respect these identifications
+    /// ([`crate::basis::MobiusHarmonicEvaluator`],
+    /// [`crate::basis::QuotientSpectralEvaluator`]); this descriptor is what lets
+    /// the coordinate prior respect them too, see [`Self::ard_axis_periods`].
+    pub(crate) fn deck_generator(&self, latent_dim: usize) -> Option<Vec<DeckAxisAction>> {
+        use DeckAxisAction::{HalfTurn, Reflect};
+        match (self, latent_dim) {
+            (Self::Mobius | Self::KleinBottle, 2) => Some(vec![HalfTurn, Reflect]),
+            (Self::ProjectivePlane, 2) => Some(vec![Reflect, HalfTurn]),
+            (Self::ProjectivePlane, 3) => Some(vec![Reflect; 3]),
+            _ => None,
+        }
+    }
+
+    /// Per-axis period of the ARD coordinate prior on this kind's cover chart,
+    /// given the chart's per-axis wrap periods (#2933 F25).
+    ///
+    /// A prior on a quotient must assign one value to every deck orbit, or the fit
+    /// scores two representatives of the same point differently. Every factor
+    /// [`ArdAxisPrior`] evaluates is even in `t`, so a reflected axis needs no
+    /// change. A half-turned axis does: the chart's period-`P` von Mises energy
+    /// `V_P(t) = (α/κ²)(1 − cos κt)` has `V_P(t + P/2) = (α/κ²)(1 + cos κt)`, so the
+    /// Möbius twins `s = 0` and `s = 1` would be charged `0` and `2α/π²`.
+    ///
+    /// The invariant member of the same family is the period-`P/2` von Mises, the
+    /// von Mises of the quotient's base circle. It keeps curvature `α` at its
+    /// minimum (the ARD precision reading), it is still degree one in `α` (so the
+    /// PSD majorizer, log-precision curvature and Mackay `sq_equiv` identities hold
+    /// unchanged), and its log partition over that axis's fundamental domain is
+    /// `log(P/2) − η + log I0(η)` with `η = α(P/2)²/(2π)²` — exactly what
+    /// `ard_value` charges for a period-`P/2` axis, so the prior is normalized over
+    /// the quotient rather than the cover. Only the prior changes: the optimizer
+    /// still retracts on the cover with period `P`.
+    pub(crate) fn ard_axis_periods(&self, chart_periods: &[Option<f64>]) -> Vec<Option<f64>> {
+        let Some(generator) = self.deck_generator(chart_periods.len()) else {
+            return chart_periods.to_vec();
+        };
+        chart_periods
+            .iter()
+            .zip(generator)
+            .map(|(&period, action)| match action {
+                DeckAxisAction::HalfTurn => period.map(|p| 0.5 * p),
+                DeckAxisAction::Reflect => period,
+            })
+            .collect()
+    }
+}
+
+/// How one cover-chart axis moves under a quotient's deck generator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeckAxisAction {
+    /// Translate a periodic axis by half its period.
+    HalfTurn,
+    /// Negate the axis about the chart origin.
+    Reflect,
 }
 
 /// Per-axis ARD coordinate prior, evaluated as a smooth energy in the latent
