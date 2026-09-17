@@ -1473,7 +1473,9 @@ pub(crate) fn assignment_prior_value_weighted(
     // #Bug4: under FROZEN routing every logit is inert (the gates come from the
     // ρ-invariant frozen predictor, not `self.logits`), so the whole assignment
     // sparsity prior is a constant with zero gradient/curvature — score it as 0 to
-    // match the derivative-side treatment. (Softmax rejects frozen routing.)
+    // match the derivative-side treatment. That holds for a softmax row too: its
+    // gates over frozen logits are constant in the free logits, so its entropy
+    // prior is inert in exactly the same way.
     if assignment.routing_is_frozen() {
         return Ok(0.0);
     }

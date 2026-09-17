@@ -1056,6 +1056,83 @@ fn joint_encode_damped_step(
     }
 }
 
+/// The latent manifold `atom`'s coordinates live on: the chart the fit retracts on,
+/// and the one [`latent_chart_axis_periods`] reads its wrap periods from.
+fn atom_latent_manifold(atom: &SaeManifoldAtom) -> gam_terms::latent::LatentManifold {
+    atom.basis_kind().latent_manifold(atom.latent_dim())
+}
+
+/// #2934 — the joint encode objective as a function on the product of the atoms'
+/// latent manifolds. [`joint_encode_value_grad_hess`] differentiates in ambient
+/// coordinates. On an embedded sphere, a step along that gradient has a normal part
+/// that no feasible move realizes, and an ambient stationarity test refuses a
+/// tangent-stationary row: the isotropic ARD energy `½α‖u‖²` is constant on `S²` but
+/// has ambient gradient `αu`. Each atom's gradient block is projected onto its
+/// tangent space with `project_gradient_to_tangent`. Its Hessian block becomes
+/// `riemannian_hessian_matrix`, which carries the sphere's Weingarten term and normal
+/// pin, as the fit's row geometry does. Every cross-atom block is projected on both
+/// sides. The value is unchanged. On an all-Euclidean dictionary every projection is
+/// the identity, so the ambient pieces are returned as they are.
+fn joint_encode_riemannian_value_grad_hess(
+    atoms: &[SaeManifoldAtom],
+    coords: &[Array1<f64>],
+    x: ArrayView1<'_, f64>,
+    amplitudes: ArrayView1<'_, f64>,
+    metric_factor: Option<ArrayView2<'_, f64>>,
+) -> Result<(f64, Array1<f64>, Array2<f64>), String> {
+    let (value, grad, hess) =
+        joint_encode_value_grad_hess(atoms, coords, x, amplitudes, metric_factor)?;
+    let manifolds: Vec<gam_terms::latent::LatentManifold> =
+        atoms.iter().map(atom_latent_manifold).collect();
+    if manifolds.iter().all(|manifold| manifold.is_euclidean()) {
+        return Ok((value, grad, hess));
+    }
+    let mut offsets = Vec::with_capacity(atoms.len() + 1);
+    offsets.push(0usize);
+    for atom in atoms {
+        offsets.push(offsets[offsets.len() - 1] + atom.latent_dim());
+    }
+    let q = grad.len();
+    let mut tangent_grad = Array1::<f64>::zeros(q);
+    let mut tangent_hess = Array2::<f64>::zeros((q, q));
+    for (k, manifold) in manifolds.iter().enumerate() {
+        let (lo, hi) = (offsets[k], offsets[k + 1]);
+        let point = coords[k].view();
+        let gradient = grad.slice(ndarray::s![lo..hi]);
+        tangent_grad
+            .slice_mut(ndarray::s![lo..hi])
+            .assign(&manifold.project_gradient_to_tangent(point, gradient));
+        for (j, other) in manifolds.iter().enumerate() {
+            let (other_lo, other_hi) = (offsets[j], offsets[j + 1]);
+            let block = hess.slice(ndarray::s![lo..hi, other_lo..other_hi]);
+            let projected = if j == k {
+                manifold.riemannian_hessian_matrix(point, gradient, block)
+            } else {
+                // `P_k H_kj P_j`: project the columns on atom k's side, then the
+                // transposed columns on atom j's side.
+                let left =
+                    manifold.project_matrix_columns_to_gradient_tangent(point, gradient, block);
+                other
+                    .project_matrix_columns_to_gradient_tangent(
+                        coords[j].view(),
+                        grad.slice(ndarray::s![other_lo..other_hi]),
+                        left.t(),
+                    )
+                    .t()
+                    .to_owned()
+            };
+            tangent_hess
+                .slice_mut(ndarray::s![lo..hi, other_lo..other_hi])
+                .assign(&projected);
+        }
+    }
+    Ok((value, tangent_grad, tangent_hess))
+}
+
+/// Move each atom along its block of `scale · step` by its latent manifold's
+/// retraction (#2934). The retraction normalizes on an embedded sphere, clamps an
+/// interval factor, wraps a circle by its period, and acts blockwise on a product.
+/// A Euclidean block is the plain sum.
 fn joint_encode_add_step(
     atoms: &[SaeManifoldAtom],
     coords: &[Array1<f64>],
@@ -1065,15 +1142,12 @@ fn joint_encode_add_step(
     let mut out = Vec::with_capacity(atoms.len());
     let mut offset = 0usize;
     for (atom_idx, atom) in atoms.iter().enumerate() {
-        let mut next = coords[atom_idx].clone();
-        for axis in 0..atom.latent_dim() {
-            next[axis] += scale * step[offset + axis];
-            if let Some(period) = latent_axis_period(atom, axis) {
-                next[axis] = next[axis].rem_euclid(period);
-            }
-        }
-        offset += atom.latent_dim();
-        out.push(next);
+        let d = atom.latent_dim();
+        let velocity = step
+            .slice(ndarray::s![offset..offset + d])
+            .mapv(|value| scale * value);
+        out.push(atom_latent_manifold(atom).retract(coords[atom_idx].view(), velocity.view()));
+        offset += d;
     }
     out
 }
@@ -1082,6 +1156,16 @@ fn joint_encode_add_step(
 /// residual. Independent atlas projections may be supplied as starts, but every
 /// accepted step and the convergence test use
 /// `Σ_k z_k B_kᵀΦ_k(t_k) - x`, including all cross-atom Jacobian blocks.
+///
+/// #2934 — the iteration is a damped Riemannian Newton method on the product of
+/// the atoms' latent manifolds, the same charts the fit retracts on. Each start is
+/// projected onto its manifold. Every step solves the tangent-projected system of
+/// [`joint_encode_riemannian_value_grad_hess`], moves by
+/// [`joint_encode_add_step`]'s retraction, and is accepted by Armijo on the
+/// retracted point. Stationarity is measured on the tangent gradient. An ambient
+/// sphere encode therefore stays a unit vector, an interval factor stays in range,
+/// and a row that is stationary along the manifold is not refused for an ambient
+/// normal component.
 pub(crate) fn joint_encode_refine_row(
     atoms: &[SaeManifoldAtom],
     initial_coords: &[Array1<f64>],
@@ -1089,7 +1173,25 @@ pub(crate) fn joint_encode_refine_row(
     amplitudes: ArrayView1<'_, f64>,
     metric_factor: Option<ArrayView2<'_, f64>>,
 ) -> Result<(Vec<Array1<f64>>, bool), String> {
-    let mut coords = initial_coords.to_vec();
+    if initial_coords.len() != atoms.len() {
+        return Err(format!(
+            "joint encode: {} atoms require {} starts; got {}",
+            atoms.len(),
+            atoms.len(),
+            initial_coords.len()
+        ));
+    }
+    let mut coords = Vec::with_capacity(atoms.len());
+    for (atom_idx, (atom, start)) in atoms.iter().zip(initial_coords).enumerate() {
+        if start.len() != atom.latent_dim() {
+            return Err(format!(
+                "joint encode: atom {atom_idx} start has length {} != latent_dim {}",
+                start.len(),
+                atom.latent_dim()
+            ));
+        }
+        coords.push(atom_latent_manifold(atom).project_point(start.view()));
+    }
     let q: usize = atoms.iter().map(SaeManifoldAtom::latent_dim).sum();
     if q == 0 {
         return Ok((coords, true));
@@ -1098,8 +1200,13 @@ pub(crate) fn joint_encode_refine_row(
     let mut damping = JOINT_ENCODE_DAMPING_FLOOR;
 
     for _ in 0..JOINT_ENCODE_MAX_ITER {
-        let (value, grad, hess) =
-            joint_encode_value_grad_hess(atoms, &coords, x, amplitudes, metric_factor.clone())?;
+        let (value, grad, hess) = joint_encode_riemannian_value_grad_hess(
+            atoms,
+            &coords,
+            x,
+            amplitudes,
+            metric_factor.clone(),
+        )?;
         let grad_norm = grad.dot(&grad).sqrt();
         if grad_norm <= JOINT_ENCODE_GRAD_TOL * target_scale {
             return Ok((coords, true));
@@ -1172,15 +1279,20 @@ pub(crate) fn joint_encode_refine_row(
         };
         coords = next;
         if step_norm <= JOINT_ENCODE_STEP_TOL * target_scale {
-            let (_, final_grad, _) =
-                joint_encode_value_grad_hess(atoms, &coords, x, amplitudes, metric_factor.clone())?;
+            let (_, final_grad, _) = joint_encode_riemannian_value_grad_hess(
+                atoms,
+                &coords,
+                x,
+                amplitudes,
+                metric_factor.clone(),
+            )?;
             let converged =
                 final_grad.dot(&final_grad).sqrt() <= JOINT_ENCODE_GRAD_TOL * target_scale;
             return Ok((coords, converged));
         }
     }
     let (_, final_grad, _) =
-        joint_encode_value_grad_hess(atoms, &coords, x, amplitudes, metric_factor)?;
+        joint_encode_riemannian_value_grad_hess(atoms, &coords, x, amplitudes, metric_factor)?;
     let converged = final_grad.dot(&final_grad).sqrt() <= JOINT_ENCODE_GRAD_TOL * target_scale;
     Ok((coords, converged))
 }
@@ -3221,7 +3333,21 @@ mod encode_fix_tests {
             Array1::<f64>::zeros(3).view(),
             1.0,
         );
-        assert_eq!(stepped[0], u, "a zero step must leave the ambient unit vector in place");
+        // #2934 — the step is the sphere's retraction, which renormalizes: a norm that
+        // rounds a unit away from 1 can move the last bit, so the pin is ulp-scale
+        // rather than bit-exact. It still catches a `2π` wrap and any off-sphere drift.
+        for axis in 0..3 {
+            assert!(
+                (stepped[0][axis] - u[axis]).abs() <= 4.0 * f64::EPSILON,
+                "a zero step must leave the ambient unit vector in place: {:?} vs {u:?}",
+                stepped[0]
+            );
+        }
+        let norm = stepped[0].dot(&stepped[0]).sqrt();
+        assert!(
+            (norm - 1.0).abs() <= 4.0 * f64::EPSILON,
+            "a zero step must stay on the unit sphere: norm {norm:.17e}"
+        );
 
         let mobius = [tiny_atom(SaeAtomBasisKind::Mobius, 2)];
         let stepped = joint_encode_add_step(
@@ -4065,6 +4191,199 @@ mod atlas_certificate_tests {
         assert!(
             (ratio - 100.0).abs() < 1e-6,
             "h must be exactly linear in L; ratio = {ratio}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod joint_encode_retraction_2934_tests {
+    //! #2934 — joint encode must move each atom on its latent manifold: an ambient
+    //! sphere encode stays a unit vector, a Möbius width stays in `[-1, 1]`, and a
+    //! row that is stationary along the manifold is accepted even when its ambient
+    //! gradient has a live normal component.
+    use super::*;
+    use crate::manifold::SaeAtomBasisKind;
+
+    /// Degree-2 ambient sphere atom with a fixed decoder of width `p` and an optional
+    /// isotropic ARD precision, whose energy `½α‖u‖²` is constant on the sphere.
+    fn sphere_atom(p: usize, isotropic_alpha: Option<f64>) -> SaeManifoldAtom {
+        let evaluator = std::sync::Arc::new(
+            AmbientSphereHarmonicEvaluator::new(2).expect("degree-2 sphere basis"),
+        );
+        let anchor = ndarray::array![[0.36_f64, 0.48, 0.8]];
+        let (phi, jet) = evaluator
+            .evaluate(anchor.view())
+            .expect("evaluate sphere basis");
+        let width = phi.ncols();
+        let decoder = Array2::from_shape_fn((width, p), |(basis, out)| {
+            0.5 * (0.73 * (3 * basis + 5 * out + 1) as f64).sin()
+        });
+        let mut atom = SaeManifoldAtom::new_with_provided_function_gram(
+            "sphere",
+            SaeAtomBasisKind::Sphere,
+            3,
+            phi,
+            jet,
+            decoder,
+            Array2::<f64>::eye(width),
+        )
+        .expect("sphere atom")
+        .with_basis_evaluator(evaluator);
+        atom.ard_precisions = isotropic_alpha.map(|alpha| ndarray::array![alpha, alpha, alpha]);
+        atom
+    }
+
+    /// Möbius atom on the cover `S¹(period 2) × [-1, 1]` with a fixed decoder of width `p`.
+    fn mobius_atom(p: usize) -> SaeManifoldAtom {
+        let evaluator = std::sync::Arc::new(
+            crate::basis::MobiusHarmonicEvaluator::new(2, 2).expect("Möbius basis"),
+        );
+        let anchor = ndarray::array![[0.3_f64, 0.5]];
+        let (phi, jet) = evaluator
+            .evaluate(anchor.view())
+            .expect("evaluate Möbius basis");
+        let width = phi.ncols();
+        let decoder = Array2::from_shape_fn((width, p), |(basis, out)| {
+            0.6 * (0.57 * (7 * basis + 3 * out + 2) as f64).cos()
+        });
+        SaeManifoldAtom::new_with_provided_function_gram(
+            "mobius",
+            SaeAtomBasisKind::Mobius,
+            2,
+            phi,
+            jet,
+            decoder,
+            Array2::<f64>::eye(width),
+        )
+        .expect("Möbius atom")
+        .with_basis_evaluator(evaluator)
+    }
+
+    /// `z · Φ(t)ᵀ B`, read through the atom's live evaluator.
+    fn decode(atom: &SaeManifoldAtom, coords: &Array1<f64>, amplitude: f64) -> Array1<f64> {
+        let evaluator = atom
+            .basis_evaluator
+            .as_ref()
+            .expect("live basis evaluator");
+        let (phi, _) = evaluator
+            .evaluate(coords.view().insert_axis(ndarray::Axis(0)))
+            .expect("decode");
+        phi.row(0).dot(atom.decoder_coefficients()) * amplitude
+    }
+
+    fn unit(v: [f64; 3]) -> Array1<f64> {
+        let norm = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        ndarray::array![v[0] / norm, v[1] / norm, v[2] / norm]
+    }
+
+    #[test]
+    fn joint_encode_retracts_a_sphere_and_a_mobius_atom_onto_their_manifolds_2934() {
+        let p = 6;
+        let atoms = [sphere_atom(p, Some(4.0)), mobius_atom(p)];
+        let sphere_truth = unit([0.3, -0.5, 0.81]);
+        let mobius_truth = ndarray::array![0.35_f64, 0.4];
+        let amplitudes = ndarray::array![0.8_f64, 0.7];
+        let x = decode(&atoms[0], &sphere_truth, 0.8) + decode(&atoms[1], &mobius_truth, 0.7);
+        let starts = [unit([0.36, -0.45, 0.82]), ndarray::array![0.32_f64, 0.45]];
+        let (coords, converged) =
+            joint_encode_refine_row(&atoms, &starts, x.view(), amplitudes.view(), None)
+                .expect("joint encode");
+        let norm = coords[0].dot(&coords[0]).sqrt();
+        assert!(
+            (norm - 1.0).abs() <= 1.0e-12,
+            "the sphere encode must be a unit vector; got norm {norm:.17e} at {:?}",
+            coords[0]
+        );
+        assert!(
+            coords[1][1].abs() <= 1.0,
+            "Möbius width left the band: {}",
+            coords[1][1]
+        );
+        assert!(
+            converged,
+            "the row must reach tangent stationarity: sphere {:?}, Möbius {:?}",
+            coords[0],
+            coords[1]
+        );
+        let recovered = decode(&atoms[0], &coords[0], 0.8) + decode(&atoms[1], &coords[1], 0.7);
+        let gap = &recovered - &x;
+        let gap_norm = gap.dot(&gap).sqrt();
+        assert!(
+            gap_norm <= 1.0e-6,
+            "the encode must reconstruct its zero-residual target: residual {gap_norm:e} at \
+             sphere {:?}, Möbius {:?}",
+            coords[0],
+            coords[1]
+        );
+    }
+
+    #[test]
+    fn joint_encode_accepts_a_tangent_stationary_sphere_row_2934() {
+        let atoms = [sphere_atom(3, Some(2.0))];
+        let truth = unit([0.3, -0.5, 0.81]);
+        let amplitudes = ndarray::array![0.9_f64];
+        let x = decode(&atoms[0], &truth, 0.9);
+        let (_, ambient_grad, _) = joint_encode_value_grad_hess(
+            &atoms,
+            std::slice::from_ref(&truth),
+            x.view(),
+            amplitudes.view(),
+            None,
+        )
+        .expect("ambient objective");
+        let ambient_norm = ambient_grad.dot(&ambient_grad).sqrt();
+        assert!(
+            ambient_norm > 1.0,
+            "fixture: the isotropic prior's ambient gradient 2u must be live; got {ambient_norm:e}"
+        );
+        let (coords, converged) = joint_encode_refine_row(
+            &atoms,
+            std::slice::from_ref(&truth),
+            x.view(),
+            amplitudes.view(),
+            None,
+        )
+        .expect("joint encode");
+        let moved = &coords[0] - &truth;
+        let moved_norm = moved.dot(&moved).sqrt();
+        assert!(
+            converged && moved_norm <= 1.0e-12,
+            "a zero-residual row with an isotropic sphere prior is stationary along the sphere \
+             and must be accepted in place; converged={converged}, moved {moved_norm:e} to {:?}",
+            coords[0]
+        );
+    }
+
+    #[test]
+    fn joint_encode_keeps_a_mobius_width_inside_the_band_2934() {
+        let atoms = [mobius_atom(2)];
+        let amplitudes = ndarray::array![1.0_f64];
+        // Decoded past the band edge (`w = 1.3`, on the width polynomial's extension),
+        // so an unconstrained ambient solve walks the width out of `[-1, 1]`.
+        let x = decode(&atoms[0], &ndarray::array![0.3_f64, 1.3], 1.0);
+        let start = ndarray::array![0.3_f64, 0.9];
+        let (coords, converged) = joint_encode_refine_row(
+            &atoms,
+            std::slice::from_ref(&start),
+            x.view(),
+            amplitudes.view(),
+            None,
+        )
+        .expect("joint encode");
+        assert!(
+            coords[0][1].abs() <= 1.0,
+            "Möbius width left the band: {:?}",
+            coords[0]
+        );
+        assert!(
+            (0.0..2.0).contains(&coords[0][0]),
+            "Möbius cover angle left its period: {:?}",
+            coords[0]
+        );
+        assert!(
+            converged,
+            "the row must reach projected stationarity at {:?}",
+            coords[0]
         );
     }
 }
