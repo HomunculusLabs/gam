@@ -300,12 +300,36 @@ impl NativeSwiglu {
         self.gate.ncols()
     }
 
+    /// Every stage of the layer on the original tensors.
+    pub fn execute_stages(&self, inputs: ArrayView2<'_, f64>) -> Result<SwigluStages, GatedRewriteError> {
+        require_shape("SwiGLU input rows", (inputs.nrows(), self.width()), inputs.dim())?;
+        let gate = inputs.dot(&self.gate.t());
+        let up = inputs.dot(&self.up.t());
+        let hidden = swiglu_hidden(gate.view(), up.view())?;
+        let write = hidden.dot(&self.down.t());
+        Ok(SwigluStages {
+            gate,
+            up,
+            hidden,
+            write,
+        })
+    }
+
     /// The layer's write for every normalized input row, on the original tensors.
     pub fn execute(&self, inputs: ArrayView2<'_, f64>) -> Result<Array2<f64>, GatedRewriteError> {
-        require_shape("SwiGLU input rows", (inputs.nrows(), self.width()), inputs.dim())?;
-        let hidden = swiglu_hidden(inputs.dot(&self.gate.t()).view(), inputs.dot(&self.up.t()).view())?;
-        Ok(hidden.dot(&self.down.t()))
+        Ok(self.execute_stages(inputs)?.write)
     }
+}
+
+/// Every stage of a SwiGLU layer that torch exports as a module output: `gate_proj`,
+/// `up_proj`, the `down_proj` input `s(gate) ⊙ up`, and `down_proj`, the write with no
+/// residual added.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwigluStages {
+    pub gate: Array2<f64>,
+    pub up: Array2<f64>,
+    pub hidden: Array2<f64>,
+    pub write: Array2<f64>,
 }
 
 /// How the three factors of a [`ComponentSwiglu`] execute.
@@ -364,12 +388,27 @@ impl ComponentSwiglu {
         }
     }
 
-    /// The layer's write for every normalized input row under `mask`.
-    pub fn execute(&self, inputs: ArrayView2<'_, f64>, mask: SwigluMask<'_>) -> Result<Array2<f64>, SwigluError> {
+    /// Every stage of the layer under `mask`.
+    pub fn execute_stages(
+        &self,
+        inputs: ArrayView2<'_, f64>,
+        mask: SwigluMask<'_>,
+    ) -> Result<SwigluStages, SwigluError> {
         let gate = read_through(self.native.gate.view(), &self.gate, inputs, mask.gate)?;
         let up = read_through(self.native.up.view(), &self.up, inputs, mask.up)?;
         let hidden = swiglu_hidden(gate.view(), up.view())?;
-        Ok(read_through(self.native.down.view(), &self.down, hidden.view(), mask.down)?)
+        let write = read_through(self.native.down.view(), &self.down, hidden.view(), mask.down)?;
+        Ok(SwigluStages {
+            gate,
+            up,
+            hidden,
+            write,
+        })
+    }
+
+    /// The layer's write for every normalized input row under `mask`.
+    pub fn execute(&self, inputs: ArrayView2<'_, f64>, mask: SwigluMask<'_>) -> Result<Array2<f64>, SwigluError> {
+        Ok(self.execute_stages(inputs, mask)?.write)
     }
 }
 
@@ -702,10 +741,8 @@ mod tests {
     use ndarray::{Array, Array1, Array2, ArrayView2, Axis, Dimension, Zip, arr0, array, s};
     use qd::Quad;
     use rand::rngs::StdRng;
+    use gam_linalg::roundoff::{UNIT_ROUNDOFF, accumulation_growth};
     use rand::{RngExt, SeedableRng};
-
-    /// Higham's unit roundoff for round-to-nearest binary64, `u = 2^-53`.
-    const UNIT_ROUNDOFF: f64 = f64::EPSILON / 2.0;
 
     /// A Lipschitz constant of the SiLU gate: `s' = sigma + t sigma (1 - sigma)`
     /// and `sigma (1 - sigma) = e^-|t| / (1 + e^-|t|)^2 <= e^-|t|`, so
@@ -731,20 +768,12 @@ mod tests {
         silu_derivatives(t)[0]
     }
 
-    /// `gamma_n = n u / (1 - n u)`: a product of `n` factors `(1 + delta)^(+-1)`
-    /// with `|delta| <= u` lies within `gamma_n` of one (Higham, Accuracy and
-    /// Stability of Numerical Algorithms, Lemma 3.1).
-    fn gamma(operations: usize) -> f64 {
-        let scaled = operations as f64 * UNIT_ROUNDOFF;
-        scaled / (1.0 - scaled)
-    }
-
     /// Divides a computed tolerance by `1 - gamma_(k + 1)`, where `k` bounds the
     /// rounded operations along any chain of the tolerance arithmetic and the
     /// extra operation is this division, so the computed tolerance dominates its
     /// real-arithmetic value.
     fn inflate<D: Dimension>(tolerance: Array<f64, D>, operations: usize) -> Array<f64, D> {
-        let factor = 1.0 - gamma(operations + 1);
+        let factor = 1.0 - accumulation_growth(operations + 1);
         tolerance.mapv(|value| value / factor)
     }
 
@@ -842,7 +871,7 @@ mod tests {
         /// are computed with the same structure, so dividing by `1 - gamma_n`
         /// makes them dominate their real values.
         fn roundoff_radius(&self, mask: &Array1<f64>, inputs: ArrayView2<'_, f64>) -> Array2<f64> {
-            let bound = gamma(self.operations_per_term());
+            let bound = accumulation_growth(self.operations_per_term());
             self.term_magnitudes(mask, inputs)
                 .mapv(|magnitude| bound * magnitude / (1.0 - bound))
         }
@@ -977,7 +1006,7 @@ mod tests {
             radius += &write_radius;
             magnitude += &write.mapv(f64::abs);
         }
-        let summation = gamma(components - 1);
+        let summation = accumulation_growth(components - 1);
         let summation_radius = magnitude.mapv(|value| summation * value / (1.0 - summation));
         (sum, radius + &summation_radius)
     }
@@ -1098,7 +1127,14 @@ mod tests {
             up: ComponentMask::AllOn,
             down: ComponentMask::AllOn,
         };
+        let native_stages = component.native().execute_stages(inputs.view()).expect("finite rows");
+        let component_stages = component.execute_stages(inputs.view(), all_on).expect("finite rows");
+        assert_eq!(
+            component_stages, native_stages,
+            "every factor all on must execute the original tensors on their original path, stage by stage"
+        );
         let native = component.native().execute(inputs.view()).expect("finite rows");
+        assert_eq!(native, native_stages.write, "execute must return the stages' write bit for bit");
         assert_eq!(
             component.execute(inputs.view(), all_on).expect("finite rows"),
             native,
@@ -1263,7 +1299,7 @@ mod tests {
             let gate_entry = cotangents.gate[index];
             let up_entry = cotangents.up[index];
             let hidden = cotangent[index];
-            let gate_radius = gamma(2) * gate_entry.abs() / (1.0 - gamma(2))
+            let gate_radius = accumulation_growth(2) * gate_entry.abs() / (1.0 - accumulation_growth(2))
                 + (hidden * up[index]).abs() * silu_slope_evaluation_error(t);
             let up_radius =
                 UNIT_ROUNDOFF * up_entry.abs() / (1.0 - UNIT_ROUNDOFF) + hidden.abs() * silu_evaluation_error(t);
@@ -1424,10 +1460,10 @@ mod tests {
             // centring of the cotangent adds its mean's radius and `gamma_(d + 1)`. The gain
             // cotangent's terms pass `d + 6` operations and the row sum `rows`; the bias
             // cotangent's row sum `rows - 1`.
-            let term_gamma = gamma(4 * dim + 20);
-            let centring_gamma = gamma(dim + 1);
-            let gain_gamma = gamma(dim + 6 + ROWS);
-            let summation = gamma(ROWS - 1);
+            let term_gamma = accumulation_growth(4 * dim + 20);
+            let centring_gamma = accumulation_growth(dim + 1);
+            let gain_gamma = accumulation_growth(dim + 6 + ROWS);
+            let summation = accumulation_growth(ROWS - 1);
             let mut entry_radius = 0.0;
             let mut predicted_magnitude = 0.0;
             let mut gain_magnitude = Array1::<f64>::zeros(dim);
@@ -1581,7 +1617,7 @@ mod tests {
             .fold(Array2::<f64>::zeros((ROWS, dim)), |accumulated, part| accumulated + part);
         // fl(N(h)) passes the squares, d - 1 additions, the mean, + eps, sqrt, the
         // reciprocal, the product with h and the gain: gamma_(d + 6) relative.
-        let norm_gamma = gamma(dim + 6);
+        let norm_gamma = accumulation_growth(dim + 6);
         let whole = norm.apply(summed.view()).expect("finite residual");
         let mut separate = Array2::<f64>::zeros((ROWS, dim));
         let mut radius = whole.mapv(|value| norm_gamma * value.abs() / (1.0 - norm_gamma));
@@ -1592,7 +1628,7 @@ mod tests {
             magnitude += &normalized.mapv(f64::abs);
             separate += &normalized;
         }
-        let summation = gamma(parts - 1);
+        let summation = accumulation_growth(parts - 1);
         radius += &magnitude.mapv(|value| summation * value / (1.0 - summation));
         let tolerance = inflate(radius, dim + parts + 9);
         let refuted = separate
@@ -1732,10 +1768,10 @@ mod tests {
                 .map_collect(|&mlp_value, &attention_value, &input_value, &total| {
                     let attention_value = attention_value.abs();
                     let input_value = input_value.abs();
-                    gamma(2) * (mlp_value + attention_value + input_value)
+                    accumulation_growth(2) * (mlp_value + attention_value + input_value)
                         + UNIT_ROUNDOFF * (attention_value + input_value)
                         + UNIT_ROUNDOFF * (mlp_value + input_value)
-                        + gamma(3) * total
+                        + accumulation_growth(3) * total
                 });
             inflate(entries, 6)
         };

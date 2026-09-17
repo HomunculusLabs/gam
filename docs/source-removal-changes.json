@@ -63,5 +63,14 @@
     ],
     "reason": "#2902 (#2933 argument-free bar): true_crossing_couples_values asserted e_parallel > 0 and e_cross >= 100·e_parallel. The exact weighted affine projection leaves e_parallel at roundoff, so the first assertion tests roundoff's sign and the second has no magnitude floor. The crossing gate now reads the parallel offset and checkerboard energies from one form, bounds the offset by 1e-8·checkerboard, and bounds e_cross below by the derived coincident_crossing_floor. parallel_two_level_energy_at_defaults returned only the offset energy. It is restated as parallel_two_level_and_checkerboard_energies_at_defaults, which returns both from one form.",
     "evidence": "At the base, measure_jet_near_miss_decoupling.rs names parallel_two_level_energy_at_defaults at its declaration and its one call in true_crossing_couples_values. The identity was derived by reading the change against source_removal_guard.py's item rule, and the gate job runs the guard against this entry."
+  },
+  {
+    "base": "fb8a68cf391b797ee27076a38565a02c1078c2c1",
+    "items": [
+      "crates/gam-sae/src/parameter_decomposition/gated_rewrite.rs:const:UNIT_ROUNDOFF",
+      "crates/gam-sae/src/parameter_decomposition/gated_rewrite.rs:fn:gamma"
+    ],
+    "reason": "#2951 mpd-spec NOTE 11 (comment 5719475109): the gated_rewrite.rs test module kept local copies of the roundoff owner, a private test-scoped const UNIT_ROUNDOFF = f64::EPSILON / 2 and a private test-scoped fn gamma computing gamma_n = n u / (1 - n u). Both are deleted, and every call site now reads gam_linalg::roundoff::{UNIT_ROUNDOFF, accumulation_growth}, the owner moments, spectral, rewrite and attention already import, which computes the same gamma_n and returns infinity once n u >= 1.",
+    "evidence": "Both items were private and inside the #[cfg(test)] module of crates/gam-sae/src/parameter_decomposition/gated_rewrite.rs, with no production occurrence. At the base every former call site reads accumulation_growth(n), and the test module imports UNIT_ROUNDOFF from gam_linalg::roundoff (gam-linalg roundoff.rs:49 and :57 on main d466c9c5d2). Slurm job 1197488 (pool-sw0d) on the landing tree at 5023324b3c: source_removal_guard.py reported exactly these two identities (test_scoped, removed_declarations 1, production_occurrences 0) and nothing else, public_api_census.py passed, and the guard's positive control refused the #2818 sweep. Gate job 1201008 at 0e584db5ad with this entry: RC_REMOVAL_GUARD=0 and RC_PUBLIC_API_CENSUS=0."
   }
 ]
