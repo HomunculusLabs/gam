@@ -678,9 +678,10 @@ fn tangent_from_row_factorization(
     vt: &Array2<f64>,
 ) -> Result<(usize, ActiveConstraintTangentGeometry), String> {
     let p = normalized.ncols();
-    let smax = singular.iter().fold(0.0_f64, |largest, &s| largest.max(s));
-    let rank_threshold = 100.0 * f64::EPSILON * (normalized.nrows().max(p) as f64) * smax;
-    let rank = singular.iter().filter(|&&s| s > rank_threshold).count();
+    // The row rank is read at the SVD's own rounding band `max(rows, p)·ε·σ_max`
+    // (`svd_rank_band`), with no extra factor: a singular value above it is
+    // resolved by the factorization that produced it (#2469).
+    let rank = crate::active_set::svd_rank(singular, normalized.nrows(), p);
     if rank == 0 {
         return Err("non-empty active constraint block has zero numerical row rank".to_string());
     }
@@ -688,38 +689,18 @@ fn tangent_from_row_factorization(
         return Ok((rank, ActiveConstraintTangentGeometry::FullyPinned));
     }
 
+    // The orthonormal complement of the leading `rank` right singular vectors.
+    // Pivoted Gram–Schmidt on the coordinate axes always takes the longest
+    // remaining residual, whose squared norm is at least `(p − rank − j)/p`
+    // after `j` columns, so no cutoff on residual length is needed (#2469).
     let null_count = p - rank;
-    let mut orthonormal_basis: Vec<Array1<f64>> = (0..rank).map(|i| vt.row(i).to_owned()).collect();
-    let mut z = Array2::<f64>::zeros((p, null_count));
-    let mut collected = 0usize;
-    let independence_floor = 100.0 * f64::EPSILON * p as f64;
-    for axis in 0..p {
-        if collected == null_count {
-            break;
-        }
-        let mut candidate = Array1::<f64>::zeros(p);
-        candidate[axis] = 1.0;
-        // A second pass is deliberate: modified Gram–Schmidt reorthogonalization
-        // keeps the constructed complement accurate for ill-conditioned faces.
-        for _ in 0..2 {
-            for q in &orthonormal_basis {
-                let projection = q.dot(&candidate);
-                candidate.scaled_add(-projection, q);
-            }
-        }
-        let norm = candidate.dot(&candidate).sqrt();
-        if norm > independence_floor {
-            candidate /= norm;
-            z.column_mut(collected).assign(&candidate);
-            orthonormal_basis.push(candidate);
-            collected += 1;
-        }
-    }
-    if collected != null_count {
-        return Err(format!(
-            "active constraint tangent complement construction produced {collected} of {null_count} columns"
-        ));
-    }
+    let z = crate::active_set::null_space_complement(vt, rank).ok_or_else(|| {
+        format!(
+            "active constraint tangent complement construction produced no {null_count}-column basis \
+             for row rank {rank} over {} right singular vectors",
+            vt.nrows()
+        )
+    })?;
 
     // This routine is the shared authority for both optimization and LAML
     // projection. Refuse geometry that cannot preserve the solver's working-
@@ -765,12 +746,12 @@ pub fn active_constraint_tangent_geometry(
     // normal direction: the next accepted point then falls off the working
     // face and discards the entire warm active set. The thin SVD gives the row
     // rank without normal equations; complete its right-singular row basis to
-    // an orthonormal null basis using twice-reorthogonalized coordinate axes.
+    // an orthonormal null basis by pivoted Gram–Schmidt on the coordinate axes.
     //
     // Left singular vectors are NOT requested here: this entry point answers
     // only the tangent question, and the callers that also need the affine
     // particular solution go through `active_constraint_face_geometry`, which
-    // pays for `U` once and shares this exact rank rule.
+    // pays for `U` once and shares this exact rank rule and completion.
     let (_u, singular, vt) = normalized
         .svd(false, true)
         .map_err(|error| format!("active constraint tangent SVD failed: {error}"))?;
@@ -1005,6 +986,34 @@ mod active_constraint_tangent_geometry_tests {
         }
     }
 
+    /// #2469: the row rank is read at the SVD's own band `max(rows, p)·ε·σ_max`.
+    /// Two unit rows at angle `θ ≈ 1.33e-14` have `σ₂ ≈ θ/√2 ≈ 9.4e-15`, ten
+    /// times that band (`3·ε·√2 ≈ 9.4e-16`) and a tenth of the `100×` cutoff it
+    /// replaced. The face is rank two, and its tangent is the one untouched axis.
+    #[test]
+    fn row_rank_is_read_at_the_svd_rounding_band_2469() {
+        let theta = 1.33e-14_f64;
+        let a = ndarray::array![[1.0, 0.0, 0.0], [1.0, theta, 0.0]];
+        let geometry = active_constraint_face_geometry(&a).expect("face geometry");
+        let smax = geometry.singular.iter().fold(0.0_f64, |acc, &s| acc.max(s));
+        let band = 3.0 * f64::EPSILON * smax;
+        let smallest = geometry.singular.iter().fold(f64::INFINITY, |acc, &s| acc.min(s));
+        assert!(
+            smallest > band && smallest < 100.0 * band,
+            "fixture premise: the second singular value {smallest:.3e} sits between the band \
+             {band:.3e} and the replaced cutoff {:.3e}",
+            100.0 * band
+        );
+        assert_eq!(geometry.rank(), 2);
+        let ActiveConstraintTangentGeometry::Tangent(z) =
+            active_constraint_tangent_geometry(&a).expect("tangent geometry")
+        else {
+            panic!("a rank-two face in three dimensions has a tangent");
+        };
+        assert_eq!(z.dim(), (3, 1));
+        assert!((z[[2, 0]].abs() - 1.0).abs() <= 4.0 * f64::EPSILON);
+    }
+
     #[test]
     fn face_geometry_and_tangent_geometry_cannot_disagree_about_rank_2600() {
         // Two rows whose normalized independence is O(1e-8) and a third
@@ -1023,7 +1032,7 @@ mod active_constraint_tangent_geometry_tests {
             panic!("face geometry must agree that the face has a tangent");
         };
         assert_eq!(direct.dim(), shared.dim());
-        // Both bases are built by the same twice-reorthogonalized completion
+        // Both bases are built by the same pivoted completion
         // from the same rank, so they span the same line; assert the span
         // rather than the bits, since only one of the two SVD calls also asks
         // for `U` and the factorization is free to differ in the last digits.

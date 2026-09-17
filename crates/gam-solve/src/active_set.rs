@@ -425,12 +425,13 @@ pub fn binding_constraint_rows(
 }
 
 /// The SVD's own rounding band `max(rows, cols)·ε·σ_max` for a `rows × cols`
-/// matrix: a singular value at or below it is indistinguishable from zero. There
-/// is no absolute floor and no extra factor, so `cR` has the rank of `R` for every
+/// matrix, read from its one owner `gam_linalg::roundoff::factor_singular_band`:
+/// a singular value at or below it is indistinguishable from zero. There is no
+/// absolute floor and no extra factor, so `cR` has the rank of `R` for every
 /// `c > 0` (#2469).
 pub(crate) fn svd_rank_band(singular: &Array1<f64>, rows: usize, cols: usize) -> f64 {
     let smax = singular.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
-    smax * (rows.max(cols) as f64) * f64::EPSILON
+    gam_linalg::roundoff::factor_singular_band(rows, cols, smax)
 }
 
 /// Numerical rank of a `rows × cols` matrix from its singular values, at
