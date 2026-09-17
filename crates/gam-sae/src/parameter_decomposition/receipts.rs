@@ -28,8 +28,10 @@
 //! The model counts rounded binary64 operations in round-to-nearest. So a band is valid
 //! only for an executor that evaluates the stage in IEEE binary64 with one rounding per
 //! basic operation. A float32 or bfloat16 execution, or TF32 matrix multiplication,
-//! rounds at a coarser precision that no binary64 band covers. A caller holding such an
-//! execution refuses instead of comparing (mpd-verify on #2951).
+//! rounds at a coarser precision that no binary64 band covers. [`compare_stage`] takes
+//! the external [`ExternalExecution`] record and refuses such an execution before any
+//! verdict exists, so neither `agrees` nor `refutes` can be read without the check
+//! (mpd-verify and mpd-spec on #2951). The native side is Rust `f64`, binary64 by type.
 //!
 //! Two implementations of a special function (torch's `erf` against gam-math's
 //! `erfc`) share no derivation here. A receipt evaluates the native activation at
@@ -42,6 +44,24 @@ use gam_linalg::roundoff::accumulation_growth;
 use ndarray::{Array2, ArrayView1, ArrayView2};
 use std::fmt;
 
+/// What an external executor ran a stage in, as it reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExternalExecution<'a> {
+    /// The executed dtype's name, e.g. torch's `"float64"`.
+    pub dtype: &'a str,
+    /// The executing device. It is recorded, not gated: float64 BLAS on a CPU or a GPU,
+    /// with blocked sums or fused multiply-add, stays inside the rounding model.
+    pub device: &'a str,
+    /// Whether TF32 matrix multiplication was enabled.
+    pub tf32_matmul: bool,
+}
+
+impl ExternalExecution<'_> {
+    fn covered_by_binary64_bands(&self) -> bool {
+        self.dtype == "float64" && !self.tf32_matmul
+    }
+}
+
 /// A refused receipt computation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ReceiptRefusal {
@@ -52,6 +72,9 @@ pub enum ReceiptRefusal {
         row: usize,
         column: usize,
     },
+    /// The external stage was not executed in binary64 with TF32 off, so no band here
+    /// covers it.
+    ExternalPrecision { float64: bool, tf32_matmul: bool },
 }
 
 impl From<ShapeMismatch> for ReceiptRefusal {
@@ -67,6 +90,14 @@ impl fmt::Display for ReceiptRefusal {
             Self::NonFinite { array, row, column } => write!(
                 formatter,
                 "the receipt's {array} has a non-finite entry at ({row}, {column})"
+            ),
+            Self::ExternalPrecision {
+                float64,
+                tf32_matmul,
+            } => write!(
+                formatter,
+                "the external stage was not executed in binary64 with TF32 off (float64: {float64}, \
+                 tf32_matmul: {tf32_matmul}), so no binary64 band covers it"
             ),
         }
     }
@@ -219,12 +250,22 @@ fn require_finite(array: &'static str, values: ArrayView2<'_, f64>) -> Result<()
 
 /// Compares an external executor's stage output with the native one against their
 /// bands.
+///
+/// It refuses before comparing unless `external_execution` is binary64 with TF32 off,
+/// the precondition every band here assumes.
 pub fn compare_stage(
+    external_execution: ExternalExecution<'_>,
     external: ArrayView2<'_, f64>,
     native: ArrayView2<'_, f64>,
     external_band: ArrayView2<'_, f64>,
     native_band: ArrayView2<'_, f64>,
 ) -> Result<StageAgreement, ReceiptRefusal> {
+    if !external_execution.covered_by_binary64_bands() {
+        return Err(ReceiptRefusal::ExternalPrecision {
+            float64: external_execution.dtype == "float64",
+            tf32_matmul: external_execution.tf32_matmul,
+        });
+    }
     let (rows, columns) = native.dim();
     for (what, array) in [
         ("external", external),
@@ -282,6 +323,13 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
 
+    /// The execution record of a Rust-native "external" program in these tests.
+    const BINARY64_CPU: ExternalExecution<'static> = ExternalExecution {
+        dtype: "float64",
+        device: "cpu",
+        tf32_matmul: false,
+    };
+
     fn uniform(rng: &mut StdRng, rows: usize, cols: usize) -> Array2<f64> {
         Array2::from_shape_simple_fn((rows, cols), || rng.random_range(-1.0..1.0))
     }
@@ -324,14 +372,26 @@ mod tests {
         assert_eq!((forward[[0, 0]], reverse[[0, 0]]), (0.0, 14.0));
 
         let band = affine_stage_band(weight.view(), None, inputs.view()).expect("shapes compose");
-        let agreement = compare_stage(forward.view(), reverse.view(), band.view(), band.view())
-            .expect("finite arrays");
+        let agreement = compare_stage(
+            BINARY64_CPU,
+            forward.view(),
+            reverse.view(),
+            band.view(),
+            band.view(),
+        )
+        .expect("finite arrays");
         assert!(agreement.agrees && !agreement.refutes, "{agreement:?}");
 
         let absolute_sum = 2.0_f64.powi(54) + 14.0;
         let shallow = Array2::from_elem((1, 1), evaluation_band(1, absolute_sum));
-        let refuted = compare_stage(forward.view(), reverse.view(), shallow.view(), shallow.view())
-            .expect("finite arrays");
+        let refuted = compare_stage(
+            BINARY64_CPU,
+            forward.view(),
+            reverse.view(),
+            shallow.view(),
+            shallow.view(),
+        )
+        .expect("finite arrays");
         assert!(
             !refuted.agrees && refuted.refutes,
             "a depth-one band must be refuted by fourteen: {refuted:?}"
@@ -376,14 +436,26 @@ mod tests {
             inputs.view(),
         )
         .expect("shapes compose");
-        let agreement = compare_stage(dense.view(), matrix_free.view(), band.view(), band.view())
-            .expect("finite arrays");
+        let agreement = compare_stage(
+            BINARY64_CPU,
+            dense.view(),
+            matrix_free.view(),
+            band.view(),
+            band.view(),
+        )
+        .expect("finite arrays");
         assert!(agreement.agrees, "{agreement:?}");
 
         let mut displaced = matrix_free.clone();
         displaced[[2, 1]] += 2.0 * (band[[2, 1]] + band[[2, 1]]);
-        let refuted = compare_stage(dense.view(), displaced.view(), band.view(), band.view())
-            .expect("finite arrays");
+        let refuted = compare_stage(
+            BINARY64_CPU,
+            dense.view(),
+            displaced.view(),
+            band.view(),
+            band.view(),
+        )
+        .expect("finite arrays");
         assert!(!refuted.agrees && refuted.refutes);
         assert_eq!(refuted.witness, (2, 1));
     }
@@ -397,8 +469,14 @@ mod tests {
         let native = Array2::from_elem((1, 1), 1.0);
         let verdict = |half_band: f64| {
             let band = Array2::from_elem((1, 1), half_band);
-            compare_stage(external.view(), native.view(), band.view(), band.view())
-                .expect("finite arrays")
+            compare_stage(
+                BINARY64_CPU,
+                external.view(),
+                native.view(),
+                band.view(),
+                band.view(),
+            )
+            .expect("finite arrays")
         };
 
         let boundary = verdict(0.5);
@@ -417,22 +495,64 @@ mod tests {
     fn compare_stage_refuses_mismatched_shapes_and_non_finite_entries() {
         let values = Array2::<f64>::zeros((2, 3));
         let band = Array2::<f64>::zeros((2, 3));
-        assert!(compare_stage(values.view(), values.view(), band.view(), band.view()).is_ok());
+        assert!(
+            compare_stage(BINARY64_CPU, values.view(), values.view(), band.view(), band.view())
+                .is_ok()
+        );
 
         let narrow = Array2::<f64>::zeros((2, 2));
         assert!(matches!(
-            compare_stage(narrow.view(), values.view(), band.view(), band.view()),
+            compare_stage(BINARY64_CPU, narrow.view(), values.view(), band.view(), band.view()),
             Err(ReceiptRefusal::Shape(..))
         ));
 
         let mut poisoned = values.clone();
         poisoned[[1, 2]] = f64::NAN;
         assert_eq!(
-            compare_stage(poisoned.view(), values.view(), band.view(), band.view()),
+            compare_stage(BINARY64_CPU, poisoned.view(), values.view(), band.view(), band.view()),
             Err(ReceiptRefusal::NonFinite {
                 array: "external output",
                 row: 1,
                 column: 2,
+            })
+        );
+    }
+
+    /// An external stage that no binary64 band covers is refused before any verdict:
+    /// a float32 execution, and a float64 execution with TF32 matmul on. Positive
+    /// control: the same arrays under a binary64 record compare and agree.
+    #[test]
+    fn compare_stage_refuses_an_execution_no_binary64_band_covers() {
+        let values = Array2::<f64>::zeros((2, 3));
+        let band = Array2::<f64>::zeros((2, 3));
+        let agreement =
+            compare_stage(BINARY64_CPU, values.view(), values.view(), band.view(), band.view())
+                .expect("a binary64 execution compares");
+        assert!(agreement.agrees && !agreement.refutes, "{agreement:?}");
+
+        let float32 = ExternalExecution {
+            dtype: "float32",
+            device: "cpu",
+            tf32_matmul: false,
+        };
+        assert_eq!(
+            compare_stage(float32, values.view(), values.view(), band.view(), band.view()),
+            Err(ReceiptRefusal::ExternalPrecision {
+                float64: false,
+                tf32_matmul: false,
+            })
+        );
+
+        let tf32 = ExternalExecution {
+            dtype: "float64",
+            device: "cuda",
+            tf32_matmul: true,
+        };
+        assert_eq!(
+            compare_stage(tf32, values.view(), values.view(), band.view(), band.view()),
+            Err(ReceiptRefusal::ExternalPrecision {
+                float64: true,
+                tf32_matmul: true,
             })
         );
     }
