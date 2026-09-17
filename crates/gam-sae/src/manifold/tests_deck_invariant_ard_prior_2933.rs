@@ -236,8 +236,10 @@ fn assert_systems_transform(
     }
 }
 
-/// Dense route: reconstruction, prior value, transformed gradient and Hessian
-/// action all agree at deck-equivalent representatives, on every quotient kind.
+/// Dense route: reconstruction, prior value and total agree at deck-equivalent
+/// representatives on every quotient cover. The transformed gradient and Hessian
+/// action agree on every cover the dense assembly admits, and the charted `RP²` it
+/// does not admit is refused with its typed error.
 #[test]
 fn dense_objective_is_deck_invariant_on_every_quotient_2933() {
     for case in quotient_cases() {
@@ -272,6 +274,26 @@ fn dense_objective_is_deck_invariant_on_every_quotient_2933() {
             other_loss.ard
         );
 
+        // The dense Arrow route takes a spherical kind only on its ambient cover:
+        // `push_atom_row_gauge_deflations` refuses a charted `RP²` with a typed
+        // error. Pin that refusal at both representatives, so a dense route that
+        // admits the chart, or panics on it, fails here and brings the assembly
+        // comparison back. The chart's assembly is compared on the support-sparse
+        // route.
+        if case.kind == SaeAtomBasisKind::ProjectivePlane && case.latent_dim != 3 {
+            for term in [&mut cover, &mut twin] {
+                let refusal = term
+                    .assemble_arrow_schur(target.view(), &rho, None)
+                    .err()
+                    .expect("dense assembly must refuse a charted RP²");
+                assert!(
+                    refusal.contains("requires latent dimension 3"),
+                    "{}: the dense assembly refusal names another cause: {refusal}",
+                    case.name
+                );
+            }
+            continue;
+        }
         let cover_system = cover
             .assemble_arrow_schur(target.view(), &rho, None)
             .expect("cover assembly");
