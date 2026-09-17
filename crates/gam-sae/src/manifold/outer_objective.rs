@@ -4657,6 +4657,14 @@ pub(crate) fn transport_smooth_penalty_for_decoder(
     ))
 }
 
+/// The numerical-rank cutoff [`solve_design_least_squares`] applies: a singular value
+/// at or below it is dropped from the pseudo-inverse. A caller asking whether that
+/// solve returns the unique least-squares solution rather than the minimum-norm one
+/// reads the design's rank against this same cutoff.
+pub(crate) fn design_rank_cutoff(sigma_max: f64, rows: usize, cols: usize) -> f64 {
+    sigma_max * f64::EPSILON * (rows.max(cols) as f64)
+}
+
 pub(crate) fn solve_design_least_squares(
     design: ArrayView2<'_, f64>,
     rhs: ArrayView2<'_, f64>,
@@ -4678,7 +4686,7 @@ pub(crate) fn solve_design_least_squares(
     if !(smax.is_finite() && smax > 0.0) {
         return Err("solve_design_least_squares: design has zero numerical rank".to_string());
     }
-    let cutoff = smax * f64::EPSILON * (design.nrows().max(design.ncols()) as f64);
+    let cutoff = design_rank_cutoff(smax, design.nrows(), design.ncols());
     let coeffs = u.t().dot(&rhs);
     let mut scaled = Array2::<f64>::zeros(coeffs.dim());
     for row in 0..sigma.len() {

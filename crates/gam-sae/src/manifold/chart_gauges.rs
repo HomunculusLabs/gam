@@ -15,189 +15,209 @@ impl SaeManifoldTerm {
         let total_len = n * q + self.factored_border_dim();
         let mut out = Vec::new();
         for atom_idx in 0..self.k_atoms() {
-            let d = self.assignment.coords[atom_idx].latent_dim();
-            let coords = self.assignment.coords[atom_idx].as_matrix();
-            match self.atoms[atom_idx].basis_kind() {
-                // The Poincaré tangent patch shares the Euclidean patch's
-                // translation + scale gauge orbit on the tangent coordinate
-                // (the hyperbolic structure lives in the penalty, not the
-                // gauge), so it deflates the same step-gauge vectors.
-                // The genuinely-linear (affine) atom shares the Euclidean patch's
-                // translation + scale gauge orbit on its tangent coordinate (its
-                // constant column carries the translation gauge, its `t` column
-                // the scale gauge), so it deflates the same step-gauge vectors.
-                SaeAtomBasisKind::Linear
-                | SaeAtomBasisKind::EuclideanPatch
-                | SaeAtomBasisKind::Poincare => {
-                    for axis in 0..d {
-                        let mut field = Array2::<f64>::zeros((n, d));
-                        field.column_mut(axis).fill(1.0);
-                        if let Some(g) = self.dense_step_gauge_vector_from_field(
-                            atom_idx,
-                            field.view(),
-                            &coord_offsets,
-                            &beta_offsets,
-                            total_len,
-                        )? {
-                            out.push(g);
-                        }
-                    }
-                    for axis in 0..d {
-                        let mut field = Array2::<f64>::zeros((n, d));
-                        for row in 0..n {
-                            field[[row, axis]] = coords[[row, axis]];
-                        }
-                        if let Some(g) = self.dense_step_gauge_vector_from_field(
-                            atom_idx,
-                            field.view(),
-                            &coord_offsets,
-                            &beta_offsets,
-                            total_len,
-                        )? {
-                            out.push(g);
-                        }
-                    }
-                }
-                SaeAtomBasisKind::Duchon => {
-                    for axis in 0..d {
-                        let mut field = Array2::<f64>::zeros((n, d));
-                        field.column_mut(axis).fill(1.0);
-                        if let Some(g) = self.dense_step_gauge_vector_from_field(
-                            atom_idx,
-                            field.view(),
-                            &coord_offsets,
-                            &beta_offsets,
-                            total_len,
-                        )? {
-                            out.push(g);
-                        }
-                    }
-                    for axis in 0..d {
-                        let mut field = Array2::<f64>::zeros((n, d));
-                        for row in 0..n {
-                            field[[row, axis]] = coords[[row, axis]];
-                        }
-                        if let Some(g) = self.dense_step_gauge_vector_from_field(
-                            atom_idx,
-                            field.view(),
-                            &coord_offsets,
-                            &beta_offsets,
-                            total_len,
-                        )? {
-                            out.push(g);
-                        }
-                    }
-                }
-                SaeAtomBasisKind::Periodic | SaeAtomBasisKind::Torus => {
-                    for axis in 0..d {
-                        let mut field = Array2::<f64>::zeros((n, d));
-                        field.column_mut(axis).fill(1.0);
-                        if let Some(g) = self.dense_step_gauge_vector_from_field(
-                            atom_idx,
-                            field.view(),
-                            &coord_offsets,
-                            &beta_offsets,
-                            total_len,
-                        )? {
-                            out.push(g);
-                        }
-                    }
-                }
-                SaeAtomBasisKind::KleinBottle => {
-                    if d != 2 {
-                        return Err(format!(
-                            "dense_step_gauge_vectors: Klein atom {atom_idx} requires latent dimension 2, got {d}"
-                        ));
-                    }
-                    let mut field = Array2::<f64>::zeros((n, d));
-                    field.column_mut(0).fill(1.0);
-                    if let Some(g) = self.dense_step_gauge_vector_from_field(
-                        atom_idx,
-                        field.view(),
-                        &coord_offsets,
-                        &beta_offsets,
-                        total_len,
-                    )? {
-                        out.push(g);
-                    }
-                }
-                SaeAtomBasisKind::Sphere | SaeAtomBasisKind::ProjectivePlane => {
-                    if d != 3 {
-                        return Err(format!(
-                            "dense_step_gauge_vectors: spherical atom {atom_idx} rides the ambient cover and requires latent dimension 3, got {d}"
-                        ));
-                    }
-                    let mut fields = [
-                        Array2::<f64>::zeros((n, d)),
-                        Array2::<f64>::zeros((n, d)),
-                        Array2::<f64>::zeros((n, d)),
-                    ];
-                    for row in 0..n {
-                        let directions = ambient_sphere_killing_directions([
-                            coords[[row, 0]],
-                            coords[[row, 1]],
-                            coords[[row, 2]],
-                        ]);
-                        for generator in 0..3 {
-                            for axis in 0..3 {
-                                fields[generator][[row, axis]] = directions[generator][axis];
-                            }
-                        }
-                    }
-                    for field in fields {
-                        if let Some(g) = self.dense_step_gauge_vector_from_field(
-                            atom_idx,
-                            field.view(),
-                            &coord_offsets,
-                            &beta_offsets,
-                            total_len,
-                        )? {
-                            out.push(g);
-                        }
-                    }
-                }
-                // `Cylinder` (`S¹ × ℝ`) carries exactly one continuous gauge: the
-                // shift (rotation) of the periodic axis 0. The line axis 1 has no
-                // rotational gauge and its translation is pinned by the constant
-                // column, so we deflate only the axis-0 constant-shift field —
-                // matching the `AtomTopology::Circle` identifiability choice.
-                SaeAtomBasisKind::Cylinder => {
-                    let mut field = Array2::<f64>::zeros((n, d));
-                    if d > 0 {
-                        field.column_mut(0).fill(1.0);
-                    }
-                    if let Some(g) = self.dense_step_gauge_vector_from_field(
-                        atom_idx,
-                        field.view(),
-                        &coord_offsets,
-                        &beta_offsets,
-                        total_len,
-                    )? {
-                        out.push(g);
-                    }
-                }
-                // The remaining kinds deflate no dense step gauge, each for its
-                // own reason — spelled out as named arms so a new topology has
-                // to state its gauge orbit here instead of silently inheriting
-                // "none" from a wildcard.
-                //
-                // * `Mobius`: the half-twist lives in the parity culling of the
-                //   basis (`trig(πks)·wᵐ`, `k + m` even), so a constant shift of
-                //   the double-cover phase is NOT a symmetry of the culled span
-                //   the way it is for `Periodic`/`Torus`; there is no enumerated
-                //   continuous orbit to project out.
-                // * `FiniteSet`: the latent is CATEGORICAL (anchor indicators),
-                //   so there is no continuous coordinate to move along at all.
-                // * `Precomputed`: the basis is supplied from outside this
-                //   module and carries no declared gauge structure, so nothing
-                //   may be assumed deflatable.
-                SaeAtomBasisKind::Mobius
-                | SaeAtomBasisKind::FiniteSet
-                | SaeAtomBasisKind::Precomputed(_) => {}
-            }
+            out.extend(self.dense_step_gauge_vectors_of_atom(
+                atom_idx,
+                &coord_offsets,
+                &beta_offsets,
+                total_len,
+            )?);
         }
         if p == 0 {
             return Ok(Vec::new());
+        }
+        Ok(out)
+    }
+
+    /// One atom's declared step gauge generators: the per-kind menu that
+    /// [`Self::dense_step_gauge_vectors`] concatenates over atoms, in atom order.
+    fn dense_step_gauge_vectors_of_atom(
+        &self,
+        atom_idx: usize,
+        coord_offsets: &[usize],
+        beta_offsets: &[usize],
+        total_len: usize,
+    ) -> Result<Vec<Array1<f64>>, String> {
+        let n = self.n_obs();
+        let mut out = Vec::new();
+        let d = self.assignment.coords[atom_idx].latent_dim();
+        let coords = self.assignment.coords[atom_idx].as_matrix();
+        match self.atoms[atom_idx].basis_kind() {
+            // The Poincaré tangent patch shares the Euclidean patch's
+            // translation + scale gauge orbit on the tangent coordinate
+            // (the hyperbolic structure lives in the penalty, not the
+            // gauge), so it deflates the same step-gauge vectors.
+            // The genuinely-linear (affine) atom shares the Euclidean patch's
+            // translation + scale gauge orbit on its tangent coordinate (its
+            // constant column carries the translation gauge, its `t` column
+            // the scale gauge), so it deflates the same step-gauge vectors.
+            SaeAtomBasisKind::Linear
+            | SaeAtomBasisKind::EuclideanPatch
+            | SaeAtomBasisKind::Poincare => {
+                for axis in 0..d {
+                    let mut field = Array2::<f64>::zeros((n, d));
+                    field.column_mut(axis).fill(1.0);
+                    if let Some(g) = self.dense_step_gauge_vector_from_field(
+                        atom_idx,
+                        field.view(),
+                        &coord_offsets,
+                        &beta_offsets,
+                        total_len,
+                    )? {
+                        out.push(g);
+                    }
+                }
+                for axis in 0..d {
+                    let mut field = Array2::<f64>::zeros((n, d));
+                    for row in 0..n {
+                        field[[row, axis]] = coords[[row, axis]];
+                    }
+                    if let Some(g) = self.dense_step_gauge_vector_from_field(
+                        atom_idx,
+                        field.view(),
+                        &coord_offsets,
+                        &beta_offsets,
+                        total_len,
+                    )? {
+                        out.push(g);
+                    }
+                }
+            }
+            SaeAtomBasisKind::Duchon => {
+                for axis in 0..d {
+                    let mut field = Array2::<f64>::zeros((n, d));
+                    field.column_mut(axis).fill(1.0);
+                    if let Some(g) = self.dense_step_gauge_vector_from_field(
+                        atom_idx,
+                        field.view(),
+                        &coord_offsets,
+                        &beta_offsets,
+                        total_len,
+                    )? {
+                        out.push(g);
+                    }
+                }
+                for axis in 0..d {
+                    let mut field = Array2::<f64>::zeros((n, d));
+                    for row in 0..n {
+                        field[[row, axis]] = coords[[row, axis]];
+                    }
+                    if let Some(g) = self.dense_step_gauge_vector_from_field(
+                        atom_idx,
+                        field.view(),
+                        &coord_offsets,
+                        &beta_offsets,
+                        total_len,
+                    )? {
+                        out.push(g);
+                    }
+                }
+            }
+            SaeAtomBasisKind::Periodic | SaeAtomBasisKind::Torus => {
+                for axis in 0..d {
+                    let mut field = Array2::<f64>::zeros((n, d));
+                    field.column_mut(axis).fill(1.0);
+                    if let Some(g) = self.dense_step_gauge_vector_from_field(
+                        atom_idx,
+                        field.view(),
+                        &coord_offsets,
+                        &beta_offsets,
+                        total_len,
+                    )? {
+                        out.push(g);
+                    }
+                }
+            }
+            SaeAtomBasisKind::KleinBottle => {
+                if d != 2 {
+                    return Err(format!(
+                        "dense_step_gauge_vectors: Klein atom {atom_idx} requires latent dimension 2, got {d}"
+                    ));
+                }
+                let mut field = Array2::<f64>::zeros((n, d));
+                field.column_mut(0).fill(1.0);
+                if let Some(g) = self.dense_step_gauge_vector_from_field(
+                    atom_idx,
+                    field.view(),
+                    &coord_offsets,
+                    &beta_offsets,
+                    total_len,
+                )? {
+                    out.push(g);
+                }
+            }
+            SaeAtomBasisKind::Sphere | SaeAtomBasisKind::ProjectivePlane => {
+                if d != 3 {
+                    return Err(format!(
+                        "dense_step_gauge_vectors: spherical atom {atom_idx} rides the ambient cover and requires latent dimension 3, got {d}"
+                    ));
+                }
+                let mut fields = [
+                    Array2::<f64>::zeros((n, d)),
+                    Array2::<f64>::zeros((n, d)),
+                    Array2::<f64>::zeros((n, d)),
+                ];
+                for row in 0..n {
+                    let directions = ambient_sphere_killing_directions([
+                        coords[[row, 0]],
+                        coords[[row, 1]],
+                        coords[[row, 2]],
+                    ]);
+                    for generator in 0..3 {
+                        for axis in 0..3 {
+                            fields[generator][[row, axis]] = directions[generator][axis];
+                        }
+                    }
+                }
+                for field in fields {
+                    if let Some(g) = self.dense_step_gauge_vector_from_field(
+                        atom_idx,
+                        field.view(),
+                        &coord_offsets,
+                        &beta_offsets,
+                        total_len,
+                    )? {
+                        out.push(g);
+                    }
+                }
+            }
+            // `Cylinder` (`S¹ × ℝ`) carries exactly one continuous gauge: the
+            // shift (rotation) of the periodic axis 0. The line axis 1 has no
+            // rotational gauge and its translation is pinned by the constant
+            // column, so we deflate only the axis-0 constant-shift field —
+            // matching the `AtomTopology::Circle` identifiability choice.
+            SaeAtomBasisKind::Cylinder => {
+                let mut field = Array2::<f64>::zeros((n, d));
+                if d > 0 {
+                    field.column_mut(0).fill(1.0);
+                }
+                if let Some(g) = self.dense_step_gauge_vector_from_field(
+                    atom_idx,
+                    field.view(),
+                    &coord_offsets,
+                    &beta_offsets,
+                    total_len,
+                )? {
+                    out.push(g);
+                }
+            }
+            // The remaining kinds deflate no dense step gauge, each for its
+            // own reason — spelled out as named arms so a new topology has
+            // to state its gauge orbit here instead of silently inheriting
+            // "none" from a wildcard.
+            //
+            // * `Mobius`: the half-twist lives in the parity culling of the
+            //   basis (`trig(πks)·wᵐ`, `k + m` even), so a constant shift of
+            //   the double-cover phase is NOT a symmetry of the culled span
+            //   the way it is for `Periodic`/`Torus`; there is no enumerated
+            //   continuous orbit to project out.
+            // * `FiniteSet`: the latent is CATEGORICAL (anchor indicators),
+            //   so there is no continuous coordinate to move along at all.
+            // * `Precomputed`: the basis is supplied from outside this
+            //   module and carries no declared gauge structure, so nothing
+            //   may be assumed deflatable.
+            SaeAtomBasisKind::Mobius
+            | SaeAtomBasisKind::FiniteSet
+            | SaeAtomBasisKind::Precomputed(_) => {}
         }
         Ok(out)
     }
@@ -329,34 +349,71 @@ impl SaeManifoldTerm {
         Ok(basis)
     }
 
-    /// Closed-form chart-gauge directions restricted to the reduced β border.
+    /// Closed-form chart-gauge directions restricted to the reduced β border, for
+    /// the generators along which every term of the penalized objective is
+    /// structurally invariant.
     ///
     /// Each returned vector is the β (decoder-border) component of a
     /// [`Self::dense_step_gauge_vectors`] orbit — the exact decoder compensation
     /// `δβ` that, paired with the coordinate motion `δt`, leaves the atom
     /// reconstruction invariant (`Φ(t+δt)·(β+δβ) = Φ(t)·β` to first order).
     ///
-    /// By the arrow-Schur identity these β-components are exactly the null
-    /// directions of the reduced β-Schur complement `S_β = H_ββ − H_βt H_tt⁻¹
-    /// H_tβ`: from `H·(δt,δβ)ᵀ = 0` the elimination `δt = −H_tt⁻¹ H_tβ δβ` gives
-    /// `S_β δβ = 0`. Installing them as an [`ArrowBetaGaugeQuotient`] therefore
-    /// gauge-fixes the reduced Newton solve to the Faddeev–Popov quotient
-    /// `P S_β P + Q Qᵀ` (`P = I − Q Qᵀ`), replacing an exactly-singular `S_β`
-    /// with a well-conditioned operator whose gauge directions carry curvature
-    /// `1`. The identifiable complement is untouched, so the step is unchanged
-    /// off the orbit — only the orbit drift (the #2228 circle-rotation crawl that
-    /// walks `t` off the manifold over the outer ρ-walk) is removed.
+    /// Reconstruction invariance alone does not make a generator a null of the
+    /// reduced β-Schur `S_β`. A term the orbit moves gives it slope and curvature,
+    /// and installing that direction as an [`ArrowBetaGaugeQuotient`] projects live
+    /// gradient out of the Newton step. On #2267's k2 fit the declared chart gauge
+    /// carried |g_β| = 440.8 where the projected step saw |P g_β| = 0.714, and the fit
+    /// died on "adaptive proximal correction failed" (sae2267's lane-only probe, job
+    /// 617095). So a generator is declared only where invariance holds by
+    /// construction, term by term:
     ///
-    /// The count is a structural property of the chart menu (one per circle /
-    /// torus phase, translation+scale for the linear/euclidean/Duchon patches),
-    /// so — unlike a spectral-floor discovery — it does not flicker across the
+    /// * Reconstruction: the compensation `δβ` holds it by construction.
+    /// * Gate priors, including the logit Jacobians: they read only logits, which no
+    ///   chart generator moves.
+    /// * Decoder smoothing, the amplitude and separation barriers, and decoder
+    ///   repulsion: invariant when `δβ` rotates the basis coefficients orthogonally.
+    ///   That is exactly the phase and Killing generators of the harmonic families
+    ///   (periodic, torus, sphere, projective plane, Klein bottle, cylinder axis 0),
+    ///   whose roughness is Laplacian and so diagonal by frequency. The translation
+    ///   and scale generators of the linear, Euclidean, Poincaré and Duchon patches
+    ///   compensate non-orthogonally, so smoothing breaks them and they are never
+    ///   declared.
+    /// * Coordinate ARD: its centered prior, `½αt²` or `(α/κ²)(1 − cos κt)`, moves
+    ///   under every generator on its axes, so an atom with ARD enabled declares
+    ///   nothing.
+    /// * Analytic registry penalties can target any slice, so any present penalty
+    ///   withholds every declaration.
+    /// * The rotation argument needs `δβ` to BE the coefficient rotation. The solve
+    ///   returns it only when the atom's compensation design has full column rank
+    ///   ([`Self::atom_compensation_has_full_column_rank`]); otherwise it returns
+    ///   the minimum-norm compensation, which the penalties see move, so a
+    ///   rank-deficient atom declares nothing. A two-atom torus on 42 rows with
+    ///   M = 49 carried smoothing slope at 2148x to 8840x the inner tolerance along
+    ///   its declared generators (sae2267, job 1102636).
+    ///
+    /// Where nothing is declared, the step solves the direction with its real
+    /// curvature. Installing the declared set as the Faddeev–Popov quotient
+    /// `P S_β P + Q Qᵀ` (`P = I − Q Qᵀ`) removes only a true null. The count follows
+    /// from the chart menu and the model's terms, so it does not flicker across the
     /// ρ-walk (#2253).
-    pub(crate) fn closed_form_beta_gauge_directions(&self) -> Result<Vec<Array1<f64>>, String> {
+    pub(crate) fn closed_form_beta_gauge_directions(
+        &self,
+        rho: &SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+    ) -> Result<Vec<Array1<f64>>, String> {
         let border = self.factored_border_dim();
         if border == 0 {
             return Ok(Vec::new());
         }
-        let coord_len = self.n_obs() * self.assignment.row_block_dim();
+        if registry.is_some_and(|registry| !registry.penalties.is_empty()) {
+            return Ok(Vec::new());
+        }
+        let n = self.n_obs();
+        let q = self.assignment.row_block_dim();
+        let coord_offsets = self.assignment.coord_offsets();
+        let beta_offsets = self.factored_border_offsets();
+        let coord_len = n * q;
+        let total_len = coord_len + border;
         let mut out = Vec::new();
         // Independence probe for the emitted set. `ArrowBetaGaugeQuotient::new`
         // treats a linearly dependent direction as a MALFORMED DECLARATION and
@@ -394,33 +451,116 @@ impl SaeManifoldTerm {
         // MGS over the survivors reproduces its previous arithmetic step for
         // step. The ONLY fits that move are the ones that previously died.
         let mut probe: Vec<Array1<f64>> = Vec::new();
-        for gauge in self.dense_step_gauge_vectors()? {
-            if gauge.len() != coord_len + border {
+        for atom_idx in 0..self.k_atoms() {
+            if !self.atom_step_gauge_is_structural_null(atom_idx, rho)? {
                 continue;
             }
-            let beta_part = gauge.slice(s![coord_len..]).to_owned();
-            let norm_sq = beta_part.iter().map(|&v| v * v).sum::<f64>();
-            // A gauge whose reconstruction motion is entirely absorbed by the
-            // coordinate block (no decoder compensation) contributes no β-Schur
-            // null direction; skip it so the quotient stays exactly the reduced
-            // border nullspace.
-            if !(norm_sq.is_finite() && norm_sq > 1.0e-24) {
-                continue;
+            for gauge in self.dense_step_gauge_vectors_of_atom(
+                atom_idx,
+                &coord_offsets,
+                &beta_offsets,
+                total_len,
+            )? {
+                if gauge.len() != coord_len + border {
+                    continue;
+                }
+                let beta_part = gauge.slice(s![coord_len..]).to_owned();
+                let norm_sq = beta_part.iter().map(|&v| v * v).sum::<f64>();
+                // A gauge whose reconstruction motion is entirely absorbed by the
+                // coordinate block (no decoder compensation) contributes no β-Schur
+                // null direction; skip it so the quotient stays exactly the reduced
+                // border nullspace.
+                if !(norm_sq.is_finite() && norm_sq > 1.0e-24) {
+                    continue;
+                }
+                let mut residual = beta_part.clone();
+                for basis in &probe {
+                    let coefficient = residual.dot(basis);
+                    residual.scaled_add(-coefficient, basis);
+                }
+                let residual_norm_sq = residual.dot(&residual);
+                if !(residual_norm_sq.is_finite() && residual_norm_sq > 0.0) {
+                    continue;
+                }
+                residual *= residual_norm_sq.sqrt().recip();
+                probe.push(residual);
+                out.push(beta_part);
             }
-            let mut residual = beta_part.clone();
-            for basis in &probe {
-                let coefficient = residual.dot(basis);
-                residual.scaled_add(-coefficient, basis);
-            }
-            let residual_norm_sq = residual.dot(&residual);
-            if !(residual_norm_sq.is_finite() && residual_norm_sq > 0.0) {
-                continue;
-            }
-            residual *= residual_norm_sq.sqrt().recip();
-            probe.push(residual);
-            out.push(beta_part);
         }
         Ok(out)
+    }
+
+    /// Whether every term present is structurally invariant along atom
+    /// `atom_idx`'s declared step gauge generators; see
+    /// [`Self::closed_form_beta_gauge_directions`] for the term-by-term derivation.
+    fn atom_step_gauge_is_structural_null(
+        &self,
+        atom_idx: usize,
+        rho: &SaeManifoldRho,
+    ) -> Result<bool, String> {
+        let isometry = matches!(
+            self.atoms[atom_idx].basis_kind(),
+            SaeAtomBasisKind::Periodic
+                | SaeAtomBasisKind::Torus
+                | SaeAtomBasisKind::Sphere
+                | SaeAtomBasisKind::ProjectivePlane
+                | SaeAtomBasisKind::KleinBottle
+                | SaeAtomBasisKind::Cylinder
+        );
+        if !(isometry && rho.log_ard.get(atom_idx).is_some_and(|axes| axes.is_empty())) {
+            return Ok(false);
+        }
+        self.atom_compensation_has_full_column_rank(atom_idx)
+    }
+
+    /// The design `a·Φ` that atom `atom_idx`'s decoder compensation `δβ` is solved
+    /// against: one row per observation, zero where the atom is inactive.
+    fn atom_compensation_design(&self, atom_idx: usize) -> Result<Array2<f64>, String> {
+        let n = self.n_obs();
+        let atom = &self.atoms[atom_idx];
+        let m = atom.basis_size();
+        let mut design = Array2::<f64>::zeros((n, m));
+        for row in 0..n {
+            let a = self.assignment.try_assignments_row(row)?[atom_idx];
+            if a == 0.0 {
+                continue;
+            }
+            for col in 0..m {
+                design[[row, col]] = a * atom.basis_values[[row, col]];
+            }
+        }
+        Ok(design)
+    }
+
+    /// Whether atom `atom_idx`'s compensation design keeps every column above
+    /// [`design_rank_cutoff`], so that [`solve_design_least_squares`] returns the
+    /// unique `δβ` rather than the minimum-norm one.
+    ///
+    /// A harmonic generator moves the atom inside its own span, `∂Φ·ξ = Φ·G`, so the
+    /// exact compensation is the coefficient rotation `δβ = −G β`, and that rotation
+    /// is what leaves the smoothing, the barriers and the repulsion invariant. On a
+    /// rank-deficient design the solve drops the component of `G β` in the design's
+    /// null space: the reconstruction on the active rows is still invariant, but the
+    /// penalties read the dropped component and move.
+    pub(crate) fn atom_compensation_has_full_column_rank(
+        &self,
+        atom_idx: usize,
+    ) -> Result<bool, String> {
+        let design = self.atom_compensation_design(atom_idx)?;
+        let (rows, cols) = design.dim();
+        if rows < cols {
+            return Ok(false);
+        }
+        let decomposition = design.svd(false, false).map_err(|err| {
+            format!("atom_compensation_has_full_column_rank: SVD failed: {err}")
+        })?;
+        let sigma = decomposition.1;
+        let sigma_max = sigma.iter().fold(0.0_f64, |acc, &v| acc.max(v));
+        if !(sigma_max.is_finite() && sigma_max > 0.0) {
+            return Ok(false);
+        }
+        let cutoff = design_rank_cutoff(sigma_max, rows, cols);
+        Ok(sigma.iter().filter(|&&value| value > cutoff).count() == cols)
     }
 
     pub(crate) fn row_gauge_deflation_for_layout(
@@ -615,16 +755,13 @@ impl SaeManifoldTerm {
                 field.dim()
             ));
         }
-        let mut design = Array2::<f64>::zeros((n, m));
+        let design = self.atom_compensation_design(atom_idx)?;
         let mut motion = Array2::<f64>::zeros((n, p));
         for row in 0..n {
             let assignments = self.assignment.try_assignments_row(row)?;
             let a = assignments[atom_idx];
             if a == 0.0 {
                 continue;
-            }
-            for col in 0..m {
-                design[[row, col]] = a * atom.basis_values[[row, col]];
             }
             for axis in 0..d {
                 let dt = field[[row, axis]];

@@ -503,6 +503,11 @@ mod tests_gauge_frame_roundtrip_2720;
 #[cfg(test)]
 mod tests_gauge_posterior_flatness_2720;
 
+/// #2267 — the joint fit's declared chart-gauge quotient must be a null of every
+/// penalized-objective term, swept per kind with coordinate ARD off and on.
+#[cfg(test)]
+mod tests_chart_gauge_structural_null_2267;
+
 #[cfg(test)]
 mod tests_gauge_geometry_2720;
 #[cfg(test)]

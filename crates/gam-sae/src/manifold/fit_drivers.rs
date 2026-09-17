@@ -7120,13 +7120,18 @@ impl SaeManifoldTerm {
             // identifiable complement. The device `solve_sae_matrix_free_pcg`
             // kernel does NOT yet apply the pin, so it is gated off to the CPU path
             // whenever a quotient is present (a follow-up will project in-kernel).
+            //
+            // #2267 — that null holds only where every term is invariant along the
+            // generator, so only those generators are declared
+            // (`closed_form_beta_gauge_directions`). Where a prior moves the orbit,
+            // the step takes the direction with its real slope and curvature.
             if sys.k > 0
                 && matches!(
                     solve_options.mode,
                     ArrowSolverMode::Direct | ArrowSolverMode::SqrtBA | ArrowSolverMode::InexactPCG
                 )
             {
-                match self.closed_form_beta_gauge_directions() {
+                match self.closed_form_beta_gauge_directions(rho, analytic_penalties) {
                     Ok(dirs) if !dirs.is_empty() => {
                         let quotient = ArrowBetaGaugeQuotient::new(dirs).map_err(|err| {
                             format!(
