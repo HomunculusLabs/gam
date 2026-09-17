@@ -1850,10 +1850,21 @@ impl SaeManifoldOuterObjective {
         let residual = self
             .term
             .reconstruction_residual(self.target.view(), &rho)?;
-        let dispersion =
-            self.term
-                .reconstruction_dispersion(&loss, &cache, &rho, residual.view())?;
+        // One decision of which operator the report inverts. On the fixed-frame
+        // route its exact-A geometry feeds both the dispersion's divergence and the
+        // covariance (#2933 F33).
+        let route = self
+            .term
+            .shape_information_route(&rho, self.target.view(), &cache)?;
+        let dispersion = self.term.reconstruction_dispersion_with_geometry(
+            &loss,
+            &cache,
+            &rho,
+            residual.view(),
+            route.fixed_frame_geometry(),
+        )?;
         let information = self.term.shape_information(
+            &route,
             &rho,
             self.target.view(),
             self.registry.as_ref(),

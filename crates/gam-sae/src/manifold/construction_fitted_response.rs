@@ -147,28 +147,13 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
     ) -> Result<FittedResponseDivergence, FittedResponseDivergenceRefusal> {
         let numerical = |reason: String| FittedResponseDivergenceRefusal::Numerical { reason };
-        if target.dim() != (self.n_obs(), self.output_dim()) {
-            return Err(numerical(format!(
-                "target {:?} != ({}, {})",
-                target.dim(),
-                self.n_obs(),
-                self.output_dim()
-            )));
-        }
-        if let Err(reason) = self.atom_second_jets() {
-            return Err(FittedResponseDivergenceRefusal::SecondJetsUnavailable { reason });
-        }
+        self.admit_fitted_response_divergence(target)?;
         let dim = sae_exact_stationarity_dim(cache.delta_t_len(), cache.k);
         if sae_exact_stationarity_admitted(dim, self.host_available_bytes) {
-            let (divergence, likelihood_residual_dof, raw_residual_dof) = self
-                .exact_spectral_fitted_response(rho, target, cache)
+            let geometry = self
+                .materialize_exact_stationarity_geometry(rho, target, cache)
                 .map_err(numerical)?;
-            Ok(FittedResponseDivergence {
-                divergence,
-                likelihood_residual_dof,
-                raw_residual_dof,
-                estimator: FittedResponseDivergenceEstimator::ExactSpectral,
-            })
+            self.fitted_response_divergence_exact_spectral(&geometry, cache)
         } else {
             // The divergence shares the ARD trace lane's probe budget and seed: both
             // are grouped Hutchinson traces of an arrow inverse at the same scale.
@@ -219,6 +204,61 @@ impl SaeManifoldTerm {
         }
     }
 
+    /// [`Self::fitted_response_divergence`] off a fixed-frame exact stationarity
+    /// geometry the caller already holds, so one shape report forms `A`'s
+    /// eigensystem once for the divergence and the covariance (#2933 F33). The
+    /// estimator is the exact spectral trace, whatever the admission would have
+    /// routed, because the eigensystem is already paid for. Resolved negative
+    /// modes are inverted exactly as on the admission-routed path.
+    pub(crate) fn fitted_response_divergence_from_geometry(
+        &self,
+        geometry: &ExactHessianSpectralBlock,
+        target: ArrayView2<'_, f64>,
+        cache: &ArrowFactorCache,
+    ) -> Result<FittedResponseDivergence, FittedResponseDivergenceRefusal> {
+        self.admit_fitted_response_divergence(target)?;
+        self.fitted_response_divergence_exact_spectral(geometry, cache)
+    }
+
+    /// What every divergence estimator needs: a target of the fitted shape, and
+    /// every atom's second jet, without which the residual curvature is unknown.
+    fn admit_fitted_response_divergence(
+        &self,
+        target: ArrayView2<'_, f64>,
+    ) -> Result<(), FittedResponseDivergenceRefusal> {
+        if target.dim() != (self.n_obs(), self.output_dim()) {
+            return Err(FittedResponseDivergenceRefusal::Numerical {
+                reason: format!(
+                    "target {:?} != ({}, {})",
+                    target.dim(),
+                    self.n_obs(),
+                    self.output_dim()
+                ),
+            });
+        }
+        if let Err(reason) = self.atom_second_jets() {
+            return Err(FittedResponseDivergenceRefusal::SecondJetsUnavailable { reason });
+        }
+        Ok(())
+    }
+
+    /// The exact spectral [`FittedResponseDivergence`] off `geometry`.
+    fn fitted_response_divergence_exact_spectral(
+        &self,
+        geometry: &ExactHessianSpectralBlock,
+        cache: &ArrowFactorCache,
+    ) -> Result<FittedResponseDivergence, FittedResponseDivergenceRefusal> {
+        let (divergence, likelihood_residual_dof, raw_residual_dof) = self
+            .exact_spectral_fitted_response(geometry, cache)
+            .map_err(|reason| FittedResponseDivergenceRefusal::Numerical { reason })?;
+        Ok(FittedResponseDivergence {
+            divergence,
+            likelihood_residual_dof,
+            raw_residual_dof,
+            estimator: FittedResponseDivergenceEstimator::ExactSpectral,
+        })
+    }
+
     /// `tr(A⁺G)` and each frame's residual dof off the materialized exact
     /// stationarity eigensystem.
     ///
@@ -229,11 +269,9 @@ impl SaeManifoldTerm {
     /// `G_a = JᵀΩ²J` and `G_b = JᵀJ`.
     fn exact_spectral_fitted_response(
         &self,
-        rho: &SaeManifoldRho,
-        target: ArrayView2<'_, f64>,
+        geometry: &ExactHessianSpectralBlock,
         cache: &ArrowFactorCache,
     ) -> Result<(f64, f64, f64), String> {
-        let geometry = self.materialize_exact_stationarity_geometry(rho, target, cache)?;
         let dim = geometry.eigenvalues.len();
         if geometry.eigenvectors.dim() != (dim, dim) {
             return Err(format!(

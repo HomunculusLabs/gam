@@ -1440,8 +1440,11 @@ mod shape_uncertainty_joint_recompute_tests {
             dispersion.posterior_covariance_scale() > 0.0,
             "a real residual ⇒ positive dispersion"
         );
+        let geometry = term
+            .materialize_exact_stationarity_geometry(&rho, target.view(), &cache)
+            .expect("exact stationarity geometry at the converged state");
         let information = term
-            .exact_observed_information_shape_covariance(&rho, target.view(), &cache)
+            .exact_observed_information_shape_covariance(&geometry, &rho, target.view(), &cache)
             .expect("exact observed information at the converged state");
         let joint = term
             .assemble_shape_uncertainty(&information, dispersion)
@@ -1837,8 +1840,11 @@ mod learned_frame_shape_covariance_2933_f35_tests {
             &unframed.evidence_factor_options(),
         )
         .expect("frozen unframed evidence factor");
+        let geometry = unframed
+            .materialize_exact_stationarity_geometry(&rho, target.view(), &cache)
+            .expect("unframed exact stationarity geometry");
         let covariance = match unframed
-            .exact_observed_information_shape_covariance(&rho, target.view(), &cache)
+            .exact_observed_information_shape_covariance(&geometry, &rho, target.view(), &cache)
             .expect("unframed observed information")
         {
             SaeShapeInformation::ObservedInformation(covariance) => covariance,

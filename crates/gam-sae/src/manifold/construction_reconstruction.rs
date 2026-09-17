@@ -264,6 +264,22 @@ impl SaeManifoldTerm {
         rho: &SaeManifoldRho,
         residual: ArrayView2<'_, f64>,
     ) -> Result<SaeReconstructionDispersion, String> {
+        self.reconstruction_dispersion_with_geometry(loss, cache, rho, residual, None)
+    }
+
+    /// [`Self::reconstruction_dispersion`] with the fitted-response divergence read
+    /// off a fixed-frame exact stationarity geometry the caller already holds, so a
+    /// shape report on the fixed-frame route pays one dense eigendecomposition of
+    /// `A` for the divergence and the covariance together (#2933 F33). `None`
+    /// routes the divergence by admission.
+    pub(crate) fn reconstruction_dispersion_with_geometry(
+        &self,
+        loss: &SaeManifoldLoss,
+        cache: &ArrowFactorCache,
+        rho: &SaeManifoldRho,
+        residual: ArrayView2<'_, f64>,
+        geometry: Option<&super::construction::ExactHessianSpectralBlock>,
+    ) -> Result<SaeReconstructionDispersion, String> {
         self.assignment.validate_rho_domain(rho)?;
         // FRAME CONSISTENCY: the raw energy prices the output-frame noise the MP
         // edge compares against; the likelihood energy prices the covariance
@@ -279,9 +295,13 @@ impl SaeManifoldTerm {
             ));
         }
         let target = &fitted - &residual;
-        let response = self
-            .fitted_response_divergence(target.view(), rho, cache)
-            .map_err(|refusal| format!("reconstruction_dispersion: {refusal}"))?;
+        let response = match geometry {
+            Some(geometry) => {
+                self.fitted_response_divergence_from_geometry(geometry, target.view(), cache)
+            }
+            None => self.fitted_response_divergence(target.view(), rho, cache),
+        }
+        .map_err(|refusal| format!("reconstruction_dispersion: {refusal}"))?;
         match response.estimator {
             FittedResponseDivergenceEstimator::ExactSpectral => log::debug!(
                 "[SAE-DISPERSION] exact spectral fitted-response divergence {:.6e}, residual dof \
@@ -611,9 +631,18 @@ impl SaeManifoldTerm {
             )
             .map_err(|error| error.to_string())?;
         let residual = self.reconstruction_residual(target, rho)?;
-        let dispersion =
-            self.reconstruction_dispersion(&loss, &cache, rho, residual.view())?;
-        let information = self.shape_information(rho, target, registry, &cache)?;
+        // One decision of which operator the report inverts. On the fixed-frame
+        // route its exact-A geometry feeds both the dispersion's divergence and the
+        // covariance (#2933 F33).
+        let route = self.shape_information_route(rho, target, &cache)?;
+        let dispersion = self.reconstruction_dispersion_with_geometry(
+            &loss,
+            &cache,
+            rho,
+            residual.view(),
+            route.fixed_frame_geometry(),
+        )?;
+        let information = self.shape_information(&route, rho, target, registry, &cache)?;
         self.assemble_shape_uncertainty(&information, dispersion)
     }
 

@@ -1261,8 +1261,11 @@ mod robust_shape_band_tests {
         cache: &ArrowFactorCache,
         dispersion: SaeReconstructionDispersion,
     ) -> f64 {
+        let geometry = term
+            .materialize_exact_stationarity_geometry(rho, target, cache)
+            .expect("exact stationarity geometry at the converged state");
         let information = term
-            .exact_observed_information_shape_covariance(rho, target, cache)
+            .exact_observed_information_shape_covariance(&geometry, rho, target, cache)
             .expect("exact observed information at the converged state");
         let uncertainty = term
             .assemble_shape_uncertainty(&information, dispersion)

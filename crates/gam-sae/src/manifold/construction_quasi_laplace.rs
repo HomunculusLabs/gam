@@ -7894,16 +7894,16 @@ impl SaeManifoldTerm {
     ///
     /// The criterion prices `½log|A|` from its own dense materialization but
     /// returns only the majorizer's factor cache, whose Schur inverse is
-    /// `[B⁻¹]_ββ`. This re-forms the same `A` through
+    /// `[B⁻¹]_ββ`. `geometry` is the same `A` formed by
     /// [`Self::materialize_exact_stationarity_geometry`], the one construction the
     /// IFT solve and the fitted-response divergence (#2933 F36) read, over the
     /// operator `exact_observed_information_log_dets_with_saddle_directions`
-    /// classifies, and reads every atom's block off its eigensystem. That costs a
-    /// dense build and an `O(dim³)` decomposition per uncertainty report, on the
-    /// route whose admission (`direct_logdet_admitted`) already prices that block
-    /// for every criterion evaluation. The dispersion's divergence currently
-    /// forms its own copy of the same geometry; neither block outlives its
-    /// consumer, so the peak memory is one block.
+    /// classifies, at the state `cache` factors. This reads every atom's block off
+    /// its eigensystem. On the production route
+    /// ([`Self::shape_information_route`]) the dispersion's divergence reads the
+    /// same geometry, so a report pays one dense build and one `O(dim³)`
+    /// decomposition, on the route whose admission (`direct_logdet_admitted`)
+    /// already prices that block for every criterion evaluation.
     ///
     /// A resolved negative direction of `A` returns
     /// [`SaeShapeCovarianceUnavailable::IndefiniteObservedInformation`]. The value
@@ -7921,15 +7921,23 @@ impl SaeManifoldTerm {
     /// [`Self::shape_information`].
     pub(crate) fn exact_observed_information_shape_covariance(
         &self,
+        geometry: &ExactHessianSpectralBlock,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
         cache: &ArrowFactorCache,
     ) -> Result<SaeShapeInformation, String> {
         let frame_conditioning = self.fixed_frame_conditioning()?;
         let total_t = cache.delta_t_len();
-        let joint = self.materialize_exact_stationarity_geometry(rho, target, cache)?;
+        if geometry.eigenvalues.len() != total_t + cache.k {
+            return Err(format!(
+                "exact observed-information shape covariance: geometry dimension {} is not the \
+                 cache's t dimension {total_t} plus border {}",
+                geometry.eigenvalues.len(),
+                cache.k
+            ));
+        }
         let sandwich = self.row_sandwich_meat(rho, cache, target)?;
-        joint.border_selected_inverse_blocks(
+        geometry.border_selected_inverse_blocks(
             total_t,
             &self.shape_covariance_border_ranges(),
             &sandwich,
@@ -7937,24 +7945,51 @@ impl SaeManifoldTerm {
         )
     }
 
-    /// #2933 F35 — the shape information production reports at a converged state.
+    /// #2933 F35 — which operator a shape report inverts at a converged state,
+    /// decided once.
     ///
     /// A learned frame is estimated, so the covariance integrates it wherever the
     /// dense observed information of the unframed decoder is admitted
     /// ([`Self::frame_marginal_shape_information`]). Otherwise, and with no frames
-    /// at all, it is [`Self::exact_observed_information_shape_covariance`] on
-    /// `cache`, tagged with why the frames are held fixed.
+    /// at all, the report holds the frames fixed and reads the fixed-frame exact
+    /// stationarity geometry formed here. The dispersion's fitted-response
+    /// divergence reads that geometry too (#2933 F33), so it is formed once. On the
+    /// frame-marginal route the covariance inverts a different operator, and the
+    /// divergence, which is conditional on the fitted frames, still forms its own.
+    pub(crate) fn shape_information_route(
+        &self,
+        rho: &SaeManifoldRho,
+        target: ArrayView2<'_, f64>,
+        cache: &ArrowFactorCache,
+    ) -> Result<ShapeInformationRoute, String> {
+        if self.frames_active() && self.frame_marginal_admission()?.is_none() {
+            Ok(ShapeInformationRoute::FrameMarginal)
+        } else {
+            Ok(ShapeInformationRoute::FixedFrame(
+                self.materialize_exact_stationarity_geometry(rho, target, cache)?,
+            ))
+        }
+    }
+
+    /// #2933 F35 — the shape information production reports on `route`: the
+    /// frame-marginal covariance, or [`Self::exact_observed_information_shape_covariance`]
+    /// on the route's fixed-frame geometry, tagged with why the frames are held
+    /// fixed.
     pub(crate) fn shape_information(
         &self,
+        route: &ShapeInformationRoute,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
         registry: Option<&AnalyticPenaltyRegistry>,
         cache: &ArrowFactorCache,
     ) -> Result<SaeShapeInformation, String> {
-        if self.frames_active() && self.frame_marginal_admission()?.is_none() {
-            self.frame_marginal_shape_information(rho, target, registry)
-        } else {
-            self.exact_observed_information_shape_covariance(rho, target, cache)
+        match route {
+            ShapeInformationRoute::FrameMarginal => {
+                self.frame_marginal_shape_information(rho, target, registry)
+            }
+            ShapeInformationRoute::FixedFrame(geometry) => {
+                self.exact_observed_information_shape_covariance(geometry, rho, target, cache)
+            }
         }
     }
 
@@ -8110,6 +8145,28 @@ impl SaeManifoldTerm {
     // (the contiguous trailing methods of this impl block) were split into the
     // sibling construction_reconstruction.rs (declared in mod.rs); callers reach
     // them bare via use super::*.
+}
+
+/// #2933 F33/F35 — the operator a shape report inverts, decided once by
+/// [`SaeManifoldTerm::shape_information_route`].
+pub(crate) enum ShapeInformationRoute {
+    /// Every learned frame admits integration: the frame-marginal covariance,
+    /// over an operator of its own.
+    FrameMarginal,
+    /// No learned frames, or frames held fixed: the fixed-frame exact stationarity
+    /// geometry, which the dispersion's fitted-response divergence reads too.
+    FixedFrame(ExactHessianSpectralBlock),
+}
+
+impl ShapeInformationRoute {
+    /// The fixed-frame geometry the dispersion may share, or `None` on the
+    /// frame-marginal route, whose covariance inverts a different operator.
+    pub(crate) fn fixed_frame_geometry(&self) -> Option<&ExactHessianSpectralBlock> {
+        match self {
+            Self::FrameMarginal => None,
+            Self::FixedFrame(geometry) => Some(geometry),
+        }
+    }
 }
 
 impl ExactHessianSpectralBlock {
@@ -8608,8 +8665,11 @@ mod shape_covariance_observed_information_2933_f33_tests {
         let total_t = cache.delta_t_len();
         let k = cache.k;
         let ranges = term.shape_covariance_border_ranges();
+        let geometry = term
+            .materialize_exact_stationarity_geometry(&rho, target.view(), &cache)
+            .expect("exact stationarity geometry at the converged basin");
         let information = term
-            .exact_observed_information_shape_covariance(&rho, target.view(), &cache)
+            .exact_observed_information_shape_covariance(&geometry, &rho, target.view(), &cache)
             .expect("exact observed information at the converged basin");
         let SaeShapeInformation::ObservedInformation(covariance) = &information else {
             panic!(
@@ -8812,8 +8872,11 @@ mod shape_covariance_observed_information_2933_f33_tests {
             "the specimen must carry resolved negative observed curvature"
         );
         let most_negative = oracle.values.iter().copied().fold(f64::INFINITY, f64::min);
+        let geometry = term
+            .materialize_exact_stationarity_geometry(&rho, target.view(), &cache)
+            .expect("exact stationarity geometry at the saddle specimen");
         let information = term
-            .exact_observed_information_shape_covariance(&rho, target.view(), &cache)
+            .exact_observed_information_shape_covariance(&geometry, &rho, target.view(), &cache)
             .expect("exact observed information");
         match &information {
             SaeShapeInformation::Unavailable(

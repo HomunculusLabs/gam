@@ -152,7 +152,7 @@ pub(crate) struct ExactHessianDeltaRow {
 /// block.  The materialized operator and its eigensystem remain together so a
 /// pseudo-inverse response can be certified against the physical operator that
 /// produced it, rather than against a projected Krylov surrogate.
-struct ExactHessianSpectralBlock {
+pub(crate) struct ExactHessianSpectralBlock {
     operator: Array2<f64>,
     eigenvalues: Array1<f64>,
     /// Ambient eigenvectors, SQUARE: every direction of the materialized
@@ -4051,7 +4051,7 @@ impl SaeManifoldTerm {
     /// Materialize only the joint spectral geometry required by a dense
     /// exact-stationarity solve.  No log-determinant pricing or coordinate-block
     /// decomposition is paid on routes that rank the B majorizer.
-    fn materialize_exact_stationarity_geometry(
+    pub(crate) fn materialize_exact_stationarity_geometry(
         &self,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
