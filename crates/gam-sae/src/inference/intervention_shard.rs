@@ -24,9 +24,24 @@
 //! groups later can never move an existing group across the fence. The Python
 //! calibration driver consumes the plan produced here, so there is no second
 //! implementation of the split or any other calibration policy.
+//!
+//! # Intervention experiments (#2946 Stage D)
+//!
+//! [`InterventionExperimentPlan`] generalizes one record per atom and dose to
+//! experiments that apply several typed changes together in one patched forward
+//! pass and read several declared responses: KL at the edited positions, KL at the
+//! positions that follow, token log-probabilities, and executed rows of a later
+//! site. Where replacement rows come from is part of their type. Only
+//! [`GaussianLoadingLaw`] rows are randomized, and only this module can draw them,
+//! so designed or observed rows can never reach an estimator as a randomized dose.
+//! Every experiment falls on one side of the same G2 split, and observed rows
+//! taken across the fence are refused.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+
+use crate::inference::steering::SteerPlan;
+use gam_math::probability::standard_normal_quantile;
 
 /// One shard of executed interventions. All per-record vectors share length
 /// `m`; `dose` is row-major `(m, d_dose)`.
@@ -532,6 +547,1023 @@ impl InterventionShard {
     }
 }
 
+/// A hookable site of the executed model. The runner resolves `module_path`;
+/// Rust never sees the model, only the width of the rows written and read there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InterventionSite {
+    pub module_path: String,
+    pub width: usize,
+}
+
+/// One input sequence of the corpus. `group` is the G2 split unit, and `length`
+/// bounds every position an experiment on this unit may touch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExperimentUnit {
+    pub group: i64,
+    pub sequence: i64,
+    pub length: usize,
+}
+
+/// The stream key of one Gaussian-law draw. Two replacements sharing a key would
+/// share their draws, so a plan refuses a repeated key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DrawKey {
+    pub seed: u64,
+    pub stream: u64,
+}
+
+/// `2⁻⁵²`: the spacing of the uniform built from the top 52 bits of one stream word.
+const UNIFORM_52_BIT_SPACING: f64 = 1.0 / (1_u64 << 52) as f64;
+
+/// The #2946 declared law `h = h0 + L z` with `z ~ N(0, I_rank)`, drawn by this
+/// module. The fields are private, so [`GaussianLoadingLaw::draw`] is the only way
+/// to hold one: hand-picked or correlated `z` cannot pass as randomized.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GaussianLoadingLaw {
+    baseline: Vec<f64>,
+    loading: Vec<f64>,
+    rank: usize,
+    key: DrawKey,
+    draws: Vec<f64>,
+}
+
+impl GaussianLoadingLaw {
+    /// Draw the law's rows at `positions` positions. `baseline` is `h0` (its length
+    /// is the site width) and `loading` is `L`, row-major `(width, rank)`.
+    ///
+    /// Each coordinate of `z` is the standard normal quantile of `u = (b + 1/2)·2⁻⁵²`,
+    /// where `b` is the top 52 bits of the SplitMix64 stream keyed by `key`. Every
+    /// `b + 1/2` with `b < 2⁵²` is representable, so `u` lies in `[2⁻⁵³, 1 − 2⁻⁵³]`
+    /// and never leaves the quantile's open domain. The stream reuses the split's
+    /// hash owner and the inversion reuses the pinned quantile owner.
+    pub fn draw(
+        baseline: Vec<f64>,
+        loading: Vec<f64>,
+        rank: usize,
+        key: DrawKey,
+        positions: usize,
+    ) -> Result<Self, InterventionPlanError> {
+        let width = baseline.len();
+        if width == 0 || rank == 0 || loading.len() != width * rank {
+            return Err(InterventionPlanError::InvalidGaussianLaw(format!(
+                "the baseline has width {width}, the rank is {rank} and the loading has {} entries; \
+                 expected width >= 1, rank >= 1 and width*rank loading entries",
+                loading.len()
+            )));
+        }
+        if !baseline.iter().chain(&loading).all(|value| value.is_finite()) {
+            return Err(InterventionPlanError::InvalidGaussianLaw(
+                "the baseline and loading must be finite".to_string(),
+            ));
+        }
+        let mut state = splitmix64(key.seed ^ splitmix64(key.stream));
+        let draws = std::iter::repeat_with(|| {
+            let bits = gam_linalg::utils::splitmix64(&mut state) >> 12;
+            standard_normal_quantile((bits as f64 + 0.5) * UNIFORM_52_BIT_SPACING)
+        })
+        .take(positions * rank)
+        .collect::<Result<Vec<f64>, String>>()
+            .map_err(InterventionPlanError::InvalidGaussianLaw)?;
+        Ok(Self {
+            baseline,
+            loading,
+            rank,
+            key,
+            draws,
+        })
+    }
+
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+
+    pub fn width(&self) -> usize {
+        self.baseline.len()
+    }
+
+    /// The drawn `z`, row-major `(positions, rank)`.
+    pub fn draws(&self) -> &[f64] {
+        &self.draws
+    }
+
+    /// The replacement rows `h0 + L z`, row-major `(positions, width)`.
+    pub fn rows(&self) -> Vec<f64> {
+        let mut rows = Vec::with_capacity(self.draws.len() / self.rank * self.width());
+        for z in self.draws.chunks_exact(self.rank) {
+            for (h0, loading_row) in self
+                .baseline
+                .iter()
+                .zip(self.loading.chunks_exact(self.rank))
+            {
+                rows.push(
+                    h0 + loading_row
+                        .iter()
+                        .zip(z)
+                        .map(|(&loading, &coordinate)| loading * coordinate)
+                        .sum::<f64>(),
+                );
+            }
+        }
+        rows
+    }
+}
+
+/// Where an ambient replacement's rows come from. This is the fence between an
+/// experiment and correlated observational inputs: only [`GaussianLoadingLaw`]
+/// rows are randomized.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReplacementRows {
+    /// Rows the caller declared deterministically, such as a dose ladder, row-major
+    /// `(positions, width)`. Unit-level effects are exact; population averages
+    /// cover only the declared design.
+    Designed(Vec<f64>),
+    /// Natural rows read from `source` at `source_positions`, row-major
+    /// `(positions, width)`. The unit-level effect is exact, but the rows carry every
+    /// feature correlated with their source, so no estimator may attribute the
+    /// response to one declared coordinate.
+    Observed {
+        source: ExperimentUnit,
+        source_positions: Vec<usize>,
+        rows: Vec<f64>,
+    },
+    /// Rows drawn from the declared Gaussian law.
+    GaussianLaw(GaussianLoadingLaw),
+}
+
+/// One declared change. Every kind is a do-operator on the executed network that
+/// does not depend on the patched state, so the runner applies it without
+/// computing anything itself.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InterventionChange {
+    /// Set the site's rows at `positions`.
+    AmbientReplacement {
+        site: usize,
+        positions: Vec<usize>,
+        rows: ReplacementRows,
+    },
+    /// Add `delta`, row-major `(positions, width)`, to the site's rows. The
+    /// matched-norm controls of #2234 are additions.
+    AmbientAddition {
+        site: usize,
+        positions: Vec<usize>,
+        delta: Vec<f64>,
+    },
+    /// Move one atom's chart coordinate by adding the chord `plan.delta`, priced at
+    /// the fitted row. The whole [`SteerPlan`] travels with the move, so the dose
+    /// read back is the dose of the delta applied.
+    ChartCoordinateMove {
+        site: usize,
+        position: usize,
+        plan: SteerPlan,
+    },
+    /// Hold coordinate `component` of the site's rows at `value`.
+    ComponentWriteClamp {
+        site: usize,
+        positions: Vec<usize>,
+        component: usize,
+        value: f64,
+    },
+    /// Add the rank-`rank` product `left · rightᵀ` (`left` row-major `(rows, rank)`,
+    /// `right` row-major `(cols, rank)`) to one named parameter for the whole pass.
+    ParameterEdit {
+        parameter: String,
+        rows: usize,
+        cols: usize,
+        rank: usize,
+        left: Vec<f64>,
+        right: Vec<f64>,
+    },
+}
+
+/// The positions a KL readout reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KlPositions {
+    /// Every position some change writes.
+    Edited,
+    /// Up to `horizon` positions after the last edited one, within the unit. A
+    /// causal model's response to an edit lives only there.
+    Following { horizon: usize },
+    /// Declared positions.
+    Declared(Vec<usize>),
+}
+
+/// One declared response.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Readout {
+    /// `KL(p_clean ‖ p_patched)` in nats at each resolved position.
+    Kl(KlPositions),
+    /// Clean and patched log-probabilities of `token_ids` at `positions`.
+    TokenLogProb {
+        token_ids: Vec<u32>,
+        positions: Vec<usize>,
+    },
+    /// Clean and patched rows of a declared site at `positions`.
+    Activation { site: usize, positions: Vec<usize> },
+}
+
+/// How the clean response is executed. It follows from the changes and is never
+/// an option.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CleanPass {
+    /// The clean and patched copies share one batched forward pass, so every
+    /// position before the earliest edit must read back exactly the clean response.
+    SameBatch,
+    /// A parameter edit reaches every position, so the clean pass is its own
+    /// forward pass.
+    SeparateForward,
+}
+
+/// A side of the permanent G2 split.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitSide {
+    Train,
+    EvalForever,
+}
+
+/// Several changes applied together in one patched forward pass of one unit,
+/// with the responses read from that pass.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InterventionExperiment {
+    pub unit: ExperimentUnit,
+    pub changes: Vec<InterventionChange>,
+    pub readouts: Vec<Readout>,
+}
+
+impl InterventionExperiment {
+    pub fn clean_pass(&self) -> CleanPass {
+        if self
+            .changes
+            .iter()
+            .any(|change| matches!(change, InterventionChange::ParameterEdit { .. }))
+        {
+            CleanPass::SeparateForward
+        } else {
+            CleanPass::SameBatch
+        }
+    }
+
+    /// Sorted positions some change writes. A parameter edit writes no single
+    /// position and contributes none.
+    pub fn edited_positions(&self) -> Vec<usize> {
+        let mut edited = BTreeSet::new();
+        for change in &self.changes {
+            match change {
+                InterventionChange::AmbientReplacement { positions, .. }
+                | InterventionChange::AmbientAddition { positions, .. }
+                | InterventionChange::ComponentWriteClamp { positions, .. } => {
+                    edited.extend(positions.iter().copied());
+                }
+                InterventionChange::ChartCoordinateMove { position, .. } => {
+                    edited.insert(*position);
+                }
+                InterventionChange::ParameterEdit { .. } => {}
+            }
+        }
+        edited.into_iter().collect()
+    }
+
+    /// The positions a KL readout resolves to on this experiment.
+    pub fn kl_positions(&self, positions: &KlPositions) -> Vec<usize> {
+        match positions {
+            KlPositions::Edited => self.edited_positions(),
+            KlPositions::Following { horizon } => match self.edited_positions().last() {
+                Some(&last) => {
+                    (last + 1..self.unit.length.min(last.saturating_add(1).saturating_add(*horizon)))
+                        .collect()
+                }
+                None => Vec::new(),
+            },
+            KlPositions::Declared(declared) => declared.clone(),
+        }
+    }
+}
+
+/// A validated set of experiments. The fields are private, so every plan a
+/// consumer holds has passed [`InterventionExperimentPlan::new`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct InterventionExperimentPlan {
+    sites: Vec<InterventionSite>,
+    experiments: Vec<InterventionExperiment>,
+    split_seed: u64,
+}
+
+/// Typed refusals of an experiment plan.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InterventionPlanError {
+    InvalidSite {
+        site: usize,
+    },
+    DuplicateSite {
+        site: usize,
+    },
+    NoExperiments,
+    EmptyExperiment {
+        experiment: usize,
+    },
+    InvalidChange {
+        experiment: usize,
+        change: usize,
+        reason: String,
+    },
+    /// Two writes at one site and position do not commute (a replacement with
+    /// anything, or a clamp with an addition or the same clamp), so their order
+    /// would decide the experiment.
+    ConflictingWrites {
+        experiment: usize,
+        site: usize,
+        position: usize,
+    },
+    /// Observed rows come from a unit on the other side of the G2 split, which
+    /// would leak eval-forever information into train.
+    StraddlesSplit {
+        experiment: usize,
+        change: usize,
+    },
+    RepeatedDrawKey {
+        experiment: usize,
+        change: usize,
+        key: DrawKey,
+    },
+    InvalidReadout {
+        experiment: usize,
+        readout: usize,
+        reason: String,
+    },
+    InvalidGaussianLaw(String),
+}
+
+impl fmt::Display for InterventionPlanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidSite { site } => write!(
+                f,
+                "intervention plan: site {site} needs a module path and a width >= 1"
+            ),
+            Self::DuplicateSite { site } => {
+                write!(f, "intervention plan: site {site} repeats a module path")
+            }
+            Self::NoExperiments => write!(f, "intervention plan: no experiments"),
+            Self::EmptyExperiment { experiment } => write!(
+                f,
+                "intervention plan: experiment {experiment} needs a change, a readout and a unit length >= 1"
+            ),
+            Self::InvalidChange {
+                experiment,
+                change,
+                reason,
+            } => write!(
+                f,
+                "intervention plan: experiment {experiment} change {change}: {reason}"
+            ),
+            Self::ConflictingWrites {
+                experiment,
+                site,
+                position,
+            } => write!(
+                f,
+                "intervention plan: experiment {experiment} writes site {site} at position {position} with changes that do not commute"
+            ),
+            Self::StraddlesSplit { experiment, change } => write!(
+                f,
+                "intervention plan: experiment {experiment} change {change} copies rows from a unit on the other side of the G2 split"
+            ),
+            Self::RepeatedDrawKey {
+                experiment,
+                change,
+                key,
+            } => write!(
+                f,
+                "intervention plan: experiment {experiment} change {change} repeats draw key (seed {}, stream {}), so its draws would not be independent",
+                key.seed, key.stream
+            ),
+            Self::InvalidReadout {
+                experiment,
+                readout,
+                reason,
+            } => write!(
+                f,
+                "intervention plan: experiment {experiment} readout {readout}: {reason}"
+            ),
+            Self::InvalidGaussianLaw(reason) => {
+                write!(f, "intervention plan: invalid Gaussian law: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for InterventionPlanError {}
+
+/// The writes one experiment has made at one (site, position).
+#[derive(Default)]
+struct SiteWrites {
+    replaced: bool,
+    added: bool,
+    clamped: BTreeSet<usize>,
+}
+
+enum WriteKind {
+    Replace,
+    Add,
+    Clamp(usize),
+}
+
+/// Record one write, or return false when it does not commute with an earlier one.
+fn record_write(
+    writes: &mut BTreeMap<(usize, usize), SiteWrites>,
+    at: (usize, usize),
+    kind: WriteKind,
+) -> bool {
+    let entry = writes.entry(at).or_default();
+    let conflicts = entry.replaced
+        || match kind {
+            WriteKind::Replace => entry.added || !entry.clamped.is_empty(),
+            WriteKind::Add => !entry.clamped.is_empty(),
+            WriteKind::Clamp(component) => entry.added || entry.clamped.contains(&component),
+        };
+    if conflicts {
+        return false;
+    }
+    match kind {
+        WriteKind::Replace => entry.replaced = true,
+        WriteKind::Add => entry.added = true,
+        WriteKind::Clamp(component) => {
+            entry.clamped.insert(component);
+        }
+    }
+    true
+}
+
+/// Positions must be non-empty, inside the unit and unrepeated: a repeated index
+/// in one batched write keeps only its last value.
+fn check_positions(positions: &[usize], length: usize) -> Result<(), String> {
+    if positions.is_empty() {
+        return Err("no positions are declared".to_string());
+    }
+    let mut seen = BTreeSet::new();
+    for &position in positions {
+        if position >= length {
+            return Err(format!(
+                "position {position} is outside the unit of length {length}"
+            ));
+        }
+        if !seen.insert(position) {
+            return Err(format!("position {position} is repeated"));
+        }
+    }
+    Ok(())
+}
+
+fn check_values(name: &str, values: &[f64], expected: usize) -> Result<(), String> {
+    if values.len() != expected {
+        return Err(format!(
+            "{name} have {} entries; expected {expected}",
+            values.len()
+        ));
+    }
+    if !values.iter().all(|value| value.is_finite()) {
+        return Err(format!("{name} must be finite"));
+    }
+    Ok(())
+}
+
+impl InterventionExperimentPlan {
+    /// Validate sites and experiments under the permanent split `split_seed`.
+    pub fn new(
+        sites: Vec<InterventionSite>,
+        experiments: Vec<InterventionExperiment>,
+        split_seed: u64,
+    ) -> Result<Self, InterventionPlanError> {
+        let mut paths = BTreeSet::new();
+        for (index, site) in sites.iter().enumerate() {
+            if site.module_path.is_empty() || site.width == 0 {
+                return Err(InterventionPlanError::InvalidSite { site: index });
+            }
+            if !paths.insert(site.module_path.as_str()) {
+                return Err(InterventionPlanError::DuplicateSite { site: index });
+            }
+        }
+        if experiments.is_empty() {
+            return Err(InterventionPlanError::NoExperiments);
+        }
+        let seed_mix = splitmix64(split_seed);
+        let mut draw_keys = BTreeSet::new();
+        for (index, experiment) in experiments.iter().enumerate() {
+            validate_experiment(index, experiment, &sites, seed_mix, &mut draw_keys)?;
+        }
+        Ok(Self {
+            sites,
+            experiments,
+            split_seed,
+        })
+    }
+
+    pub fn sites(&self) -> &[InterventionSite] {
+        &self.sites
+    }
+
+    pub fn experiments(&self) -> &[InterventionExperiment] {
+        &self.experiments
+    }
+
+    /// Indices of the experiments on `side` of the permanent split, in plan order.
+    /// Membership is [`eval_forever_mask`]'s predicate on the unit's group.
+    pub fn experiments_on(&self, side: SplitSide) -> Vec<usize> {
+        let seed_mix = splitmix64(self.split_seed);
+        let want_eval = side == SplitSide::EvalForever;
+        (0..self.experiments.len())
+            .filter(|&index| {
+                group_is_eval_forever(self.experiments[index].unit.group, seed_mix) == want_eval
+            })
+            .collect()
+    }
+}
+
+fn validate_experiment(
+    index: usize,
+    experiment: &InterventionExperiment,
+    sites: &[InterventionSite],
+    seed_mix: u64,
+    draw_keys: &mut BTreeSet<DrawKey>,
+) -> Result<(), InterventionPlanError> {
+    let unit = experiment.unit;
+    if experiment.changes.is_empty() || experiment.readouts.is_empty() || unit.length == 0 {
+        return Err(InterventionPlanError::EmptyExperiment { experiment: index });
+    }
+    let unit_is_eval = group_is_eval_forever(unit.group, seed_mix);
+    let site_width = |site: usize| sites.get(site).map(|found| found.width);
+    let mut writes = BTreeMap::new();
+    for (change_index, change) in experiment.changes.iter().enumerate() {
+        let invalid = |reason: String| InterventionPlanError::InvalidChange {
+            experiment: index,
+            change: change_index,
+            reason,
+        };
+        let conflict = |site: usize, position: usize| InterventionPlanError::ConflictingWrites {
+            experiment: index,
+            site,
+            position,
+        };
+        match change {
+            InterventionChange::AmbientReplacement {
+                site,
+                positions,
+                rows,
+            } => {
+                let width = site_width(*site)
+                    .ok_or_else(|| invalid(format!("site {site} is not in the plan")))?;
+                check_positions(positions, unit.length).map_err(invalid)?;
+                let expected = positions.len() * width;
+                match rows {
+                    ReplacementRows::Designed(values) => {
+                        check_values("designed rows", values, expected).map_err(invalid)?;
+                    }
+                    ReplacementRows::Observed {
+                        source,
+                        source_positions,
+                        rows: observed,
+                    } => {
+                        check_values("observed rows", observed, expected).map_err(invalid)?;
+                        if source_positions.len() != positions.len()
+                            || source_positions
+                                .iter()
+                                .any(|&position| position >= source.length)
+                        {
+                            return Err(invalid(format!(
+                                "observed rows need one source position inside the source unit per target position; got {} for {}",
+                                source_positions.len(),
+                                positions.len()
+                            )));
+                        }
+                        if group_is_eval_forever(source.group, seed_mix) != unit_is_eval {
+                            return Err(InterventionPlanError::StraddlesSplit {
+                                experiment: index,
+                                change: change_index,
+                            });
+                        }
+                    }
+                    ReplacementRows::GaussianLaw(law) => {
+                        if law.width() != width || law.draws.len() != positions.len() * law.rank {
+                            return Err(invalid(format!(
+                                "the Gaussian law has width {} and {} draws of rank {}; the site has width {width} and {} positions",
+                                law.width(),
+                                law.draws.len(),
+                                law.rank,
+                                positions.len()
+                            )));
+                        }
+                        if !draw_keys.insert(law.key) {
+                            return Err(InterventionPlanError::RepeatedDrawKey {
+                                experiment: index,
+                                change: change_index,
+                                key: law.key,
+                            });
+                        }
+                    }
+                }
+                for &position in positions {
+                    if !record_write(&mut writes, (*site, position), WriteKind::Replace) {
+                        return Err(conflict(*site, position));
+                    }
+                }
+            }
+            InterventionChange::AmbientAddition {
+                site,
+                positions,
+                delta,
+            } => {
+                let width = site_width(*site)
+                    .ok_or_else(|| invalid(format!("site {site} is not in the plan")))?;
+                check_positions(positions, unit.length).map_err(invalid)?;
+                check_values("delta rows", delta, positions.len() * width).map_err(invalid)?;
+                for &position in positions {
+                    if !record_write(&mut writes, (*site, position), WriteKind::Add) {
+                        return Err(conflict(*site, position));
+                    }
+                }
+            }
+            InterventionChange::ChartCoordinateMove {
+                site,
+                position,
+                plan,
+            } => {
+                let width = site_width(*site)
+                    .ok_or_else(|| invalid(format!("site {site} is not in the plan")))?;
+                check_positions(&[*position], unit.length).map_err(invalid)?;
+                if plan.delta.len() != width || !plan.delta.iter().all(|value| value.is_finite()) {
+                    return Err(invalid(format!(
+                        "the chart-move delta has {} entries for a site of width {width} and must be finite",
+                        plan.delta.len()
+                    )));
+                }
+                if !record_write(&mut writes, (*site, *position), WriteKind::Add) {
+                    return Err(conflict(*site, *position));
+                }
+            }
+            InterventionChange::ComponentWriteClamp {
+                site,
+                positions,
+                component,
+                value,
+            } => {
+                let width = site_width(*site)
+                    .ok_or_else(|| invalid(format!("site {site} is not in the plan")))?;
+                check_positions(positions, unit.length).map_err(invalid)?;
+                if *component >= width || !value.is_finite() {
+                    return Err(invalid(format!(
+                        "clamp of component {component} to {value} needs a component below the site width {width} and a finite value"
+                    )));
+                }
+                for &position in positions {
+                    if !record_write(&mut writes, (*site, position), WriteKind::Clamp(*component))
+                    {
+                        return Err(conflict(*site, position));
+                    }
+                }
+            }
+            InterventionChange::ParameterEdit {
+                parameter,
+                rows,
+                cols,
+                rank,
+                left,
+                right,
+            } => {
+                if parameter.is_empty() || *rank == 0 || *rank > (*rows).min(*cols) {
+                    return Err(invalid(format!(
+                        "parameter edit {parameter:?} of shape ({rows}, {cols}) needs a name and a rank in 1..=min(rows, cols); got rank {rank}"
+                    )));
+                }
+                check_values("left factor entries", left, rows * rank).map_err(invalid)?;
+                check_values("right factor entries", right, cols * rank).map_err(invalid)?;
+            }
+        }
+    }
+    let clean_pass = experiment.clean_pass();
+    for (readout_index, readout) in experiment.readouts.iter().enumerate() {
+        let invalid = |reason: String| InterventionPlanError::InvalidReadout {
+            experiment: index,
+            readout: readout_index,
+            reason,
+        };
+        match readout {
+            Readout::Kl(kl) => {
+                if let KlPositions::Declared(declared) = kl {
+                    check_positions(declared, unit.length).map_err(invalid)?;
+                } else if clean_pass == CleanPass::SeparateForward {
+                    return Err(invalid(
+                        "a parameter edit reaches every position, so its KL readout must declare positions"
+                            .to_string(),
+                    ));
+                }
+                if experiment.kl_positions(kl).is_empty() {
+                    return Err(invalid("the KL readout resolves to no position".to_string()));
+                }
+            }
+            Readout::TokenLogProb {
+                token_ids,
+                positions,
+            } => {
+                if token_ids.is_empty() {
+                    return Err(invalid("no token ids are declared".to_string()));
+                }
+                check_positions(positions, unit.length).map_err(invalid)?;
+            }
+            Readout::Activation { site, positions } => {
+                if site_width(*site).is_none() {
+                    return Err(invalid(format!("site {site} is not in the plan")));
+                }
+                check_positions(positions, unit.length).map_err(invalid)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The measured response of one declared readout.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReadoutMeasurement {
+    /// One KL per resolved position, in nats, stored raw.
+    Kl(Vec<f64>),
+    /// Log-probabilities, row-major `(positions, token_ids)`.
+    TokenLogProb { clean: Vec<f64>, patched: Vec<f64> },
+    /// Rows of the readout site, row-major `(positions, width)`.
+    Activation { clean: Vec<f64>, patched: Vec<f64> },
+}
+
+/// What one executed experiment measured.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExperimentMeasurement {
+    /// One measurement per declared readout, in declaration order.
+    pub readouts: Vec<ReadoutMeasurement>,
+    /// For a same-batch experiment whose earliest edit is after position 0: the
+    /// largest KL over the positions before that edit. `None` otherwise.
+    pub pre_edit_kl_max: Option<f64>,
+}
+
+/// A validated plan together with what its execution measured.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutedInterventionExperiments {
+    plan: InterventionExperimentPlan,
+    measurements: Vec<ExperimentMeasurement>,
+}
+
+/// Aligned randomized draws and executed responses, one record per replaced
+/// position.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GaussianLawResponses {
+    pub rank: usize,
+    pub width: usize,
+    /// `z`, row-major `(records, rank)`.
+    pub draws: Vec<f64>,
+    /// Patched readout rows, row-major `(records, width)`.
+    pub responses: Vec<f64>,
+    /// The plan experiment each record came from.
+    pub experiment: Vec<usize>,
+}
+
+/// Typed refusals of executed measurements and of their consumers.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExecutedInterventionError {
+    MeasurementCountMismatch {
+        expected: usize,
+        got: usize,
+    },
+    InvalidMeasurement {
+        experiment: usize,
+        reason: String,
+    },
+    /// A same-batch position before the earliest edit moved. Causal attention
+    /// cannot carry an edit backwards and the clean copy rides in the same batch,
+    /// so the splice wrote the wrong row or position.
+    PreEditResponse {
+        experiment: usize,
+        kl: f64,
+    },
+    UnknownSite {
+        site: usize,
+    },
+    NoExperimentsOnSide(SplitSide),
+    /// The experiment is not exactly one Gaussian-law replacement, so its rows are
+    /// not a randomized draw.
+    NotRandomized {
+        experiment: usize,
+    },
+    MissingActivationReadout {
+        experiment: usize,
+        site: usize,
+    },
+    MixedGaussianLawRanks {
+        experiment: usize,
+    },
+}
+
+impl fmt::Display for ExecutedInterventionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MeasurementCountMismatch { expected, got } => write!(
+                f,
+                "executed interventions: {got} measurements for {expected} experiments"
+            ),
+            Self::InvalidMeasurement { experiment, reason } => write!(
+                f,
+                "executed interventions: experiment {experiment}: {reason}"
+            ),
+            Self::PreEditResponse { experiment, kl } => write!(
+                f,
+                "executed interventions: experiment {experiment} moved a position before its earliest edit (KL {kl}); the splice wrote the wrong row or position"
+            ),
+            Self::UnknownSite { site } => {
+                write!(f, "executed interventions: site {site} is not in the plan")
+            }
+            Self::NoExperimentsOnSide(side) => write!(
+                f,
+                "executed interventions: no experiment falls on the {side:?} side of the split"
+            ),
+            Self::NotRandomized { experiment } => write!(
+                f,
+                "executed interventions: experiment {experiment} is not exactly one Gaussian-law replacement, so its rows are not a randomized draw"
+            ),
+            Self::MissingActivationReadout { experiment, site } => write!(
+                f,
+                "executed interventions: experiment {experiment} has no activation readout at site {site} over its replaced positions"
+            ),
+            Self::MixedGaussianLawRanks { experiment } => write!(
+                f,
+                "executed interventions: experiment {experiment} draws a different rank from the experiments before it"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExecutedInterventionError {}
+
+impl ExecutedInterventionExperiments {
+    /// Validate one measurement per experiment against its declared readouts.
+    pub fn new(
+        plan: InterventionExperimentPlan,
+        measurements: Vec<ExperimentMeasurement>,
+    ) -> Result<Self, ExecutedInterventionError> {
+        if measurements.len() != plan.experiments.len() {
+            return Err(ExecutedInterventionError::MeasurementCountMismatch {
+                expected: plan.experiments.len(),
+                got: measurements.len(),
+            });
+        }
+        for (index, (experiment, measurement)) in
+            plan.experiments.iter().zip(&measurements).enumerate()
+        {
+            let invalid = |reason: String| ExecutedInterventionError::InvalidMeasurement {
+                experiment: index,
+                reason,
+            };
+            if measurement.readouts.len() != experiment.readouts.len() {
+                return Err(invalid(format!(
+                    "{} readout measurements for {} declared readouts",
+                    measurement.readouts.len(),
+                    experiment.readouts.len()
+                )));
+            }
+            for (readout, measured) in experiment.readouts.iter().zip(&measurement.readouts) {
+                match (readout, measured) {
+                    (Readout::Kl(kl), ReadoutMeasurement::Kl(values)) => {
+                        check_values("KL values", values, experiment.kl_positions(kl).len())
+                            .map_err(invalid)?;
+                    }
+                    (
+                        Readout::TokenLogProb {
+                            token_ids,
+                            positions,
+                        },
+                        ReadoutMeasurement::TokenLogProb { clean, patched },
+                    ) => {
+                        let expected = positions.len() * token_ids.len();
+                        check_values("clean log-probabilities", clean, expected).map_err(invalid)?;
+                        check_values("patched log-probabilities", patched, expected)
+                            .map_err(invalid)?;
+                    }
+                    (
+                        Readout::Activation { site, positions },
+                        ReadoutMeasurement::Activation { clean, patched },
+                    ) => {
+                        let expected = positions.len() * plan.sites[*site].width;
+                        check_values("clean activation rows", clean, expected).map_err(invalid)?;
+                        check_values("patched activation rows", patched, expected)
+                            .map_err(invalid)?;
+                    }
+                    _ => {
+                        return Err(invalid(
+                            "a readout was measured as a different kind".to_string(),
+                        ));
+                    }
+                }
+            }
+            let has_pre_edit_positions = experiment.clean_pass() == CleanPass::SameBatch
+                && experiment
+                    .edited_positions()
+                    .first()
+                    .is_some_and(|&earliest| earliest > 0);
+            match (has_pre_edit_positions, measurement.pre_edit_kl_max) {
+                (true, Some(kl)) => {
+                    if kl != 0.0 {
+                        return Err(ExecutedInterventionError::PreEditResponse {
+                            experiment: index,
+                            kl,
+                        });
+                    }
+                }
+                (false, None) => {}
+                (true, None) => {
+                    return Err(invalid(
+                        "a same-batch experiment edited after position 0 must report its pre-edit KL"
+                            .to_string(),
+                    ));
+                }
+                (false, Some(kl)) => {
+                    return Err(invalid(format!(
+                        "a pre-edit KL of {kl} was reported for an experiment with no same-batch pre-edit positions"
+                    )));
+                }
+            }
+        }
+        Ok(Self { plan, measurements })
+    }
+
+    pub fn plan(&self) -> &InterventionExperimentPlan {
+        &self.plan
+    }
+
+    pub fn measurements(&self) -> &[ExperimentMeasurement] {
+        &self.measurements
+    }
+
+    /// The randomized draws and executed responses on `side` of the split, read at
+    /// the activation readout of `readout_site` over each replaced position. Every
+    /// experiment on that side must be exactly one Gaussian-law replacement, so
+    /// designed or observed rows can never enter an estimator as randomized.
+    pub fn gaussian_law_responses(
+        &self,
+        side: SplitSide,
+        readout_site: usize,
+    ) -> Result<GaussianLawResponses, ExecutedInterventionError> {
+        let width = self
+            .plan
+            .sites
+            .get(readout_site)
+            .map(|site| site.width)
+            .ok_or(ExecutedInterventionError::UnknownSite { site: readout_site })?;
+        let indices = self.plan.experiments_on(side);
+        let mut rank = None;
+        let mut draws = Vec::new();
+        let mut responses = Vec::new();
+        let mut experiment_of_record = Vec::new();
+        for index in indices {
+            let experiment = &self.plan.experiments[index];
+            let (positions, law) = match experiment.changes.as_slice() {
+                [
+                    InterventionChange::AmbientReplacement {
+                        positions,
+                        rows: ReplacementRows::GaussianLaw(law),
+                        ..
+                    },
+                ] => (positions, law),
+                _ => return Err(ExecutedInterventionError::NotRandomized { experiment: index }),
+            };
+            if *rank.get_or_insert(law.rank) != law.rank {
+                return Err(ExecutedInterventionError::MixedGaussianLawRanks { experiment: index });
+            }
+            let patched = experiment
+                .readouts
+                .iter()
+                .zip(&self.measurements[index].readouts)
+                .find_map(|(readout, measured)| match (readout, measured) {
+                    (
+                        Readout::Activation {
+                            site,
+                            positions: read,
+                        },
+                        ReadoutMeasurement::Activation { patched, .. },
+                    ) if *site == readout_site && read == positions => Some(patched),
+                    _ => None,
+                })
+                .ok_or(ExecutedInterventionError::MissingActivationReadout {
+                    experiment: index,
+                    site: readout_site,
+                })?;
+            draws.extend_from_slice(&law.draws);
+            responses.extend_from_slice(patched);
+            experiment_of_record.extend(std::iter::repeat_n(index, positions.len()));
+        }
+        let rank = rank.ok_or(ExecutedInterventionError::NoExperimentsOnSide(side))?;
+        Ok(GaussianLawResponses {
+            rank,
+            width,
+            draws,
+            responses,
+            experiment: experiment_of_record,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,5 +1728,430 @@ mod tests {
         shard.nu_hat_2 = Some(shard.nu_hat_1.iter().map(|value| value * 2.0).collect());
         let plan = prepare_intervention_calibration(&shard, spec).unwrap();
         assert_eq!(plan.train_log_nu_hat[0], 2.0_f64.ln());
+    }
+
+    fn experiment_sites() -> Vec<InterventionSite> {
+        vec![
+            InterventionSite {
+                module_path: "gpt_neox.layers.4.mlp".to_string(),
+                width: 2,
+            },
+            InterventionSite {
+                module_path: "gpt_neox.layers.6".to_string(),
+                width: 2,
+            },
+        ]
+    }
+
+    fn unit_in(group: i64) -> ExperimentUnit {
+        ExperimentUnit {
+            group,
+            sequence: 3,
+            length: 6,
+        }
+    }
+
+    fn chart_move(delta: [f64; 2]) -> SteerPlan {
+        SteerPlan {
+            atom: 1,
+            atom_name: "month".to_string(),
+            t_from: vec![0.1],
+            t_to: vec![0.2],
+            amplitude: 1.0,
+            metric_row: 9,
+            delta: ndarray::Array1::from(delta.to_vec()),
+            predicted_nats: None,
+            predicted_nats_kind: crate::inference::steering::FisherDoseKind::Unavailable,
+            fisher_mass_captured: None,
+            fisher_mass_residual: None,
+            fisher_mass_residual_fraction: None,
+            off_manifold_norm: 0.0,
+            metric_provenance: gam_problem::MetricProvenance::Euclidean,
+        }
+    }
+
+    fn two_by_two_law(stream: u64, positions: usize) -> GaussianLoadingLaw {
+        GaussianLoadingLaw::draw(
+            vec![0.5, -0.5],
+            vec![1.0, 0.0, 0.0, 2.0],
+            2,
+            DrawKey { seed: 3, stream },
+            positions,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn experiment_carries_several_typed_changes_and_derives_its_clean_pass() {
+        let seed = 19;
+        let train_group = group_on_side(seed, false);
+        let same_batch = InterventionExperiment {
+            unit: unit_in(train_group),
+            changes: vec![
+                InterventionChange::AmbientReplacement {
+                    site: 0,
+                    positions: vec![2],
+                    rows: ReplacementRows::GaussianLaw(two_by_two_law(0, 1)),
+                },
+                InterventionChange::AmbientAddition {
+                    site: 1,
+                    positions: vec![2, 3],
+                    delta: vec![0.1, 0.0, 0.0, 0.1],
+                },
+                InterventionChange::ChartCoordinateMove {
+                    site: 1,
+                    position: 3,
+                    plan: chart_move([0.2, -0.2]),
+                },
+                InterventionChange::ComponentWriteClamp {
+                    site: 1,
+                    positions: vec![4],
+                    component: 1,
+                    value: 0.0,
+                },
+            ],
+            readouts: vec![
+                Readout::Kl(KlPositions::Edited),
+                Readout::Kl(KlPositions::Following { horizon: 8 }),
+                Readout::TokenLogProb {
+                    token_ids: vec![11, 12],
+                    positions: vec![5],
+                },
+                Readout::Activation {
+                    site: 1,
+                    positions: vec![2, 3],
+                },
+            ],
+        };
+        let parameter_edit = InterventionExperiment {
+            unit: unit_in(train_group),
+            changes: vec![InterventionChange::ParameterEdit {
+                parameter: "gpt_neox.layers.4.mlp.dense_4h_to_h.weight".to_string(),
+                rows: 2,
+                cols: 3,
+                rank: 1,
+                left: vec![1.0, -1.0],
+                right: vec![0.5, 0.0, 0.5],
+            }],
+            readouts: vec![Readout::Kl(KlPositions::Declared(vec![0, 5]))],
+        };
+        let plan = InterventionExperimentPlan::new(
+            experiment_sites(),
+            vec![same_batch, parameter_edit],
+            seed,
+        )
+        .unwrap();
+        let experiments = plan.experiments();
+        assert_eq!(experiments[0].clean_pass(), CleanPass::SameBatch);
+        assert_eq!(experiments[1].clean_pass(), CleanPass::SeparateForward);
+        assert_eq!(experiments[0].edited_positions(), vec![2, 3, 4]);
+        assert!(experiments[1].edited_positions().is_empty());
+        assert_eq!(
+            experiments[0].kl_positions(&KlPositions::Following { horizon: 8 }),
+            vec![5]
+        );
+        assert_eq!(plan.experiments_on(SplitSide::Train), vec![0, 1]);
+        assert!(plan.experiments_on(SplitSide::EvalForever).is_empty());
+    }
+
+    #[test]
+    fn non_commuting_writes_at_one_site_and_position_are_refused() {
+        let addition = |position: usize| InterventionChange::AmbientAddition {
+            site: 1,
+            positions: vec![position],
+            delta: vec![0.1, 0.2],
+        };
+        let plan_with = |second: InterventionChange| {
+            InterventionExperimentPlan::new(
+                experiment_sites(),
+                vec![InterventionExperiment {
+                    unit: unit_in(4),
+                    changes: vec![addition(2), second],
+                    readouts: vec![Readout::Kl(KlPositions::Edited)],
+                }],
+                0,
+            )
+        };
+        // Additions commute, and a clamp at another site does not overlap.
+        assert!(plan_with(addition(2)).is_ok());
+        assert!(
+            plan_with(InterventionChange::ComponentWriteClamp {
+                site: 0,
+                positions: vec![2],
+                component: 0,
+                value: 1.0,
+            })
+            .is_ok()
+        );
+        let conflict = InterventionPlanError::ConflictingWrites {
+            experiment: 0,
+            site: 1,
+            position: 2,
+        };
+        assert_eq!(
+            plan_with(InterventionChange::AmbientReplacement {
+                site: 1,
+                positions: vec![2],
+                rows: ReplacementRows::Designed(vec![0.0, 0.0]),
+            })
+            .unwrap_err(),
+            conflict
+        );
+        assert_eq!(
+            plan_with(InterventionChange::ComponentWriteClamp {
+                site: 1,
+                positions: vec![2],
+                component: 0,
+                value: 1.0,
+            })
+            .unwrap_err(),
+            conflict
+        );
+    }
+
+    #[test]
+    fn observed_rows_from_across_the_split_are_refused() {
+        let seed = 19;
+        let train_group = group_on_side(seed, false);
+        let eval_group = group_on_side(seed, true);
+        let patch_from = |source_group: i64| {
+            InterventionExperimentPlan::new(
+                experiment_sites(),
+                vec![InterventionExperiment {
+                    unit: unit_in(train_group),
+                    changes: vec![InterventionChange::AmbientReplacement {
+                        site: 0,
+                        positions: vec![1],
+                        rows: ReplacementRows::Observed {
+                            source: unit_in(source_group),
+                            source_positions: vec![4],
+                            rows: vec![0.3, -0.3],
+                        },
+                    }],
+                    readouts: vec![Readout::Kl(KlPositions::Following { horizon: 2 })],
+                }],
+                seed,
+            )
+        };
+        assert!(patch_from(train_group).is_ok());
+        assert_eq!(
+            patch_from(eval_group).unwrap_err(),
+            InterventionPlanError::StraddlesSplit {
+                experiment: 0,
+                change: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn gaussian_law_responses_refuse_designed_rows_with_identical_values() {
+        let train_group = group_on_side(0, false);
+        let replace = |rows: ReplacementRows| InterventionExperiment {
+            unit: unit_in(train_group),
+            changes: vec![InterventionChange::AmbientReplacement {
+                site: 0,
+                positions: vec![0, 1],
+                rows,
+            }],
+            readouts: vec![Readout::Activation {
+                site: 1,
+                positions: vec![0, 1],
+            }],
+        };
+        let measured = || ExperimentMeasurement {
+            readouts: vec![ReadoutMeasurement::Activation {
+                clean: vec![0.0; 4],
+                patched: vec![1.0, 2.0, 3.0, 4.0],
+            }],
+            pre_edit_kl_max: None,
+        };
+        let randomized = InterventionExperimentPlan::new(
+            experiment_sites(),
+            vec![
+                replace(ReplacementRows::GaussianLaw(two_by_two_law(0, 2))),
+                replace(ReplacementRows::GaussianLaw(two_by_two_law(1, 2))),
+            ],
+            0,
+        )
+        .unwrap();
+        let executed =
+            ExecutedInterventionExperiments::new(randomized, vec![measured(), measured()]).unwrap();
+        let recovered = executed
+            .gaussian_law_responses(SplitSide::Train, 1)
+            .unwrap();
+        let expected_draws: Vec<f64> = two_by_two_law(0, 2)
+            .draws()
+            .iter()
+            .chain(two_by_two_law(1, 2).draws())
+            .copied()
+            .collect();
+        assert_eq!(recovered.rank, 2);
+        assert_eq!(recovered.width, 2);
+        assert_eq!(recovered.draws, expected_draws);
+        assert_eq!(
+            recovered.responses,
+            vec![1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0]
+        );
+        assert_eq!(recovered.experiment, vec![0, 0, 1, 1]);
+        assert_ne!(two_by_two_law(0, 2).draws(), two_by_two_law(1, 2).draws());
+
+        // Positive control: the same rows declared as designed are refused, so the
+        // fence is the type, not the values.
+        let designed = InterventionExperimentPlan::new(
+            experiment_sites(),
+            vec![replace(ReplacementRows::Designed(
+                two_by_two_law(0, 2).rows(),
+            ))],
+            0,
+        )
+        .unwrap();
+        let executed_designed =
+            ExecutedInterventionExperiments::new(designed, vec![measured()]).unwrap();
+        assert_eq!(
+            executed_designed
+                .gaussian_law_responses(SplitSide::Train, 1)
+                .unwrap_err(),
+            ExecutedInterventionError::NotRandomized { experiment: 0 }
+        );
+
+        // A repeated draw key would repeat the draws.
+        assert_eq!(
+            InterventionExperimentPlan::new(
+                experiment_sites(),
+                vec![
+                    replace(ReplacementRows::GaussianLaw(two_by_two_law(0, 2))),
+                    replace(ReplacementRows::GaussianLaw(two_by_two_law(0, 2))),
+                ],
+                0,
+            )
+            .unwrap_err(),
+            InterventionPlanError::RepeatedDrawKey {
+                experiment: 1,
+                change: 0,
+                key: DrawKey { seed: 3, stream: 0 },
+            }
+        );
+    }
+
+    #[test]
+    fn gaussian_law_rows_are_baseline_plus_loading_times_standard_normal_draws() {
+        let law = two_by_two_law(5, 20_000);
+        for (row, z) in law.rows().chunks_exact(2).zip(law.draws().chunks_exact(2)) {
+            assert_eq!(row[0], 0.5 + z[0]);
+            assert_eq!(row[1], -0.5 + 2.0 * z[1]);
+        }
+        // Dvoretzky-Kiefer-Wolfowitz with Massart's constant: n i.i.d. draws give
+        // sup|F_n - Phi| > eps with probability at most 2 exp(-2 n eps^2). `epsilon`
+        // is that eps at false-failure probability 1e-9.
+        let draws = law.draws();
+        let n = draws.len() as f64;
+        let epsilon = ((2.0 / 1.0e-9_f64).ln() / (2.0 * n)).sqrt();
+        let kolmogorov_distance = |shift: f64| {
+            let mut sorted: Vec<f64> = draws.iter().map(|z| z + shift).collect();
+            sorted.sort_by(f64::total_cmp);
+            sorted
+                .iter()
+                .enumerate()
+                .fold(0.0_f64, |distance, (index, &z)| {
+                    let cdf = gam_math::probability::normal_cdf(z);
+                    distance
+                        .max(cdf - index as f64 / n)
+                        .max((index + 1) as f64 / n - cdf)
+                })
+        };
+        let distance = kolmogorov_distance(0.0);
+        assert!(
+            distance <= epsilon,
+            "the draws are not standard normal: Kolmogorov distance {distance} > {epsilon}"
+        );
+        // Positive control: the same draws shifted by a tenth of a standard deviation
+        // exceed the bound, so the bound can detect a wrong stream.
+        let shifted = kolmogorov_distance(0.1);
+        assert!(
+            shifted > epsilon,
+            "a 0.1 shift was not detected: {shifted} <= {epsilon}"
+        );
+    }
+
+    #[test]
+    fn a_same_batch_response_before_the_earliest_edit_is_refused() {
+        let plan = || {
+            InterventionExperimentPlan::new(
+                experiment_sites(),
+                vec![InterventionExperiment {
+                    unit: unit_in(4),
+                    changes: vec![InterventionChange::AmbientAddition {
+                        site: 1,
+                        positions: vec![3],
+                        delta: vec![0.1, 0.2],
+                    }],
+                    readouts: vec![
+                        Readout::Kl(KlPositions::Edited),
+                        Readout::Kl(KlPositions::Following { horizon: 2 }),
+                    ],
+                }],
+                0,
+            )
+            .unwrap()
+        };
+        let measured = |pre_edit_kl_max: Option<f64>| {
+            vec![ExperimentMeasurement {
+                readouts: vec![
+                    ReadoutMeasurement::Kl(vec![0.4]),
+                    ReadoutMeasurement::Kl(vec![0.02, 0.01]),
+                ],
+                pre_edit_kl_max,
+            }]
+        };
+        assert!(ExecutedInterventionExperiments::new(plan(), measured(Some(0.0))).is_ok());
+        assert_eq!(
+            ExecutedInterventionExperiments::new(plan(), measured(Some(1.0e-12))).unwrap_err(),
+            ExecutedInterventionError::PreEditResponse {
+                experiment: 0,
+                kl: 1.0e-12,
+            }
+        );
+        assert!(matches!(
+            ExecutedInterventionExperiments::new(plan(), measured(None)),
+            Err(ExecutedInterventionError::InvalidMeasurement { experiment: 0, .. })
+        ));
+        // A future-position readout measured at the wrong length is refused.
+        let mut short = measured(Some(0.0));
+        short[0].readouts[1] = ReadoutMeasurement::Kl(vec![0.02]);
+        assert!(matches!(
+            ExecutedInterventionExperiments::new(plan(), short),
+            Err(ExecutedInterventionError::InvalidMeasurement { experiment: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn a_parameter_edit_must_declare_its_kl_positions() {
+        let edit = |readout: Readout| {
+            InterventionExperimentPlan::new(
+                experiment_sites(),
+                vec![InterventionExperiment {
+                    unit: unit_in(4),
+                    changes: vec![InterventionChange::ParameterEdit {
+                        parameter: "embed_out.weight".to_string(),
+                        rows: 2,
+                        cols: 2,
+                        rank: 1,
+                        left: vec![1.0, 0.0],
+                        right: vec![0.0, 1.0],
+                    }],
+                    readouts: vec![readout],
+                }],
+                0,
+            )
+        };
+        assert!(edit(Readout::Kl(KlPositions::Declared(vec![5]))).is_ok());
+        assert!(matches!(
+            edit(Readout::Kl(KlPositions::Edited)),
+            Err(InterventionPlanError::InvalidReadout {
+                experiment: 0,
+                readout: 0,
+                ..
+            })
+        ));
     }
 }
