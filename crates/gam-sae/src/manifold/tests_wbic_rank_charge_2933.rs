@@ -265,7 +265,8 @@ fn rank_charge_audit_fills_every_field_from_one_state_2933() {
     let residual = term.reconstruction_residual(target.view(), &rho).unwrap();
     let dispersion = term
         .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))
-        .unwrap();
+        .unwrap()
+        .raw_output_noise_variance;
     assert_eq!(audit.dispersion.to_bits(), dispersion.to_bits());
     let mut grams = term.empty_decoder_gram_accumulator();
     term.accumulate_decoder_gram(&mut grams).unwrap();
