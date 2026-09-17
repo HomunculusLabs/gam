@@ -259,6 +259,91 @@ fn production_objective_forced_streaming_value_gradient_matches_dense() {
     }
 }
 
+/// #979 — the production gradient lane where the memory planner admits matrix-free evidence
+/// and refuses direct evidence. That lane used to return the streaming criterion paired with a
+/// zero gradient, while `capability()` declares an analytic gradient, so a gradient reader saw a
+/// stationary point.
+///
+/// The host reading is the term's own budget seam. Below the host reserve floor the in-core
+/// budget is zero and the planner refuses both routes. Above it, a shape whose direct peak and
+/// exact-stationarity resident both sit under `SAE_DIRECT_ALWAYS_ADMIT_BYTES` is admitted
+/// directly, so the n=32 planted circle has no reading that takes this lane. At n=256 the
+/// exact-stationarity resident exceeds that bound, and the reading one byte short of the reserve
+/// floor plus that resident refuses exact stationarity while the matrix-free peak still fits.
+/// The premise asserts both production predicates on the resulting plan.
+///
+/// Asked for value and gradient, the lane must return the analytic gradient of the streaming
+/// artifact, priced by a second objective at the same reading and rho.
+#[test]
+fn production_gradient_lane_returns_the_streaming_gradient_where_direct_logdet_is_not_admitted_979() {
+    gam_runtime::test_support::install_diagnostic_logger();
+    let target = planted_circle_embedded(256, 4, 0.02);
+    let mut term = planted_circle_seed_term(target.view(), PlantedCircleAssignmentMode::Softmax).0;
+    term.atoms[0].basis_second_jet = Some(Arc::new(
+        PeriodicHarmonicEvaluator::new(3).expect("periodic evaluator"),
+    ));
+    term.gpu_policy = gam_gpu::GpuPolicy::Off;
+    let default_plan = term
+        .streaming_plan()
+        .expect("streaming plan at the default host reading");
+    term.host_available_bytes = super::streaming_plan::SAE_HOST_MEMORY_RESERVE_FLOOR_BYTES
+        .saturating_add(default_plan.estimated_exact_stationarity_bytes)
+        .saturating_sub(1);
+    let starved_plan = term
+        .streaming_plan()
+        .expect("streaming plan at the starved host reading");
+    assert!(
+        starved_plan.matrix_free_admitted && !starved_plan.direct_logdet_admitted(),
+        "premise: the planner admits matrix-free evidence and refuses direct evidence; \
+         plan={starved_plan:?}"
+    );
+    let seed_rho = SaeManifoldRho::new(0.0, 0.05_f64.ln(), vec![Array1::<f64>::zeros(1)]);
+    let mut production = SaeManifoldOuterObjective::new(
+        term.clone(),
+        target.clone(),
+        None,
+        seed_rho.clone(),
+        40,
+        1.0,
+        1.0e-6,
+        1.0e-6,
+    );
+    let mut reference =
+        SaeManifoldOuterObjective::new(term, target, None, seed_rho, 40, 1.0, 1.0e-6, 1.0e-6);
+    let rho_flat = production.baseline_rho.flat_coordinates();
+    let rho = reference
+        .baseline_rho
+        .from_flat(rho_flat.view())
+        .expect("both objectives own the same typed rho layout");
+    let production_eval = OuterObjective::eval(&mut production, &rho_flat)
+        .expect("production value+gradient on the streaming route");
+    let artifact = reference
+        .evaluate_outer_criterion_route(&rho, false, false)
+        .expect("streaming artifact at the same rho");
+    let reference_gradient = reference
+        .analytic_gradient_for_outer_evaluation(&rho, &artifact)
+        .expect("streaming analytic gradient at the same rho");
+    let reference_norm_sq = reference_gradient.dot(&reference_gradient);
+    assert!(
+        reference_norm_sq.is_finite() && reference_norm_sq > 1.0e-12,
+        "the streaming analytic gradient must be nonzero here; norm^2={reference_norm_sq}"
+    );
+    assert!(production_eval.cost.is_finite());
+    assert_eq!(production_eval.gradient.len(), reference_gradient.len());
+    for (coordinate, (&returned, &expected)) in production_eval
+        .gradient
+        .iter()
+        .zip(reference_gradient.iter())
+        .enumerate()
+    {
+        assert_abs_diff_eq!(returned, expected, epsilon = 1.0e-6);
+        assert!(
+            returned.is_finite(),
+            "production gradient coordinate {coordinate} is non-finite"
+        );
+    }
+}
+
 /// #2515 blocker 3 — WHICH assembly the stale-pair guard is comparing.
 ///
 /// `production_objective_forced_streaming_value_gradient_matches_dense` dies on

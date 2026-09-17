@@ -3487,57 +3487,13 @@ impl OuterObjective for SaeManifoldOuterObjective {
         // reads `self.target` (idempotent; no-op for a plain SAE).
         self.apply_block_scaling(&rho_state)
             .map_err(EstimationError::InvalidInput)?;
-        // #1026 — matrix-free (streaming) regime: the dense joint-Hessian evidence
-        // cache does not exist, so the analytic gradient lane below
-        // (`penalized_quasi_laplace_criterion_with_cache` → `outer_gradient_arrow_solver`) cannot run
-        // and hard-errors ("cost-only streaming route is required"). The outer plan
-        // descends ρ via the value + Fellner–Schall (EFS) route
-        // (`fixed_point_available`), which never consumes this gradient — but the
-        // generic seed startup-VALIDATION still probes this gradient lane, and its
-        // hard error rejects EVERY seed ("no candidate seeds passed outer startup
-        // validation") for any large-K / wide-border (duchon) fit whose dense
-        // criterion factor exceeds the in-core budget. Route it to the SAME streaming
-        // value path the `Value` order uses: validation then gets a finite streaming
-        // penalized quasi-Laplace cost (paired with a zero gradient it never consumes) and the fit
-        // proceeds on the EFS lane. Dense-admitted fits never enter this branch and
-        // are byte-for-byte unchanged.
-        if !self.audit_installed_state
-            && !self
-                .term
-                .streaming_plan()
-                .map_err(EstimationError::RemlOptimizationFailed)?
-                .direct_logdet_admitted()
-        {
-            // Seed validation still selects whether this fit exists, so its
-            // streaming value must be the same fully converged fixed point used
-            // by every dense ranking/value lane.
-            let (cost, _beta_hat) = match self.evaluate_authoritative_criterion(rho.view()) {
-                Ok(evaluated) => evaluated,
-                // A recoverable refusal means the streaming quasi-Laplace score is
-                // undefined at this ρ. Return the objective contract's typed
-                // infeasible evaluation, never a finite surrogate value.
-                Err(err) if Self::is_recoverable_value_probe_refusal(&err) => {
-                    self.probe_telemetry.record_refusal_kind(&err);
-                    log::debug!("SAE criterion eval mapped refusal to +inf: {err}");
-                    self.probe_telemetry.infeasible_criterion_evals += 1;
-                    return Ok(OuterEval::infeasible(rho.len()));
-                }
-                Err(err) => return Err(EstimationError::RemlOptimizationFailed(err)),
-            };
-            // #2231 Inc-B — price the block Jacobian into the streaming-lane cost
-            // (0 for a plain SAE), so the recorded and returned value agree.
-            let cost = cost + self.block_jacobian(&rho_state);
-            if !cost.is_finite() {
-                return Ok(OuterEval::infeasible(rho.len()));
-            }
-            self.record_search_criterion(cost, None);
-            return Ok(OuterEval {
-                cost,
-                gradient: Array1::zeros(rho.len()),
-                hessian: HessianValue::Unavailable,
-                inner_beta_hint: None,
-            });
-        }
+        // #979 — a state whose direct logdet the memory planner does not admit takes this
+        // same lane. `evaluate_outer_criterion_route` builds the streaming artifact (factor
+        // cache, exact matrix-free operator, frozen inverse-probe bundle) and
+        // `analytic_gradient_for_outer_evaluation` differentiates it, so the lane returns
+        // the complete analytic gradient on both routes. A former branch answered this
+        // request with the streaming value and a zero gradient, which any gradient reader
+        // takes as a stationary point.
         // #2080/#2087/#2253/#2510 — every dense analytic sample begins in the
         // authoritative envelope argmin. The shared installer consumes a valid
         // exact-rho probe handoff or runs the selector on a miss; either path
