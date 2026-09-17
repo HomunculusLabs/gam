@@ -778,7 +778,11 @@ impl SaeManifoldAtom {
             None => (full_penalty, full_derivative),
         };
         let current_m = self.basis_size();
-        let penalty = Self::validate_reference_function_gram(penalty, current_m, true)?;
+        // #2935 — the declared seminorm's positive rank is checked on the full
+        // Gram above. A data-supported reduction may retain only directions in its
+        // null space (a constant-only design); `reduce_basis_to_subspace` admits that
+        // reduced congruence with zero rank, and every trial curvature must too.
+        let penalty = Self::validate_reference_function_gram(penalty, current_m, false)?;
         if derivative.dim() != (current_m, current_m)
             || derivative.iter().any(|value| !value.is_finite())
         {

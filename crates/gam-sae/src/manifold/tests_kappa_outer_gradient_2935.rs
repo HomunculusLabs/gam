@@ -5,17 +5,37 @@
 //! only through the penalty Gram `S(κ)`: the penalty energy `½λ<B, S B>`, the
 //! observed information `½log|A|`, the rank charge's basis EDF `tr(G(G+λS)⁻¹)`, the
 //! smoothing-prior normalizer `½r·log|S|_+`, and the fitted state that re-converges
-//! against all of them. Each route's analytic κ entry must match a central
-//! difference of that same route's `cost`, re-converged at both endpoints by one
-//! objective that holds its declared collapse-prevention gates (#2933 F05).
+//! against all of them.
+//!
+//! The arbiter is factor-wise at one converged state, not a central difference of
+//! the re-converged cost. On this fixture the implicit response amplifies the κ
+//! right-hand side about 360-fold and `‖Γ‖` is about 6e3, so a cost difference over
+//! re-converged endpoints would need roots accurate to about 1e-13, while the
+//! production inner solve stops near 1e-4. Each factor is instead checked against
+//! its own central difference at the converged state:
+//! - the fixed-state partials (explicit with the rank charge's direct part, log-det
+//!   trace, Occam) against a difference of the frozen cost over κ;
+//! - the implicit right-hand side `g_κ` against a difference of the inner gradient
+//!   over κ;
+//! - `θ̂_κ = −A⁺g_κ` through `A·θ̂_κ = −g_κ`, where `A·θ̂_κ` is a difference of the
+//!   inner gradient along `θ̂_κ`;
+//! - the implicit correction `½Γᵀθ̂_κ` through the frozen cost along `θ̂_κ`, whose
+//!   slope is `gᵀθ̂_κ + ½Γᵀθ̂_κ` with `g` the inner residual measured at that state.
 #![cfg(test)]
 use super::*;
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2};
 
 const KAPPA: f64 = 0.3;
 
 /// One constant-curvature tangent-chart atom observed with a small deterministic
 /// residual, so the exact observed information carries residual curvature.
+///
+/// The signal dominates both seed priors, so the inner fit keeps the latent chart
+/// excited. At a decoder amplitude of 0.4 with `log λ = −1`, the smoothing prior
+/// shrinks the linear decoder columns to about a fifth of their data value. Every
+/// coordinate then collapses onto the origin within 40 inner iterations, the
+/// data-supported reduction keeps only the constant column, and κ no longer moves
+/// the criterion.
 fn curvature_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
     let n = 24usize;
     let p = 3usize;
@@ -45,7 +65,7 @@ fn curvature_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
         .expect("reference rows lie inside the chart");
     let m = bundle.basis_values.ncols();
     let decoder = Array2::from_shape_fn((m, p), |(basis_col, out_col)| {
-        0.4 * ((1 + basis_col + 3 * out_col) as f64).sin()
+        4.0 * ((1 + basis_col + 3 * out_col) as f64).sin()
     });
     let mut target = bundle.basis_values.dot(&decoder);
     for ((row, col), value) in target.indexed_iter_mut() {
@@ -72,39 +92,95 @@ fn curvature_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
     )
     .expect("one coordinate block for one atom");
     let term = SaeManifoldTerm::new(vec![atom], assignment).expect("single-atom term");
-    let rho = SaeManifoldRho::new(-1.0, -1.0, vec![Array1::from_elem(2, -1.0)]);
+    let rho = SaeManifoldRho::new(-1.0, -5.0, vec![Array1::from_elem(2, -1.0)]);
     (term, target, rho)
 }
 
-/// Install `S(κ)` and `∂S/∂κ` on the objective's atom, as the production outer
-/// walk does before it evaluates a trial curvature.
-fn install_curvature(objective: &mut SaeManifoldOuterObjective, kappa: f64) {
-    let prepared = objective.term.atoms[0]
-        .prepare_constant_curvature(kappa)
-        .expect("the trial curvature lies inside the chart's domain");
-    objective.term.atoms[0].commit_prepared_constant_curvature(prepared);
+fn arrow_norm(vector: &SaeArrowVector) -> f64 {
+    (vector.t.dot(&vector.t) + vector.beta.dot(&vector.beta)).sqrt()
 }
 
-/// The route's own converged `cost` at curvature `kappa`.
-fn route_cost_at_curvature(
-    objective: &mut SaeManifoldOuterObjective,
-    anchor: &SaeManifoldRho,
-    direct_logdet_admitted: bool,
-    kappa: f64,
-) -> f64 {
-    let mut endpoint = anchor.clone();
-    endpoint.kappa[0] = kappa;
-    install_curvature(objective, kappa);
-    objective
-        .evaluate_outer_criterion_route(&endpoint, direct_logdet_admitted, false)
-        .expect("the route prices the criterion at a curvature endpoint")
-        .cost
+fn arrow_dot(x: &SaeArrowVector, y: &SaeArrowVector) -> f64 {
+    x.t.dot(&y.t) + x.beta.dot(&y.beta)
 }
 
-fn kappa_gradient_is_the_derivative_of_the_route_value(direct_logdet_admitted: bool, route: &str) {
-    let (term, target, rho) = curvature_fixture();
+fn arrow_max(vector: &SaeArrowVector) -> f64 {
+    vector
+        .t
+        .iter()
+        .chain(vector.beta.iter())
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()))
+}
+
+fn arrow_gap(x: &SaeArrowVector, y: &SaeArrowVector) -> f64 {
+    assert_eq!(x.t.len(), y.t.len(), "coordinate blocks share one layout");
+    assert_eq!(x.beta.len(), y.beta.len(), "decoder blocks share one layout");
+    x.t.iter()
+        .zip(y.t.iter())
+        .chain(x.beta.iter().zip(y.beta.iter()))
+        .fold(0.0_f64, |acc, (a, b)| acc.max((a - b).abs()))
+}
+
+fn arrow_scaled_difference(plus: &SaeArrowVector, minus: &SaeArrowVector, step: f64) -> SaeArrowVector {
+    SaeArrowVector {
+        t: (&plus.t - &minus.t) / (2.0 * step),
+        beta: (&plus.beta - &minus.beta) / (2.0 * step),
+    }
+}
+
+/// `(4·fine − coarse)/3` and `|coarse − fine|`.
+fn richardson(coarse: f64, fine: f64) -> (f64, f64) {
+    ((4.0 * fine - coarse) / 3.0, (coarse - fine).abs())
+}
+
+/// The inner stationarity residual `(g_t, g_β)` at the term's coordinates and decoder.
+fn inner_gradient(
+    term: &SaeManifoldTerm,
+    target: ArrayView2<'_, f64>,
+    rho: &SaeManifoldRho,
+) -> SaeArrowVector {
+    let mut state = term.clone();
+    state
+        .refresh_basis_from_current_coords()
+        .expect("the basis refreshes at the current coordinates");
+    let system = state
+        .assemble_arrow_schur(target, rho, None)
+        .expect("the inner system assembles at the state");
+    SaeArrowVector {
+        t: Array1::from_iter(system.rows.iter().flat_map(|row| row.gt.iter().copied())),
+        beta: system.gb.clone(),
+    }
+}
+
+/// The term moved by `scale·step` in the arrow layout: row-major coordinates and the
+/// basis-major decoder of the single atom.
+fn displaced(term: &SaeManifoldTerm, step: &SaeArrowVector, scale: f64) -> SaeManifoldTerm {
+    let mut moved = term.clone();
+    let coords = moved.assignment.coords[0].as_matrix();
+    let coordinate_step =
+        Array2::from_shape_vec(coords.dim(), step.t.to_vec()).expect("row-major coordinate layout");
+    moved.assignment.coords[0] = LatentCoordValues::from_matrix_with_manifold(
+        (&coords + &(coordinate_step * scale)).view(),
+        LatentIdMode::None,
+        LatentManifold::Euclidean,
+    );
+    let decoder = moved.atoms[0].decoder_coefficients().clone();
+    let decoder_step =
+        Array2::from_shape_vec(decoder.dim(), step.beta.to_vec()).expect("basis-major decoder layout");
+    moved.atoms[0]
+        .set_decoder_coefficients(&decoder + &(decoder_step * scale))
+        .expect("the decoder keeps its shape");
+    moved
+}
+
+/// The dense route's converged anchor, checked to keep every penalized column.
+fn converged_anchor(
+    term: SaeManifoldTerm,
+    target: &Array2<f64>,
+    rho: SaeManifoldRho,
+) -> (SaeManifoldTerm, SaeManifoldRho, usize) {
     let mut objective =
-        SaeManifoldOuterObjective::new(term, target, None, rho, 40, 0.4, 1.0e-6, 1.0e-6);
+        SaeManifoldOuterObjective::new(term, target.clone(), None, rho, 40, 0.4, 1.0e-6, 1.0e-6);
     let anchor = objective.baseline_rho.clone();
     let flat = anchor
         .kappa_flat_index(0)
@@ -114,61 +190,307 @@ fn kappa_gradient_is_the_derivative_of_the_route_value(direct_logdet_admitted: b
         KAPPA.to_bits(),
         "the objective seeds κ from the atom's geometry plan"
     );
-    install_curvature(&mut objective, KAPPA);
-    let evaluation = objective
-        .evaluate_outer_criterion_route(&anchor, direct_logdet_admitted, false)
-        .expect("the route prices the criterion at the anchor");
-    let gradient = objective
-        .analytic_gradient_for_outer_evaluation(&anchor, &evaluation)
-        .expect("the route differentiates the criterion at the anchor");
-    let analytic = gradient[flat];
+    objective
+        .evaluate_outer_criterion_route(&anchor, true, false)
+        .expect("the dense route converges the anchor");
+    // Premise: the fit kept every penalized column. A collapsed chart leaves the atom
+    // on its penalty's null space, where κ has nothing to move.
+    let live_width = objective.term.atoms[0].basis_size();
+    let full_width = objective.term.atoms[0].full_basis_size();
+    println!("[#2935] live basis width {live_width} of {full_width}");
+    assert_eq!(
+        live_width, full_width,
+        "the inner fit reduced the curvature atom to {live_width} of {full_width} basis \
+         columns, so κ cannot move the criterion"
+    );
+    (objective.term.clone(), anchor, flat)
+}
 
-    let mut central = |step: f64| {
-        let plus = route_cost_at_curvature(&mut objective, &anchor, direct_logdet_admitted, KAPPA + step);
-        let minus =
-            route_cost_at_curvature(&mut objective, &anchor, direct_logdet_admitted, KAPPA - step);
-        (plus - minus) / (2.0 * step)
+#[test]
+fn dense_kappa_gradient_factors_are_derivatives_of_the_criterion_2935() {
+    let (term, target, rho) = curvature_fixture();
+    let (mut state, anchor, flat) = converged_anchor(term, &target, rho);
+    let (cost, loss, cache) = state
+        .penalized_quasi_laplace_criterion_with_cache(
+            target.view(),
+            &anchor,
+            None,
+            0,
+            0.4,
+            1.0e-6,
+            1.0e-6,
+        )
+        .expect("the criterion prices the converged state");
+    let residual = inner_gradient(&state, target.view(), &anchor);
+    let lambda_smooth = anchor.lambda_smooth_vec().expect("smoothing strengths");
+    let solver = state
+        .outer_gradient_arrow_solver(&cache, &lambda_smooth)
+        .expect("dense outer gradient solver");
+    let components = state
+        .analytic_outer_rho_gradient_components_with_bundle(
+            target.view(),
+            &anchor,
+            &loss,
+            &cache,
+            &solver,
+            None,
+            None,
+        )
+        .expect("dense κ gradient components at the converged state");
+    let partial = components.explicit[flat] + components.logdet_trace[flat] + components.occam[flat];
+    let implicit = components.third_order_correction[flat];
+    let complete = components.gradient()[flat];
+    let g_kappa = state
+        .outer_rho_gradient_ift_rhs(&anchor, flat, &cache)
+        .expect("κ implicit right-hand side");
+    let a_pinv_g = state
+        .solve_exact_stationarity(&anchor, target.view(), &cache, &g_kappa)
+        .expect("A⁺ g_κ");
+    let theta_hat = SaeArrowVector {
+        t: a_pinv_g.t.mapv(|value| -value),
+        beta: a_pinv_g.beta.mapv(|value| -value),
     };
-    let step = 1.0e-3_f64;
-    let coarse = central(step);
-    let fine = central(0.5 * step);
-    let richardson = (4.0 * fine - coarse) / 3.0;
-    let spread = (coarse - fine).abs();
+    let negative_g_kappa = SaeArrowVector {
+        t: g_kappa.t.mapv(|value| -value),
+        beta: g_kappa.beta.mapv(|value| -value),
+    };
+
+    let price = |at_state: &SaeManifoldTerm, at: &SaeManifoldRho| -> f64 {
+        let mut arm = at_state.clone();
+        arm.penalized_quasi_laplace_criterion_with_cache(target.view(), at, None, 0, 0.4, 1.0e-6, 1.0e-6)
+            .expect("the criterion prices the fixed state")
+            .0
+    };
+    let at_kappa = |kappa: f64| -> (SaeManifoldTerm, SaeManifoldRho) {
+        let mut arm = state.clone();
+        let prepared = arm.atoms[0]
+            .prepare_constant_curvature(kappa)
+            .expect("the trial curvature lies inside the chart's domain");
+        arm.atoms[0].commit_prepared_constant_curvature(prepared);
+        let mut at = anchor.clone();
+        at.kappa[0] = kappa;
+        (arm, at)
+    };
+    let cost_over_kappa = |step: f64| -> f64 {
+        let (plus, plus_rho) = at_kappa(KAPPA + step);
+        let (minus, minus_rho) = at_kappa(KAPPA - step);
+        (price(&plus, &plus_rho) - price(&minus, &minus_rho)) / (2.0 * step)
+    };
+    let gradient_over_kappa = |step: f64| -> SaeArrowVector {
+        let (plus, plus_rho) = at_kappa(KAPPA + step);
+        let (minus, minus_rho) = at_kappa(KAPPA - step);
+        arrow_scaled_difference(
+            &inner_gradient(&plus, target.view(), &plus_rho),
+            &inner_gradient(&minus, target.view(), &minus_rho),
+            step,
+        )
+    };
+    let direction_scale = arrow_norm(&theta_hat).max(1.0);
+    let gradient_along_response = |eps: f64| -> SaeArrowVector {
+        arrow_scaled_difference(
+            &inner_gradient(&displaced(&state, &theta_hat, eps), target.view(), &anchor),
+            &inner_gradient(&displaced(&state, &theta_hat, -eps), target.view(), &anchor),
+            eps,
+        )
+    };
+    let cost_along_response = |eps: f64| -> f64 {
+        (price(&displaced(&state, &theta_hat, eps), &anchor)
+            - price(&displaced(&state, &theta_hat, -eps), &anchor))
+            / (2.0 * eps)
+    };
+
+    let kappa_step = 1.0e-3_f64;
+    let (partial_fd, partial_spread) =
+        richardson(cost_over_kappa(kappa_step), cost_over_kappa(0.5 * kappa_step));
+    let g_kappa_coarse = gradient_over_kappa(kappa_step);
+    let g_kappa_fine = gradient_over_kappa(0.5 * kappa_step);
+    let response_step = 1.0e-4 / direction_scale;
+    let a_theta_coarse = gradient_along_response(response_step);
+    let a_theta_fine = gradient_along_response(0.5 * response_step);
+    let (directional_fd, directional_spread) = richardson(
+        cost_along_response(response_step),
+        cost_along_response(0.5 * response_step),
+    );
+    // The frozen cost's slope along θ̂_κ is gᵀθ̂_κ + ½Γᵀθ̂_κ: the penalized loss
+    // contributes its inner residual g, measured at this same state.
+    let residual_along_response = arrow_dot(&residual, &theta_hat);
+    let implicit_fd = directional_fd - residual_along_response;
+
     println!(
-        "[#2935 {route}] cost={:.10e} analytic dV/dκ={analytic:.10e} \
-         central(h)={coarse:.10e} central(h/2)={fine:.10e} richardson={richardson:.10e}",
-        evaluation.cost
+        "[#2935 dense] cost={cost:.12e} |g|={:.6e} |θ̂_κ|={:.6e} gᵀθ̂_κ={residual_along_response:.12e} \
+         partial={partial:.12e} partial_fd={partial_fd:.12e} (spread {partial_spread:.3e}) \
+         implicit={implicit:.12e} directional_fd={directional_fd:.12e} (spread {directional_spread:.3e}) \
+         implicit_fd={implicit_fd:.12e} complete={complete:.12e}",
+        arrow_norm(&residual),
+        arrow_norm(&theta_hat)
+    );
+    println!(
+        "[#2935 dense] |g_κ|∞={:.6e} max|g_κ − fd|={:.3e} (spread {:.3e}); \
+         max|A·θ̂_κ + g_κ| by difference={:.3e} (spread {:.3e})",
+        arrow_max(&g_kappa),
+        arrow_gap(&g_kappa, &g_kappa_fine),
+        arrow_gap(&g_kappa_coarse, &g_kappa_fine),
+        arrow_gap(&negative_g_kappa, &a_theta_fine),
+        arrow_gap(&a_theta_coarse, &a_theta_fine)
+    );
+
+    // Every premise below is measured by difference, independent of the channel it
+    // licenses, so a missing channel fails its own factor check rather than a premise.
+    let partial_tolerance = 10.0 * partial_spread + 1.0e-6 * partial_fd.abs().max(1.0);
+    assert!(
+        partial_fd.abs() > 1.0e3 * partial_tolerance,
+        "the frozen cost must move materially with κ against the partial tolerance \
+         ({partial_fd} vs {partial_tolerance:.3e})"
     );
     assert!(
-        analytic.is_finite() && richardson.is_finite(),
-        "{route}: non-finite κ derivative (analytic {analytic}, difference {richardson})"
+        (partial - partial_fd).abs() <= partial_tolerance,
+        "fixed-state κ partials {partial} are not the frozen cost's κ derivative {partial_fd} \
+         (|Δ| = {}, tolerance {partial_tolerance})",
+        (partial - partial_fd).abs()
+    );
+    let g_kappa_tolerance = 10.0 * arrow_gap(&g_kappa_coarse, &g_kappa_fine)
+        + 1.0e-6 * arrow_max(&g_kappa_fine).max(1.0);
+    assert!(
+        arrow_max(&g_kappa_fine) > 1.0e3 * g_kappa_tolerance,
+        "the inner gradient must move materially with κ against its tolerance \
+         ({:.3e} vs {g_kappa_tolerance:.3e})",
+        arrow_max(&g_kappa_fine)
     );
     assert!(
-        spread <= 1.0e-2 * fine.abs().max(1.0),
-        "{route}: the two central differences disagree ({coarse} vs {fine}), so the endpoints \
-         straddle a discrete stratum or the inner solve is not converged tightly enough to \
-         difference"
+        arrow_gap(&g_kappa, &g_kappa_fine) <= g_kappa_tolerance,
+        "g_κ is not the inner gradient's κ derivative (max |Δ| = {}, tolerance {g_kappa_tolerance})",
+        arrow_gap(&g_kappa, &g_kappa_fine)
+    );
+    let response_tolerance = 10.0 * arrow_gap(&a_theta_coarse, &a_theta_fine)
+        + 1.0e-6 * arrow_max(&g_kappa_fine).max(1.0);
+    assert!(
+        arrow_gap(&negative_g_kappa, &a_theta_fine) <= response_tolerance,
+        "θ̂_κ = −A⁺g_κ does not solve the linearized stationarity: max |A·θ̂_κ + g_κ| by \
+         difference = {}, tolerance {response_tolerance}",
+        arrow_gap(&negative_g_kappa, &a_theta_fine)
+    );
+    let implicit_tolerance = 10.0 * directional_spread + 1.0e-6 * directional_fd.abs().max(1.0);
+    assert!(
+        implicit_fd.abs() > 1.0e3 * implicit_tolerance,
+        "the frozen cost must move materially along θ̂_κ against the implicit tolerance \
+         ({implicit_fd} vs {implicit_tolerance:.3e})"
     );
     assert!(
-        fine.abs() > 1.0e-3,
-        "{route}: the criterion must move materially with κ for this check to mean anything \
-         (slope {fine})"
+        (implicit - implicit_fd).abs() <= implicit_tolerance,
+        "the implicit correction {implicit} is not ½Γᵀθ̂_κ = {implicit_fd} measured along θ̂_κ \
+         (|Δ| = {}, tolerance {implicit_tolerance})",
+        (implicit - implicit_fd).abs()
     );
-    let tolerance = 10.0 * spread + 1.0e-6 * richardson.abs().max(1.0);
     assert!(
-        (analytic - richardson).abs() <= tolerance,
-        "{route}: analytic κ entry {analytic} is not the derivative of the route's own value \
-         ({richardson}; |Δ| = {}, tolerance {tolerance})",
-        (analytic - richardson).abs()
+        (complete - (partial_fd + implicit_fd)).abs() <= partial_tolerance + implicit_tolerance,
+        "the complete κ entry {complete} is not the verified partials {partial_fd} plus the \
+         verified implicit response {implicit_fd}"
     );
 }
 
 #[test]
-fn dense_route_kappa_gradient_is_the_derivative_of_its_value_2935() {
-    kappa_gradient_is_the_derivative_of_the_route_value(true, "dense exact-A");
+fn streaming_route_kappa_gradient_matches_the_dense_route_at_one_state_2935() {
+    let (term, target, rho) = curvature_fixture();
+    let (state, anchor, _) = converged_anchor(term, &target, rho);
+    // A zero inner budget prices both routes at the converged state.
+    let mut objective =
+        SaeManifoldOuterObjective::new(state, target.clone(), None, anchor, 0, 0.4, 1.0e-6, 1.0e-6);
+    let at = objective.baseline_rho.clone();
+    let flat = at
+        .kappa_flat_index(0)
+        .expect("the curvature atom owns an outer coordinate");
+    let dense_evaluation = objective
+        .evaluate_outer_criterion_route(&at, true, false)
+        .expect("the dense route prices the state");
+    let dense = objective
+        .analytic_gradient_for_outer_evaluation(&at, &dense_evaluation)
+        .expect("the dense route differentiates the state")[flat];
+    let streaming_evaluation = objective
+        .evaluate_outer_criterion_route(&at, false, false)
+        .expect("the streaming route prices the state");
+    let streaming = objective
+        .analytic_gradient_for_outer_evaluation(&at, &streaming_evaluation)
+        .expect("the streaming route differentiates the state")[flat];
+    println!(
+        "[#2935 routes] dense cost={:.12e} streaming cost={:.12e} dense dV/dκ={dense:.12e} \
+         streaming dV/dκ={streaming:.12e}",
+        dense_evaluation.cost, streaming_evaluation.cost
+    );
+    assert!(
+        (dense_evaluation.cost - streaming_evaluation.cost).abs()
+            <= 1.0e-8 * dense_evaluation.cost.abs().max(1.0),
+        "both routes must price one state ({} vs {})",
+        dense_evaluation.cost,
+        streaming_evaluation.cost
+    );
+    assert!(
+        dense.abs() > 1.0e-3,
+        "the κ entry must be material for route parity to mean anything ({dense})"
+    );
+    let tolerance = 1.0e-6 * dense.abs().max(1.0);
+    assert!(
+        (streaming - dense).abs() <= tolerance,
+        "the streaming κ entry {streaming} is not the dense κ entry {dense} at one state \
+         (|Δ| = {}, tolerance {tolerance})",
+        (streaming - dense).abs()
+    );
 }
 
+/// A data-supported reduction may keep only directions in the penalty's null
+/// space. A trial curvature must then install the reduced congruence `QᵀS(κ)Q`,
+/// which is zero there, instead of refusing the atom. A reduction that keeps a
+/// penalized direction installs the matching block of the full Gram.
 #[test]
-fn streaming_route_kappa_gradient_is_the_derivative_of_its_value_2935() {
-    kappa_gradient_is_the_derivative_of_the_route_value(false, "streaming");
+fn curvature_trial_installs_the_reduced_congruence_of_the_full_gram_2935() {
+    let (term, _target, _rho) = curvature_fixture();
+    let trial = 0.4_f64;
+    let full = term.atoms[0]
+        .geometry_plan()
+        .expect("the fixture atom carries its geometry plan")
+        .at_constant_curvature(trial)
+        .and_then(|plan| plan.build_reference_penalty())
+        .expect("full Gram at the trial curvature");
+    let scale = full.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    assert!(
+        scale > 1.0,
+        "the full Gram must be materially nonzero (max |S| = {scale})"
+    );
+    let m = full.nrows();
+    // Column 0 of the monomial tangent basis is the constant, the Dirichlet null
+    // space. Retaining [1, t₁] keeps one penalized direction (the control arm);
+    // retaining [1] keeps none.
+    for retained in [2usize, 1] {
+        let mut q = Array2::<f64>::zeros((m, retained));
+        for col in 0..retained {
+            q[[col, col]] = 1.0;
+        }
+        let mut atom = term.atoms[0].clone();
+        atom.reduce_basis_to_subspace(&q)
+            .expect("the reduction retains orthonormal columns of the basis");
+        let prepared = atom
+            .prepare_constant_curvature(trial)
+            .unwrap_or_else(|err| panic!("retained {retained}: trial curvature refused: {err}"));
+        atom.commit_prepared_constant_curvature(prepared);
+        let expected = q.t().dot(&full).dot(&q);
+        let installed = atom.smooth_penalty();
+        let gap = installed
+            .iter()
+            .zip(expected.iter())
+            .map(|(value, reference)| (value - reference).abs())
+            .fold(0.0_f64, f64::max);
+        println!(
+            "[#2935 reduced congruence] retained={retained} installed={installed:?} \
+             expected={expected:?} gap={gap:.3e}"
+        );
+        assert_eq!(installed.dim(), (retained, retained));
+        assert!(
+            gap <= 1.0e-10 * scale,
+            "retained {retained}: installed reduced Gram departs from QᵀS(κ)Q by {gap}"
+        );
+        assert!(
+            atom.smooth_penalty_kappa_derivative()
+                .is_some_and(|derivative| derivative.dim() == (retained, retained)),
+            "retained {retained}: the reduced dS/dκ must be installed at the reduced width"
+        );
+    }
 }
