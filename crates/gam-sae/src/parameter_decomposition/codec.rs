@@ -504,6 +504,43 @@ pub fn decode_prefix_integer(reader: &mut BitReader<'_>) -> Result<u64, CodecErr
     Ok(value)
 }
 
+/// The zigzag index `2k` for `k ≥ 0` and `2|k| − 1` for `k < 0`, a bijection of `i64` onto `u64`.
+fn zigzag(value: i64) -> u64 {
+    ((value << 1) ^ (value >> (i64::BITS - 1))) as u64
+}
+
+/// The inverse of [`zigzag`]. `index >> 1` is below `2^63`, so the cast is exact.
+fn unzigzag(index: u64) -> i64 {
+    let half = (index >> 1) as i64;
+    if index & 1 == 0 { half } else { -half - 1 }
+}
+
+/// `zigzag(value) + 1`, the argument of the unsigned prefix code. `i64::MIN` has zigzag index
+/// `u64::MAX`, which leaves no room for the `+ 1`, so it has no codeword.
+fn signed_codeword_argument(value: i64) -> Result<u64, CodecError> {
+    zigzag(value).checked_add(1).ok_or_else(|| {
+        CodecError::InvalidInput("i64::MIN has no signed prefix codeword".to_string())
+    })
+}
+
+/// Length in bits of the signed prefix codeword of `value`: [`prefix_integer_len_bits`] of
+/// `zigzag(value) + 1`. `i64::MIN` is refused.
+pub fn signed_prefix_integer_len_bits(value: i64) -> Result<u64, CodecError> {
+    prefix_integer_len_bits(signed_codeword_argument(value)?)
+}
+
+/// Write `value` as the Elias omega codeword of `zigzag(value) + 1`. `i64::MIN` is refused
+/// before any bit is written.
+pub fn encode_signed_prefix_integer(out: &mut BitString, value: i64) -> Result<(), CodecError> {
+    encode_prefix_integer(out, signed_codeword_argument(value)?)
+}
+
+/// Read one signed prefix codeword ([`encode_signed_prefix_integer`]). Every codeword decodes
+/// into `[i64::MIN + 1, i64::MAX]`.
+pub fn decode_signed_prefix_integer(reader: &mut BitReader<'_>) -> Result<i64, CodecError> {
+    Ok(unzigzag(decode_prefix_integer(reader)? - 1))
+}
+
 /// `⌈log₂ M⌉`: the width of a fixed index into an alphabet of `M ≥ 1` symbols the
 /// decoder already knows. A one-symbol alphabet costs zero bits.
 pub fn fixed_index_len_bits(alphabet_size: usize) -> Result<u32, CodecError> {
@@ -1013,6 +1050,51 @@ mod tests {
             decode_prefix_integer(&mut cut.reader()),
             Err(CodecError::UnexpectedEnd { .. })
         ));
+    }
+
+    #[test]
+    fn signed_prefix_integer_code_round_trips_and_refuses_i64_min() {
+        // Hand-derived: zigzag maps 0, −1, 1, −2 to 0, 1, 2, 3, so the codeword lengths are
+        // L_int(1) = 1, L_int(2) = 3, L_int(3) = 3 and L_int(4) = 6.
+        for (value, bits) in [(0_i64, 1_u64), (-1, 3), (1, 3), (-2, 6)] {
+            assert_eq!(signed_prefix_integer_len_bits(value), Ok(bits), "L_s({value})");
+        }
+        let mut values: Vec<i64> = (-4096..=4096).collect();
+        values.extend([i64::MAX, i64::MIN + 1, 1 << 53, -(1 << 53), 1022, -1022]);
+        let mut stream = BitString::new();
+        for &value in &values {
+            let before = stream.len_bits();
+            encode_signed_prefix_integer(&mut stream, value).expect("encode");
+            assert_eq!(
+                stream.len_bits() - before,
+                signed_prefix_integer_len_bits(value).expect("length"),
+                "written length of {value}"
+            );
+        }
+        // One concatenated stream decodes value by value: the code stays prefix-free.
+        let mut reader = stream.reader();
+        for &value in &values {
+            assert_eq!(decode_signed_prefix_integer(&mut reader), Ok(value));
+        }
+        assert_eq!(reader.finish(), Ok(()));
+        // Positive control: i64::MIN has no codeword, and a refused encode writes nothing.
+        assert!(matches!(
+            signed_prefix_integer_len_bits(i64::MIN),
+            Err(CodecError::InvalidInput(_))
+        ));
+        let mut refused = BitString::new();
+        assert!(matches!(
+            encode_signed_prefix_integer(&mut refused, i64::MIN),
+            Err(CodecError::InvalidInput(_))
+        ));
+        assert!(refused.is_empty());
+        // The two largest unsigned codewords decode to the ends of the signed range.
+        let mut largest = BitString::new();
+        encode_prefix_integer(&mut largest, u64::MAX).expect("encode");
+        assert_eq!(decode_signed_prefix_integer(&mut largest.reader()), Ok(i64::MAX));
+        let mut odd = BitString::new();
+        encode_prefix_integer(&mut odd, u64::MAX - 1).expect("encode");
+        assert_eq!(decode_signed_prefix_integer(&mut odd.reader()), Ok(i64::MIN + 1));
     }
 
     #[test]
