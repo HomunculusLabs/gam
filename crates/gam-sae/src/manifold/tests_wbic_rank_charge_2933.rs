@@ -219,7 +219,7 @@ fn resolved_single_atom_state() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho
         decoder,
         Array2::<f64>::eye(3),
     )
-    .unwrap()
+    .expect("the periodic fixture has matching basis, jet, decoder and Gram shapes")
     .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((n, 1)),
@@ -227,22 +227,26 @@ fn resolved_single_atom_state() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect("one softmax block over one circle coordinate is a valid assignment");
+    let term = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("one atom with one matching assignment block is a valid term");
     let rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![250.0_f64.ln()]]);
     (term, target, rho)
 }
 
 #[test]
 fn rank_charge_audit_fills_every_field_from_one_state_2933() {
-    let (term, target, rho) = resolved_single_atom_state();
-    let loss = term.loss(target.view(), &rho).unwrap();
+    let (mut term, target, rho) = resolved_single_atom_state();
+    let loss = term
+        .loss(target.view(), &rho)
+        .expect("the fixture loss is finite");
     let sys = term
         .assemble_arrow_schur(target.view(), &rho, None)
-        .unwrap();
+        .expect("the fixture arrow system assembles");
     let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
     let (_delta_t, _delta_beta, cache) =
-        solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options).unwrap();
+        solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options)
+            .expect("the resolved fixture has a positive definite evidence factor");
 
     let audits = term
         .rank_charge_audit(target.view(), &rho, &loss, &cache)
@@ -262,18 +266,21 @@ fn rank_charge_audit_fills_every_field_from_one_state_2933() {
 
     // Tied to the priced state: the same dispersion, the same DOF the criterion
     // charges, and the criterion's charge arithmetic.
-    let residual = term.reconstruction_residual(target.view(), &rho).unwrap();
+    let residual = term
+        .reconstruction_residual(target.view(), &rho)
+        .expect("fitted and target shapes match");
     let dispersion = term
         .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))
-        .unwrap()
+        .expect("the fixture dispersion is finite and positive")
         .raw_output_noise_variance;
     assert_eq!(audit.dispersion.to_bits(), dispersion.to_bits());
     let mut grams = term.empty_decoder_gram_accumulator();
-    term.accumulate_decoder_gram(&mut grams).unwrap();
+    term.accumulate_decoder_gram(&mut grams)
+        .expect("the decoder Gram accumulates on the CPU fixture");
     let n_eff = term.per_atom_effective_sample_size();
     let priced_dof = term
         .rank_dof_from_grams(&grams, &n_eff, &rho, dispersion)
-        .unwrap();
+        .expect("the priced rank-charge DOF exists at the fixture state");
     assert_eq!(audit.stratum.production_dof().to_bits(), priced_dof[0].to_bits());
     assert_eq!(
         audit.stratum.production_charge().to_bits(),
@@ -384,7 +391,7 @@ fn rank_charge_audit_fills_every_field_from_one_state_2933() {
     let mut weighted = resolved_single_atom_state().0;
     weighted
         .set_row_loss_weights((0..n).map(|row| if row % 2 == 0 { 1.5 } else { 0.5 }).collect())
-        .unwrap();
+        .expect("alternating 1.5/0.5 weights are finite, positive and mean one");
     let refusal = weighted
         .rank_charge_audit(target.view(), &rho, &loss, &cache)
         .expect_err("weighted rows are refused");
@@ -419,8 +426,8 @@ fn mp_edge_false_rank_rate_under_a_fitted_noise_only_null_2933() {
         let design = Array2::from_shape_fn((n, m), |(row, col)| gates[row] * phi[[row, col]]);
         let gram = design.t().dot(&design);
         let n_eff = gates.iter().map(|gate| gate * gate).sum::<f64>();
-        let edge =
-            crate::null_battery::mp_reconstruction_rank_edge(n_eff, p as f64, dispersion).unwrap();
+        let edge = crate::null_battery::mp_reconstruction_rank_edge(n_eff, p as f64, dispersion)
+            .expect("positive occupancy, width and dispersion give a finite edge");
         let null = conditional_noise_null(&gram, n_eff, p, dispersion, lambda, Some(&penalty))
             .expect("conditional noise-only law");
         let ridge = (&gram + &(&penalty * lambda))
@@ -507,7 +514,8 @@ fn rank_charge_stratum_names_the_mp_edge_branch_2933() {
     // With G = N_eff·I the reconstruction energies are the squared decoder
     // singular values.
     let gram = Array2::<f64>::eye(2) * n_eff;
-    let edge = crate::null_battery::mp_reconstruction_rank_edge(n_eff, p as f64, dispersion).unwrap();
+    let edge = crate::null_battery::mp_reconstruction_rank_edge(n_eff, p as f64, dispersion)
+        .expect("positive occupancy, width and dispersion give a finite edge");
     let stratum_at = |first: f64, second: f64| {
         rank_charge_stratum(
             &gram,
@@ -568,6 +576,6 @@ fn rank_charge_stratum_names_the_mp_edge_branch_2933() {
     // The value path prices the branch the stratum names.
     let decoder = decoder_with_energies(edge, 1.05, 0.99, p);
     let priced = realised_rank_charge_dof(&gram, &decoder, n_eff, p as f64, dispersion, 0.0, None)
-        .unwrap();
+        .expect("the diagonal fixture prices a finite DOF");
     assert_eq!(priced.to_bits(), resolved.production_dof().to_bits());
 }
