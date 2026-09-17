@@ -285,7 +285,7 @@ pub fn generate_rho_candidates(
     if num_smoothing == 3 {
         let smoothing_primary =
             Array1::from_vec(primary.iter().take(num_smoothing).copied().collect());
-        let smoothing_heuristic_lambdas = heuristic_rhos.and_then(|vals| {
+        let smoothing_heuristic_log_lambdas = heuristic_rhos.and_then(|vals| {
             if vals.len() >= num_smoothing {
                 Some(&vals[..num_smoothing])
             } else {
@@ -311,13 +311,13 @@ pub fn generate_rho_candidates(
             &mut spde_prefix_seeds,
             &mut spde_prefix_seen,
             bounds,
-            smoothing_heuristic_lambdas,
+            smoothing_heuristic_log_lambdas,
         );
         add_spde_manifold_seeds(
             &mut spde_prefix_seeds,
             &mut spde_prefix_seen,
             bounds,
-            smoothing_heuristic_lambdas,
+            smoothing_heuristic_log_lambdas,
             &smoothing_primary,
         );
         for prefix_seed in spde_prefix_seeds {

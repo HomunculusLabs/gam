@@ -23,7 +23,7 @@
 // either a status mismatch, an inner-iter blowup to ~100, or a wall-clock
 // timeout — any of which fails the test.
 
-use gam::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
+use gam::estimate::{FitOptions, fit_gamwith_heuristic_log_lambdas};
 use gam::pirls::PirlsStatus;
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
@@ -156,7 +156,7 @@ fn large_scale_convergence_regression() {
     let s_list = vec![BlockwisePenalty::new(1..(1 + k), s_block)];
 
     let start = Instant::now();
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x_design.view(),
         y.view(),
         weights.view(),

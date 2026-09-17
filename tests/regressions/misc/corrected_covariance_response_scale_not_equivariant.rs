@@ -26,7 +26,7 @@
 //!   2. premise  — `Vb` diagonals scale by exactly `c²`,
 //!   3. property — `Vp` diagonals scale by the same `c²` (was `c⁴`).
 
-use gam::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
+use gam::estimate::{FitOptions, fit_gamwith_heuristic_log_lambdas};
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use ndarray::{Array1, Array2};
@@ -96,7 +96,7 @@ fn fit_design(
     let w = Array1::<f64>::ones(x.nrows());
     let offset = Array1::<f64>::zeros(x.nrows());
     let penalty = BlockwisePenalty::new(0..x.ncols(), s);
-    fit_gamwith_heuristic_lambdas(
+    fit_gamwith_heuristic_log_lambdas(
         x,
         y.view(),
         w.view(),

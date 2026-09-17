@@ -2,7 +2,7 @@
 //! so an inner-accuracy edit can be checked without rebuilding model families.
 
 use gam_problem::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
-use gam_solve::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
+use gam_solve::estimate::{FitOptions, fit_gamwith_heuristic_log_lambdas};
 use gam_terms::smooth::BlockwisePenalty;
 use ndarray::{Array1, Array2, array};
 
@@ -19,7 +19,7 @@ fn main() {
         nullspace_dims: vec![0],
         ..FitOptions::default()
     };
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x.view(),
         y.view(),
         weights.view(),

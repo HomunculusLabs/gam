@@ -26,7 +26,7 @@
 //!       trips if the outer work blows back up toward the ~150-eval bug regime.
 //! It does NOT depend on R / mgcv.
 
-use gam::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
+use gam::estimate::{FitOptions, fit_gamwith_heuristic_log_lambdas};
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use ndarray::{Array1, Array2};
@@ -120,7 +120,7 @@ fn binomial_logit_reml_outer_work_bounded_1575() {
     let weights = Array1::ones(n);
     let offset = Array1::zeros(n);
 
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x.view(),
         y.view(),
         weights.view(),
@@ -269,7 +269,7 @@ fn binomial_logit_reml_firth_on_outer_work_bounded_1575() {
     let mut opts = logit_fit_options();
     opts.firth_bias_reduction = true; // exercise the Firth TK outer-Hessian path
 
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x.view(),
         y.view(),
         weights.view(),

@@ -565,7 +565,7 @@ pub(crate) fn run_outer_with_plan(
     let model_domain_bounds = outer_model_domain_bounds_template(config, cap.n_params);
     let mut seeds = crate::seeding::generate_rho_candidates(
         cap.n_params,
-        config.heuristic_lambdas.as_deref(),
+        config.heuristic_log_lambdas.as_deref(),
         &config.seed_config,
         gam_problem::OrderedRhoBounds::envelope(
             model_domain_bounds.0.iter().copied(),

@@ -3,7 +3,7 @@
 //! Retains the exact problem for the independent integration audit and verifies
 //! that the published covariance describes beta before any estimator transform.
 
-use gam_solve::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
+use gam_solve::estimate::{FitOptions, fit_gamwith_heuristic_log_lambdas};
 use gam_terms::smooth::BlockwisePenalty;
 use ndarray::{Array1, Array2};
 use serde::Deserialize;
@@ -36,7 +36,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let x = matrix(serde_json::from_value(problem["x"].clone())?);
     let y = Array1::from_vec(serde_json::from_value(problem["y"].clone())?);
     let rho: Vec<f64> = serde_json::from_value(problem["rho"].clone())?;
-    let initial: Vec<_> = rho.iter().map(|r| r.exp()).collect();
     let blocks: Vec<Penalty> = serde_json::from_value(problem["penalties"].clone())?;
     let penalties: Vec<_> = blocks
         .into_iter()
@@ -49,13 +48,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let weights = Array1::ones(y.len());
     let offset = Array1::zeros(y.len());
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x,
         y.view(),
         weights.view(),
         offset.view(),
         &penalties,
-        Some(&initial),
+        Some(&rho),
         gam_problem::LikelihoodSpec::gaussian_identity(),
         &options,
     )?;

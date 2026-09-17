@@ -4834,7 +4834,7 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
         // The seed lattice reads its anchor in the outer coordinate, log λ
         // (#1340); an exp(ρ₀) anchor clamps to the domain's upper face (#2902
         // row 9).
-        .with_heuristic_lambdas(theta0.to_vec());
+        .with_heuristic_log_lambdas(theta0.to_vec());
 
     let eval_outer = |state: &mut MeanWiggleOuterState,
                       theta: &Array1<f64>,

@@ -26,7 +26,7 @@
 //!   2. the resulting conformal interval achieves at least nominal coverage on
 //!      a fresh draw from the same DGP (within small finite-sample slack).
 
-use gam_solve::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
+use gam_solve::estimate::{FitOptions, fit_gamwith_heuristic_log_lambdas};
 use gam_linalg::matrix::DesignMatrix;
 use gam_terms::smooth::BlockwisePenalty;
 use gam_spec::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
@@ -103,7 +103,7 @@ fn fit_cubic(x: &Array1<f64>, y: &Array1<f64>) -> gam_solve::estimate::UnifiedFi
     let weights = Array1::<f64>::ones(design.nrows());
     let offset = Array1::<f64>::zeros(design.nrows());
     let penalty = BlockwisePenalty::new(1..design.ncols(), Array2::<f64>::eye(design.ncols() - 1));
-    fit_gamwith_heuristic_lambdas(
+    fit_gamwith_heuristic_log_lambdas(
         design,
         y.view(),
         weights.view(),

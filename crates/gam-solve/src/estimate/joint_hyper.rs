@@ -102,7 +102,7 @@ pub(crate) fn validate_joint_hyper_direction_shapes(
 ///
 /// # Why this is public (#2671)
 ///
-/// `optimize_external_designwith_heuristic_lambdas_andwarm_start` — the
+/// `optimize_external_designwith_heuristic_log_lambdas_andwarm_start` — the
 /// scalar-ρ route — conditions its response before building its `RemlState`
 /// (#1000 centering, #1127 scaling) and reports `reml_score` as the outer value
 /// OF THE CONDITIONED PROBLEM. The joint `[ρ, ψ]` spatial route builds its

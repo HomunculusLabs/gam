@@ -836,7 +836,6 @@ fn gaussian_reml_fit_blocks_forward_native(
             )
         })
         .collect::<Vec<_>>();
-    let heuristic_lambdas = init_rhos.iter().map(|rho| rho.exp()).collect::<Vec<_>>();
     let opts = gam::solver::estimate::FitOptions {
         resource_policy: gam_runtime::resource::ResourcePolicy::default_library(),
         latent_cloglog: None,
@@ -855,13 +854,13 @@ fn gaussian_reml_fit_blocks_forward_native(
         persistent_warm_start_store: None,
     };
     let offset = Array1::<f64>::zeros(n_rows);
-    let fit = gam::solver::estimate::fit_gamwith_heuristic_lambdas(
+    let fit = gam::solver::estimate::fit_gamwith_heuristic_log_lambdas(
         joint_x.clone(),
         y,
         weights,
         offset.view(),
         &s_list,
-        Some(heuristic_lambdas.as_slice()),
+        Some(init_rhos),
         LikelihoodSpec::new(
             ResponseFamily::Gaussian,
             InverseLink::Standard(StandardLink::Identity),

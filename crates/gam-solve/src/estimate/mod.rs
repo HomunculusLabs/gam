@@ -90,13 +90,13 @@ pub use external_options::{ExternalOptimOptions, ExternalOptimResult};
 pub(crate) use external_options::{
     effective_sas_link_for_family, resolved_external_config, validate_penalty_spec_shape,
 };
-pub use fit::{fit_gam_with_penalty_specs, fit_gamwith_heuristic_lambdas};
+pub use fit::{fit_gam_with_penalty_specs, fit_gamwith_heuristic_log_lambdas};
 pub use gam_problem::{ensure_finite_scalar, validate_all_finite};
 pub use joint_hyper::{
     ExternalJointHyperEvaluator, gaussian_identity_outer_response_conditioning,
 };
-pub(crate) use optimizer::optimize_external_designwith_heuristic_lambdas_andwarm_start;
-pub use optimizer::optimize_external_designwith_heuristic_lambdas;
+pub(crate) use optimizer::optimize_external_designwith_heuristic_log_lambdas_andwarm_start;
+pub use optimizer::optimize_external_designwith_heuristic_log_lambdas;
 pub(crate) use penalty::{
     ParametricColumnConditioning, faer_frob_inner, kahan_sum, map_hessian_to_original_basis,
 };

@@ -445,13 +445,13 @@ fn reserve_factorized_inference_state(
 
 /// Fit an external design, allowing heuristic λ warm-start seeds
 /// for the outer smoothing search.
-pub fn optimize_external_designwith_heuristic_lambdas<X>(
+pub fn optimize_external_designwith_heuristic_log_lambdas<X>(
     y: ArrayView1<'_, f64>,
     w: ArrayView1<'_, f64>,
     x: X,
     offset: ArrayView1<'_, f64>,
     s_list: Vec<BlockwisePenalty>,
-    heuristic_lambdas: Option<&[f64]>,
+    heuristic_log_lambdas: Option<&[f64]>,
     opts: &ExternalOptimOptions,
 ) -> Result<ExternalOptimResult, EstimationError>
 where
@@ -461,13 +461,13 @@ where
         .into_iter()
         .map(PenaltySpec::from_blockwise)
         .collect();
-    optimize_external_designwith_heuristic_lambdas_andwarm_start(
+    optimize_external_designwith_heuristic_log_lambdas_andwarm_start(
         y,
         w,
         x,
         offset,
         specs,
-        heuristic_lambdas,
+        heuristic_log_lambdas,
         None,
         opts,
     )
@@ -894,14 +894,14 @@ pub(crate) fn freeze_lambda_search_nuisance_at_canonical_anchor(
     reml_state: &RemlState<'_>,
     resolved_likelihood_scale: &gam_problem::ResolvedLikelihoodScale,
     k: usize,
-    heuristic_lambdas: Option<&[f64]>,
+    heuristic_log_lambdas: Option<&[f64]>,
     seed_config: &SeedConfig,
 ) -> Result<(), EstimationError> {
     freeze_lambda_search_nuisance_at_canonical_anchor_with_ext_count(
         reml_state,
         resolved_likelihood_scale,
         k,
-        heuristic_lambdas,
+        heuristic_log_lambdas,
         seed_config,
         0,
     )
@@ -918,7 +918,7 @@ pub(crate) fn freeze_lambda_search_nuisance_at_canonical_anchor_with_ext_count(
     reml_state: &RemlState<'_>,
     resolved_likelihood_scale: &gam_problem::ResolvedLikelihoodScale,
     k: usize,
-    heuristic_lambdas: Option<&[f64]>,
+    heuristic_log_lambdas: Option<&[f64]>,
     seed_config: &SeedConfig,
     external_hyper_count: usize,
 ) -> Result<(), EstimationError> {
@@ -963,7 +963,7 @@ pub(crate) fn freeze_lambda_search_nuisance_at_canonical_anchor_with_ext_count(
     anchors.extend(
         crate::seeding::generate_rho_candidates(
             k,
-            heuristic_lambdas,
+            heuristic_log_lambdas,
             seed_config,
             gam_problem::OrderedRhoBounds::envelope(
                 domain_lower.iter().copied(),
@@ -1009,13 +1009,13 @@ pub(crate) fn freeze_lambda_search_nuisance_at_canonical_anchor_with_ext_count(
     Ok(())
 }
 
-pub(crate) fn optimize_external_designwith_heuristic_lambdas_andwarm_start<X>(
+pub(crate) fn optimize_external_designwith_heuristic_log_lambdas_andwarm_start<X>(
     y: ArrayView1<'_, f64>,
     w: ArrayView1<'_, f64>,
     x: X,
     offset: ArrayView1<'_, f64>,
     s_list: Vec<PenaltySpec>,
-    heuristic_lambdas: Option<&[f64]>,
+    heuristic_log_lambdas: Option<&[f64]>,
     warm_start_beta: Option<ArrayView1<'_, f64>>,
     opts: &ExternalOptimOptions,
 ) -> Result<ExternalOptimResult, EstimationError>
@@ -1198,7 +1198,7 @@ where
         &reml_state,
         &resolved_likelihood_scale,
         k,
-        heuristic_lambdas,
+        heuristic_log_lambdas,
         &reml_seed_config,
     )?;
     if let Some(store) = opts.persistent_warm_start_store.clone() {
@@ -1287,7 +1287,7 @@ where
             let rho_warm_start = negbin_rho_seed
                 .as_ref()
                 .and_then(|rho| rho.as_slice())
-                .or(heuristic_lambdas);
+                .or(heuristic_log_lambdas);
             let analytic_outer_hessian_available = reml_state.analytic_outer_hessian_enabled();
             // #2359: non-Gaussian search consumes the analytic outer gradient
             // (the family derivative ladder through order three), reserving
@@ -1348,7 +1348,7 @@ where
                 // native-order path unchanged.
                 .with_rho_canonical_keys(canon_keys.clone());
             let problem = if let Some(h) = rho_warm_start {
-                problem.with_heuristic_lambdas(h.to_vec())
+                problem.with_heuristic_log_lambdas(h.to_vec())
             } else {
                 problem
             };
@@ -1392,7 +1392,7 @@ where
             // from the selected start, and no seed is promoted directly to a fit.
             // `rho_weight_anchor` is exactly 0 for unit weights and fixed dispersion (#2469).
             let run_gaussian_anchored_prepass = gaussian_risk && weight_log_geom_mean != 0.0;
-            // A caller-supplied rho seed (`init_rhos`/`heuristic_lambdas`, now in
+            // A caller-supplied rho seed (`init_rhos`/`heuristic_log_lambdas`, now in
             // rho-space) is an explicit warm-start installed via `with_initial_rho`
             // above. It still ANCHORS the initial.sp prepass below rather than
             // short-circuiting it: the prepass only adopts its analytic candidate
@@ -1444,7 +1444,7 @@ where
                     SeedRiskProfile::GeneralizedLinear => 1.0,
                     SeedRiskProfile::Survival => 2.0,
                 };
-                // Anchor the prepass at the caller-supplied `heuristic_lambdas` when
+                // Anchor the prepass at the caller-supplied `heuristic_log_lambdas` when
                 // one is present (it is already in rho-space, used as-is) — the
                 // analytic candidate is scored relative to the warm start and keeps
                 // it unless it is strictly better. Otherwise anchor the default
@@ -1729,7 +1729,7 @@ where
                 })
                 .ok_or_else(|| EstimationError::InvalidInput("missing mixture spec".to_string()))?;
             let mut heuristic_theta = Vec::new();
-            if let Some(hvals) = heuristic_lambdas
+            if let Some(hvals) = heuristic_log_lambdas
                 && hvals.len() == k
             {
                 heuristic_theta.extend_from_slice(hvals);
@@ -1818,7 +1818,7 @@ where
                 .with_outer_inner_cap(reml_inner_progress_feedback(&reml_state))
                 .with_bounds(theta_lower, theta_upper);
             let problem = if let Some(h) = heuristic_theta_ref {
-                problem.with_heuristic_lambdas(h.to_vec())
+                problem.with_heuristic_log_lambdas(h.to_vec())
             } else {
                 problem
             };

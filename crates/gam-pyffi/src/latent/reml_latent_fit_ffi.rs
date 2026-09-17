@@ -614,14 +614,22 @@ fn glm_reml_fit_latent_impl(
         rho_prior: RhoPrior::Flat,
         persistent_warm_start_store: None,
     };
-    let heuristic_lambda = init_lambda.map(|lambda| [lambda]);
-    let mut fit = optimize_external_designwith_heuristic_lambdas(
+    // `init_lambda` is a smoothing strength at the Python boundary, as on every
+    // sibling latent fit; the outer search reads its seed as a log strength.
+    let heuristic_log_lambda = init_lambda
+        .map(|lambda| {
+            gam::checked_log_strength(lambda)
+                .map(|log_lambda| [log_lambda])
+                .map_err(|error| format!("init_lambda is not a supported smoothing strength: {error}"))
+        })
+        .transpose()?;
+    let mut fit = optimize_external_designwith_heuristic_log_lambdas(
         y_vec.view(),
         weights_owned.view(),
         design.clone(),
         offset.view(),
         vec![penalty_block],
-        heuristic_lambda.as_ref().map(|values| values.as_slice()),
+        heuristic_log_lambda.as_ref().map(|values| values.as_slice()),
         &opts,
     )
     .map_err(|err| err.to_string())?;

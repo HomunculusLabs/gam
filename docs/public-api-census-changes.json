@@ -2182,6 +2182,18 @@
     "evidence": "The removed map is what scripts/public_api_census.py printed for this change on the lane (gate job 1121497 on gx2 at 10043352cf). At the base git grep -w finds these names outside test files only in gam-solve estimate/optimizer.rs, reml/{atoms,gradient_hessian,mod,objective}.rs and rho_optimizer/{objective,run}.rs, and every one of those occurrences is deleted in this commit. cargo check --workspace --all-targets --exclude gam-pyffi on the patched tree names none of them."
   },
   {
+    "base": "cc2ea46f82a599c9619004b9574615f653349bdd",
+    "removed": {
+      "crates/gam-solve/src/estimate/fit.rs::fit_gamwith_heuristic_lambdas": 1,
+      "crates/gam-solve/src/estimate/fit.rs::fit_gamwith_heuristic_lambdas_andwarm_start": 1,
+      "crates/gam-solve/src/estimate/optimizer.rs::optimize_external_designwith_heuristic_lambdas": 1,
+      "crates/gam-solve/src/estimate/optimizer.rs::optimize_external_designwith_heuristic_lambdas_andwarm_start": 1,
+      "crates/gam-solve/src/rho_optimizer/run.rs::with_heuristic_lambdas": 1
+    },
+    "reason": "#2902 row 9: rename of the seed-heuristic entry points to log strengths (fit_gamwith_heuristic_lambdas(_andwarm_start) -> fit_gamwith_heuristic_log_lambdas(_andwarm_start), optimize_external_designwith_heuristic_lambdas(_andwarm_start) -> optimize_external_designwith_heuristic_log_lambdas(_andwarm_start), OuterProblem::with_heuristic_lambdas -> with_heuristic_log_lambdas). Each is replaced in the same commit by the renamed function with the same signature; the outer runner reads the values as log strengths since #1340.",
+    "evidence": "The removed map is what scripts/public_api_census.py printed for this change on the lane (gate job 1129787 on gx1 at da351759ac). Every caller at the base (gam-solve, gam-models, gam-predict tests, gam-pyffi, the root tests, examples/gaussian_posterior_1561.rs and bench/measurements/issue_2668) is updated to the renamed function in this commit."
+  },
+  {
     "base": "70defacd8d2f0704a266cc2bc407f3af1f6e3034",
     "removed": {
       "crates/gam-linalg/src/test_support.rs::advantage_upper_bound": 1,

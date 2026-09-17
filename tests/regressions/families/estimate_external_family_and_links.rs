@@ -1,4 +1,4 @@
-use gam::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
+use gam::estimate::{FitOptions, fit_gamwith_heuristic_log_lambdas};
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use ndarray::{Array1, Array2, array};
@@ -36,7 +36,7 @@ fn heuristic_rho_seed_produces_a_finite_optimized_reml_fit() {
         ResponseFamily::Binomial,
         InverseLink::Standard(StandardLink::Logit),
     );
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x.view(),
         y.view(),
         w.view(),
@@ -84,7 +84,7 @@ fn resolve_external_family_fits_binomial_loglog_and_cauchit_2158() {
         let (x, y, w, offset, s) = tiny_problem();
         let opts = base_opts();
         let family = LikelihoodSpec::new(ResponseFamily::Binomial, InverseLink::Standard(link));
-        let fit = fit_gamwith_heuristic_lambdas(
+        let fit = fit_gamwith_heuristic_log_lambdas(
             x.view(),
             y.view(),
             w.view(),
@@ -121,7 +121,7 @@ fn firth_accepted_for_binomial_loglog_and_cauchit_2158() {
     let mut opts = base_opts();
     opts.firth_bias_reduction = true;
     for link in [StandardLink::LogLog, StandardLink::Cauchit] {
-        let fit = fit_gamwith_heuristic_lambdas(
+        let fit = fit_gamwith_heuristic_log_lambdas(
             x.view(),
             y.view(),
             w.view(),

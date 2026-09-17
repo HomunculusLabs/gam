@@ -1,38 +1,38 @@
 use super::*;
 
-pub fn fit_gamwith_heuristic_lambdas<X>(
+pub fn fit_gamwith_heuristic_log_lambdas<X>(
     x: X,
     y: ArrayView1<'_, f64>,
     weights: ArrayView1<'_, f64>,
     offset: ArrayView1<'_, f64>,
     s_list: &[BlockwisePenalty],
-    heuristic_lambdas: Option<&[f64]>,
+    heuristic_log_lambdas: Option<&[f64]>,
     family: gam_problem::LikelihoodSpec,
     opts: &FitOptions,
 ) -> Result<UnifiedFitResult, EstimationError>
 where
     X: Into<DesignMatrix>,
 {
-    fit_gamwith_heuristic_lambdas_andwarm_start(
+    fit_gamwith_heuristic_log_lambdas_andwarm_start(
         x,
         y,
         weights,
         offset,
         s_list,
-        heuristic_lambdas,
+        heuristic_log_lambdas,
         None,
         family,
         opts,
     )
 }
 
-pub(crate) fn fit_gamwith_heuristic_lambdas_andwarm_start<X>(
+pub(crate) fn fit_gamwith_heuristic_log_lambdas_andwarm_start<X>(
     x: X,
     y: ArrayView1<'_, f64>,
     weights: ArrayView1<'_, f64>,
     offset: ArrayView1<'_, f64>,
     s_list: &[BlockwisePenalty],
-    heuristic_lambdas: Option<&[f64]>,
+    heuristic_log_lambdas: Option<&[f64]>,
     warm_start_beta: Option<ArrayView1<'_, f64>>,
     family: gam_problem::LikelihoodSpec,
     opts: &FitOptions,
@@ -48,7 +48,7 @@ where
         offset,
         specs,
         opts.nullspace_dims.clone(),
-        heuristic_lambdas,
+        heuristic_log_lambdas,
         warm_start_beta,
         family,
         opts,
@@ -89,7 +89,7 @@ fn fit_gamwith_penalty_specs_andwarm_start<X>(
     offset: ArrayView1<'_, f64>,
     specs: Vec<PenaltySpec>,
     nullspace_dims: Vec<usize>,
-    heuristic_lambdas: Option<&[f64]>,
+    heuristic_log_lambdas: Option<&[f64]>,
     warm_start_beta: Option<ArrayView1<'_, f64>>,
     family: gam_problem::LikelihoodSpec,
     opts: &FitOptions,
@@ -289,13 +289,13 @@ where
         persistent_warm_start_store: opts.persistent_warm_start_store.clone(),
     };
 
-    let result = optimize_external_designwith_heuristic_lambdas_andwarm_start(
+    let result = optimize_external_designwith_heuristic_log_lambdas_andwarm_start(
         y,
         weights,
         &x,
         offset,
         specs.clone(),
-        heuristic_lambdas,
+        heuristic_log_lambdas,
         warm_start_beta,
         &ext_opts,
     )?;

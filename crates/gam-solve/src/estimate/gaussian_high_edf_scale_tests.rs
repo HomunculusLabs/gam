@@ -87,7 +87,7 @@ fn gaussian_high_edf_scale_uses_residual_df_not_mle_1765() {
     let offset = Array1::<f64>::zeros(N);
     let penalty = BlockwisePenalty::new(0..P, s.clone());
 
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x.clone(),
         y.view(),
         weights.view(),

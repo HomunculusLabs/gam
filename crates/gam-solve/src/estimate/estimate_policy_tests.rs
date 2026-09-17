@@ -2090,7 +2090,7 @@ fn cache_invariance_arm(
         rho_prior: Default::default(),
         persistent_warm_start_store: persistent_warm_start_store.clone(),
     };
-    optimize_external_designwith_heuristic_lambdas_andwarm_start(
+    optimize_external_designwith_heuristic_log_lambdas_andwarm_start(
         y.view(),
         w.view(),
         x.clone(),

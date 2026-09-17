@@ -28,7 +28,7 @@
 // test for the per-iter soft-acceptance and seed-screening fixes; the
 // gradient-only routing has its own unit tests in `outer_strategy.rs`.
 
-use gam::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
+use gam::estimate::{FitOptions, fit_gamwith_heuristic_log_lambdas};
 use gam::pirls::PirlsStatus;
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
@@ -126,7 +126,7 @@ fn large_scale_dense_logit_regression_guard() {
     let offset = Array1::zeros(n);
 
     let start = Instant::now();
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x.view(),
         y.view(),
         weights.view(),

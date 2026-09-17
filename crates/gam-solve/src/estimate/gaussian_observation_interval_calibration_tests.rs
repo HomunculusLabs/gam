@@ -137,7 +137,7 @@ fn gaussian_observation_interval_calibrated_high_edf_1765() {
         nullspace_dims: vec![0],
         ..FitOptions::default()
     };
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x.clone(),
         y.view(),
         weights.view(),

@@ -14,7 +14,7 @@ pub(crate) use gam::terms::basis::create_duchon_basis_1d_derivative_dense;
 
 pub(crate) use gam::solver::estimate::{
     EstimationError, ExternalOptimOptions,
-    optimize_external_designwith_heuristic_lambdas,
+    optimize_external_designwith_heuristic_log_lambdas,
 };
 
 pub(crate) use gam::linalg::faer_ndarray::{

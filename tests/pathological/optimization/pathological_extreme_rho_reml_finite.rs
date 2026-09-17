@@ -1,4 +1,4 @@
-use gam::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
+use gam::estimate::{FitOptions, fit_gamwith_heuristic_log_lambdas};
 use gam::terms::smooth::BlockwisePenalty;
 use gam::types::LikelihoodSpec;
 use ndarray::array;
@@ -15,7 +15,7 @@ fn extreme_rho_bounds_keep_reml_finite() {
 
     for rho in [-20.0_f64, 20.0_f64] {
         let lambdas = [rho.exp()];
-        let fit = fit_gamwith_heuristic_lambdas(
+        let fit = fit_gamwith_heuristic_log_lambdas(
             x.view(),
             y.view(),
             w.view(),

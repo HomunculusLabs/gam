@@ -163,7 +163,7 @@ fn binomial_logit_reml_outer_cost_is_bounded_1575() {
     let offset = Array1::<f64>::zeros(N);
 
     let t0 = std::time::Instant::now();
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x.clone(),
         y.view(),
         weights.view(),
@@ -268,7 +268,7 @@ fn binomial_logit_reml_outer_cost_is_n_independent_1575() {
         let mut opts = logit_options();
         opts.nullspace_dims = vec![2; N_SMOOTH];
         let t0 = std::time::Instant::now();
-        let fit = fit_gamwith_heuristic_lambdas(
+        let fit = fit_gamwith_heuristic_log_lambdas(
             x,
             y.view(),
             weights.view(),
@@ -1029,7 +1029,7 @@ fn binomial_logit_fit_publishes_a_certified_identified_subspace_2901() {
     let (x, y, s_list) = build_fixture();
     let weights = Array1::<f64>::ones(N);
     let offset = Array1::<f64>::zeros(N);
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x,
         y.view(),
         weights.view(),
@@ -1112,7 +1112,7 @@ fn a_fits_identified_rank_refuses_over_a_step_that_reaches_its_band_2901() {
     let (x, y, s_list) = build_fixture();
     let weights = Array1::<f64>::ones(N);
     let offset = Array1::<f64>::zeros(N);
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x.clone(),
         y.view(),
         weights.view(),

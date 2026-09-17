@@ -1,4 +1,4 @@
-use gam::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
+use gam::estimate::{FitOptions, fit_gamwith_heuristic_log_lambdas};
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use ndarray::{Array1, Array2};
@@ -43,7 +43,7 @@ fn noiseless_gaussian_smoothing_correction_is_a_valid_covariance_2490() {
     let mut penalty = Array2::<f64>::zeros((3, 3));
     penalty[[2, 2]] = 1.0;
 
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x.view(),
         y.view(),
         weights.view(),

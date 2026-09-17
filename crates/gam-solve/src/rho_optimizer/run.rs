@@ -129,7 +129,7 @@ pub(crate) struct OuterConfig {
     /// screening or mint is allowed to certify.
     pub(crate) search_bounds_override: Option<(Array1<f64>, Array1<f64>)>,
     pub(crate) seed_config: gam_problem::SeedConfig,
-    pub(crate) heuristic_lambdas: Option<Vec<f64>>,
+    pub(crate) heuristic_log_lambdas: Option<Vec<f64>>,
     pub(crate) initial_rho: Option<Array1<f64>>,
     /// Additional explicit, model-derived starts. Unlike the generic seed
     /// lattice these are supplied by the objective owner and survive the
@@ -310,7 +310,7 @@ impl Default for OuterConfig {
             model_domain_bounds: None,
             search_bounds_override: None,
             seed_config: gam_problem::SeedConfig::default(),
-            heuristic_lambdas: None,
+            heuristic_log_lambdas: None,
             initial_rho: None,
             initial_rho_candidates: Vec::new(),
             previously_refused_seed_points: Vec::new(),
@@ -362,7 +362,7 @@ pub struct OuterProblem {
     max_iter: usize,
     bounds: Option<(Array1<f64>, Array1<f64>)>,
     seed_config: gam_problem::SeedConfig,
-    heuristic_lambdas: Option<Vec<f64>>,
+    heuristic_log_lambdas: Option<Vec<f64>>,
     initial_rho: Option<Array1<f64>>,
     initial_rho_candidates: Vec<Array1<f64>>,
     fallback_policy: FallbackPolicy,
@@ -401,7 +401,7 @@ impl OuterProblem {
             max_iter: UNBOUNDED_OUTER_ITERATIONS,
             bounds: None,
             seed_config: gam_problem::SeedConfig::default(),
-            heuristic_lambdas: None,
+            heuristic_log_lambdas: None,
             initial_rho: None,
             initial_rho_candidates: Vec::new(),
             fallback_policy: FallbackPolicy::Automatic,
@@ -501,8 +501,8 @@ impl OuterProblem {
         self.seed_config = sc;
         self
     }
-    pub fn with_heuristic_lambdas(mut self, h: Vec<f64>) -> Self {
-        self.heuristic_lambdas = Some(h);
+    pub fn with_heuristic_log_lambdas(mut self, h: Vec<f64>) -> Self {
+        self.heuristic_log_lambdas = Some(h);
         self
     }
     pub fn with_initial_rho(mut self, rho: Array1<f64>) -> Self {
@@ -748,7 +748,7 @@ impl OuterProblem {
             model_domain_bounds: self.bounds.clone(),
             search_bounds_override: None,
             seed_config: self.seed_config,
-            heuristic_lambdas: self.heuristic_lambdas.clone(),
+            heuristic_log_lambdas: self.heuristic_log_lambdas.clone(),
             initial_rho: self.initial_rho.clone(),
             initial_rho_candidates: self.initial_rho_candidates.clone(),
             previously_refused_seed_points: Vec::new(),
@@ -7464,7 +7464,7 @@ pub(crate) fn run_outer(
         let pilot_iterations = result.iterations;
         let mut exact_config = config.clone();
         exact_config.initial_rho = Some(result.rho.clone());
-        exact_config.heuristic_lambdas = None;
+        exact_config.heuristic_log_lambdas = None;
         exact_config.seed_config.max_seeds = 1;
         exact_config.seed_config.seed_budget = 1;
         exact_config.screen_initial_rho = false;
@@ -7653,7 +7653,7 @@ pub(crate) fn run_outer(
                 if let Some(frozen_bounds) = reseed.search_bounds_override {
                     retry_cfg.search_bounds_override = Some(frozen_bounds);
                 }
-                retry_cfg.heuristic_lambdas = None;
+                retry_cfg.heuristic_log_lambdas = None;
                 retry_cfg.seed_config.max_seeds = 1;
                 retry_cfg.seed_config.seed_budget = 1;
                 retry_cfg.screen_initial_rho = false;
@@ -7743,8 +7743,8 @@ fn canonicalize_outer_config(config: &OuterConfig, perm: &[usize]) -> OuterConfi
             beta: bound.beta.clone(),
         });
     }
-    if let Some(h) = config.heuristic_lambdas.as_ref() {
-        canonical.heuristic_lambdas = Some(permute_vec(h));
+    if let Some(h) = config.heuristic_log_lambdas.as_ref() {
+        canonical.heuristic_log_lambdas = Some(permute_vec(h));
     }
     if let Some((lower, upper)) = config.model_domain_bounds.as_ref() {
         canonical.model_domain_bounds = Some((permute_arr(lower), permute_arr(upper)));
@@ -8227,7 +8227,7 @@ pub(crate) fn run_per_atom_efs_if_frontier(
         _ => {
             let generated = crate::seeding::generate_rho_candidates(
                 cap.n_params,
-                config.heuristic_lambdas.as_deref(),
+                config.heuristic_log_lambdas.as_deref(),
                 &config.seed_config,
                 gam_problem::OrderedRhoBounds::envelope(
                     model_domain_bounds.0.iter().copied(),

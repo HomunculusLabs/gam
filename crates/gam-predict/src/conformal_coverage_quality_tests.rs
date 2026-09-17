@@ -23,7 +23,7 @@
 //! set, are pinned by `gam_predict::conformal`'s own unit tests, because the
 //! calibrator's constructor and interval are crate-private.
 
-use gam_solve::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
+use gam_solve::estimate::{FitOptions, fit_gamwith_heuristic_log_lambdas};
 use gam_linalg::matrix::DesignMatrix;
 use gam_terms::smooth::BlockwisePenalty;
 use gam_spec::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
@@ -118,7 +118,7 @@ fn fit_cubic(x: &Array1<f64>, y: &Array1<f64>) -> (gam_solve::estimate::UnifiedF
     let offset = Array1::<f64>::zeros(design.nrows());
     // Ridge penalty on the non-intercept polynomial columns only.
     let penalty = BlockwisePenalty::new(1..design.ncols(), Array2::<f64>::eye(design.ncols() - 1));
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         design.clone(),
         y.view(),
         weights.view(),

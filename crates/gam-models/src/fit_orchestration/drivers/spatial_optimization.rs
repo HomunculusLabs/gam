@@ -2554,7 +2554,7 @@ fn try_exact_joint_spatial_length_scale_optimization(
         }
     }
     let optimized_spec = log_kappa_star.apply_tospec(resolvedspec, spatial_terms)?;
-    let optimized = fit_term_collection_forspecwith_heuristic_lambdas(
+    let optimized = fit_term_collection_forspecwith_heuristic_log_lambdas(
         data,
         y,
         weights,
@@ -7462,7 +7462,7 @@ pub(crate) fn exact_joint_multistart_outer_problem(
             auxiliary_dim,
             initial_seed_only,
         ))
-        .with_heuristic_lambdas(seed_heuristic);
+        .with_heuristic_log_lambdas(seed_heuristic);
     if let Some((n_obs, p_cols)) = profiled_objective_size {
         // Calibrate to the n-scaled profiled criterion (see the param doc).
         // This is the scale the spatial exact-joint path was missing relative
@@ -8590,7 +8590,7 @@ fn try_exact_joint_latent_coord_optimization(
             final_data[[n, latent.feature_cols[axis]]] = value;
         }
     }
-    let optimized = fit_term_collection_forspecwith_heuristic_lambdas(
+    let optimized = fit_term_collection_forspecwith_heuristic_log_lambdas(
         final_data.view(),
         y,
         weights,
@@ -8752,13 +8752,13 @@ fn select_isotropic_matern_range_basin(
         // lambdas provide the well-scaled starting chart needed for that profile
         // to reach its KKT certificate rather than exhausting its startup plans
         // a few ulps above stationarity.
-        let endpoint = fit_term_collection_forspecwith_heuristic_lambdas(
+        let endpoint = refit_term_collection_at_fitted_strengths(
             data,
             y,
             weights,
             offset,
             &endpoint_spec,
-            best.fit.log_lambdas.as_slice(),
+            &best.fit,
             family.clone(),
             options,
         )?;
@@ -8863,13 +8863,13 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
                 "[spatial-kappa] joint kappa optimization DECLINED its own candidate                  (incumbent={baseline_score:.12e}, candidate={optimized_score:.12e},                  regression={:.3e}); shipping the incumbent scalar-route fit at the                  incumbent κ, which is what the decline means. Not an unavailability.",
                 optimized_score - baseline_score,
             );
-            let fitted = fit_term_collection_forspecwith_heuristic_lambdas(
+            let fitted = refit_term_collection_at_fitted_strengths(
                 data,
                 y.view(),
                 weights.view(),
                 offset.view(),
                 &resolvedspec,
-                best.fit.log_lambdas.as_slice(),
+                &best.fit,
                 family,
                 options,
             )?;
@@ -8916,13 +8916,13 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
          it refines is not a reason to have no fit (#2748).",
         exact_score - initial_score,
     );
-    let fitted = fit_term_collection_forspecwith_heuristic_lambdas(
+    let fitted = refit_term_collection_at_fitted_strengths(
         data,
         y.view(),
         weights.view(),
         offset.view(),
         &resolvedspec,
-        best.fit.log_lambdas.as_slice(),
+        &best.fit,
         family,
         options,
     )?;
@@ -9153,13 +9153,13 @@ fn spatial_kappa_incumbent(
     // rather than the zero sentinel from --scale-dimensions.
     sync_aniso_contrasts_from_metadata(&mut resolvedspec, &best.design.smooth);
     if spatial_terms.is_empty() {
-        let fitted = fit_term_collection_forspecwith_heuristic_lambdas(
+        let fitted = refit_term_collection_at_fitted_strengths(
             data,
             y.view(),
             weights.view(),
             offset.view(),
             &resolvedspec,
-            best.fit.log_lambdas.as_slice(),
+            &best.fit,
             family.clone(),
             options,
         )?;

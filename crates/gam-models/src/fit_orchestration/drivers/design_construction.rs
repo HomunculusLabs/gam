@@ -52,7 +52,7 @@ pub fn fit_term_collection_forspec(
     family: LikelihoodSpec,
     options: &FitOptions,
 ) -> Result<FittedTermCollection, EstimationError> {
-    fit_term_collection_forspecwith_heuristic_lambdas(
+    fit_term_collection_forspecwith_heuristic_log_lambdas(
         data, y, weights, offset, spec, None, family, options,
     )
 }
@@ -115,7 +115,7 @@ pub fn fit_term_collection_with_penalty_block_gamma_priors(
     fit_opts.rho_prior = realize_keyed_penalty_block_gamma_priors(&design, priors)
         .map_err(EstimationError::BasisError)?;
     let fitted = FittedTermCollection {
-        fit: fit_gamwith_heuristic_lambdas(
+        fit: fit_gamwith_heuristic_log_lambdas(
             design.design.clone(),
             y,
             weights,
@@ -185,13 +185,13 @@ pub fn fit_term_collection_with_coefficient_groups_and_penalty_block_gamma_prior
     Ok(fitted)
 }
 
-fn fit_term_collection_forspecwith_heuristic_lambdas(
+fn fit_term_collection_forspecwith_heuristic_log_lambdas(
     data: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
     weights: ArrayView1<'_, f64>,
     offset: ArrayView1<'_, f64>,
     spec: &TermCollectionSpec,
-    heuristic_lambdas: Option<&[f64]>,
+    heuristic_log_lambdas: Option<&[f64]>,
     family: LikelihoodSpec,
     options: &FitOptions,
 ) -> Result<FittedTermCollection, EstimationError> {
@@ -203,7 +203,33 @@ fn fit_term_collection_forspecwith_heuristic_lambdas(
         offset,
         spec,
         &base_design,
-        heuristic_lambdas,
+        heuristic_log_lambdas,
+        family,
+        options,
+    )
+}
+
+/// Refit `spec` starting from a converged fit's own smoothing coordinates.
+///
+/// The seed is `fitted.log_lambdas`, the coordinate the outer search reads, and
+/// never the physical `lambdas` derived from it (#2902 row 9).
+fn refit_term_collection_at_fitted_strengths(
+    data: ArrayView2<'_, f64>,
+    y: ArrayView1<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+    offset: ArrayView1<'_, f64>,
+    spec: &TermCollectionSpec,
+    fitted: &UnifiedFitResult,
+    family: LikelihoodSpec,
+    options: &FitOptions,
+) -> Result<FittedTermCollection, EstimationError> {
+    fit_term_collection_forspecwith_heuristic_log_lambdas(
+        data,
+        y,
+        weights,
+        offset,
+        spec,
+        fitted.log_lambdas.as_slice(),
         family,
         options,
     )
@@ -215,7 +241,7 @@ fn fit_term_collection_on_realized_design(
     offset: ArrayView1<'_, f64>,
     spec: &TermCollectionSpec,
     design: &TermCollectionDesign,
-    heuristic_lambdas: Option<&[f64]>,
+    heuristic_log_lambdas: Option<&[f64]>,
     family: LikelihoodSpec,
     options: &FitOptions,
 ) -> Result<FittedTermCollection, EstimationError> {
@@ -230,20 +256,20 @@ fn fit_term_collection_on_realized_design(
             offset,
             spec,
             design,
-            heuristic_lambdas,
+            heuristic_log_lambdas,
             family,
             options,
         );
     }
     let base_fit_opts = adaptive_fit_options_base(options, design);
     let fitted = FittedTermCollection {
-        fit: fit_gamwith_heuristic_lambdas(
+        fit: fit_gamwith_heuristic_log_lambdas(
             design.design.clone(),
             y,
             weights,
             offset,
             &design.penalties,
-            heuristic_lambdas,
+            heuristic_log_lambdas,
             family.clone(),
             &base_fit_opts,
         )?,
@@ -2686,7 +2712,7 @@ fn fit_bounded_term_collection_with_design(
     offset: ArrayView1<'_, f64>,
     spec: &TermCollectionSpec,
     design: &TermCollectionDesign,
-    heuristic_lambdas: Option<&[f64]>,
+    heuristic_log_lambdas: Option<&[f64]>,
     family: LikelihoodSpec,
     options: &FitOptions,
 ) -> Result<FittedTermCollection, EstimationError> {
@@ -2745,12 +2771,12 @@ fn fit_bounded_term_collection_with_design(
         initial_beta[term.col_idx] = 0.0;
     }
 
-    let initial_log_lambdas = heuristic_lambdas
+    let initial_log_lambdas = heuristic_log_lambdas
         .map(|vals| Array1::from_vec(vals.to_vec()))
         .unwrap_or_else(|| Array1::zeros(fit_penalties.len()));
     if initial_log_lambdas.len() != fit_penalties.len() {
         crate::bail_invalid_estim!(
-            "heuristic lambda length mismatch for bounded model: got {}, expected {}",
+            "heuristic log-lambda length mismatch for bounded model: got {}, expected {}",
             initial_log_lambdas.len(),
             fit_penalties.len()
         );
@@ -4329,6 +4355,130 @@ mod glm_eta_observation_fd_tests {
                 )
                 .is_err(),
                 "singular/indefinite precision must not become a pseudo-covariance"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod refit_seed_2902_tests {
+    use super::*;
+    use gam_solve::estimate::outer_eval_capture::{
+        OuterSeedLayout, OuterSeedProbe, observe_next_outer_seed,
+    };
+    use gam_terms::basis::{
+        BSplineBasisSpec, BSplineBoundaryConditions, BSplineIdentifiability, BSplineKnotSpec,
+        OneDimensionalBoundary,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// #2902 row 9: a refit seeded from a converged fit starts the outer search at
+    /// that fit's own `ρ*`, bit for bit and strictly inside the declared domain.
+    /// The spatial refits after κ selection passed the physical `lambdas`, which
+    /// the outer search reads as log strengths, so the refit started at
+    /// `clamp(e^{ρ*})` instead.
+    #[test]
+    fn a_refit_from_a_converged_fit_starts_at_its_log_strengths_2902() {
+        let n = 120usize;
+        let mut data = Array2::<f64>::zeros((n, 1));
+        let mut y = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let x = i as f64 / (n as f64 - 1.0);
+            data[[i, 0]] = x;
+            y[i] = (0.4 + 1.2 * (2.0 * std::f64::consts::PI * x).sin())
+                .exp()
+                .round();
+        }
+        let weights = Array1::<f64>::ones(n);
+        let offset = Array1::<f64>::zeros(n);
+        let spec = TermCollectionSpec {
+            linear_terms: vec![],
+            random_effect_terms: vec![],
+            smooth_terms: vec![SmoothTermSpec {
+                frozen_parametric_residualization: None,
+                name: "s".to_string(),
+                basis: SmoothBasisSpec::BSpline1D {
+                    feature_col: 0,
+                    spec: BSplineBasisSpec {
+                        degree: 3,
+                        penalty_order: 2,
+                        knotspec: BSplineKnotSpec::Generate {
+                            data_range: (0.0, 1.0),
+                            num_internal_knots: 8,
+                        },
+                        double_penalty: false,
+                        identifiability: BSplineIdentifiability::WeightedSumToZero { weights: None },
+                        boundary: OneDimensionalBoundary::Open,
+                        boundary_conditions: BSplineBoundaryConditions::default(),
+                    },
+                },
+                shape: ShapeConstraint::None,
+                joint_null_rotation: None,
+            }],
+        };
+        let family = LikelihoodSpec::new(
+            ResponseFamily::Poisson,
+            InverseLink::Standard(StandardLink::Log),
+        );
+        let options = FitOptions::default();
+        let converged = fit_term_collection_forspec(
+            data.view(),
+            y.view(),
+            weights.view(),
+            offset.view(),
+            &spec,
+            family.clone(),
+            &options,
+        )
+        .expect("the Poisson s(x) fixture fits");
+        let rho_star = converged.fit.log_lambdas.clone();
+
+        let seen: Rc<RefCell<Option<OuterSeedLayout>>> = Rc::new(RefCell::new(None));
+        let sink = Rc::clone(&seen);
+        observe_next_outer_seed(
+            0,
+            Box::new(
+                move |probe: &mut dyn OuterSeedProbe| -> Result<(), EstimationError> {
+                    *sink.borrow_mut() = Some(probe.layout().clone());
+                    Ok(())
+                },
+            ),
+        );
+        let refit = refit_term_collection_at_fitted_strengths(
+            data.view(),
+            y.view(),
+            weights.view(),
+            offset.view(),
+            &spec,
+            &converged.fit,
+            family,
+            &options,
+        );
+        assert!(
+            refit.is_ok(),
+            "the refit at the converged strengths must fit: {:?}",
+            refit.err()
+        );
+        let layout = seen
+            .borrow_mut()
+            .take()
+            .expect("the refit's outer search entered a seed");
+        let bits = |values: &Array1<f64>| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert_eq!(
+            bits(&layout.seed),
+            bits(&rho_star),
+            "the refit's first seed {:?} is not the converged log strengths {:?}",
+            layout.seed,
+            rho_star
+        );
+        for index in 0..rho_star.len() {
+            assert!(
+                layout.lower[index] < rho_star[index] && rho_star[index] < layout.upper[index],
+                "rho* {} must sit strictly inside the domain [{}, {}] on coordinate {index}",
+                rho_star[index],
+                layout.lower[index],
+                layout.upper[index]
             );
         }
     }

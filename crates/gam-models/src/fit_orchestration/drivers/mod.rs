@@ -29,7 +29,7 @@ use gam_model_kernels::bernoulli_link::{
 
 use gam_solve::estimate::{
     EstimationError, ExternalOptimOptions, FitInference, FitOptions, PenaltySpec,
-    UnifiedFitResult, UnifiedFitResultParts, fit_gamwith_heuristic_lambdas,
+    UnifiedFitResult, UnifiedFitResultParts, fit_gamwith_heuristic_log_lambdas,
 };
 
 use gam_solve::estimate::reml::DirectionalHyperParam;

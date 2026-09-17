@@ -17,7 +17,7 @@
 //! makes A and B identical. The test asserts λ, EDF, dispersion φ̂, and the
 //! fitted coefficients all match to machine precision (#584).
 
-use gam::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
+use gam::estimate::{FitOptions, fit_gamwith_heuristic_log_lambdas};
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use ndarray::{Array1, Array2};
@@ -88,7 +88,7 @@ fn zero_weight_rows_are_equivalent_to_absent_rows() {
     // ── Reference fit B: base dataset, all weights 1. ──────────────────────
     let w_b = Array1::<f64>::ones(n);
     let offset_b = Array1::<f64>::zeros(n);
-    let fit_b = fit_gamwith_heuristic_lambdas(
+    let fit_b = fit_gamwith_heuristic_log_lambdas(
         x.clone(),
         y.view(),
         w_b.view(),
@@ -117,7 +117,7 @@ fn zero_weight_rows_are_equivalent_to_absent_rows() {
         w_a[n + i] = 0.0;
     }
     let offset_a = Array1::<f64>::zeros(2 * n);
-    let fit_a = fit_gamwith_heuristic_lambdas(
+    let fit_a = fit_gamwith_heuristic_log_lambdas(
         x_a,
         y_a.view(),
         w_a.view(),
