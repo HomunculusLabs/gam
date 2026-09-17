@@ -320,24 +320,13 @@ fn support_objective_is_deck_invariant_on_every_quotient_2933() {
     }
 }
 
-/// Normalization over the quotient. `ard_value` on one row is the negative log
-/// prior density at that row, so `exp(-ard_value)` integrated over one fundamental
-/// domain of the deck action must be one. For the Klein bottle that domain is
-/// `theta ∈ [0, 1/2)`, `phi ∈ [0, 1)`, and both axes are periodic, so the
-/// trapezoid rule on a periodic integrand is spectrally accurate. A prior
-/// normalized over the cover `T²` instead puts half its mass on the other sheet
-/// and integrates to 1/2 here.
-#[test]
-fn klein_bottle_ard_prior_integrates_to_one_over_the_quotient_2933() {
-    let case = quotient_cases()
-        .into_iter()
-        .find(|case| case.name == "klein_bottle")
-        .expect("klein case");
-    let manifold = case.kind.latent_manifold(case.latent_dim);
-    let mut term = dense_term(&case, &array![[0.0, 0.0]]);
-    let rho = SaeManifoldRho::new(0.0, 0.0, vec![array![60.0_f64.ln(), 30.0_f64.ln()]]);
+/// Trapezoid mass of `exp(-ard_value)` over the `T²` cover grid
+/// `theta ∈ [0, theta_span)`, `phi ∈ [0, 1)`. Returns the mass and the range of
+/// the negative log density it saw.
+fn torus_cover_prior_mass(case: &QuotientCase, rho: &SaeManifoldRho, theta_span: f64) -> (f64, f64) {
     let nodes = 64usize;
-    let (theta_span, phi_span) = (0.5, 1.0);
+    let manifold = case.kind.latent_manifold(case.latent_dim);
+    let mut term = dense_term(case, &array![[0.0, 0.0]]);
     let mut mass = 0.0_f64;
     let mut min_neg_log = f64::INFINITY;
     let mut max_neg_log = f64::NEG_INFINITY;
@@ -345,28 +334,61 @@ fn klein_bottle_ard_prior_integrates_to_one_over_the_quotient_2933() {
         for j in 0..nodes {
             let point = array![[
                 theta_span * i as f64 / nodes as f64,
-                phi_span * j as f64 / nodes as f64
+                j as f64 / nodes as f64
             ]];
             term.assignment.coords[0] = LatentCoordValues::from_matrix_with_manifold(
                 point.view(),
                 LatentIdMode::None,
                 manifold.clone(),
             );
-            let neg_log_density = term.ard_value(&rho).expect("ard value");
+            let neg_log_density = term.ard_value(rho).expect("ard value");
             min_neg_log = min_neg_log.min(neg_log_density);
             max_neg_log = max_neg_log.max(neg_log_density);
             mass += (-neg_log_density).exp();
         }
     }
-    mass *= (theta_span / nodes as f64) * (phi_span / nodes as f64);
+    mass *= (theta_span / nodes as f64) * (1.0 / nodes as f64);
+    (mass, max_neg_log - min_neg_log)
+}
+
+/// Normalization over the quotient. `exp(-ard_value)` on one row is the prior
+/// density at that row up to the per-tangent-dimension constant the normalizer
+/// convention pairs with the Laplace term (#2933 F26). The Klein bottle's
+/// fundamental domain is `theta ∈ [0, 1/2)`, `phi ∈ [0, 1)`. A torus atom with the
+/// same precisions uses the same circle normalizer family over the whole of `T²`,
+/// so the Klein prior's mass over its fundamental domain must equal the torus
+/// prior's mass over `T²`, and the convention constant cancels. A prior normalized
+/// over the cover puts half its mass on the other sheet and carries exactly half
+/// here. Both integrands are periodic over their grids, so the trapezoid rule is
+/// spectrally accurate.
+#[test]
+fn klein_bottle_ard_prior_carries_the_cover_mass_over_one_fundamental_domain_2933() {
+    let klein = quotient_cases()
+        .into_iter()
+        .find(|case| case.name == "klein_bottle")
+        .expect("klein case");
+    let torus = QuotientCase {
+        name: "torus",
+        kind: SaeAtomBasisKind::Torus,
+        latent_dim: 2,
+        evaluator: Arc::new(TorusHarmonicEvaluator::new(2, 2).expect("torus basis")),
+        coords: klein.coords.clone(),
+        deck: Vec::new(),
+        other_points: klein.other_points.clone(),
+        log_ard: klein.log_ard.clone(),
+    };
+    let rho = SaeManifoldRho::new(0.0, 0.0, vec![array![60.0_f64.ln(), 30.0_f64.ln()]]);
+    let (torus_mass, torus_range) = torus_cover_prior_mass(&torus, &rho, 1.0);
+    let (klein_mass, _) = torus_cover_prior_mass(&klein, &rho, 0.5);
     assert!(
-        max_neg_log - min_neg_log > 0.5,
-        "the prior must be materially non-uniform over the domain, else normalization is untested: \
-         range {min_neg_log}..{max_neg_log}"
+        torus_range > 0.5,
+        "the prior must be materially non-uniform over T², else normalization is untested: \
+         range {torus_range}"
     );
     assert!(
-        (mass - 1.0).abs() <= 1.0e-10,
-        "Klein-bottle ARD prior mass over one fundamental domain is {mass:.15}, not 1"
+        (klein_mass - torus_mass).abs() <= 1.0e-10 * torus_mass,
+        "Klein-bottle prior mass over one fundamental domain is {klein_mass:.15}, but the \
+         torus prior's mass over T² is {torus_mass:.15}"
     );
 }
 
