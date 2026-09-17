@@ -16,15 +16,17 @@ pub const JACOBI_MAX_SWEEPS: usize = 30;
 
 /// The squared coefficient of the Jacobi stopping band, for a `d×d` matrix.
 ///
-/// The sweeps stop when `‖offdiag‖_F ≤ γ_{2d}·u·‖diag‖_F`: by Weyl's inequality
-/// every eigenvalue then lies within `‖offdiag‖_F` of a diagonal entry, and
-/// `γ_{2d}·u·‖diag‖_F` is the rounding band the diagonal already carries from
-/// the `2(d − 1)` rotation updates each of its entries receives per sweep. The
-/// band belongs to the arithmetic, not to a magnitude: the former `1e-300` test
-/// was inert for every matrix that was not already exactly diagonal.
+/// The sweeps stop when `‖offdiag‖_F ≤ γ_{2d}·‖diag‖_F`: by Weyl's inequality
+/// every eigenvalue of the iterate then lies within `‖offdiag‖_F` of a diagonal
+/// entry, and `γ_{2d}·‖diag‖_F` is the rounding band the diagonal already carries
+/// from the `2(d − 1)` rotation updates each of its entries receives per sweep.
+/// `γ_n = n·u/(1 − n·u)` already carries the unit roundoff `u`; a second factor
+/// of `u` made the band `O(u²)`, below anything binary64 resolves, so the stop
+/// fired only once the upper triangle rounded to exact zeros (#2627). The band
+/// belongs to the arithmetic, not to a magnitude: the former `1e-300` test was
+/// inert for every matrix that was not already exactly diagonal.
 pub fn jacobi_off_diagonal_band_coefficient_squared(d: usize) -> f64 {
-    let coefficient = gam_linalg::roundoff::accumulation_growth(2 * d)
-        * gam_linalg::roundoff::UNIT_ROUNDOFF;
+    let coefficient = gam_linalg::roundoff::accumulation_growth(2 * d);
     coefficient * coefficient
 }
 
@@ -147,4 +149,66 @@ mod tests {
         assert!((vs[1] - (7.0 + 5.0_f64.sqrt()) / 2.0).abs() < 1e-12);
     }
 
+    /// #2627 — a matrix whose off-diagonal mass already lies inside the band
+    /// `γ_{2d}·‖diag‖_F` is certified before any rotation: V stays bitwise the
+    /// identity and the eigenvalues are bitwise the input diagonal. With the
+    /// band's former extra factor of `u` the solver rotated it (V gained ±1e-17).
+    #[test]
+    fn an_in_band_matrix_certifies_without_rotating_2627() {
+        let d = 3;
+        let tiny = 1.0e-17;
+        let a = [1.0, tiny, tiny, tiny, 2.0, tiny, tiny, tiny, 3.0];
+        let off_frobenius = (6.0_f64).sqrt() * tiny;
+        let diag_frobenius = (14.0_f64).sqrt();
+        assert!(
+            off_frobenius <= gam_linalg::roundoff::accumulation_growth(2 * d) * diag_frobenius,
+            "the fixture must lie inside the band it pins"
+        );
+        let mut vals = [0.0; 3];
+        let mut vecs = [0.0; 9];
+        assert!(
+            jacobi_eigh(&a, d, &mut vals, &mut vecs),
+            "an in-band matrix certifies"
+        );
+        for r in 0..d {
+            for c in 0..d {
+                assert_eq!(
+                    vecs[c * d + r],
+                    if r == c { 1.0 } else { 0.0 },
+                    "V[{r},{c}] must be untouched by rotations"
+                );
+            }
+            assert_eq!(vals[r], a[r * d + r], "eigenvalue {r} must be the input diagonal");
+        }
+    }
+
+    /// The certified stop bounds the eigenvalue error by the off-diagonal band
+    /// `γ_{2d}·‖diag‖_F` at stop plus at most `JACOBI_MAX_SWEEPS` sweeps of the
+    /// diagonal's per-sweep rounding band, with `‖diag‖_F ≤ ‖A‖_F`. The input is
+    /// exact, so the reference spectrum `2 − √2, 2, 2 + √2` carries no
+    /// construction rounding.
+    #[test]
+    fn certified_eigenvalues_lie_within_the_band_of_an_exact_spectrum_2627() {
+        let d = 3;
+        let a = [2.0, -1.0, 0.0, -1.0, 2.0, -1.0, 0.0, -1.0, 2.0];
+        let mut vals = [0.0; 3];
+        let mut vecs = [0.0; 9];
+        assert!(
+            jacobi_eigh(&a, d, &mut vals, &mut vecs),
+            "the exact tridiagonal certifies"
+        );
+        let frobenius = a.iter().map(|value| value * value).sum::<f64>().sqrt();
+        let bound = (1 + JACOBI_MAX_SWEEPS) as f64
+            * gam_linalg::roundoff::accumulation_growth(2 * d)
+            * frobenius;
+        let root_two = 2.0_f64.sqrt();
+        let mut sorted = vals.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        for (computed, exact) in sorted.iter().zip([2.0 - root_two, 2.0, 2.0 + root_two]) {
+            assert!(
+                (computed - exact).abs() <= bound,
+                "eigenvalue {computed:e} vs {exact:e}: error beyond the certified band {bound:e}"
+            );
+        }
+    }
 }
