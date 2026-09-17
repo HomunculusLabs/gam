@@ -6081,6 +6081,9 @@ mod run_plan_warm_start_cache_tests;
 #[path = "run_plan_saddle_escape_tests.rs"]
 mod run_plan_saddle_escape_tests;
 
+#[path = "stratum_boundary_2939_tests.rs"]
+mod stratum_boundary_2939_tests;
+
 /// #2370: an inverted per-coordinate ρ-box (lower > upper) must surface as a
 /// typed `EstimationError::InvalidInput` from the outer runner. The
 /// custom-family effective-df ceiling once emitted an upper bound below

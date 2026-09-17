@@ -355,6 +355,9 @@ pub(crate) struct CostStallExit {
     /// `(noise_floor σ̂, probe_radius Δ)` measured over the stall window, reported
     /// as evidence and licensing no bound. See [`CostStallGuard::window_probe_scale`].
     pub(crate) probe_scale: Option<(f64, f64)>,
+    /// Set when the window that halted the search held only trials refused for leaving
+    /// its kept rank (#2939). See [`CostStallGuard::observe_off_stratum`].
+    pub(crate) rank_boundary: Option<RankBoundaryStall>,
 }
 
 /// Tracks the monotone best accepted-iterate REML objective and a
@@ -412,6 +415,10 @@ pub(crate) struct CostStallGuard {
     /// real progress" signal and trips the same halt at the best feasible
     /// iterate (#1082/#1237).
     infeasible_streak: usize,
+    /// How many of the trials in the current [`Self::infeasible_streak`] were refused for
+    /// keeping a different kept rank than the run's start (#2765), rather than failing to
+    /// evaluate. When it equals the streak, the whole window left the run's rank (#2939).
+    off_stratum_streak: usize,
     accepted_iters: usize,
     /// Number of consecutive fruitless [`CostStallVerdict::StuckKeepDescending`]
     /// escapes granted on this seed (#1426), reset by any genuine super-floor
@@ -492,6 +499,7 @@ impl CostStallGuard {
             strict_saddle_refusal: false,
             no_improve_streak: 0,
             infeasible_streak: 0,
+            off_stratum_streak: 0,
             accepted_iters: 0,
             stuck_escapes: 0,
             incumbent_at_last_escape: None,
@@ -639,6 +647,7 @@ impl CostStallGuard {
             iterations: self.accepted_iters,
             converged: false,
             probe_scale: None,
+            rank_boundary: None,
         })
     }
 
@@ -981,6 +990,7 @@ impl CostStallGuard {
             return CostStallVerdict::Continue;
         }
         self.infeasible_streak = self.infeasible_streak.saturating_add(1);
+        self.off_stratum_streak = 0;
         if self.infeasible_streak < self.window {
             return CostStallVerdict::Continue;
         }
@@ -1002,6 +1012,66 @@ impl CostStallGuard {
         // Halt back to the best feasible iterate. Its projected gradient decides
         // converged-vs-flat-valley exactly as the finite stall path does.
         self.publish_stall(rho, self.best_value, self.best_grad_norm)
+    }
+
+    /// Fold one trial refused for keeping a different kept rank than the run's start
+    /// (#2765) into the guard (#2939).
+    ///
+    /// The trial shares [`Self::observe_infeasible`]'s streak and window. A window that
+    /// also holds a trial that failed to evaluate is decided exactly as that one is. A
+    /// window whose every trial was refused for its rank publishes the incumbent and
+    /// grants no escape. #1426's escape reopens a window because a non-stationary
+    /// incumbent may still have feasible descent that the rescue ladder can reach past
+    /// probes that did not evaluate. These probes did evaluate. Their criterion belongs
+    /// to another rank, and the seed loop crosses to the lowest of them when it is
+    /// lower. From an incumbent pinned where its rank ends, continuing only proposes
+    /// more trials off the rank. On the stratum-wall fixture, five escapes bought descent
+    /// into the rank boundary while |Pg| grew from 4.2 to 11.3, and the run never
+    /// certified.
+    pub(crate) fn observe_off_stratum(
+        &mut self,
+        rho: &Array1<f64>,
+        kept_rank: usize,
+    ) -> CostStallVerdict {
+        if self.best_rho.is_none() || !self.best_value.is_finite() {
+            return CostStallVerdict::Continue;
+        }
+        self.infeasible_streak = self.infeasible_streak.saturating_add(1);
+        self.off_stratum_streak = match self.infeasible_streak {
+            1 => 1,
+            _ => self.off_stratum_streak.saturating_add(1),
+        };
+        if self.infeasible_streak < self.window {
+            return CostStallVerdict::Continue;
+        }
+        if self.off_stratum_streak < self.infeasible_streak {
+            return self.publish_stall(rho, self.best_value, self.best_grad_norm);
+        }
+        let (best_rho, best_value, best_grad_norm) =
+            self.best_iterate_or(rho, self.best_value, self.best_grad_norm);
+        let band = self.stationarity_band(best_value);
+        if best_grad_norm.is_finite() && best_grad_norm <= band {
+            return self.publish_stall(rho, best_value, best_grad_norm);
+        }
+        let probe_scale = self.window_probe_scale();
+        if let Ok(mut slot) = self.exit.lock() {
+            *slot = Some(CostStallExit {
+                rho: best_rho,
+                value: best_value,
+                grad_norm: best_grad_norm,
+                iterations: self.accepted_iters,
+                converged: false,
+                probe_scale,
+                rank_boundary: Some(RankBoundaryStall {
+                    kept_rank,
+                    refused_trials: self.off_stratum_streak,
+                    band,
+                }),
+            });
+        }
+        CostStallVerdict::FlatValleyStall {
+            residual_grad_norm: best_grad_norm,
+        }
     }
 
     /// Publish the current finite probe as a constrained-stationary point.
@@ -1112,6 +1182,7 @@ impl CostStallGuard {
                     iterations: self.accepted_iters,
                     converged,
                     probe_scale,
+                    rank_boundary: None,
                 });
             }
             return CostStallVerdict::Converged;
@@ -1181,6 +1252,7 @@ impl CostStallGuard {
                 iterations: self.accepted_iters,
                 converged,
                 probe_scale,
+                rank_boundary: None,
             });
         }
         CostStallVerdict::FlatValleyStall {
@@ -1235,6 +1307,7 @@ impl CostStallGuard {
                 // Not a halted stall: no window evidence is reported for a
                 // running best-so-far snapshot.
                 probe_scale: None,
+                rank_boundary: None,
             });
         }
     }
@@ -1579,6 +1652,7 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
             trial_rho_distance,
             self.first_order_evals
         );
+        let mut left_stratum = false;
         let result = self
             .obj
             .eval_with_order(x, OuterEvalOrder::Value)
@@ -1587,7 +1661,10 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
             })
             .and_then(|eval| finite_cost_or_error("outer eval_cost failed", eval.cost))
             .and_then(|cost| match self.refuse_off_stratum_trial(x, cost) {
-                Some(refusal) => Err(into_objective_error("outer eval_cost failed", refusal)),
+                Some(refusal) => {
+                    left_stratum = true;
+                    Err(into_objective_error("outer eval_cost failed", refusal))
+                }
                 None => Ok(cost),
             });
         let cached_outcome = cache_value_probe_result(&result);
@@ -1624,7 +1701,11 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
                     err,
                 );
                 if let Some(guard) = self.cost_stall.as_mut() {
-                    match guard.observe_infeasible(x) {
+                    let verdict = match (left_stratum, self.stratum_rank) {
+                        (true, Some(kept_rank)) => guard.observe_off_stratum(x, kept_rank),
+                        _ => guard.observe_infeasible(x),
+                    };
+                    match verdict {
                         CostStallVerdict::Continue => {}
                         CostStallVerdict::StuckKeepDescending {
                             residual_grad_norm,
@@ -1664,15 +1745,31 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
                             return Err(ObjectiveEvalError::fatal(COST_STALL_CONVERGED_SENTINEL.to_string()));
                         }
                         CostStallVerdict::FlatValleyStall { residual_grad_norm } => {
-                            log::warn!(
-                                "[OUTER] cost-stall halt (infeasible BFGS probes): {} \
-                                 consecutive infeasible probes after a finite seed/iterate; \
-                                 halting at best-so-far with residual |g|={:.3e} \
-                                 (value={:.6e}).",
-                                guard.infeasible_streak,
-                                residual_grad_norm,
-                                guard.best_value,
-                            );
+                            if left_stratum && guard.off_stratum_streak == guard.infeasible_streak {
+                                log::warn!(
+                                    "[OUTER] stratum boundary (#2939): the last {} trials all keep \
+                                     a rank other than the {} this search started on, so the search \
+                                     is pinned where its rank ends; halting at the incumbent with \
+                                     residual |g|={:.3e} (value={:.6e}). The seed loop crosses to the \
+                                     lowest refused trial if it is lower, and the certificate judges \
+                                     the incumbent otherwise.",
+                                    guard.infeasible_streak,
+                                    self.stratum_rank
+                                        .map_or_else(|| "none".to_string(), |rank| rank.to_string()),
+                                    residual_grad_norm,
+                                    guard.best_value,
+                                );
+                            } else {
+                                log::warn!(
+                                    "[OUTER] cost-stall halt (infeasible BFGS probes): {} \
+                                     consecutive infeasible probes after a finite seed/iterate; \
+                                     halting at best-so-far with residual |g|={:.3e} \
+                                     (value={:.6e}).",
+                                    guard.infeasible_streak,
+                                    residual_grad_norm,
+                                    guard.best_value,
+                                );
+                            }
                             return Err(ObjectiveEvalError::fatal(COST_STALL_CONVERGED_SENTINEL.to_string()));
                         }
                     }
@@ -2766,6 +2863,7 @@ impl OuterSecondOrderBridge<'_> {
                 // No stall window fired, so no window evidence is reported: the
                 // rung that stopped this run is the decrement.
                 probe_scale: None,
+                rank_boundary: None,
             });
         }
         Some(ObjectiveEvalError::fatal(
@@ -2863,6 +2961,7 @@ impl OuterSecondOrderBridge<'_> {
                         // No stall window's evidence is reported: the rung that
                         // stopped this run is the certificate's band.
                         probe_scale: None,
+                        rank_boundary: None,
                     });
                 }
                 Some(ObjectiveEvalError::fatal(

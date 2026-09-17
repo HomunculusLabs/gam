@@ -2746,6 +2746,9 @@ pub(crate) fn run_outer_with_plan(
                                     // The stall window's evidence travels with the
                                     // result as reported text only (#2817).
                                     result.cost_stall_probe_scale = exit.probe_scale;
+                                    // So does a halt where the search's kept rank
+                                    // ends (#2939).
+                                    result.rank_boundary_stall = exit.rank_boundary;
                                     // The mandatory final analytic certificate
                                     // judges this point by its own ladder, and
                                     // the guard claimed it only inside that
