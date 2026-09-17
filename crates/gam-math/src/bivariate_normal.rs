@@ -257,42 +257,41 @@ fn validate_complement(complement: f64) -> Result<(), BivariateNormalError> {
     Ok(())
 }
 
-/// A correlation with its singular factors `1 − ρ` and `1 + ρ`.
+/// A correlation with its singular factors `1 − ρ` and `1 + ρ`, and their product `1 − ρ²`.
 ///
 /// - From `ρ` alone, each factor is formed directly, and is exact near its own singular end.
-/// - From a caller's `1 − ρ²`, the vanishing factor is `(1 − ρ²)/(1 + |ρ|)`. So a correlation that rounds to `±1`
-///   still carries the complement the caller resolved.
+/// - From a caller's `1 − ρ²`, the product is the caller's value itself, and the vanishing factor is
+///   `(1 − ρ²)/(1 + |ρ|)`. So a correlation that rounds to `±1` still carries the complement the caller resolved. A
+///   complement whose vanishing factor underflows, such as the smallest subnormal at `|ρ| = 1`, keeps a nonzero
+///   determinant instead of collapsing to `0·2`.
 #[derive(Clone, Copy)]
 struct Correlation {
     rho: f64,
     one_minus: f64,
     one_plus: f64,
+    complement: f64,
 }
 
 impl Correlation {
     fn from_rho(rho: f64) -> Self {
+        let (one_minus, one_plus) = (1.0 - rho, 1.0 + rho);
         Self {
             rho,
-            one_minus: 1.0 - rho,
-            one_plus: 1.0 + rho,
+            one_minus,
+            one_plus,
+            complement: one_minus * one_plus,
         }
     }
 
     fn from_complement(rho: f64, complement: f64) -> Self {
         let far = 1.0 + rho.abs();
         let near = complement / far;
-        if rho >= 0.0 {
-            Self {
-                rho,
-                one_minus: near,
-                one_plus: far,
-            }
-        } else {
-            Self {
-                rho,
-                one_minus: far,
-                one_plus: near,
-            }
+        let (one_minus, one_plus) = if rho >= 0.0 { (near, far) } else { (far, near) };
+        Self {
+            rho,
+            one_minus,
+            one_plus,
+            complement,
         }
     }
 
@@ -301,11 +300,12 @@ impl Correlation {
             rho: -self.rho,
             one_minus: self.one_plus,
             one_plus: self.one_minus,
+            complement: self.complement,
         }
     }
 
     fn complement(self) -> f64 {
-        self.one_minus * self.one_plus
+        self.complement
     }
 }
 
@@ -1218,5 +1218,40 @@ mod tests {
         // Positive controls: the exponent's 8uE term is needed somewhere, and some gap exceeds 1/64 of its bound.
         assert!(density_needs_its_exponent_term, "dropping the 8uE term must break the density bound somewhere");
         assert!(partial_bound_is_resolved, "the reference must resolve the partial bounds to 1/64");
+    }
+
+    #[test]
+    fn partials_keep_a_subnormal_complement_resolved() {
+        // At |ρ| = 1 the vanishing factor of the smallest subnormal complement rounds to zero. So a determinant formed
+        // as the product of the factors collapses. It gave a zero scale, and NaN or infinite partials.
+        let complement = f64::from_bits(1);
+        assert_eq!((complement / 2.0) * 2.0, 0.0, "the factor product underflows at this complement");
+        let root = complement.sqrt();
+        // A tie at ρ = 1: t = 0, so ∂_hΦ₂ = ½φ(h), and φ₂ = exp(−h²/2)/(2π√c) is finite and representable.
+        let h = 0.4_f64;
+        let tie = bivariate_normal_cdf_partials_with_complement(h, h, 1.0, complement).unwrap();
+        assert!(tie.d_h.is_finite() && tie.d_k.is_finite() && tie.d_rho.is_finite(), "{tie:?}");
+        assert!((tie.d_h - 0.5 * normal_pdf(h)).abs() <= tie.d_h_rounding, "{tie:?}");
+        assert_eq!(tie.d_k, tie.d_h);
+        let expected_density = normal_pdf(h) / ((2.0 * PI).sqrt() * root);
+        // The reference's own rounding: normal_pdf (5u) and the square root, product and division (3u).
+        assert!(
+            (tie.d_rho - expected_density).abs() <= tie.d_rho_rounding + 8.0 * UNIT_ROUNDOFF * expected_density,
+            "d_rho={:e} expected={expected_density:e}",
+            tie.d_rho
+        );
+        assert!(tie.d_h_rounding.is_finite() && tie.d_rho_rounding.is_finite(), "{tie:?}");
+        // Opposite signs at ρ = 1: the step limits φ(h)·1[h < k] and φ(k)·1[k < h], and a vanishing density.
+        let (x, y) = (0.3_f64, -0.2_f64);
+        let split = bivariate_normal_cdf_partials_with_complement(x, y, 1.0, complement).unwrap();
+        assert_eq!(split.d_h, 0.0, "{split:?}");
+        assert!((split.d_k - normal_pdf(y)).abs() <= split.d_k_rounding, "{split:?}");
+        assert_eq!(split.d_rho, 0.0, "{split:?}");
+        assert!(split.d_rho_rounding.is_finite(), "{split:?}");
+        // The value takes the exact singular branch.
+        assert_eq!(
+            bivariate_normal_cdf_with_complement(x, y, 1.0, complement).unwrap(),
+            normal_cdf(y)
+        );
     }
 }
