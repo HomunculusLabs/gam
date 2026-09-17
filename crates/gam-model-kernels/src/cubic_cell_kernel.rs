@@ -1659,7 +1659,9 @@ fn moment_dot_with_coefficients(
     ))
 }
 
-#[inline]
+/// Always inlined, so its `mul_add`s take the target features of the kernel copy that
+/// calls it (#979).
+#[inline(always)]
 fn moment_dot_with_coefficients_unchecked(coefficients: &[f64], moments: &[f64]) -> f64 {
     let mut acc = 0.0;
     for (idx, &coeff) in coefficients.iter().enumerate() {
@@ -1677,7 +1679,10 @@ fn moment_dot_with_coefficients_unchecked(coefficients: &[f64], moments: &[f64])
 /// and quadruple sums into a single moment dot, eliminating the
 /// `O(deg^3)`/`O(deg^4)` inner-loop work that dominated the
 /// `cell_*_derivative_from_moments` hot leaves on large-scale fits.
-#[inline]
+///
+/// Always inlined: the `fma` copies of those kernels reach its `mul_add`s only through
+/// inlining, and an out-of-line copy is compiled without the feature (#979).
+#[inline(always)]
 fn poly_conv_into(lhs: &[f64], rhs: &[f64], out: &mut [f64]) -> usize {
     if lhs.is_empty() || rhs.is_empty() {
         return 0;
@@ -1693,6 +1698,48 @@ fn poly_conv_into(lhs: &[f64], rhs: &[f64], out: &mut [f64]) -> usize {
         }
     }
     len
+}
+
+/// `⟨eta ⊗ first ⊗ second, moments⟩`: one `eta · first · second` triple sum folded into a
+/// single moment dot through two convolutions into the scratch buffers.
+///
+/// This and [`weighted_triple_product_moment_dot`] are always-inlined functions, not
+/// closures in the kernel bodies. A closure is a function of its own, and it joins a
+/// kernel's `fma` copy only if LLVM inlines it. The third-derivative closure stayed out of
+/// line: it took 28% of the sampled CPU of the flex marginal-slope smoke fit, and the runtime
+/// `fma` took another 8.7% (#979).
+#[inline(always)]
+fn eta_product_moment_dot(
+    eta: &[f64],
+    first: &[f64],
+    second: &[f64],
+    moments: &[f64],
+    buf_a: &mut [f64],
+    buf_b: &mut [f64],
+) -> f64 {
+    let first_second_len = poly_conv_into(first, second, buf_a);
+    let product_len = poly_conv_into(eta, &buf_a[..first_second_len], buf_b);
+    moment_dot_with_coefficients_unchecked(&buf_b[..product_len], moments)
+}
+
+/// `⟨weight ⊗ a ⊗ b ⊗ c, moments⟩`, folded into a single moment dot through three
+/// convolutions into the scratch buffers. Always inlined, for the reason
+/// [`eta_product_moment_dot`] gives.
+#[inline(always)]
+fn weighted_triple_product_moment_dot(
+    weight: &[f64],
+    a: &[f64],
+    b: &[f64],
+    c: &[f64],
+    moments: &[f64],
+    buf_a: &mut [f64],
+    buf_b: &mut [f64],
+    buf_c: &mut [f64],
+) -> f64 {
+    let ab_len = poly_conv_into(a, b, buf_a);
+    let abc_len = poly_conv_into(&buf_a[..ab_len], c, buf_b);
+    let final_len = poly_conv_into(weight, &buf_b[..abc_len], buf_c);
+    moment_dot_with_coefficients_unchecked(&buf_c[..final_len], moments)
 }
 
 #[inline]
@@ -1889,34 +1936,27 @@ fn cell_third_derivative_from_moments_body(
     // eta_second_term = Σ over (rs⊗t, rt⊗s, st⊗r) of eta⊗product · moments.
     // Fold each of the three triple sums into a single moment dot.
     let mut eta_second_term = 0.0;
-    let conv_dot = |first: &[f64],
-                    second: &[f64],
-                    buf_a: &mut [f64; SCRATCH],
-                    buf_b: &mut [f64; SCRATCH]|
-     -> f64 {
-        let m = poly_conv_into(first, second, buf_a);
-        let n = poly_conv_into(&eta, &buf_a[..m], buf_b);
-        let mut acc = 0.0;
-        for k in 0..n {
-            acc = buf_b[k].mul_add(moments[k], acc);
-        }
-        acc
-    };
-    eta_second_term += conv_dot(
+    eta_second_term += eta_product_moment_dot(
+        &eta,
         second_coefficients_rs,
         first_coefficients_t,
+        moments,
         &mut buf_a,
         &mut buf_b,
     );
-    eta_second_term += conv_dot(
+    eta_second_term += eta_product_moment_dot(
+        &eta,
         second_coefficients_rt,
         first_coefficients_s,
+        moments,
         &mut buf_a,
         &mut buf_b,
     );
-    eta_second_term += conv_dot(
+    eta_second_term += eta_product_moment_dot(
+        &eta,
         second_coefficients_st,
         first_coefficients_r,
+        moments,
         &mut buf_a,
         &mut buf_b,
     );
@@ -2218,62 +2258,19 @@ fn cell_fourth_derivative_from_moments_body(
     // eta_linear_term = Σ over seven (rst⊗u, rsu⊗t, rtu⊗s, stu⊗r, rs⊗tu,
     // rt⊗su, ru⊗st) of eta⊗product · moments. Fold each triple sum into
     // a single moment dot.
-    let conv_eta_dot = |first: &[f64],
-                        second: &[f64],
-                        buf_a: &mut [f64; SCRATCH],
-                        buf_b: &mut [f64; SCRATCH]|
-     -> f64 {
-        let m = poly_conv_into(first, second, buf_a);
-        let n = poly_conv_into(&eta, &buf_a[..m], buf_b);
-        let mut acc = 0.0;
-        for k in 0..n {
-            acc = buf_b[k].mul_add(moments[k], acc);
-        }
-        acc
-    };
     let mut eta_linear_term = 0.0;
-    eta_linear_term += conv_eta_dot(
-        third_coefficients_rst,
-        first_coefficients_u,
-        &mut buf_a,
-        &mut buf_b,
-    );
-    eta_linear_term += conv_eta_dot(
-        third_coefficients_rsu,
-        first_coefficients_t,
-        &mut buf_a,
-        &mut buf_b,
-    );
-    eta_linear_term += conv_eta_dot(
-        third_coefficients_rtu,
-        first_coefficients_s,
-        &mut buf_a,
-        &mut buf_b,
-    );
-    eta_linear_term += conv_eta_dot(
-        third_coefficients_stu,
-        first_coefficients_r,
-        &mut buf_a,
-        &mut buf_b,
-    );
-    eta_linear_term += conv_eta_dot(
-        second_coefficients_rs,
-        second_coefficients_tu,
-        &mut buf_a,
-        &mut buf_b,
-    );
-    eta_linear_term += conv_eta_dot(
-        second_coefficients_rt,
-        second_coefficients_su,
-        &mut buf_a,
-        &mut buf_b,
-    );
-    eta_linear_term += conv_eta_dot(
-        second_coefficients_ru,
-        second_coefficients_st,
-        &mut buf_a,
-        &mut buf_b,
-    );
+    for (first, second) in [
+        (third_coefficients_rst, first_coefficients_u),
+        (third_coefficients_rsu, first_coefficients_t),
+        (third_coefficients_rtu, first_coefficients_s),
+        (third_coefficients_stu, first_coefficients_r),
+        (second_coefficients_rs, second_coefficients_tu),
+        (second_coefficients_rt, second_coefficients_su),
+        (second_coefficients_ru, second_coefficients_st),
+    ] {
+        eta_linear_term +=
+            eta_product_moment_dot(&eta, first, second, moments, &mut buf_a, &mut buf_b);
+    }
 
     let mut eta_sq_minus_one = [0.0_f64; 7];
     for (i, &eta_i) in eta.iter().enumerate() {
@@ -2286,78 +2283,26 @@ fn cell_fourth_derivative_from_moments_body(
     // quad_coeff_term: six (eta²−1)⊗A⊗B⊗C · moments sums, where the (A,B,C)
     // factors are: (rs,t,u), (rt,s,u), (ru,s,t), (st,r,u), (su,r,t), (tu,r,s).
     let mut buf_c = [0.0_f64; SCRATCH];
-    let conv_weighted_triple_dot = |weight: &[f64],
-                                    a: &[f64],
-                                    b: &[f64],
-                                    c: &[f64],
-                                    buf_a: &mut [f64; SCRATCH],
-                                    buf_b: &mut [f64; SCRATCH],
-                                    buf_c: &mut [f64; SCRATCH]|
-     -> f64 {
-        let ab_len = poly_conv_into(a, b, buf_a);
-        let abc_len = poly_conv_into(&buf_a[..ab_len], c, buf_b);
-        let final_len = poly_conv_into(weight, &buf_b[..abc_len], buf_c);
-        let mut acc = 0.0;
-        for k in 0..final_len {
-            acc = buf_c[k].mul_add(moments[k], acc);
-        }
-        acc
-    };
     let mut quad_coeff_term = 0.0;
-    quad_coeff_term += conv_weighted_triple_dot(
-        &eta_sq_minus_one,
-        second_coefficients_rs,
-        first_coefficients_t,
-        first_coefficients_u,
-        &mut buf_a,
-        &mut buf_b,
-        &mut buf_c,
-    );
-    quad_coeff_term += conv_weighted_triple_dot(
-        &eta_sq_minus_one,
-        second_coefficients_rt,
-        first_coefficients_s,
-        first_coefficients_u,
-        &mut buf_a,
-        &mut buf_b,
-        &mut buf_c,
-    );
-    quad_coeff_term += conv_weighted_triple_dot(
-        &eta_sq_minus_one,
-        second_coefficients_ru,
-        first_coefficients_s,
-        first_coefficients_t,
-        &mut buf_a,
-        &mut buf_b,
-        &mut buf_c,
-    );
-    quad_coeff_term += conv_weighted_triple_dot(
-        &eta_sq_minus_one,
-        second_coefficients_st,
-        first_coefficients_r,
-        first_coefficients_u,
-        &mut buf_a,
-        &mut buf_b,
-        &mut buf_c,
-    );
-    quad_coeff_term += conv_weighted_triple_dot(
-        &eta_sq_minus_one,
-        second_coefficients_su,
-        first_coefficients_r,
-        first_coefficients_t,
-        &mut buf_a,
-        &mut buf_b,
-        &mut buf_c,
-    );
-    quad_coeff_term += conv_weighted_triple_dot(
-        &eta_sq_minus_one,
-        second_coefficients_tu,
-        first_coefficients_r,
-        first_coefficients_s,
-        &mut buf_a,
-        &mut buf_b,
-        &mut buf_c,
-    );
+    for (a, b, c) in [
+        (second_coefficients_rs, first_coefficients_t, first_coefficients_u),
+        (second_coefficients_rt, first_coefficients_s, first_coefficients_u),
+        (second_coefficients_ru, first_coefficients_s, first_coefficients_t),
+        (second_coefficients_st, first_coefficients_r, first_coefficients_u),
+        (second_coefficients_su, first_coefficients_r, first_coefficients_t),
+        (second_coefficients_tu, first_coefficients_r, first_coefficients_s),
+    ] {
+        quad_coeff_term += weighted_triple_product_moment_dot(
+            &eta_sq_minus_one,
+            a,
+            b,
+            c,
+            moments,
+            &mut buf_a,
+            &mut buf_b,
+            &mut buf_c,
+        );
+    }
 
     // cubic_weight = 3·eta − eta³ (same as the prior expansion: eta_sq*eta
     // negated, plus the 3·eta linear correction).
