@@ -4,10 +4,12 @@
 
 use super::{
     BirthMdlPrescreen, BirthPriorityInconclusive, BirthProposalPriority, DecoderBlockCode,
-    DescriptionLengthScoreKind, DictionaryCode, DictionaryCodeKind, ScoreComparison, ScoredBits,
-    atom_occupancy, birth_proposal_priority, circle_phase_code, circle_phase_code_at,
-    description_length_delta, manifold_fit_description_length, matched_dl, matched_dl_delta,
-    persisted_decoder_dictionary_code, reverse_water_filling, scalar_rate_bits, se_resolution_bits, selection_bits, weighted_reverse_water_filling,
+    DescriptionLengthScoreKind, DictionaryCode, DictionaryCodeKind, NativeDescriptionLengthRequest,
+    ScoreComparison, ScoredBits, atom_occupancy, birth_proposal_priority, circle_phase_code,
+    circle_phase_code_at, description_length_delta, manifold_fit_description_length, matched_dl,
+    matched_dl_delta, native_manifold_description_length, persisted_decoder_dictionary_code,
+    reverse_water_filling, scalar_rate_bits, se_resolution_bits, selection_bits,
+    weighted_reverse_water_filling,
 };
 use crate::atom_codes::SparseAtomCodes;
 use crate::manifold::{
@@ -1971,4 +1973,97 @@ fn gaussian_surrogate_is_not_a_bound_for_a_matched_covariance_discrete_source_29
     assert_eq!(codec_bits_per_sample, 1.0);
     assert_eq!(codec_distortion, 0.0);
     assert!(codec_distortion < variance / 4.0);
+}
+
+/// A periodic first-harmonic atom (basis `[1, sin 2πt, cos 2πt]`).
+fn periodic_first_harmonic_plan() -> SaeAtomGeometryPlan {
+    SaeAtomGeometryPlan::new(
+        SaeAtomBasisKind::Periodic,
+        1,
+        SaeBasisResolution::PeriodicHarmonics { order: 1 },
+        SaeReferenceMetricPlan::UnitCircle,
+    )
+    .expect("periodic first-harmonic plan")
+}
+
+#[test]
+fn native_description_length_gains_nothing_by_moving_a_gate_below_a_threshold_2933_f15() {
+    // The native kernel end to end. Atom 0's gates are multiplied by 1e-9 and its
+    // decoder by 1e9, so every decoded product is unchanged while every gate of
+    // atom 0 falls below 1e-8. The support, the occupancy, the coordinate codes and
+    // the decoder-aware dictionary (its output sensitivity scales by 1e-18 and its
+    // coefficient range by 1e9) are all unchanged, so the whole message must cost
+    // the same number of bits.
+    let n = 6;
+    let plans = [periodic_first_harmonic_plan(), periodic_first_harmonic_plan()];
+    let coords_0 = Array2::from_shape_vec((n, 1), vec![0.05, 0.2, 0.33, 0.5, 0.71, 0.9]).unwrap();
+    let coords_1 = Array2::from_shape_vec((n, 1), vec![0.6, 0.1, 0.8, 0.45, 0.3, 0.15]).unwrap();
+    let decoder_0 = Array2::from_shape_vec((3, 2), vec![1.0, -0.5, 0.4, 0.8, -0.3, 0.2]).unwrap();
+    let decoder_1 = Array2::from_shape_vec((3, 2), vec![0.2, 0.9, -0.6, 0.1, 0.5, -0.7]).unwrap();
+    let gates: Array2<f64> = Array2::from_shape_vec(
+        (n, 2),
+        vec![0.9, 0.2, 0.4, 0.7, 0.75, 0.1, 0.2, 0.55, 0.6, 0.35, 0.3, 0.8],
+    )
+    .unwrap();
+    let scale = 1.0e9;
+    let mut scaled_gates = gates.clone();
+    scaled_gates.column_mut(0).mapv_inplace(|gate| gate / scale);
+    let scaled_decoder_0 = decoder_0.mapv(|value| value * scale);
+    assert!(scaled_gates.column(0).iter().all(|gate| gate.abs() < 1e-8));
+    let original_decoded = crate::manifold::reconstruct_persisted_atom_set(
+        &plans,
+        &[decoder_0.view(), decoder_1.view()],
+        &[coords_0.view(), coords_1.view()],
+        gates.view(),
+        2,
+    )
+    .unwrap();
+    let rescaled_decoded = crate::manifold::reconstruct_persisted_atom_set(
+        &plans,
+        &[scaled_decoder_0.view(), decoder_1.view()],
+        &[coords_0.view(), coords_1.view()],
+        scaled_gates.view(),
+        2,
+    )
+    .unwrap();
+    for (left, right) in original_decoded.iter().zip(rescaled_decoded.iter()) {
+        assert!((left - right).abs() <= 1e-12 * left.abs().max(1.0), "fixture decode differs");
+    }
+
+    let describe = |gates: &Array2<f64>, decoder_0: &Array2<f64>| {
+        let decoders = [decoder_0.view(), decoder_1.view()];
+        let coords = [coords_0.view(), coords_1.view()];
+        let dictionary =
+            persisted_decoder_dictionary_code(&plans, &decoders, &coords, gates.view(), None, 0)
+                .expect("decoder dictionary code");
+        native_manifold_description_length(NativeDescriptionLengthRequest {
+            assignments: gates.view(),
+            geometry_plans: &plans,
+            decoder_blocks: &decoders,
+            coords: &coords,
+            tier0_scale: None,
+            ev: 0.8,
+            dictionary: &dictionary,
+        })
+        .expect("native description length")
+    };
+    let original = describe(&gates, &decoder_0);
+    let rescaled = describe(&scaled_gates, &scaled_decoder_0);
+    assert_eq!(
+        rescaled.atom_occupancy,
+        vec![1.0, 1.0],
+        "a rescaled gate is still transmitted"
+    );
+    assert!(original.total_bits.is_finite() && original.total_bits > 0.0);
+    for (ledger, left, right) in [
+        ("selection", original.selection_bits, rescaled.selection_bits),
+        ("coordinate", original.atom_code_bits_per_token[0], rescaled.atom_code_bits_per_token[0]),
+        ("dictionary", original.dict_bits, rescaled.dict_bits),
+        ("total", original.total_bits, rescaled.total_bits),
+    ] {
+        assert!(
+            (left - right).abs() <= 1e-9 * left.abs().max(1.0),
+            "moving a gate below a magnitude threshold changed the {ledger} bits: {left} vs {right}"
+        );
+    }
 }

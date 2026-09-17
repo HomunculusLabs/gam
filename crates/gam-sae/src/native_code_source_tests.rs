@@ -109,7 +109,6 @@ fn try_describe(
         tier0_scale: tier0_scale.map(|scale| scale.view()),
         ev,
         dictionary: &dictionary,
-        active_threshold: 0.0,
     })
 }
 

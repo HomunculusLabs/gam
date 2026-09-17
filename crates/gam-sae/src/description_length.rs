@@ -1300,11 +1300,23 @@ pub fn manifold_fit_description_length(
     })
 }
 
+/// A gate is transmitted exactly when it is nonzero (#2933 F15).
+///
+/// This is the support the native coder prices, the rule
+/// [`crate::manifold::reconstruct_persisted_atom_set`] uses to skip an atom, and
+/// the firing predicate of the Eq. 4 scorer and the inference audit, whose gates
+/// are nonnegative. No magnitude threshold is applied: a gate of `1e-9` in front
+/// of a decoder of norm `1e9` contributes an output of order one, so dropping it
+/// by magnitude alone would discard output that no code pays for.
+pub fn gate_is_transmitted(gate: f64) -> bool {
+    gate != 0.0
+}
+
 /// Everything the native fit-level description length reads off a persisted
 /// manifold-SAE artifact.
 pub struct NativeDescriptionLengthRequest<'a> {
-    /// `(N, K)` gates. An atom is transmitted on a row when its gate magnitude
-    /// clears `active_threshold`.
+    /// `(N, K)` gates. An atom is transmitted on a row exactly when its gate is
+    /// nonzero ([`gate_is_transmitted`]).
     pub assignments: ArrayView2<'a, f64>,
     /// One persisted geometry plan per atom.
     pub geometry_plans: &'a [SaeAtomGeometryPlan],
@@ -1318,14 +1330,14 @@ pub struct NativeDescriptionLengthRequest<'a> {
     pub ev: f64,
     /// The decoder message.
     pub dictionary: &'a DictionaryCode,
-    /// Gate magnitude above which an atom is transmitted.
-    pub active_threshold: f64,
 }
 
 /// The fit-level [`ManifoldFitDl`] of a persisted manifold-SAE artifact (#2933
-/// F11, F12).
+/// F11, F12, F15).
 ///
-/// The transmitted support is read off the gates. Each atom's code spectrum is
+/// The transmitted support is exactly the nonzero gates ([`gate_is_transmitted`]):
+/// no gate is dropped, so no decoded output escapes the code, and a gate rescaled
+/// against its decoder is priced the same. Each atom's code spectrum is
 /// its conditional active-code source in the output metric
 /// ([`native_active_code_sources`]): moments over the rows where the atom
 /// fires, whitened by the mean pullback metric of its gated decoder. The budget
@@ -1343,18 +1355,12 @@ pub fn native_manifold_description_length(
         tier0_scale,
         ev,
         dictionary,
-        active_threshold,
     } = request;
     let (n_obs, k_atoms) = assignments.dim();
     if coords.len() != k_atoms {
         return Err(format!(
             "manifold description length expected {k_atoms} coordinate blocks, got {}",
             coords.len()
-        ));
-    }
-    if !active_threshold.is_finite() || active_threshold < 0.0 {
-        return Err(format!(
-            "manifold description length active_threshold must be finite and non-negative; got {active_threshold}"
         ));
     }
     // EV = 1 − RSS/TSS is negative on a poor held-out fit, which is valid, but
@@ -1393,7 +1399,7 @@ pub fn native_manifold_description_length(
     for row in 0..n_obs {
         for atom in 0..k_atoms {
             let gate = assignments[[row, atom]];
-            if gate.abs() > active_threshold {
+            if gate_is_transmitted(gate) {
                 codes.row_mut(row).assign(atom, gate);
             }
         }

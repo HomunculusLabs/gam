@@ -5296,14 +5296,12 @@ fn manifold_sae_owned2(v: &[Vec<f64>]) -> PyResult<Array2<f64>> {
 
 /// Sparsity summary stats for an `(n_rows, K)` assignment matrix returned by
 /// `sae_manifold_fit*`. Returns `(avg_active_atoms, mean_assignment_mass)` where
-/// "active" is `assignment >= threshold`.
+/// "active" is a transmitted gate
+/// (`description_length::gate_is_transmitted`), the support the native
+/// description length prices, so the reported L0 and the priced support agree.
 fn manifold_assignment_summary_from_array(
     assignments: ArrayView2<'_, f64>,
-    threshold: f64,
 ) -> Result<(f64, f64), String> {
-    if !threshold.is_finite() {
-        return Err("assignment summary threshold must be finite".to_string());
-    }
     let (n_rows, k) = assignments.dim();
     if n_rows == 0 || k == 0 {
         return Err("assignment summary requires a non-empty matrix".to_string());
@@ -5321,7 +5319,7 @@ fn manifold_assignment_summary_from_array(
         if !mass_total.is_finite() {
             return Err("assignment summary mass overflowed".to_string());
         }
-        if assignment >= threshold {
+        if gam::terms::sae::description_length::gate_is_transmitted(assignment) {
             active_total += 1;
         }
     }
@@ -5707,7 +5705,6 @@ impl ManifoldSaeCore {
                     .map(ndarray::ArrayView1::from),
                 ev: self.inner.reconstruction_r2,
                 dictionary: &dictionary,
-                active_threshold: 1.0e-8,
             },
         )
         .map(Some)
@@ -5877,7 +5874,7 @@ impl ManifoldSaeCore {
             .transpose()?;
         let assignments = manifold_sae_owned2(&self.inner.assignments)?;
         let (avg_active_atoms, mean_assignment_mass) =
-            manifold_assignment_summary_from_array(assignments.view(), 1.0e-8)
+            manifold_assignment_summary_from_array(assignments.view())
                 .map_err(py_value_error)?;
         let atom_dims = self
             .inner
