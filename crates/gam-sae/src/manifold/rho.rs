@@ -454,9 +454,9 @@ impl SaeManifoldRho {
     /// Fellner–Schall multiplicative fixed point (`λ_new ∝ φ̂`) then spirals the
     /// smoothing/ARD penalties to zero — a degenerate outer basin the ρ-optimizer
     /// stalls in (#1744: ordered_beta_bernoulli n=40 σ=0.18 stalled at EV 0.86). The ordered Beta--Bernoulli sparse
-    /// coordinate is additionally a dimensionless log-alpha concentration offset,
-    /// not a squared-output-unit penalty weight, so it was never dispersion-
-    /// scalable either. NONE of the ordered Beta--Bernoulli ρ coordinates therefore admit the
+    /// coordinate is the log-concentration offset while α is effectively learnable and
+    /// the log prior weight otherwise (`SaeAssignment::ordered_beta_bernoulli_prior_parameters`);
+    /// the seed leaves it unscaled in both cases. NONE of the ordered Beta--Bernoulli ρ coordinates therefore admit the
     /// Gaussian response-dispersion scaling; the seed stays at its absolute
     /// (already dimensionless) construction values, which keeps the smoothing/ARD
     /// penalties strong enough that the inner ordered Beta--Bernoulli solve cannot overfit at the seed
