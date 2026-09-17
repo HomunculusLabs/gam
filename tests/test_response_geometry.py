@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import get_type_hints
 
 import numpy as np
+import pytest
 
+import gamfit
 from gamfit._response_geometry import (
     ResponseGeometryModel,
     alr,
@@ -163,3 +165,52 @@ def test_response_geometry_model_predict_projects_back_to_manifold() -> None:
     out = np.column_stack([pred[name] for name in ("a", "b", "c")])
     np.testing.assert_allclose(out, target, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(out.sum(axis=1), np.ones(2), atol=1e-12)
+
+
+def _simplex_frame(n: int) -> dict[str, list[float]]:
+    x = np.linspace(0.0, 1.0, n)
+    y = closure(np.column_stack([0.3 + 0.2 * x, 0.3 + 0.0 * x, 0.4 - 0.2 * x]))
+    return {
+        "x": x.tolist(),
+        "g": ["a", "b"] * (n // 2),
+        "y0": y[:, 0].tolist(),
+        "y1": y[:, 1].tolist(),
+        "y2": y[:, 2].tolist(),
+    }
+
+
+_DROPPED_BY_THE_JOINT_TANGENT_FIT = {
+    "latents": lambda n: {
+        "t": gamfit.LatentCoord(n=n, d=1, init=np.zeros((n, 1)), aux_prior={"u": np.zeros((n, 1))})
+    },
+    "smooths": lambda n: {"x": gamfit.BSpline()},
+    "constraints": lambda n: {"s(x)": "monotone_increasing"},
+    "penalties": lambda n: [
+        gamfit.AuxConditionalPriorPenalty(
+            lambda_per_row=np.ones((n, 1, 1)), weight=1.0, n_eff=n, target="t"
+        )
+    ],
+    "precision_hyperpriors": lambda n: {"g": (3.0, 0.5)},
+    "scale_dimensions": lambda n: True,
+}
+
+
+@pytest.mark.parametrize("argument", sorted(_DROPPED_BY_THE_JOINT_TANGENT_FIT))
+def test_response_geometry_refuses_an_argument_its_joint_tangent_fit_would_drop(
+    argument: str,
+) -> None:
+    """The joint tangent REML materializes only the formula and the weights.
+
+    An argument it cannot see would shape the template model the predictions use
+    but not the fit the coefficients come from, so `fit` must refuse it by name
+    rather than return a model of something the user did not ask for.
+    """
+    n = 8
+    with pytest.raises(ValueError, match=f"^{argument} is not supported with response_geometry$"):
+        gamfit.fit(
+            _simplex_frame(n),
+            "y0 ~ s(x)",
+            response_geometry="simplex",
+            response_columns=["y0", "y1", "y2"],
+            **{argument: _DROPPED_BY_THE_JOINT_TANGENT_FIT[argument](n)},
+        )

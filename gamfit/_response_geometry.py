@@ -506,6 +506,20 @@ def fit_response_geometry(
     constraints: Mapping[str, Any] | None = None,
     config: dict[str, Any] | None = None,
 ) -> ResponseGeometryModel:
+    # The joint tangent REML (`_fit_shared_tangent_reml`) materializes only the
+    # formula and the weights, so these arguments would reach the template model
+    # the predictions use but never the fit its coefficients come from. Refuse
+    # them instead of fitting a different model than the one requested.
+    for arg_name, arg_val in [
+        ("latents", latents),
+        ("smooths", smooths),
+        ("constraints", constraints),
+        ("penalties", penalties),
+        ("precision_hyperpriors", precision_hyperpriors),
+        ("scale_dimensions", scale_dimensions),
+    ]:
+        if arg_val is not None:
+            raise ValueError(f"{arg_name} is not supported with response_geometry")
     columns, table_kind = table_columns(data)
     y = response_matrix_from_table(data, response_columns)
 
