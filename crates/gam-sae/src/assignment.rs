@@ -2451,6 +2451,32 @@ pub(crate) fn assignment_prior_grad_hdiag_weighted(
     Ok((grad, diag))
 }
 
+/// Per-row summands `q_ik = w_i z_ik` of the ordered Beta--Bernoulli prior's
+/// weighted active mass `M_k = Σ_i q_ik`, row-major `N·K`, from the same penalty
+/// configuration as [`ordered_beta_bernoulli_psd_majorizer_third_channels_weighted`].
+/// Returns `None` for other assignment modes.
+pub(crate) fn ordered_beta_bernoulli_weighted_active_mass_rows(
+    assignment: &SaeAssignment,
+    rho: &SaeManifoldRho,
+    row_weights: Option<&[f64]>,
+) -> Result<Option<Array1<f64>>, String> {
+    assignment.validate_rho_domain(rho)?;
+    let AssignmentMode::OrderedBetaBernoulli {
+        temperature, alpha, ..
+    } = assignment.mode
+    else {
+        return Ok(None);
+    };
+    for row in 0..assignment.n_obs() {
+        validate_finite_logits(assignment.logits.row(row), row)?;
+    }
+    let target = flat_logits(assignment.logits.view());
+    let (penalty, rho_view) =
+        ordered_beta_bernoulli_prior_penalty(assignment, rho, alpha, temperature, row_weights)?;
+    penalty.validate_rho(rho_view.view())?;
+    Ok(Some(penalty.weighted_active_mass_rows(target.view())))
+}
+
 /// Build exact derivatives of the ordered Beta--Bernoulli PSD curvature
 /// majorizer for the SAE log-det adjoint Γ, using the same penalty configuration —
 /// `alpha`/`tau`/`learnable_alpha` and the `lambda_sparse` weight convention —

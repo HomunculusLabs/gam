@@ -97,6 +97,13 @@ impl OrderedBetaBernoulliPenalty {
         self.row_weights.as_ref().map_or(1.0, |w| w[row])
     }
 
+    /// Per-row summands `w_i z_ik` of the weighted active mass `M_k`, row-major
+    /// `N·K` like the target.
+    pub fn weighted_active_mass_rows(&self, target: ArrayView1<'_, f64>) -> Array1<f64> {
+        let z = self.concrete_logits(target);
+        Array1::from_shape_fn(z.len(), |idx| self.row_weight(idx / self.k_max) * z[idx])
+    }
+
     fn weighted_active_mass(&self, z: ArrayView1<'_, f64>) -> (Array1<f64>, f64) {
         assert_eq!(
             z.len() % self.k_max,

@@ -7913,7 +7913,8 @@ impl SaeManifoldTerm {
     ///
     /// The same `A⁺` is the bread of the row-sandwich companion
     /// [`SaeAtomShapeUncertainty::band_sd_robust`], whose meat is the outer
-    /// product of the per-row data scores at `target`.
+    /// product of the per-row data scores at `target` together with any
+    /// aggregate-mass estimating equations ([`Self::row_sandwich_meat`]).
     ///
     /// On a framed state this holds every learned frame at its fitted `U_k`, so
     /// it is the route only where the frames cannot be integrated; see
@@ -7927,11 +7928,11 @@ impl SaeManifoldTerm {
         let frame_conditioning = self.fixed_frame_conditioning()?;
         let total_t = cache.delta_t_len();
         let joint = self.materialize_exact_stationarity_geometry(rho, target, cache)?;
-        let meat = self.reconstruction_border_score_meat(target)?;
+        let sandwich = self.row_sandwich_meat(rho, cache, target)?;
         joint.border_selected_inverse_blocks(
             total_t,
             &self.shape_covariance_border_ranges(),
-            meat.view(),
+            &sandwich,
             frame_conditioning,
         )
     }
@@ -8086,12 +8087,12 @@ impl SaeManifoldTerm {
                 lift: &tangent.lift,
             },
         )?;
-        let meat = tangent.congruence(&unframed.reconstruction_border_score_meat(target)?);
+        let sandwich = tangent.tangent_sandwich(unframed.row_sandwich_meat(rho, &cache, target)?)?;
         Ok(
             match joint.border_selected_inverse_blocks(
                 total_t,
                 &tangent.ranges,
-                meat.view(),
+                &sandwich,
                 SaeFrameConditioning::MarginalOverLearnedFrames,
             )? {
                 SaeShapeInformation::ObservedInformation(mut covariance) => {
@@ -8121,13 +8122,14 @@ impl ExactHessianSpectralBlock {
     /// negative direction, `|λᵢ| ≤ floor(i)` is unidentified and carries no
     /// variance, `λᵢ > floor(i)` is retained. With `W = V_β[:, retained]·Λ^{−½}`
     /// each block is the Gram `W_r W_rᵀ`, positive semidefinite by construction.
-    /// The robust blocks are those of `(W Wᵀ) J (W Wᵀ)` for the border meat `J`;
-    /// the whole border inverse is formed once, because `J` couples atoms.
+    /// The robust blocks are those of the row sandwich over `sandwich`, whose
+    /// aggregate-mass carriers `c_k u_k` are projected here onto the retained
+    /// half-inverse, `z_k = Λ^{−½}V_retᵀ(c_k u_k)`.
     fn border_selected_inverse_blocks(
         &self,
         total_t: usize,
         ranges: &[std::ops::Range<usize>],
-        meat: ArrayView2<'_, f64>,
+        sandwich: &RowSandwichMeat,
         frame_conditioning: SaeFrameConditioning,
     ) -> Result<SaeShapeInformation, String> {
         let dim = self.eigenvalues.len();
@@ -8164,8 +8166,30 @@ impl ExactHessianSpectralBlock {
             let index = retained[col];
             self.eigenvectors[[total_t + row, index]] / self.eigenvalues[index].sqrt()
         });
-        let (blocks, robust_blocks) =
-            observed_information_border_blocks(border_factor.view(), meat, ranges)?;
+        let mut mass_projections =
+            Array2::<f64>::zeros((retained.len(), sandwich.mass_carriers.len()));
+        for (column, (coefficient, carrier)) in sandwich.mass_carriers.iter().enumerate() {
+            for &(index, value) in carrier {
+                if index >= total_t {
+                    return Err(format!(
+                        "exact observed-information shape covariance: mass carrier index \
+                         {index} lies outside the t block of width {total_t}"
+                    ));
+                }
+                for (col, &eigen_index) in retained.iter().enumerate() {
+                    mass_projections[[col, column]] += coefficient
+                        * value
+                        * self.eigenvectors[[index, eigen_index]]
+                        / self.eigenvalues[eigen_index].sqrt();
+                }
+            }
+        }
+        let (blocks, robust_blocks) = observed_information_border_blocks(
+            border_factor.view(),
+            mass_projections.view(),
+            sandwich.meat.view(),
+            ranges,
+        )?;
         Ok(SaeShapeInformation::ObservedInformation(
             SaeObservedInformationCovariance {
                 blocks,
@@ -8300,6 +8324,31 @@ impl LearnedFrameTangentMap {
     /// `Tᵀ·M·T` for a border-layout matrix `M`.
     fn congruence(&self, matrix: &Array2<f64>) -> Array2<f64> {
         fast_atb(&self.lift, &fast_ab(matrix, &self.lift))
+    }
+
+    /// The row-sandwich meat in tangent coordinates: `Tᵀ·J·T` over the border,
+    /// with the aggregate-mass rows and columns carried through unchanged,
+    /// because the lift moves neither `t` nor the masses.
+    fn tangent_sandwich(&self, sandwich: RowSandwichMeat) -> Result<RowSandwichMeat, String> {
+        let beta_dim = self.lift.nrows();
+        let xi_dim = self.lift.ncols();
+        let mass_dim = sandwich.mass_carriers.len();
+        if sandwich.meat.dim() != (beta_dim + mass_dim, beta_dim + mass_dim) {
+            return Err(format!(
+                "learned frame tangent map: row-sandwich meat {:?} does not match beta dimension \
+                 {beta_dim} plus {mass_dim} aggregate masses",
+                sandwich.meat.dim()
+            ));
+        }
+        let mut lift = Array2::<f64>::zeros((beta_dim + mass_dim, xi_dim + mass_dim));
+        lift.slice_mut(s![..beta_dim, ..xi_dim]).assign(&self.lift);
+        for k in 0..mass_dim {
+            lift[[beta_dim + k, xi_dim + k]] = 1.0;
+        }
+        Ok(RowSandwichMeat {
+            meat: fast_atb(&lift, &fast_ab(&sandwich.meat, &lift)),
+            mass_carriers: sandwich.mass_carriers,
+        })
     }
 
     /// `T_k·Σ_k·T_kᵀ` per atom: tangent-coordinate blocks to decoder blocks.
@@ -8685,12 +8734,15 @@ mod shape_covariance_observed_information_2933_f33_tests {
         )
         .expect("spectral block of B");
         // Only the model blocks are checked here; the row-sandwich meat is inert.
-        let meat = Array2::<f64>::zeros((cache.k, cache.k));
+        let sandwich = RowSandwichMeat {
+            meat: Array2::<f64>::zeros((cache.k, cache.k)),
+            mass_carriers: Vec::new(),
+        };
         let information = block
             .border_selected_inverse_blocks(
                 total_t,
                 &term.shape_covariance_border_ranges(),
-                meat.view(),
+                &sandwich,
                 SaeFrameConditioning::NoLearnedFrames,
             )
             .expect("selected inverse of B");

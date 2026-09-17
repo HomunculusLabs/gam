@@ -4108,6 +4108,43 @@ impl SaeManifoldTerm {
         })
     }
 
+    /// `(c_k, [(t index, u_ik)])` per atom: the ordered Beta--Bernoulli prior's
+    /// cross-row mass Hessian `Σ_k c_k u_k u_kᵀ` over the logit slots of `cache`'s
+    /// coordinate layout, with `c_k = weight·d²L/dM²` and `u_ik = w_i dz_ik/dℓ_ik`.
+    /// Empty for every other assignment mode. The dense materialization and the
+    /// row-sandwich meat both read it, so they name one operator.
+    pub(crate) fn ordered_mass_hessian_carriers(
+        &self,
+        rho: &SaeManifoldRho,
+        cache: &ArrowFactorCache,
+    ) -> Result<Vec<(f64, Vec<(usize, f64)>)>, String> {
+        let Some(channels) = ordered_beta_bernoulli_psd_majorizer_third_channels_weighted(
+            &self.assignment,
+            rho,
+            self.row_loss_weights.as_deref(),
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+        let offsets = &cache.row_offsets;
+        let mut mass_carriers: Vec<(f64, Vec<(usize, f64)>)> = channels
+            .mass_hessian_coefficient
+            .iter()
+            .map(|&coefficient| (coefficient, Vec::new()))
+            .collect();
+        for row in 0..cache.n_rows() {
+            for (local, variable) in self.row_vars_for_cache_row(row, cache)?.iter().enumerate() {
+                if let SaeLocalRowVar::Logit { atom } = *variable {
+                    let value = channels.z_jac[row * channels.k_max + atom];
+                    if value != 0.0 {
+                        mass_carriers[atom].1.push((offsets[row] + local, value));
+                    }
+                }
+            }
+        }
+        Ok(mass_carriers)
+    }
+
     /// #2330 — dense symmetric materialization of the EXACT stationarity
     /// Hessian `A = ∇²_θθ L = B + ΔC` (`dim×dim`, `dim = total_t + k`), built
     /// column by column via [`Self::apply_exact_hessian`] and symmetrized, at the
@@ -4149,30 +4186,7 @@ impl SaeManifoldTerm {
         let dim = sae_exact_stationarity_dim(total_t, k);
         let n_rows = cache.n_rows();
         let offsets = &cache.row_offsets;
-        let mass_channels = ordered_beta_bernoulli_psd_majorizer_third_channels_weighted(
-            &self.assignment,
-            rho,
-            self.row_loss_weights.as_deref(),
-        )?;
-        let mut mass_carriers: Vec<(f64, Vec<(usize, f64)>)> = Vec::new();
-        if let Some(channels) = mass_channels.as_ref() {
-            mass_carriers = channels
-                .mass_hessian_coefficient
-                .iter()
-                .map(|&coefficient| (coefficient, Vec::new()))
-                .collect();
-            for row in 0..n_rows {
-                for (local, variable) in self.row_vars_for_cache_row(row, cache)?.iter().enumerate()
-                {
-                    if let SaeLocalRowVar::Logit { atom } = *variable {
-                        let value = channels.z_jac[row * channels.k_max + atom];
-                        if value != 0.0 {
-                            mass_carriers[atom].1.push((offsets[row] + local, value));
-                        }
-                    }
-                }
-            }
-        }
+        let mass_carriers = self.ordered_mass_hessian_carriers(rho, cache)?;
         let slots = (0..n_rows)
             .map(|row| offsets[row + 1] - offsets[row])
             .max()

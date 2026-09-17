@@ -66,13 +66,20 @@ pub struct SaeAtomShapeUncertainty {
     ///   coordinates and gate logits and the decoder border. The bread is the
     ///   pseudo-inverse `A⁺` of its exact observed information, the operator the
     ///   model-based band inverts.
-    /// * Meat: `J = Σ_i g_i g_iᵀ` over the rows' data scores. At the root each
-    ///   row's coordinate/logit data score is balanced by the prior gradient on
-    ///   that block; with one observation per row-local block its centred outer
-    ///   product vanishes, so only the border block survives:
-    ///   `J_ββ = Σ_i s_i s_iᵀ` with `s_i = ∂/∂β ½ w_i r_iᵀ M_i r_i`. Hence
-    ///   `Cov_rob(β) = [A⁺]_ββ J_ββ [A⁺]_ββ`, formed over the whole border because
-    ///   `J_ββ` couples atoms and output channels.
+    /// * Meat: `J = Σ_i g_i g_iᵀ` over the rows' estimating functions. When each
+    ///   row's coordinates and logits depend on that row alone, its row-local data
+    ///   score is balanced at the root by its own prior gradient and only the
+    ///   border survives: `Cov_rob(β) = [A⁺]_ββ J_ββ [A⁺]_ββ` with
+    ///   `J_ββ = Σ_i s_i s_iᵀ` and `s_i = ∂/∂β ½ w_i r_iᵀ M_i r_i`, the profile
+    ///   sandwich. It is formed over the whole border because `J_ββ` couples atoms
+    ///   and output channels.
+    /// * Aggregate masses: the ordered Beta--Bernoulli gate prior couples rows
+    ///   through each atom's mass `M_k = Σ_i w_i z_ik`, whose cross-row curvature
+    ///   `Σ_k c_k u_k u_kᵀ` is part of `A`. The masses enter as estimating
+    ///   equations `M_k − Σ_i w_i z_ik = 0`. Eliminating them recovers `A`, row
+    ///   `i`'s effective score becomes
+    ///   `[A⁺]_ββ s_i − Σ_k [A⁺(c_k u_k)]_β (M_k/n − w_i z_ik)`, and the meat
+    ///   carries the masses' sampling variability.
     /// * Target: the frequentist sampling covariance of the penalized decoder
     ///   estimate about its own limit, not a posterior covariance. Score and bread
     ///   come from one loss, so a known or estimated noise scale cancels and no
@@ -204,9 +211,10 @@ pub struct SaeObservedInformationCovariance {
     /// factored `(M_k·r_k)` layout; otherwise it is the full `(M_k·p)` decoder
     /// block.
     pub(crate) blocks: Vec<Array2<f64>>,
-    /// `([A⁺]_ββ J_ββ [A⁺]_ββ)[r_k, r_k]` per atom in the same layout: the
-    /// row-sandwich covariance with the per-row data-score meat `J_ββ`, never
-    /// scaled by a dispersion.
+    /// The row-sandwich covariance per atom in the same layout: the border block
+    /// of the joint sandwich over the per-row data scores and, under the ordered
+    /// Beta--Bernoulli prior, the aggregate-mass estimating equations (see
+    /// [`SaeAtomShapeUncertainty::band_sd_robust`]). Never scaled by a dispersion.
     pub(crate) robust_blocks: Vec<Array2<f64>>,
     /// Number of retained directions of `A`.
     pub(crate) identified_rank: usize,
@@ -295,25 +303,60 @@ pub struct SaeShapeUncertainty {
     pub atoms: Vec<SaeAtomShapeUncertainty>,
 }
 
+/// The row-sandwich meat of the joint estimating equations, with the carriers of
+/// the aggregate-mass equations it includes; see
+/// [`SaeAtomShapeUncertainty::band_sd_robust`].
+#[derive(Debug, Clone)]
+pub(crate) struct RowSandwichMeat {
+    /// `Σ_i g̃_i g̃_iᵀ` over `g̃_i = (s_i, M/n − q_i)`: the border data scores
+    /// followed by one centred summand per aggregate mass.
+    pub(crate) meat: Array2<f64>,
+    /// `(c_k, [(t index, u_ik)])` per aggregate mass, so the observed
+    /// information's cross-row block is `Σ_k c_k u_k u_kᵀ`. Empty when no prior
+    /// couples rows.
+    pub(crate) mass_carriers: Vec<(f64, Vec<(usize, f64)>)>,
+}
+
 impl SaeManifoldTerm {
-    /// Outer-product meat `J_ββ = Σ_i s_i s_iᵀ` of the per-row data scores, in the
-    /// decoder border layout. Row `i`'s score is the gradient of its weighted data
-    /// fit `½ w_i r_iᵀ M_i r_i` with `r_i = Σ_k a_ik m_k(t_ik) − z_i`:
+    /// The row-sandwich meat at `target`. Row `i`'s border score is the gradient
+    /// of its weighted data fit `½ w_i r_iᵀ M_i r_i` with
+    /// `r_i = Σ_k a_ik m_k(t_ik) − z_i`:
     /// `s_i[(k, b, c)] = w_i a_ik Φ_k(t_ik)[b] (M_i r_i)[c]`, projected through the
     /// atom frames when they are active. It is the per-row summand of the β
-    /// data-fit gradient the arrow assembly accumulates.
-    pub(crate) fn reconstruction_border_score_meat(
+    /// data-fit gradient the arrow assembly accumulates. Under the ordered
+    /// Beta--Bernoulli prior each aggregate mass `M_k = Σ_i q_ik`, `q_ik = w_i z_ik`,
+    /// adds the centred summand `M_k/n − q_ik`.
+    pub(crate) fn row_sandwich_meat(
         &self,
+        rho: &SaeManifoldRho,
+        cache: &ArrowFactorCache,
         target: ArrayView2<'_, f64>,
-    ) -> Result<Array2<f64>, String> {
+    ) -> Result<RowSandwichMeat, String> {
         let n = self.n_obs();
         let p = self.output_dim();
         if target.dim() != (n, p) {
             return Err(format!(
-                "reconstruction_border_score_meat: target must be ({n}, {p}); got {:?}",
+                "row_sandwich_meat: target must be ({n}, {p}); got {:?}",
                 target.dim()
             ));
         }
+        let mass_carriers = self.ordered_mass_hessian_carriers(rho, cache)?;
+        let mass_dim = mass_carriers.len();
+        let mass_rows = ordered_beta_bernoulli_weighted_active_mass_rows(
+            &self.assignment,
+            rho,
+            self.row_loss_weights.as_deref(),
+        )?
+        .unwrap_or_else(|| Array1::<f64>::zeros(0));
+        if mass_rows.len() != n * mass_dim {
+            return Err(format!(
+                "row_sandwich_meat: {} mass summands for {n} rows and {mass_dim} aggregate masses",
+                mass_rows.len()
+            ));
+        }
+        let mass_mean: Vec<f64> = (0..mass_dim)
+            .map(|k| (0..n).map(|row| mass_rows[row * mass_dim + k]).sum::<f64>() / n.max(1) as f64)
+            .collect();
         let frames_active = self.frames_active();
         let frame_projection = FrameProjection::new(self);
         let border_dim = if frames_active {
@@ -321,14 +364,15 @@ impl SaeManifoldTerm {
         } else {
             frame_projection.beta_dim()
         };
+        let width = border_dim + mass_dim;
         let whitening_metric = self
             .row_metric
             .as_ref()
             .filter(|metric| metric.whitens_likelihood());
-        // Rows fold in blocks of `border_dim` scores, so the transient score block
+        // Rows fold in blocks of `width` scores, so the transient score block
         // never outgrows the meat itself.
-        let block_rows = border_dim.max(1);
-        let mut meat = Array2::<f64>::zeros((border_dim, border_dim));
+        let block_rows = width.max(1);
+        let mut meat = Array2::<f64>::zeros((width, width));
         let mut assignments = vec![0.0_f64; self.k_atoms()];
         let mut decoded = vec![0.0_f64; p];
         let mut residual = Array1::<f64>::zeros(p);
@@ -336,7 +380,7 @@ impl SaeManifoldTerm {
         let mut block_start = 0usize;
         while block_start < n {
             let block_end = (block_start + block_rows).min(n);
-            let mut scores = Array2::<f64>::zeros((block_end - block_start, border_dim));
+            let mut scores = Array2::<f64>::zeros((block_end - block_start, width));
             for row in block_start..block_end {
                 self.assignment
                     .try_assignments_row_into(row, &mut assignments)?;
@@ -370,37 +414,61 @@ impl SaeManifoldTerm {
                 }
                 let mut out = scores.row_mut(row - block_start);
                 if frames_active {
-                    out.assign(&frame_projection.project_border_vec(score.view()));
+                    out.slice_mut(s![..border_dim])
+                        .assign(&frame_projection.project_border_vec(score.view()));
                 } else {
-                    out.assign(&score);
+                    out.slice_mut(s![..border_dim]).assign(&score);
+                }
+                for k in 0..mass_dim {
+                    out[border_dim + k] = mass_mean[k] - mass_rows[row * mass_dim + k];
                 }
             }
             meat += &fast_atb(&scores, &scores);
             block_start = block_end;
         }
-        Ok(meat)
+        Ok(RowSandwichMeat {
+            meat,
+            mass_carriers,
+        })
     }
 }
 
-/// Per-atom blocks of `[A⁺]_ββ = W Wᵀ` and of the row sandwich
-/// `[A⁺]_ββ J [A⁺]_ββ`, for the border factor `W = V_β[:, retained]·Λ^{−½}` of
-/// the observed information and the border meat `J`. The whole border inverse
-/// is formed once, because `J` couples atoms and channels.
+/// Per-atom blocks of `[A⁺]_ββ = W_β W_βᵀ` and of the row sandwich over the joint
+/// estimating equations. `border_factor` is `W_β = V_β[:, retained]·Λ^{−½}`, and
+/// column `k` of `mass_projections` is `z_k = Λ^{−½}V_retᵀ(c_k u_k)`, so the
+/// response of `β` to the `k`-th aggregate-mass equation is `−W_β z_k`. `meat` is
+/// `Σ_i g̃_i g̃_iᵀ` over `(border, masses)`. The whole border inverse is formed
+/// once, because the meat couples atoms and channels.
 pub(crate) fn observed_information_border_blocks(
     border_factor: ArrayView2<'_, f64>,
+    mass_projections: ArrayView2<'_, f64>,
     meat: ArrayView2<'_, f64>,
     ranges: &[std::ops::Range<usize>],
 ) -> Result<(Vec<Array2<f64>>, Vec<Array2<f64>>), String> {
     let border_dim = border_factor.nrows();
-    if meat.dim() != (border_dim, border_dim) {
+    let mass_dim = mass_projections.ncols();
+    let width = border_dim + mass_dim;
+    if mass_projections.nrows() != border_factor.ncols() || meat.dim() != (width, width) {
         return Err(format!(
-            "exact observed-information shape covariance: meat {:?} does not match the border \
-             dimension {border_dim}",
+            "exact observed-information shape covariance: border factor {:?}, mass projections \
+             {:?} and meat {:?} disagree",
+            border_factor.dim(),
+            mass_projections.dim(),
             meat.dim()
         ));
     }
     let border_inverse = symmetrized(fast_ab(&border_factor, &border_factor.t()));
-    let sandwich = symmetrized(fast_ab(&fast_ab(&border_inverse, &meat), &border_inverse));
+    let mut response = Array2::<f64>::zeros((border_dim, width));
+    response
+        .slice_mut(s![.., ..border_dim])
+        .assign(&border_inverse);
+    if mass_dim > 0 {
+        let mass_response = fast_ab(&border_factor, &mass_projections);
+        response
+            .slice_mut(s![.., border_dim..])
+            .assign(&mass_response.mapv(|value| -value));
+    }
+    let sandwich = symmetrized(fast_ab(&fast_ab(&response, &meat), &response.t()));
     let mut blocks = Vec::with_capacity(ranges.len());
     let mut robust_blocks = Vec::with_capacity(ranges.len());
     for (atom, range) in ranges.iter().enumerate() {
@@ -549,6 +617,7 @@ mod robust_shape_band_tests {
         let information = array![[gram[0][0], gram[0][1]], [gram[1][0], gram[1][1]]];
         let (blocks, robust) = observed_information_border_blocks(
             border_factor(&information, 0).view(),
+            Array2::<f64>::zeros((2, 0)).view(),
             meat.view(),
             &[0..2],
         )
@@ -632,6 +701,7 @@ mod robust_shape_band_tests {
         let ranges = [0..2, 2..4];
         let (blocks, robust) = observed_information_border_blocks(
             border_factor(&joint, border).view(),
+            Array2::<f64>::zeros((dim, 0)).view(),
             meat.view(),
             &ranges,
         )
@@ -715,6 +785,149 @@ mod robust_shape_band_tests {
         );
     }
 
+    /// A cross-row rank-one block `c u uᵀ` in `A`, the shape the ordered
+    /// Beta--Bernoulli prior's aggregate mass installs. The robust block must be
+    /// that of the augmented estimating equations `(G_t, G_β, M − Σ_i q_i)`, formed
+    /// from their dense non-symmetric Jacobian `Ã` and its Gauss–Jordan inverse.
+    /// Eliminating the mass equation must recover `A`, and dropping the masses'
+    /// meat must miss the robust block.
+    #[test]
+    fn row_sandwich_includes_the_aggregate_mass_equations() {
+        let (n, d, k) = (3usize, 2usize, 2usize);
+        let border = n * d;
+        let dim = border + k;
+        let htt = [
+            array![[3.0_f64, 0.4], [0.4, 2.5]],
+            array![[2.8_f64, -0.3], [-0.3, 3.2]],
+            array![[3.5_f64, 0.2], [0.2, 2.2]],
+        ];
+        let htbeta = [
+            array![[1.1_f64, -0.4], [0.3, 0.9]],
+            array![[-0.7_f64, 0.8], [1.0, -0.2]],
+            array![[0.6_f64, 0.5], [-0.8, 1.1]],
+        ];
+        let mut local = Array2::<f64>::zeros((dim, dim));
+        for i in 0..n {
+            let base = i * d;
+            local
+                .slice_mut(s![base..base + d, base..base + d])
+                .assign(&htt[i]);
+            local
+                .slice_mut(s![base..base + d, border..])
+                .assign(&htbeta[i]);
+            local
+                .slice_mut(s![border.., base..base + d])
+                .assign(&htbeta[i].t());
+        }
+        local
+            .slice_mut(s![border.., border..])
+            .assign(&array![[5.0_f64, 1.2], [1.2, 4.5]]);
+        // The mass derivative lives on each row's logit slot; the coefficient is
+        // negative like the integrated prior's `d²L/dM²`.
+        let coefficient = -0.6_f64;
+        let carrier = [(0usize, 0.8_f64), (2, -0.5), (4, 0.9)];
+        let mut u = Array1::<f64>::zeros(dim);
+        for &(index, value) in &carrier {
+            u[index] = value;
+        }
+        let joint = Array2::from_shape_fn((dim, dim), |(r, c)| {
+            local[[r, c]] + coefficient * u[r] * u[c]
+        });
+        // Border scores then the centred mass summand, for four rows.
+        let scores = array![
+            [1.0_f64, 0.8, 0.3],
+            [-0.4, 1.2, -0.5],
+            [0.6, -0.2, 0.9],
+            [0.9, 1.0, -0.7]
+        ];
+        let meat = scores.t().dot(&scores);
+
+        let (eigenvalues, eigenvectors) = joint
+            .eigh(Side::Lower)
+            .expect("symmetric eigendecomposition");
+        assert!(
+            eigenvalues.iter().all(|&lambda| lambda > 0.0),
+            "the test operator must be positive definite"
+        );
+        let rank = eigenvalues.len();
+        let border_factor = Array2::from_shape_fn((k, rank), |(row, col)| {
+            eigenvectors[[border + row, col]] / eigenvalues[col].sqrt()
+        });
+        let mass_projections = Array2::from_shape_fn((rank, 1), |(col, _)| {
+            carrier
+                .iter()
+                .map(|&(index, value)| coefficient * value * eigenvectors[[index, col]])
+                .sum::<f64>()
+                / eigenvalues[col].sqrt()
+        });
+        let (blocks, robust) = observed_information_border_blocks(
+            border_factor.view(),
+            mass_projections.view(),
+            meat.view(),
+            &[0..k],
+        )
+        .expect("border blocks");
+
+        // Jacobian over `(t, β, M)`: the mass enters the t rows through `c u`, and
+        // its own equation `M − Σ_i q_i` has t-derivative `−u`.
+        let mut augmented = Array2::<f64>::zeros((dim + 1, dim + 1));
+        augmented.slice_mut(s![..dim, ..dim]).assign(&local);
+        for &(index, value) in &carrier {
+            augmented[[index, dim]] = coefficient * value;
+            augmented[[dim, index]] = -value;
+        }
+        augmented[[dim, dim]] = 1.0;
+        let augmented_inverse = dense_inverse(&augmented);
+        let joint_inverse = dense_inverse(&joint);
+        for r in 0..k {
+            for c in 0..k {
+                let reference = joint_inverse[[border + r, border + c]];
+                assert!(
+                    (augmented_inverse[[border + r, border + c]] - reference).abs()
+                        <= 1.0e-10 * reference.abs().max(1.0),
+                    "eliminating the mass equation must recover A at [{r},{c}]"
+                );
+                assert!(
+                    (blocks[0][[r, c]] - reference).abs() <= 1.0e-10 * reference.abs().max(1.0),
+                    "bread [{r},{c}] = {} vs A⁻¹ {reference}",
+                    blocks[0][[r, c]]
+                );
+            }
+        }
+        let mut augmented_meat = Array2::<f64>::zeros((dim + 1, dim + 1));
+        augmented_meat
+            .slice_mut(s![border.., border..])
+            .assign(&meat);
+        let expected = augmented_inverse
+            .dot(&augmented_meat)
+            .dot(&augmented_inverse.t())
+            .slice(s![border..dim, border..dim])
+            .to_owned();
+        let scale = expected.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+        assert!(scale > 0.0, "the augmented sandwich must not be vacuous");
+        for r in 0..k {
+            for c in 0..k {
+                assert!(
+                    (robust[0][[r, c]] - expected[[r, c]]).abs() <= 1.0e-10 * scale,
+                    "sandwich [{r},{c}] = {} vs augmented oracle {}",
+                    robust[0][[r, c]],
+                    expected[[r, c]]
+                );
+            }
+        }
+        let border_inverse = joint_inverse.slice(s![border.., border..]).to_owned();
+        let border_meat = meat.slice(s![..k, ..k]).to_owned();
+        let without_masses = border_inverse.dot(&border_meat).dot(&border_inverse);
+        let departure = (0..k)
+            .map(|i| (without_masses[[i, i]] / expected[[i, i]] - 1.0).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            departure > 0.05,
+            "a border-only meat must miss the aggregate-mass variability (departure \
+             {departure:.3e})"
+        );
+    }
+
     fn converged_tiny_state(
         install: Option<Box<dyn FnOnce(&mut SaeManifoldTerm)>>,
     ) -> (
@@ -738,12 +951,27 @@ mod robust_shape_band_tests {
         if let Some(install) = install {
             install(&mut term);
         }
+        converged_state(term, target, rho, 40)
+    }
+
+    fn converged_state(
+        mut term: SaeManifoldTerm,
+        target: Array2<f64>,
+        rho: SaeManifoldRho,
+        inner_max_iter: usize,
+    ) -> (
+        SaeManifoldTerm,
+        Array2<f64>,
+        SaeManifoldRho,
+        ArrowFactorCache,
+        SaeReconstructionDispersion,
+    ) {
         let (_cost, loss, cache) = term
             .penalized_quasi_laplace_criterion_with_cache(
                 target.view(),
                 &rho,
                 None,
-                40,
+                inner_max_iter,
                 0.4,
                 1.0e-6,
                 1.0e-6,
@@ -758,6 +986,13 @@ mod robust_shape_band_tests {
         (term, target, rho, cache, dispersion)
     }
 
+    /// The oracle's robust bands with the aggregate-mass estimating equations and
+    /// with the border data scores alone. They coincide when no prior couples rows.
+    struct OracleBands {
+        joint: Vec<Array2<f64>>,
+        border_only: Vec<Array2<f64>>,
+    }
+
     /// Independent oracle for the robust band. Per-row decoder scores come from
     /// central differences of each row's own weighted data fit through the public
     /// forward map (the row fit is quadratic in the decoder, so the difference is
@@ -765,13 +1000,19 @@ mod robust_shape_band_tests {
     /// observed information over its `identified_rank` largest directions, which
     /// must be separated from the rest by a clear spectral gap. The push-forward is
     /// the explicit basis sum.
+    ///
+    /// Under the ordered Beta--Bernoulli prior the masses `M_k = Σ_i q_ik` enter
+    /// as estimating equations. `q_ik = w_i a_ik` is read off the forward gates and
+    /// `u_ik = ∂q_ik/∂ℓ_ik` is their central difference. The information's
+    /// cross-row block must be `Σ_k c_k u_k u_kᵀ` over the logit slots, and `c_k` is
+    /// its least-squares fit. The response of `β` to mass `k` is `−[A⁺ c_k u_k]_β`.
     fn finite_difference_robust_bands(
         term: &SaeManifoldTerm,
         target: ArrayView2<'_, f64>,
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
         identified_rank: usize,
-    ) -> Vec<Array2<f64>> {
+    ) -> OracleBands {
         let n = term.n_obs();
         let p = term.output_dim();
         let beta_dim = term.beta_dim();
@@ -833,56 +1074,193 @@ mod robust_shape_band_tests {
             .iter()
             .map(|&i| eigenvalues[i].abs())
             .fold(0.0_f64, f64::max);
+        eprintln!(
+            "ROBUST_BAND_ORACLE identified_rank={identified_rank} smallest_retained=\
+             {smallest_retained:.6e} largest_dropped={largest_dropped:.6e}"
+        );
         assert!(
             smallest_retained > 1.0e3 * largest_dropped,
             "the oracle needs a spectral gap at the identified rank {identified_rank}: smallest \
              retained {smallest_retained:.3e}, largest dropped {largest_dropped:.3e}"
         );
-        let mut border_inverse = Array2::<f64>::zeros((beta_dim, beta_dim));
-        for &index in retained {
-            for r in 0..beta_dim {
-                for c in 0..beta_dim {
-                    border_inverse[[r, c]] += eigenvectors[[total_t + r, index]]
-                        * eigenvectors[[total_t + c, index]]
-                        / eigenvalues[index];
+
+        let k_atoms = term.k_atoms();
+        let mass_dim = if matches!(
+            term.assignment.mode,
+            AssignmentMode::OrderedBetaBernoulli { .. }
+        ) {
+            k_atoms
+        } else {
+            0
+        };
+        let mut mass_rows = Array2::<f64>::zeros((n, mass_dim));
+        let mut carriers = Array2::<f64>::zeros((total_t, mass_dim));
+        let mut slot_rows = vec![0usize; total_t];
+        for row in 0..n {
+            for slot in cache.row_offsets[row]..cache.row_offsets[row + 1] {
+                slot_rows[slot] = row;
+            }
+        }
+        if mass_dim > 0 {
+            let gate_step = 1.0e-6;
+            let mut probe = term.clone();
+            for row in 0..n {
+                let weight = term.row_loss_weights().map_or(1.0, |w| w[row]);
+                let gates = term
+                    .assignment
+                    .try_assignments_row(row)
+                    .expect("forward gates");
+                let layout = term
+                    .row_vars_for_cache_row(row, cache)
+                    .expect("cache row layout");
+                for (local, variable) in layout.iter().enumerate() {
+                    let SaeLocalRowVar::Logit { atom } = *variable else {
+                        continue;
+                    };
+                    mass_rows[[row, atom]] = weight * gates[atom];
+                    let logit = probe.assignment.logits[[row, atom]];
+                    probe.assignment.logits[[row, atom]] = logit + gate_step;
+                    let plus = probe
+                        .assignment
+                        .try_assignments_row(row)
+                        .expect("forward gates")[atom];
+                    probe.assignment.logits[[row, atom]] = logit - gate_step;
+                    let minus = probe
+                        .assignment
+                        .try_assignments_row(row)
+                        .expect("forward gates")[atom];
+                    probe.assignment.logits[[row, atom]] = logit;
+                    carriers[[cache.row_offsets[row] + local, atom]] =
+                        weight * (plus - minus) / (2.0 * gate_step);
                 }
             }
         }
-        let covariance = border_inverse.dot(&meat).dot(&border_inverse);
-        term.atoms
-            .iter()
-            .enumerate()
-            .map(|(atom_idx, atom)| {
-                let m = atom.basis_size();
-                let mut band = Array2::<f64>::zeros((n, p));
-                for row in 0..n {
-                    for c in 0..p {
-                        let mut variance = 0.0;
-                        for b1 in 0..m {
-                            for b2 in 0..m {
-                                variance += atom.basis_values[[row, b1]]
-                                    * atom.basis_values[[row, b2]]
-                                    * covariance[[
-                                        offsets[atom_idx] + b1 * p + c,
-                                        offsets[atom_idx] + b2 * p + c,
-                                    ]];
-                            }
-                        }
-                        band[[row, c]] = variance.max(0.0).sqrt();
+        let mut coefficients = vec![0.0_f64; mass_dim];
+        for (atom, coefficient) in coefficients.iter_mut().enumerate() {
+            let (mut numerator, mut denominator) = (0.0_f64, 0.0_f64);
+            for a in 0..total_t {
+                for b in 0..total_t {
+                    if slot_rows[a] != slot_rows[b] {
+                        let product = carriers[[a, atom]] * carriers[[b, atom]];
+                        numerator += information[[a, b]] * product;
+                        denominator += product * product;
                     }
                 }
-                band
-            })
-            .collect()
+            }
+            assert!(
+                denominator > 0.0,
+                "atom {atom}: the mass derivative must be live"
+            );
+            *coefficient = numerator / denominator;
+        }
+        // The masses must explain every cross-row entry, and no other cross-row
+        // coupling may exist, or the oracle's estimating equations are incomplete.
+        let mut cross_row_signal = 0.0_f64;
+        let mut cross_row_misfit = 0.0_f64;
+        for a in 0..total_t {
+            for b in 0..total_t {
+                if slot_rows[a] != slot_rows[b] {
+                    let model = (0..mass_dim)
+                        .map(|atom| coefficients[atom] * carriers[[a, atom]] * carriers[[b, atom]])
+                        .sum::<f64>();
+                    cross_row_signal = cross_row_signal.max(information[[a, b]].abs());
+                    cross_row_misfit = cross_row_misfit.max((information[[a, b]] - model).abs());
+                }
+            }
+        }
+        eprintln!(
+            "ROBUST_BAND_ORACLE masses={mass_dim} coefficients={coefficients:?} \
+             cross_row_signal={cross_row_signal:.6e} cross_row_misfit={cross_row_misfit:.6e}"
+        );
+        assert!(
+            cross_row_misfit <= 1.0e-6 * cross_row_signal,
+            "the cross-row information {cross_row_signal:.3e} is not the mass carriers' \
+             (misfit {cross_row_misfit:.3e})"
+        );
+
+        let mut border_inverse = Array2::<f64>::zeros((beta_dim, beta_dim));
+        let mut mass_response = Array2::<f64>::zeros((beta_dim, mass_dim));
+        for &index in retained {
+            let projections: Vec<f64> = (0..mass_dim)
+                .map(|atom| {
+                    coefficients[atom]
+                        * (0..total_t)
+                            .map(|slot| eigenvectors[[slot, index]] * carriers[[slot, atom]])
+                            .sum::<f64>()
+                })
+                .collect();
+            for r in 0..beta_dim {
+                let left = eigenvectors[[total_t + r, index]] / eigenvalues[index];
+                for c in 0..beta_dim {
+                    border_inverse[[r, c]] += left * eigenvectors[[total_t + c, index]];
+                }
+                for (atom, &projection) in projections.iter().enumerate() {
+                    mass_response[[r, atom]] -= left * projection;
+                }
+            }
+        }
+        let border_only = border_inverse.dot(&meat).dot(&border_inverse);
+        let width = beta_dim + mass_dim;
+        let mut response = Array2::<f64>::zeros((beta_dim, width));
+        response
+            .slice_mut(s![.., ..beta_dim])
+            .assign(&border_inverse);
+        response
+            .slice_mut(s![.., beta_dim..])
+            .assign(&mass_response);
+        let mut estimating = Array2::<f64>::zeros((n, width));
+        estimating.slice_mut(s![.., ..beta_dim]).assign(&scores);
+        for atom in 0..mass_dim {
+            let mean = mass_rows.column(atom).sum() / n as f64;
+            for row in 0..n {
+                estimating[[row, beta_dim + atom]] = mean - mass_rows[[row, atom]];
+            }
+        }
+        let joint = response
+            .dot(&estimating.t().dot(&estimating))
+            .dot(&response.t());
+        let push_forward = |covariance: &Array2<f64>| -> Vec<Array2<f64>> {
+            term.atoms
+                .iter()
+                .enumerate()
+                .map(|(atom_idx, atom)| {
+                    let m = atom.basis_size();
+                    let mut band = Array2::<f64>::zeros((n, p));
+                    for row in 0..n {
+                        for c in 0..p {
+                            let mut variance = 0.0;
+                            for b1 in 0..m {
+                                for b2 in 0..m {
+                                    variance += atom.basis_values[[row, b1]]
+                                        * atom.basis_values[[row, b2]]
+                                        * covariance[[
+                                            offsets[atom_idx] + b1 * p + c,
+                                            offsets[atom_idx] + b2 * p + c,
+                                        ]];
+                                }
+                            }
+                            band[[row, c]] = variance.max(0.0).sqrt();
+                        }
+                    }
+                    band
+                })
+                .collect()
+        };
+        OracleBands {
+            joint: push_forward(&joint),
+            border_only: push_forward(&border_only),
+        }
     }
 
+    /// Asserts the user-facing robust band against the oracle's joint sandwich and
+    /// returns the largest relative departure of the border-only sandwich from it.
     fn assert_robust_band_matches_oracle(
         term: &SaeManifoldTerm,
         target: ArrayView2<'_, f64>,
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
         dispersion: SaeReconstructionDispersion,
-    ) {
+    ) -> f64 {
         let information = term
             .exact_observed_information_shape_covariance(rho, target, cache)
             .expect("exact observed information at the converged state");
@@ -896,36 +1274,56 @@ mod robust_shape_band_tests {
             ref other => panic!("the converged fixture must yield observed information: {other:?}"),
         };
         let oracle = finite_difference_robust_bands(term, target, rho, cache, identified_rank);
-        assert_eq!(uncertainty.atoms.len(), oracle.len());
+        assert_eq!(uncertainty.atoms.len(), oracle.joint.len());
+        let mut largest_error_ratio = 0.0_f64;
         let mut largest_departure_from_model = 0.0_f64;
-        for (k, (atom, expected)) in uncertainty.atoms.iter().zip(&oracle).enumerate() {
+        let mut largest_departure_from_border_only = 0.0_f64;
+        for (k, atom) in uncertainty.atoms.iter().enumerate() {
             let robust = atom
                 .band_sd_robust
                 .as_ref()
                 .expect("observed information must yield the robust band");
             let model = atom.band_sd.as_ref().expect("joint model-based band");
+            let expected = &oracle.joint[k];
             assert_eq!(robust.dim(), expected.dim(), "atom {k} robust band shape");
-            for ((&got, &want), &model_sd) in robust.iter().zip(expected.iter()).zip(model.iter())
-            {
-                assert!(
-                    (got - want).abs() <= 1.0e-6 * want + 1.0e-12,
-                    "atom {k}: robust band {got} vs finite-difference sandwich {want}"
-                );
-                if model_sd > 0.0 {
-                    largest_departure_from_model =
-                        largest_departure_from_model.max((got / model_sd - 1.0).abs());
-                }
-            }
             assert!(
                 expected.iter().any(|&v| v > 1.0e-8),
                 "atom {k}: the oracle band must not be vacuous"
             );
+            for (((&got, &want), &model_sd), &border_sd) in robust
+                .iter()
+                .zip(expected.iter())
+                .zip(model.iter())
+                .zip(oracle.border_only[k].iter())
+            {
+                largest_error_ratio =
+                    largest_error_ratio.max((got - want).abs() / (1.0e-6 * want + 1.0e-12));
+                if model_sd > 0.0 {
+                    largest_departure_from_model =
+                        largest_departure_from_model.max((got / model_sd - 1.0).abs());
+                }
+                if want > 1.0e-8 {
+                    largest_departure_from_border_only =
+                        largest_departure_from_border_only.max((border_sd / want - 1.0).abs());
+                }
+            }
         }
+        eprintln!(
+            "ROBUST_BAND_ORACLE error_ratio={largest_error_ratio:.3e} departure_from_model=\
+             {largest_departure_from_model:.3e} departure_from_border_only=\
+             {largest_departure_from_border_only:.3e}"
+        );
+        assert!(
+            largest_error_ratio <= 1.0,
+            "robust band misses the finite-difference sandwich by {largest_error_ratio:.3e} times \
+             the tolerance 1e-6·sd + 1e-12"
+        );
         assert!(
             largest_departure_from_model > 1.0e-2,
             "the row sandwich must depart from the model-based band on this fixture (largest \
              relative departure {largest_departure_from_model:.3e})"
         );
+        largest_departure_from_border_only
     }
 
     #[test]
@@ -961,6 +1359,42 @@ mod robust_shape_band_tests {
             .expect("metric matches the term");
         })));
         assert_robust_band_matches_oracle(&term, target.view(), &rho, &cache, dispersion);
+    }
+
+    /// The ordered Beta--Bernoulli gate prior couples rows through each atom's
+    /// mass `M_k = Σ_i w_i z_ik`, so the user-facing robust band must carry the
+    /// mass estimating equations, with and without design weights. A border-only
+    /// meat must miss the oracle by far more than the band tolerance.
+    #[test]
+    fn ordered_beta_bernoulli_robust_shape_band_carries_the_aggregate_mass_equations() {
+        for weighted in [false, true] {
+            let (mut term, target, mut rho) =
+                crate::manifold::tests_logdet_adjoint_780::obb_patchd_fixture(0.01, -4.0);
+            for v in rho.log_lambda_smooth.iter_mut() {
+                *v = -1.0;
+            }
+            for axis in rho.log_ard.iter_mut() {
+                for v in axis.iter_mut() {
+                    *v = -1.0;
+                }
+            }
+            if weighted {
+                term.set_row_loss_weights(
+                    (0..term.n_obs())
+                        .map(|row| 0.5 + 0.25 * (row % 4) as f64)
+                        .collect(),
+                )
+                .expect("positive design weights");
+            }
+            let (term, target, rho, cache, dispersion) = converged_state(term, target, rho, 200);
+            let departure =
+                assert_robust_band_matches_oracle(&term, target.view(), &rho, &cache, dispersion);
+            assert!(
+                departure > 1.0e-3,
+                "weighted={weighted}: a border-only meat must miss the aggregate-mass \
+                 variability (departure {departure:.3e})"
+            );
+        }
     }
 
     #[test]
