@@ -65,7 +65,12 @@
 
 use std::sync::Arc;
 
-use gam_terms::basis::{MeasureJetBasisSpec, measure_jet_band, measure_jet_energy_form};
+use gam_linalg::faer_ndarray::rrqr_nullspace_basis_with_cutoff;
+use gam_linalg::matrix::symmetrize_in_place;
+use gam_linalg::roundoff::accumulation_growth;
+use gam_terms::basis::{
+    MeasureJetBasisSpec, affine_function_nullspace_form, measure_jet_band, measure_jet_energy_form,
+};
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2};
 
 use crate::basis::SaeBasisEvaluator;
@@ -360,11 +365,11 @@ impl ParameterFamily {
         if !labels.iter().chain(weights.iter()).all(|v| v.is_finite()) {
             return Err("parameter family labels and weights must be finite".to_string());
         }
-        // Recursive summation of C terms is exact to (C - 1) eps sum_c |w_c| at
-        // first order. A total inside that band has no determined sign, so no
-        // gauge representative exists.
+        // The weights are pre-formed terms, so their sum commits C - 1 rounded
+        // additions (gam_linalg::roundoff, Higham Lemma 3.1). A total inside that
+        // band has no determined sign, so no gauge representative exists.
         let total = weights.sum();
-        let rounding = (instances - 1) as f64 * f64::EPSILON * weights.iter().map(|w| w.abs()).sum::<f64>();
+        let rounding = accumulation_growth(instances - 1) * weights.iter().map(|w| w.abs()).sum::<f64>();
         if !(total.abs() > rounding) {
             return Err(format!(
                 "the scale gauge sum_c w_c = 1 cannot be fixed: the weights sum to {total:e}, inside its rounding {rounding:e}"
@@ -580,39 +585,90 @@ pub struct FieldPenalty {
 
 impl FieldPenalty {
     /// The measure-jet penalty of `basis` over the declared latent measure
-    /// `(centers, masses)` at smoothness order `order_s` in `(0, 2)` and density
-    /// exponent `alpha`, on the owner's realized scale band of the centers.
+    /// `(centers, masses)` under the declared `spec`. The smoothness order, the
+    /// density exponent, the tau coordinate and the scale count all come from the
+    /// owner's spec, so nothing here reads a default. The auto order
+    /// (`order_s == 0.0`) is refused because its resolution belongs to the
+    /// smooth's own realization; declare the order.
+    ///
+    /// A coefficient direction `v` with `Phi_c v = 0` is a field that vanishes at
+    /// every center. No function-space penalty over this measure can see such a
+    /// direction, so it would carry no prior, and a basis that has one is
+    /// refused. The numerical rank of `Phi_c` is decided against
+    /// `max(m, J) eps ||Phi_c||_F`; the Frobenius norm bounds the largest singular
+    /// value from above.
     pub fn measure_jet(
         basis: &dyn SaeBasisEvaluator,
         centers: ArrayView2<'_, f64>,
         masses: ArrayView1<'_, f64>,
-        order_s: f64,
-        alpha: f64,
+        spec: &MeasureJetBasisSpec,
     ) -> Result<Self, String> {
-        let band = measure_jet_band(centers, 0).map_err(|e| e.to_string())?;
-        // The energy is the exact weighted affine projection and does not read
-        // tau; the owner's spec value is passed through unchanged.
-        let tau0 = MeasureJetBasisSpec::default().tau0;
-        let energy = measure_jet_energy_form(centers, masses, &band, order_s, alpha, tau0)
-            .map_err(|e| e.to_string())?;
-        let phi = basis.evaluate(centers)?.0;
-        if phi.nrows() != centers.nrows() {
-            return Err(format!(
-                "basis returned {} rows at {} centers",
-                phi.nrows(),
-                centers.nrows()
-            ));
+        if spec.order_s == 0.0 {
+            return Err(
+                "the measure-jet auto order (order_s == 0.0) is resolved only inside the smooth's realization; declare order_s in (0, 2)"
+                    .to_string(),
+            );
         }
-        let gram = phi.t().dot(&energy).dot(&phi);
-        Ok(Self {
-            gram: (&gram + &gram.t()) * 0.5,
-        })
+        let phi = basis_at_centers(basis, centers)?;
+        let band = measure_jet_band(centers, spec.num_scales).map_err(|e| e.to_string())?;
+        let energy = measure_jet_energy_form(centers, masses, &band, spec.order_s, spec.alpha, spec.tau0)
+            .map_err(|e| e.to_string())?;
+        let mut gram = phi.t().dot(&energy).dot(&phi);
+        symmetrize_in_place(&mut gram);
+        Ok(Self { gram })
+    }
+
+    /// The function-space null component of the measure-jet penalty,
+    /// `S_null = Phi_c^T H_0 Phi_c`, where `H_0` is the owner's mass-metric
+    /// projector onto affine center values (`affine_function_nullspace_form`).
+    /// That projector spans exactly the energy's null space: `v^T S_null v` is the
+    /// squared mass norm of the affine part of the field's center values. Next to
+    /// [`FieldPenalty::measure_jet`], every coefficient direction the measure can
+    /// see is charged by one of the two forms, each with its own smoothing
+    /// parameter. The same centre-invisible refusal applies.
+    pub fn measure_jet_affine_null(
+        basis: &dyn SaeBasisEvaluator,
+        centers: ArrayView2<'_, f64>,
+        masses: ArrayView1<'_, f64>,
+    ) -> Result<Self, String> {
+        let phi = basis_at_centers(basis, centers)?;
+        let null_form = affine_function_nullspace_form(centers, masses).map_err(|e| e.to_string())?;
+        let mut gram = phi.t().dot(&null_form).dot(&phi);
+        symmetrize_in_place(&mut gram);
+        Ok(Self { gram })
     }
 
     /// `S`, one row and column per basis function.
     pub fn gram(&self) -> ArrayView2<'_, f64> {
         self.gram.view()
     }
+}
+
+/// `Phi_c`, the field basis at the declared centers, refusing a basis that has a
+/// coefficient direction vanishing at every center.
+fn basis_at_centers(basis: &dyn SaeBasisEvaluator, centers: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+    let phi = basis.evaluate(centers)?.0;
+    if phi.nrows() != centers.nrows() {
+        return Err(format!(
+            "basis returned {} rows at {} centers",
+            phi.nrows(),
+            centers.nrows()
+        ));
+    }
+    let width = phi.ncols();
+    let scale = phi.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let cutoff = centers.nrows().max(width) as f64 * f64::EPSILON * scale;
+    let rank = rrqr_nullspace_basis_with_cutoff(&phi, cutoff)
+        .map_err(|e| e.to_string())?
+        .1;
+    if rank < width {
+        return Err(format!(
+            "basis has {width} functions but rank {rank} at the {} declared centers (cutoff {cutoff:e}): {} coefficient directions vanish at every center, so no function-space penalty over this measure constrains them",
+            centers.nrows(),
+            width - rank
+        ));
+    }
+    Ok(phi)
 }
 
 /// The penalty's derivative for one coefficient, in the coefficient's own form.
@@ -629,6 +685,9 @@ mod tests {
     use super::*;
     use crate::basis::EuclideanPatchEvaluator;
     use gam_math::probability::{normal_cdf, normal_pdf};
+    use faer::Side;
+    use gam_linalg::faer_ndarray::FaerEigh;
+    use gam_linalg::roundoff::symmetric_spectrum_rounding_band;
     use gam_terms::basis::monomial_exponents;
 
     const ROWS: usize = 4;
@@ -1268,13 +1327,24 @@ mod tests {
 
     fn measure_jet_penalty() -> FieldPenalty {
         let (centers, masses) = latent_measure();
-        FieldPenalty::measure_jet(&patch(), centers.view(), masses.view(), ORDER_S, ALPHA).expect("measure-jet penalty")
+        FieldPenalty::measure_jet(&patch(), centers.view(), masses.view(), &declared_spec()).expect("measure-jet penalty")
+    }
+
+    /// The declared measure-jet spec: an explicit order in (0, 2), the
+    /// density-weighted exponent, and the owner's remaining fields.
+    fn declared_spec() -> MeasureJetBasisSpec {
+        MeasureJetBasisSpec {
+            order_s: ORDER_S,
+            alpha: ALPHA,
+            ..MeasureJetBasisSpec::default()
+        }
     }
 
     fn energy() -> Array2<f64> {
         let (centers, masses) = latent_measure();
-        let band = measure_jet_band(centers.view(), 0).expect("band");
-        measure_jet_energy_form(centers.view(), masses.view(), &band, ORDER_S, ALPHA, MeasureJetBasisSpec::default().tau0)
+        let spec = declared_spec();
+        let band = measure_jet_band(centers.view(), spec.num_scales).expect("band");
+        measure_jet_energy_form(centers.view(), masses.view(), &band, spec.order_s, spec.alpha, spec.tau0)
             .expect("energy")
     }
 
@@ -1493,5 +1563,88 @@ mod tests {
         // Positive control: a gradient missing the factor 2 of the symmetric form
         // is refuted.
         assert!(half_refuted, "half the gradient is not refuted anywhere");
+    }
+
+    #[test]
+    fn measure_jet_penalty_refuses_coefficient_directions_invisible_at_the_centers() {
+        let basis = patch();
+        let (centers, masses) = latent_measure();
+        // Four centers for six quadratic functions: rank at most 4.
+        let four = centers.slice(ndarray::s![0..4, ..]).to_owned();
+        let four_masses = Array1::from_elem(4, 0.25);
+        let narrow = FieldPenalty::measure_jet(&basis, four.view(), four_masses.view(), &declared_spec())
+            .expect_err("six functions at four centers are refused");
+        assert!(
+            narrow.contains("rank 4") && narrow.contains("vanish at every center"),
+            "refusal names the rank deficit: {narrow}"
+        );
+        // Sixteen collinear centers with z_2 = 2 z_1, which doubling represents
+        // exactly: every column is exactly 1, z_1 or z_1^2 times a constant, so the
+        // rank is 3 however many centers there are.
+        let mut collinear = centers.clone();
+        for i in 0..collinear.nrows() {
+            collinear[[i, 1]] = 2.0 * collinear[[i, 0]];
+        }
+        let flat = FieldPenalty::measure_jet(&basis, collinear.view(), masses.view(), &declared_spec())
+            .expect_err("a quadratic basis on a line is refused");
+        assert!(
+            flat.contains("rank 3") && flat.contains("vanish at every center"),
+            "refusal names the rank deficit: {flat}"
+        );
+        // Positive control: the same sixteen centers in general position are accepted.
+        assert!(
+            FieldPenalty::measure_jet(&basis, centers.view(), masses.view(), &declared_spec()).is_ok(),
+            "sixteen centers in general position see every coefficient direction"
+        );
+    }
+
+    #[test]
+    fn measure_jet_null_component_closes_exactly_the_energy_null_space() {
+        let (centers, masses) = latent_measure();
+        let energy_gram = measure_jet_penalty().gram().to_owned();
+        let null_gram = FieldPenalty::measure_jet_affine_null(&patch(), centers.view(), masses.view())
+            .expect("null-component penalty")
+            .gram()
+            .to_owned();
+        let phi = patch().evaluate(centers.view()).expect("basis at centers").0;
+        let phi_squared = phi.iter().map(|v| v * v).sum::<f64>();
+        let q_norm = energy().iter().map(|v| v * v).sum::<f64>().sqrt();
+        let null_form =
+            affine_function_nullspace_form(centers.view(), masses.view()).expect("owner's affine null form");
+        let null_norm = null_form.iter().map(|v| v * v).sum::<f64>().sqrt();
+        // A Gram's unresolved band: the eigensolver's band of its own spectrum plus
+        // the owner's construction floor, m eps ||form||_F per unit center value,
+        // carried through ||Phi_c||_F^2. Each floor is denominated in the center-value
+        // form (Q or H_0), never in the pulled-back Gram.
+        let m = centers.nrows() as f64;
+        let unresolved = |gram: &Array2<f64>, form_norm: f64| {
+            let eigenvalues = gram.eigh(Side::Lower).expect("symmetric eigendecomposition").0.to_vec();
+            let band = symmetric_spectrum_rounding_band(&eigenvalues) + m * f64::EPSILON * form_norm * phi_squared;
+            (eigenvalues.iter().filter(|&&lambda| lambda <= band).count(), band)
+        };
+        let affine_columns = monomial_exponents(LATENT, DEGREE)
+            .iter()
+            .filter(|exponent| exponent.iter().sum::<usize>() <= 1)
+            .count();
+        // The energy annihilates exactly the affine functions 1, z_1, z_2.
+        let (energy_null, energy_band) = unresolved(&energy_gram, q_norm);
+        assert_eq!(
+            energy_null, affine_columns,
+            "energy Gram has {energy_null} eigenvalues inside its band {energy_band:e}; the affine span has {affine_columns}"
+        );
+        // The null component sees only the affine part, so it leaves J - 3 unresolved.
+        let (null_null, null_band) = unresolved(&null_gram, null_norm);
+        assert_eq!(
+            null_null,
+            energy_gram.nrows() - affine_columns,
+            "null component has {null_null} eigenvalues inside {null_band:e}"
+        );
+        // Together the two forms charge every coefficient direction.
+        let combined = &energy_gram + &null_gram;
+        let (combined_null, combined_band) = unresolved(&combined, q_norm + null_norm);
+        assert_eq!(
+            combined_null, 0,
+            "energy plus null component leaves {combined_null} eigenvalues inside {combined_band:e}"
+        );
     }
 }
