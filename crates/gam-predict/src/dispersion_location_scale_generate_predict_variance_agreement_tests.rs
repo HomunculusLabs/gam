@@ -120,10 +120,14 @@ enum Fam {
     Tweedie,
 }
 
+/// The variance power the Tweedie draw is simulated at, which the fit names
+/// explicitly: SPEC forbids profiling the power, so the family must carry it.
+const TWEEDIE_POWER: f64 = 1.5;
+
 /// One dispersion-LS scenario: family config + truth surfaces + a draw.
 struct Scenario {
     name: &'static str,
-    family: &'static str,
+    family: String,
     fam: Fam,
     /// The seed-spec the picker / NoiseModel see (carries the construction seed,
     /// not the fitted dispersion — exactly what the generate path presents).
@@ -201,7 +205,7 @@ fn run_scenario(s: &Scenario) {
             Fam::Tweedie => {
                 let mu = (0.5 + 0.4 * xi).exp();
                 let phi = (-0.4 + 0.8 * xi).exp(); // dispersion rises with x
-                rng.tweedie(mu, phi, 1.5)
+                rng.tweedie(mu, phi, TWEEDIE_POWER)
             }
         })
         .collect();
@@ -218,7 +222,7 @@ fn run_scenario(s: &Scenario) {
     let ncols = ds.headers.len();
 
     let cfg = FitConfig {
-        family: Some(s.family.to_string()),
+        family: Some(s.family.clone()),
         noise_formula: Some("s(x, k=6)".to_string()),
         ..FitConfig::default()
     };
@@ -347,7 +351,7 @@ fn run_scenario(s: &Scenario) {
 fn dispersion_location_scale_generate_matches_predict_variance_gamma() {
     run_scenario(&Scenario {
         name: "gamma-LS",
-        family: "gamma",
+        family: "gamma".to_string(),
         fam: Fam::Gamma,
         likelihood: LikelihoodSpec::gamma_log(),
     });
@@ -357,7 +361,7 @@ fn dispersion_location_scale_generate_matches_predict_variance_gamma() {
 fn dispersion_location_scale_generate_matches_predict_variance_negbin() {
     run_scenario(&Scenario {
         name: "negbin-LS",
-        family: "negbin",
+        family: "negbin".to_string(),
         fam: Fam::NegativeBinomial,
         likelihood: DispersionFamilyKind::NegativeBinomial.likelihood_spec(),
     });
@@ -367,7 +371,7 @@ fn dispersion_location_scale_generate_matches_predict_variance_negbin() {
 fn dispersion_location_scale_generate_matches_predict_variance_beta() {
     run_scenario(&Scenario {
         name: "beta-LS",
-        family: "beta",
+        family: "beta".to_string(),
         fam: Fam::Beta,
         likelihood: DispersionFamilyKind::Beta.likelihood_spec(),
     });
@@ -377,10 +381,10 @@ fn dispersion_location_scale_generate_matches_predict_variance_beta() {
 fn dispersion_location_scale_generate_matches_predict_variance_tweedie() {
     run_scenario(&Scenario {
         name: "tweedie-LS",
-        family: "tweedie",
+        family: format!("tweedie(p={TWEEDIE_POWER})"),
         fam: Fam::Tweedie,
         // Tweedie carries the variance power p on the spec; phi is the reciprocal
         // of the precision exp(eta_d) — the arm most prone to a units slip.
-        likelihood: DispersionFamilyKind::Tweedie { p: 1.5 }.likelihood_spec(),
+        likelihood: DispersionFamilyKind::Tweedie { p: TWEEDIE_POWER }.likelihood_spec(),
     });
 }
