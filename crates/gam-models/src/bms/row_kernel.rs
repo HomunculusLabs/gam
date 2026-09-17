@@ -1041,8 +1041,9 @@ impl BernoulliRigidRowKernel {
             }
             return Ok(acc.to_dense(slices));
         }
-        let acc = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+        let acc = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold_by_work(
             chunks.len(),
+            chunk_rows,
             |range| -> Result<BernoulliBlockHessianAccumulator, String> {
                 let mut acc = BernoulliBlockHessianAccumulator::new(slices);
                 for chunk in &chunks[range] {
@@ -1160,8 +1161,9 @@ impl BernoulliRigidRowKernel {
             }
             return Ok(acc.to_dense(slices));
         }
-        let acc = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+        let acc = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold_by_work(
             chunks.len(),
+            chunk_rows,
             |range| -> Result<BernoulliBlockHessianAccumulator, String> {
                 let mut acc = BernoulliBlockHessianAccumulator::new(slices);
                 for chunk in &chunks[range] {

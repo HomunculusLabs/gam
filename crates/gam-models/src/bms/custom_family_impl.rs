@@ -482,8 +482,9 @@ impl BernoulliMarginalSlopeFamily {
             .slice(s![slices.slope.clone(), ..]);
         let b_axis_block = weights.mixed_information.slice(s![axis_range.clone(), ..]);
 
-        let pulled = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+        let pulled = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold_by_work(
             n_chunks,
+            rows_per_chunk,
             |chunk_range| -> Result<Array1<f64>, String> {
                 let mut chunk_pullback = Array1::<f64>::zeros(total);
                 for chunk_index in chunk_range {
@@ -1823,8 +1824,9 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
 
         const ROWS_PER_CHUNK: usize = 4096;
         let n_chunks = n.div_ceil(ROWS_PER_CHUNK);
-        let accumulated = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+        let accumulated = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold_by_work(
             n_chunks,
+            ROWS_PER_CHUNK,
             |chunk_range: std::ops::Range<usize>| -> Result<(Array2<f64>, Array2<f64>, Array2<f64>), String> {
                 let mut h_qq = Array2::<f64>::zeros((pt, pt));
                 let mut h_qg = Array2::<f64>::zeros((pt, pg));
