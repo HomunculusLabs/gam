@@ -3315,7 +3315,7 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         // their standard errors in the same step as the top-level matrices.
         solved_fit
             .add_coefficient_covariance_correction(&correction)
-            .map_err(|err| format!("bms generated-regressor: {err}"))?;
+            .map_err(|err| FitFailure::from(err).context("bms generated-regressor"))?;
         log::info!(
             "[BMS latent-z] Murphy–Topel generated-regressor SE correction applied: \
              p_beta={p_beta} flex_active={flex_active} theta1_dim={} max_diag_inflation={:.3e}",
