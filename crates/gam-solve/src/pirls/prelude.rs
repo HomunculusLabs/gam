@@ -52,7 +52,7 @@ pub(crate) use faer::sparse::{
 // re-export chain does not count as a use for the lint). The two call sites
 // that need `.unbound()` (newton_solve.rs, gam_working_model.rs) import
 // `faer::Unbind` directly instead. See #2306/build.
-pub(crate) use faer::{Accum, Par, Side, get_global_parallelism};
+pub(crate) use faer::{Accum, Par, Side};
 
 pub(crate) use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3, ShapeBuilder, Zip};
 

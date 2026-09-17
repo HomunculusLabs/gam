@@ -715,6 +715,45 @@ fn apply_householder_on_the_left(basis: MatRef<'_, f64>, coeff: MatRef<'_, f64>,
     );
 }
 
+/// Householder QR `A = Q R` at [`decomposition_parallelism`], keeping the
+/// reflectors so `Qᵀ` applies to a right-hand side without `Q` being formed.
+pub struct HouseholderQr {
+    basis: Mat<f64>,
+    coeff: Mat<f64>,
+    r: Mat<f64>,
+}
+
+impl HouseholderQr {
+    pub fn new(a: MatRef<'_, f64>) -> Self {
+        let (basis, coeff, r) = householder_qr(a);
+        Self { basis, coeff, r }
+    }
+
+    /// The upper trapezoidal `R`, `min(m, n) × n`.
+    pub fn r(&self) -> MatRef<'_, f64> {
+        self.r.as_ref()
+    }
+
+    /// `target ← Qᵀ target`, at [`decomposition_parallelism`].
+    pub fn apply_transpose_on_the_left(&self, target: MatMut<'_, f64>) {
+        let columns = target.ncols();
+        faer::linalg::householder::apply_block_householder_sequence_transpose_on_the_left_in_place_with_conj(
+            self.basis.as_ref(),
+            self.coeff.as_ref(),
+            Conj::No,
+            target,
+            decomposition_parallelism(),
+            MemStack::new(&mut MemBuffer::new(
+                faer::linalg::householder::apply_block_householder_sequence_transpose_on_the_left_in_place_scratch::<f64>(
+                    self.basis.nrows(),
+                    self.coeff.nrows(),
+                    columns,
+                ),
+            )),
+        );
+    }
+}
+
 /// Column-pivoted Householder QR `A P = Q R` at [`decomposition_parallelism`].
 struct ColumnPivotedQr {
     basis: Mat<f64>,

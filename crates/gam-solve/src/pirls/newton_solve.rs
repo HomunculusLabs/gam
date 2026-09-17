@@ -98,10 +98,12 @@ impl SparseXtWxCache {
                 thread_buffers: Vec::new(),
             })
         } else {
-            // SpGEMM scratch is sized for a fixed parallelism handle, so we
-            // capture it once at construction; `get_global_parallelism()` is
-            // stable for the lifetime of the process.
-            let par = get_global_parallelism();
+            // The SpGEMM scratch is sized by the handle's degree, so the handle
+            // is captured once here and every numeric product reuses it. The
+            // product's words do not depend on the degree (#2627: identical XᵀX
+            // at Seq and rayon 4/8/24 on pools 1/4/24), so it runs at the pool
+            // width without costing determinism.
+            let par = gam_linalg::faer_ndarray::pool_parallelism();
             let scratch = MemBuffer::new(sparse_sparse_matmul_numeric_scratch::<usize, f64>(
                 xtwx_symbolic.as_ref(),
                 par,

@@ -3937,7 +3937,7 @@ pub(crate) fn build_gaussian_reml_eigen_cache_with_nullspace_dim(
 /// `D·R` a positive diagonal. `D·R` is the Cholesky factor of `XᵀWX` the cache is built
 /// on, so `Q·D` is the orthonormal basis its `coefficient_basis = (D·R)⁻¹·V` speaks in.
 struct WeightedDesignQr {
-    qr: faer::linalg::solvers::Qr<f64>,
+    qr: gam_linalg::faer_ndarray::HouseholderQr,
     /// `D·R`: upper triangular with a positive diagonal.
     upper: Array2<f64>,
     /// The diagonal of `D`.
@@ -3953,8 +3953,8 @@ fn weighted_design_qr(
         weight[row].sqrt() * x[[row, col]]
     });
     let weighted_view = FaerArrayView::new(&weighted_design);
-    let qr = weighted_view.as_ref().qr();
-    let upper_view = qr.thin_R();
+    let qr = gam_linalg::faer_ndarray::HouseholderQr::new(weighted_view.as_ref());
+    let upper_view = qr.r();
     let mut upper = Array2::from_shape_fn(
         (upper_view.nrows(), upper_view.ncols()), |(row, col)| upper_view[(row, col)],
     );
@@ -3994,22 +3994,7 @@ fn rotated_weighted_response(
     let p = factor.upper.ncols();
     let mut rotated =
         faer::Mat::<f64>::from_fn(n, d, |row, col| weight[row].sqrt() * y[[row, col]]);
-    let householder_basis = factor.qr.Q_basis();
-    let householder_factor = factor.qr.Q_coeff();
-    faer::linalg::householder::apply_block_householder_sequence_transpose_on_the_left_in_place_with_conj(
-        householder_basis,
-        householder_factor,
-        faer::Conj::No,
-        rotated.as_mut(),
-        faer::get_global_parallelism(),
-        dyn_stack::MemStack::new(&mut dyn_stack::MemBuffer::new(
-            faer::linalg::householder::apply_block_householder_sequence_transpose_on_the_left_in_place_scratch::<f64>(
-                householder_basis.nrows(),
-                householder_factor.nrows(),
-                d,
-            ),
-        )),
-    );
+    factor.qr.apply_transpose_on_the_left(rotated.as_mut());
     let head = Array2::from_shape_fn((p, d), |(row, col)| {
         factor.row_signs[row] * rotated[(row, col)]
     });
@@ -8931,6 +8916,37 @@ mod perfect_fit_refusal_tests {
                 );
             }
         }
+    }
+
+    /// #2627: the weighted-design QR and its `Qᵀ` apply run at gam-linalg's per-call
+    /// degree, so the prepared cache and the rotated residual carry the same words on
+    /// pools of different width. faer's high-level `Qr` read the process-global degree,
+    /// whose default is the calling pool's width.
+    #[test]
+    fn the_prepared_residual_words_do_not_depend_on_the_pool_width_2627() {
+        let n = 400usize;
+        let p = 24usize;
+        let x = Array2::from_shape_fn((n, p), |(row, col)| {
+            ((row as f64 + 1.0) * (col as f64 + 0.5) * 0.37).sin()
+        });
+        let y = Array2::from_shape_fn((n, 1), |(row, _)| ((row as f64) * 0.11).cos());
+        let penalty = Array2::<f64>::eye(p);
+        let words = |width: usize| {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(width).build().expect("pool");
+            pool.install(|| {
+                let prepared =
+                    prepare_gaussian_reml(x.view(), y.view(), penalty.view(), None, None, None)
+                        .expect("a finite full-rank design");
+                let mut words: Vec<u64> =
+                    prepared.unpenalized_residual.iter().map(|value| value.to_bits()).collect();
+                words.extend(prepared.cache.coefficient_basis.iter().map(|value| value.to_bits()));
+                words
+            })
+        };
+        let single = words(1);
+        assert!(!single.is_empty());
+        assert_eq!(single, words(4));
+        assert_eq!(single, words(24));
     }
 
     /// #2280: the unpenalized residual must survive a design at condition `1e12`.
