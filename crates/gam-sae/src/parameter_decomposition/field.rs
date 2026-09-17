@@ -611,7 +611,7 @@ impl FieldPenalty {
         }
         let phi = basis_at_centers(basis, centers)?;
         let band = measure_jet_band(centers, spec.num_scales).map_err(|e| e.to_string())?;
-        let energy = measure_jet_energy_form(centers, masses, &band, spec.order_s, spec.alpha, spec.tau0)
+        let energy = measure_jet_energy_form(centers, masses, &band, spec.order_s, spec.alpha)
             .map_err(|e| e.to_string())?;
         let mut gram = phi.t().dot(&energy).dot(&phi);
         symmetrize_in_place(&mut gram);
@@ -1344,7 +1344,7 @@ mod tests {
         let (centers, masses) = latent_measure();
         let spec = declared_spec();
         let band = measure_jet_band(centers.view(), spec.num_scales).expect("band");
-        measure_jet_energy_form(centers.view(), masses.view(), &band, spec.order_s, spec.alpha, spec.tau0)
+        measure_jet_energy_form(centers.view(), masses.view(), &band, spec.order_s, spec.alpha)
             .expect("energy")
     }
 

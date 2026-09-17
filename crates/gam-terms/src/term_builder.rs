@@ -3299,12 +3299,6 @@ pub(crate) fn build_smooth_basis(
             if !alpha.is_finite() {
                 return Err("measurejet smooth requires a finite alpha".to_string());
             }
-            let tau0 = option_f64(options, "tau").unwrap_or(1e-3);
-            if !(tau0.is_finite() && tau0 >= 0.0) {
-                return Err(format!(
-                    "measurejet smooth tau must be finite and nonnegative; got {tau0}"
-                ));
-            }
             let num_scales = option_usize(options, "scales").unwrap_or(0);
             let length_scale = option_f64(options, "length_scale").unwrap_or(0.0);
             if !length_scale.is_finite() || length_scale < 0.0 {
@@ -3348,7 +3342,6 @@ pub(crate) fn build_smooth_basis(
                     center_strategy,
                     order_s,
                     alpha,
-                    tau0,
                     num_scales,
                     // 0.0 sentinel = auto initialization in the basis builder
                     // (median nearest-center spacing).
@@ -5289,7 +5282,6 @@ pub(crate) const MEASURE_JET_SMOOTH_OPTION_KEYS: &[&str] = &[
     "knots",
     "s",
     "alpha",
-    "tau",
     "scales",
     "length_scale",
     "double_penalty",

@@ -1407,7 +1407,6 @@ pub enum BasisMetadata {
         eps_band: Vec<f64>,
         order_s: f64,
         alpha: f64,
-        tau0: f64,
         masses: Array1<f64>,
         support_means: Vec<f64>,
         penalty_normalization_scales: Vec<f64>,

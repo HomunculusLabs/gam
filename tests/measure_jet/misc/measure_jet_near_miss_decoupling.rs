@@ -6,8 +6,8 @@
 //! center spacing are close enough that every mid-band scale sees both, yet
 //! a two-level vector (one constant per strand) is LOCALLY AFFINE on the
 //! support of the measure: the offset direction is spanned by the local jet
-//! features, so the multiscale jet-residual energy may charge it only the
-//! τ-ridge toll — never a diffusion-style value-coupling toll. A crossing
+//! features, so the multiscale jet-residual energy annihilates it — never a
+//! diffusion-style value-coupling toll. A crossing
 //! (X) geometry breaks the affine compatibility at the shared center region
 //! and must charge the same two-level vector at full strength.
 //!
@@ -28,10 +28,9 @@ const DELTA: f64 = 2.0 * H;
 const C1: f64 = 0.0;
 const C2: f64 = 1.0;
 /// `MeasureJetBasisSpec` defaults: the `order_s = 0.0` sentinel realizes
-/// s = 1.5 (MEASURE_JET_DEFAULT_ORDER_S), α = 1, τ = 1e-3.
+/// s = 1.5 (MEASURE_JET_DEFAULT_ORDER_S) and α = 1.
 const ORDER_S: f64 = 1.5;
 const ALPHA: f64 = 1.0;
-const TAU_DEFAULT: f64 = 1e-3;
 /// Gaussian profile truncation in units of ε — mirrors the module's
 /// MEASURE_JET_PROFILE_CUTOFF so the diffusion comparator below sums the
 /// same kernel support the energy itself uses.
@@ -94,36 +93,20 @@ fn quadratic_form(q: &Array2<f64>, v: &Array1<f64>) -> f64 {
 fn parallel_two_level_energy_at_defaults() -> f64 {
     let (centers, masses) = parallel_strand_centers();
     let band = band_for(&centers);
-    let q = measure_jet_energy_form(
-        centers.view(),
-        masses.view(),
-        &band,
-        ORDER_S,
-        ALPHA,
-        TAU_DEFAULT,
-    )
-    .expect("default-τ energy form");
+    let q = measure_jet_energy_form(centers.view(), masses.view(), &band, ORDER_S, ALPHA)
+        .expect("energy form");
     let offset = two_level_vector(M1, 2 * M1);
     quadratic_form(&q, &offset)
 }
 
 /// Gate 3 proper. On the support {y = 0} ∪ {y = δ} the two-level vector
 /// equals the ambient-affine function c1 + (c2−c1)·y/δ, so wherever both
-/// strands are visible the local affine fit absorbs the offset exactly
-/// (τ = 0) or up to the ridge toll (τ > 0):
-///
-///   vᵀR_i v = γ²·q_i·Σ_k c_k²·λ_k τ/(λ_k + τ) ≤ γ²·q_i·τ,   γ = (c2−c1)·ε/δ,
-///
-/// (centered values Cv = γ·Φ̃e_y lie IN the feature span; λ_k = local Gram
-/// eigenvalues), giving the closed-form ceiling
-///
-///   vᵀQv ≤ τ·(c2−c1)²·δ⁻²·log_step·Σ_ℓ ε_ℓ^{2−2s}  ≈ 1.97e-2 here,
-///
-/// while the alternating checkerboard pays the full multiscale residual
-/// (≈ 43 here) and a diffusion-style coupling would pay W_cross ≈ 3.8
-/// (derivation at the contrast gate below). Both 1e-2 gates therefore hold
-/// with an order of magnitude to spare, and at τ = 0 the offset energy is
-/// exactly zero up to roundoff.
+/// strands are visible the centered values Cv = γ·Φ̃e_y (γ = (c2−c1)·ε/δ) lie
+/// IN the local feature span and the rank-revealing local affine fit absorbs
+/// the offset exactly: vᵀR_i v = 0. The offset energy is therefore zero up to
+/// roundoff, while the alternating checkerboard pays the full multiscale
+/// residual (≈ 43 here) and a diffusion-style coupling would pay
+/// W_cross ≈ 3.8 (derivation at the contrast gate below).
 #[test]
 fn parallel_strands_share_no_value_coupling_at_affine_order() {
     let (centers, masses) = parallel_strand_centers();
@@ -149,39 +132,21 @@ fn parallel_strands_share_no_value_coupling_at_affine_order() {
         if parity % 2 == 0 { 1.0 } else { -1.0 }
     });
 
-    // Default τ: only the ridge toll may remain (affine-damping tolerance,
-    // mirroring energy_form_annihilates_affine_when_unridged in-module).
-    let q_default = measure_jet_energy_form(
-        centers.view(),
-        masses.view(),
-        &band,
-        ORDER_S,
-        ALPHA,
-        TAU_DEFAULT,
-    )
-    .expect("default-τ energy form");
-    let e_offset = quadratic_form(&q_default, &offset);
-    let e_checker = quadratic_form(&q_default, &checker);
+    // The offset is EXACTLY in the local affine span at every scale —
+    // machine-precision annihilation (mirroring
+    // energy_form_annihilates_affine_exactly in-module).
+    let q = measure_jet_energy_form(centers.view(), masses.view(), &band, ORDER_S, ALPHA)
+        .expect("energy form");
+    let e_offset = quadratic_form(&q, &offset);
+    let e_checker = quadratic_form(&q, &checker);
     assert!(
         e_checker > 0.0,
         "checkerboard must pay energy; got {e_checker:.3e}"
     );
     assert!(
-        e_offset <= 1e-2 * e_checker,
+        e_offset.abs() <= 1e-8 * e_checker,
         "two-level offset across parallel strands is not locally affine to the \
-         energy: vᵀQv = {e_offset:.3e} vs 1e-2 × checkerboard {e_checker:.3e}"
-    );
-
-    // τ = 0 (pseudo-inverse oracle mode): the offset is EXACTLY in the local
-    // affine span at every scale — machine-precision annihilation.
-    let q_unridged =
-        measure_jet_energy_form(centers.view(), masses.view(), &band, ORDER_S, ALPHA, 0.0)
-            .expect("unridged energy form");
-    let e_offset0 = quadratic_form(&q_unridged, &offset);
-    let e_checker0 = quadratic_form(&q_unridged, &checker);
-    assert!(
-        e_offset0.abs() <= 1e-8 * e_checker0,
-        "unridged offset energy {e_offset0:.3e} vs 1e-8 × checkerboard {e_checker0:.3e}"
+         energy: vᵀQv = {e_offset:.3e} vs 1e-8 × checkerboard {e_checker:.3e}"
     );
 
     // CONTRAST gate: a diffusion-style (value-only) coupling would charge
@@ -204,8 +169,7 @@ fn parallel_strands_share_no_value_coupling_at_affine_order() {
     // strands alone (coarser scales only add), this is the floor any
     // diffusion-style coupling would charge. The jet energy must sit at
     // least two orders below it: the offset lives in the affine span, so
-    // only the τ-toll (≤ τ·Δc²·δ⁻²·log_step·Σ_ℓ ε_ℓ^{2−2s}, see above)
-    // survives — a ratio of ≈ 5e-3 here.
+    // only roundoff survives.
     let eps_star = band
         .eps
         .iter()
@@ -258,28 +222,21 @@ fn parallel_strands_share_no_value_coupling_at_affine_order() {
 /// local fit at the crossing is the constant (c1+c2)/2, leaving the FULL
 /// two-point variance (Δc²/4)·q as residual). The same two-level vector
 /// that rode free across the near-miss gap must now pay two orders of
-/// magnitude more than the parallel case (measured ≈ 194×).
+/// magnitude more than the parallel case.
 #[test]
 fn true_crossing_couples_values() {
     let e_parallel = parallel_two_level_energy_at_defaults();
     assert!(
         e_parallel > 0.0,
-        "parallel τ-toll must be positive; got {e_parallel:.3e}"
+        "parallel near-miss energy must be positive; got {e_parallel:.3e}"
     );
 
     let (centers, masses) = crossing_strand_centers();
     let band = band_for(&centers);
     let per_strand = 2 * N_ARM + 1;
     let offset = two_level_vector(per_strand, 2 * per_strand);
-    let q = measure_jet_energy_form(
-        centers.view(),
-        masses.view(),
-        &band,
-        ORDER_S,
-        ALPHA,
-        TAU_DEFAULT,
-    )
-    .expect("crossing energy form");
+    let q = measure_jet_energy_form(centers.view(), masses.view(), &band, ORDER_S, ALPHA)
+        .expect("crossing energy form");
     let e_cross = quadratic_form(&q, &offset);
 
     assert!(

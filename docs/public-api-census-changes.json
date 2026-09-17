@@ -4180,5 +4180,13 @@
     },
     "reason": "#2900 rows 6.18 and 6.19 (SPEC rule 6: no size window): the SAE ARD latent inverse diagonal and the decoder-smoothness effective dof switched from their exact routes to 64-probe Hutchinson estimates at K = 2048 atoms. Both are exact at every K now, so the two estimators and the test that compared the latent estimator with the exact diagonal are deleted.",
     "evidence": "Pool job 1190978 (pool-gx2) ran scripts/public_api_census.py --base acdf183fe6 over the landing tree (overlay 5a601c05c2, tree cf69208822) and measured exactly these three declarations. source_removal_guard.py verified the same removals with their ledger entry (11 guarded removals). The replacement routes are ArrowFactorCache::latent_block_inverse_diagonal (exact at every K, pinned by latent_inverse_diagonal_contracts_touched_columns_against_the_dense_inverse_2900) and the existing exact per-column smoothness trace."
+  },
+  {
+    "base": "d9c299af61e2a892238be5ddf174a9f96ec8976c",
+    "removed": {
+      "crates/gam-terms/src/basis/measure_jet_smooth.rs::energy_form_annihilates_affine_at_default_tau": 1
+    },
+    "reason": "#2902: τ is deleted from the measure-jet spec and energy, which never read it. The in-module test energy_form_annihilates_affine_at_default_tau was named after that dial; it is renamed energy_form_annihilates_affine_exactly, and its assertions are unchanged. This census counts function identities. The removed pub field MeasureJetBasisSpec::tau0 and the tau0 parameters of the pub measure_jet_energy_form and the pub(crate) measure_jet_energy_forms_per_scale and assemble_weighted_forms are not function identities, so they appear here only as described. The source-removal entry at this base records the same change.",
+    "evidence": "At a07a79095f, git grep -w finds energy_form_annihilates_affine_at_default_tau only at its declaration, a pub(crate) fn, which public_api_census.py counts. The removed map was derived by reading the change against the census rule, and the gate job runs the census against this entry."
   }
 ]
