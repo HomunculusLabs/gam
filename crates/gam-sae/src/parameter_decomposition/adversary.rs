@@ -62,9 +62,22 @@
 //! since `q' - q = sum_c (m_c - m'_c) v_c`. Without `L` the upper side is underived. A
 //! witness above a held bound refutes the stated constant, and the query refuses instead
 //! of reporting an inverted interval.
+//!
+//! # Support search
+//!
+//! [`ZonotopeSeparationOracle`] is mpd-supports' [`SeparationOracle`] over this ascent, so
+//! the minimum-code support search runs P12's CEGAR with the nonlinear separation. A support
+//! query starts from the last refuting witness with the kept set reset to all-on, or else from
+//! the center of the free box. It never starts at all-on: a distance objective is minimal
+//! there with every derivative zero (P16), so the ascent would be stationary at once. When the
+//! support keeps every control, the region is the single point all-on; it is evaluated natively
+//! and reported exact over that one point. A point evaluation is a counterexample when it
+//! refutes epsilon, and otherwise exact over its one mask.
 
 use super::moments::{MaskDomain, MaskMomentSystem, MomentGeometryError, MomentVector, WitnessEndpoint};
-use super::supports::{EvidenceStatus, EvidenceStatusError, Extremum};
+use super::supports::{
+    ComponentSet, EvidenceStatus, EvidenceStatusError, ExactBasis, Extremum, SeparationOracle,
+};
 use gam_linalg::roundoff::{UNIT_ROUNDOFF, accumulation_band, accumulation_growth};
 use ndarray::Array1;
 use std::fmt;
@@ -628,10 +641,219 @@ where
     })
 }
 
+/// The region an oracle status speaks about: `Z_S` for a support query, or the one-mask family
+/// of a point evaluation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OracleRegion {
+    Zonotope(SeparationRegion),
+    Mask(Vec<f64>),
+}
+
+/// The evidence the oracle returns to the support search.
+pub type OracleStatus = EvidenceStatus<Vec<f64>, OracleRegion>;
+
+/// mpd-supports' separation oracle over the zonotope ascent (#2951 P7, P12).
+pub struct ZonotopeSeparationOracle<'a, O: SeparationObjective + ?Sized> {
+    system: &'a MaskMomentSystem,
+    domain: &'a MaskDomain,
+    epsilon: f64,
+    objective: &'a O,
+    last_witness: Option<Vec<f64>>,
+}
+
+impl<'a, O: SeparationObjective + ?Sized> ZonotopeSeparationOracle<'a, O> {
+    /// `epsilon` is the declared tolerance. Every status is classified against it, so the
+    /// support search runs at the same number.
+    pub fn new(
+        system: &'a MaskMomentSystem,
+        domain: &'a MaskDomain,
+        epsilon: f64,
+        objective: &'a O,
+    ) -> Result<Self, AdversaryError> {
+        if domain.control_count() != system.control_count() {
+            return Err(AdversaryError::Geometry(MomentGeometryError::ControlCount {
+                expected: system.control_count(),
+                found: domain.control_count(),
+            }));
+        }
+        if !epsilon.is_finite() {
+            return Err(AdversaryError::NonFiniteEpsilon(epsilon));
+        }
+        Ok(Self {
+            system,
+            domain,
+            epsilon,
+            objective,
+            last_witness: None,
+        })
+    }
+
+    /// The declared tolerance.
+    pub fn epsilon(&self) -> f64 {
+        self.epsilon
+    }
+
+    fn interval(&self, control: usize) -> Result<(f64, f64), AdversaryError> {
+        self.domain
+            .interval(control)
+            .ok_or(AdversaryError::Geometry(MomentGeometryError::ControlCount {
+                expected: self.system.control_count(),
+                found: self.domain.control_count(),
+            }))
+    }
+
+    /// The last refuting witness with the kept set reset to all-on, else the center of the free
+    /// box.
+    fn start_mask(&self, kept: &[bool]) -> Result<Vec<f64>, AdversaryError> {
+        (0..kept.len())
+            .map(|control| {
+                if kept[control] {
+                    return Ok(1.0);
+                }
+                if let Some(witness) = &self.last_witness {
+                    return Ok(witness[control]);
+                }
+                let (lower, upper) = self.interval(control)?;
+                Ok(lower + 0.5 * (upper - lower))
+            })
+            .collect()
+    }
+
+    /// A native evaluation at one admissible mask, classified against epsilon.
+    fn point_status(&self, mask: &[f64], region: OracleRegion) -> Result<OracleStatus, AdversaryError> {
+        let controls = self.system.control_count();
+        if mask.len() != controls {
+            return Err(AdversaryError::Geometry(MomentGeometryError::ControlCount {
+                expected: controls,
+                found: mask.len(),
+            }));
+        }
+        for (control, &value) in mask.iter().enumerate() {
+            let (lower, upper) = self.interval(control)?;
+            if !(lower <= value && value <= upper) {
+                return Err(AdversaryError::Geometry(MomentGeometryError::MaskOutsideDomain {
+                    control,
+                    value,
+                    lower,
+                    upper,
+                }));
+            }
+        }
+        let mut evaluations = 0;
+        let jet = evaluate_checked(self.objective, mask, &mut evaluations)?;
+        let status = if certified_lower(jet.value, jet.value_roundoff) > self.epsilon {
+            OracleStatus::counterexample(jet.value, jet.value_roundoff, self.epsilon, mask.to_vec())
+        } else {
+            OracleStatus::exact(
+                jet.value,
+                jet.value_roundoff,
+                ExactBasis::Exhaustive { cardinality: 1 },
+                Some(mask.to_vec()),
+                region,
+            )
+        };
+        status.map_err(AdversaryError::Evidence)
+    }
+}
+
+/// Rebuilds a query's status over the oracle's region type, through the evidence constructors.
+fn over_oracle_region(
+    status: SeparationStatus,
+    region: OracleRegion,
+) -> Result<OracleStatus, AdversaryError> {
+    let rebuilt = match status {
+        EvidenceStatus::Exact {
+            value,
+            numerical_error,
+            basis,
+            witness,
+            ..
+        } => OracleStatus::exact(value, numerical_error, basis, witness, region),
+        EvidenceStatus::UniformBound {
+            upper,
+            numerical_error,
+            ..
+        } => OracleStatus::uniform_bound(upper, numerical_error, region),
+        EvidenceStatus::StatisticalEstimate {
+            estimate,
+            standard_error,
+            samples,
+            ..
+        } => OracleStatus::statistical_estimate(estimate, standard_error, samples, region),
+        EvidenceStatus::Counterexample {
+            value,
+            numerical_error,
+            threshold,
+            witness,
+            ..
+        } => OracleStatus::counterexample(value, numerical_error, threshold, witness),
+        EvidenceStatus::Unresolved {
+            lower,
+            upper,
+            extremum,
+            witness,
+            ..
+        } => OracleStatus::unresolved(lower, upper, extremum, witness, region),
+    };
+    rebuilt.map_err(AdversaryError::Evidence)
+}
+
+impl<O: SeparationObjective + ?Sized> SeparationOracle for ZonotopeSeparationOracle<'_, O> {
+    type Mask = Vec<f64>;
+    type Domain = OracleRegion;
+    type Error = AdversaryError;
+
+    fn components(&self) -> usize {
+        self.system.control_count()
+    }
+
+    fn perturbed_components(&self, mask: &Vec<f64>) -> Vec<usize> {
+        mask.iter()
+            .enumerate()
+            .filter_map(|(control, value)| (*value != 1.0).then_some(control))
+            .collect()
+    }
+
+    fn separate(&mut self, support: &ComponentSet) -> Result<OracleStatus, AdversaryError> {
+        let controls = self.system.control_count();
+        if support.components() != controls {
+            return Err(AdversaryError::Geometry(MomentGeometryError::ControlCount {
+                expected: controls,
+                found: support.components(),
+            }));
+        }
+        let mut kept = vec![false; controls];
+        for &member in support.members() {
+            kept[member] = true;
+        }
+        let region = OracleRegion::Zonotope(SeparationRegion {
+            domain: self.domain.clone(),
+            kept: kept.clone(),
+        });
+        if support.len() == controls {
+            // The region is the single point all-on.
+            return self.point_status(&vec![1.0; controls], region);
+        }
+        let start = self.start_mask(&kept)?;
+        let report = separate(self.system, self.domain, &kept, self.epsilon, &start, self.objective)?;
+        if report.status.refutes_at_most(self.epsilon) {
+            self.last_witness = Some(report.witness.mask.clone());
+        }
+        over_oracle_region(report.status, region)
+    }
+
+    fn evaluate(&mut self, mask: &Vec<f64>) -> Result<OracleStatus, AdversaryError> {
+        self.point_status(mask, OracleRegion::Mask(mask.clone()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::parameter_decomposition::moments::{GeneratorPart, MomentBlock};
+    use crate::parameter_decomposition::supports::{
+        CardinalityCode, FailureHypergraph, minimum_code_support,
+    };
     use ndarray::{Array2, array};
 
     fn system_from_rows(rows: &Array2<f64>) -> MaskMomentSystem {
@@ -1009,5 +1231,101 @@ mod tests {
                 gradient[coordinate]
             );
         }
+    }
+
+    /// Support code lengths increasing with size, so the search proposes the smallest unrefuted
+    /// supports first.
+    struct SizeCode;
+
+    impl CardinalityCode for SizeCode {
+        type Error = std::convert::Infallible;
+
+        fn support_bits(&self, components: usize, size: usize) -> Result<u64, Self::Error> {
+            Ok(size.min(components) as u64)
+        }
+    }
+
+    #[test]
+    fn the_oracle_drives_the_support_search_to_the_only_live_control_2951() {
+        let system = system_from_rows(&Array2::<f64>::eye(3));
+        let domain = unit_domain(3);
+        let epsilon = 0.5;
+        let mut oracle =
+            ZonotopeSeparationOracle::new(&system, &domain, epsilon, &InteriorPeak).expect("oracle");
+        let search = minimum_code_support(&mut oracle, &SizeCode, epsilon, FailureHypergraph::new(3))
+            .expect("support search");
+        // F moves only through control 2, so every refutation perturbs it and every size-one support
+        // without it is refuted from an interior start. Without a stated constant the support {2} is
+        // never certified, so the search ends undecided there, with the full support certified by its
+        // exact point evaluation.
+        let undecided = search.undecided.as_ref().expect("an undecided candidate");
+        assert_eq!(undecided.support.members(), &[2]);
+        assert!(matches!(undecided.evidence, EvidenceStatus::Unresolved { .. }));
+        let certified = search.certified.as_ref().expect("the full support certified");
+        assert_eq!(certified.support.members(), &[0, 1, 2]);
+        assert!(matches!(certified.evidence, EvidenceStatus::Exact { .. }));
+        assert!(matches!(search.code, EvidenceStatus::Unresolved { .. }));
+        assert!(!search.hypergraph.edges().is_empty());
+        assert!(
+            search
+                .hypergraph
+                .edges()
+                .iter()
+                .all(|edge| edge.perturbed.members().contains(&2))
+        );
+    }
+
+    #[test]
+    fn a_point_evaluation_is_a_counterexample_or_exact_over_its_one_mask_2951() {
+        let system = system_from_rows(&Array2::<f64>::eye(3));
+        let domain = unit_domain(3);
+        let mut oracle =
+            ZonotopeSeparationOracle::new(&system, &domain, 0.5, &InteriorPeak).expect("oracle");
+        let refuting = oracle.evaluate(&vec![1.0, 1.0, 0.75]).expect("admissible mask");
+        assert!(matches!(refuting, EvidenceStatus::Counterexample { .. }));
+        assert!(refuting.refutes_at_most(0.5));
+        // Positive control: all-on never refutes and is exact over its one mask.
+        let all_on = oracle.evaluate(&vec![1.0; 3]).expect("all-on");
+        assert!(matches!(
+            all_on,
+            EvidenceStatus::Exact {
+                basis: ExactBasis::Exhaustive { cardinality: 1 },
+                ..
+            }
+        ));
+        assert!(!all_on.refutes_at_most(0.5));
+        assert_eq!(all_on.domain(), Some(&OracleRegion::Mask(vec![1.0; 3])));
+        assert!(matches!(
+            oracle.evaluate(&vec![1.0, 1.0, 1.5]),
+            Err(AdversaryError::Geometry(MomentGeometryError::MaskOutsideDomain { .. }))
+        ));
+    }
+
+    #[test]
+    fn a_support_query_starts_off_all_on_where_the_ascent_would_be_stationary_2951() {
+        let fixture = Quadratic::fixture(CertificateKind::Absent);
+        let kept = [false; 5];
+        let epsilon = 0.25 * fixture.exhaustive_max(&kept);
+        let mut oracle =
+            ZonotopeSeparationOracle::new(&fixture.system, &fixture.domain, epsilon, &fixture)
+                .expect("oracle");
+        let empty = ComponentSet::new(5, Vec::new()).expect("empty support");
+        let status = oracle.separate(&empty).expect("empty support query");
+        assert!(status.refutes_at_most(epsilon));
+        // Positive control: the same query started at all-on has a zero gradient, is stationary at
+        // once, and refutes nothing.
+        let from_all_on =
+            separate(&fixture.system, &fixture.domain, &kept, epsilon, &[1.0; 5], &fixture)
+                .expect("all-on start");
+        assert_eq!(from_all_on.termination, AscentTermination::Stationary);
+        assert!(!from_all_on.status.refutes_at_most(epsilon));
+        // The full support is the one point all-on: exact and certified, where the ascent proves
+        // only a lower witness.
+        let full = oracle.separate(&ComponentSet::all(5)).expect("full support");
+        assert!(full.certifies_at_most(epsilon));
+        let ascent =
+            separate(&fixture.system, &fixture.domain, &[true; 5], epsilon, &[1.0; 5], &fixture)
+                .expect("all kept");
+        assert!(!ascent.status.certifies_at_most(epsilon));
     }
 }
