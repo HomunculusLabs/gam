@@ -833,9 +833,10 @@ fn target_dose_expansion_continues_through_a_local_decrease() {
 /// halves that endpoint's weight, and it takes about `log2` of the residual ratio
 /// such observations before a candidate can cross the jump. The solve must still
 /// stop at the representation limit, on the plateau closer to the target, within
-/// the observation bound its bisection safeguard guarantees. Here one quantum of
-/// displacement is `2⁻³⁰` and the target sits `2⁻²⁰` of one jump above the lower
-/// plateau.
+/// the observation bound its bisection safeguard guarantees, and the bracket rebuilt
+/// from the probed displacements must halve at least once every three
+/// observations. Here one quantum of displacement is `2⁻³⁰` and the target sits
+/// `2⁻²⁰` of one jump above the lower plateau.
 #[test]
 fn target_dose_quantized_probe_ends_on_the_closer_plateau_within_the_safeguard_bound() {
     let t0 = 0.0;
@@ -846,11 +847,15 @@ fn target_dose_quantized_probe_ends_on_the_closer_plateau_within_the_safeguard_b
     let lower = quantized_kl(cell * quantum);
     let upper = quantized_kl((cell + 1.0) * quantum);
     let target = lower + (upper - lower) * 2.0_f64.powi(-20);
+    let mut observed: Vec<(f64, f64)> = Vec::new();
     let mut probe = |plan: &SteerPlan| -> Result<AppliedDoseObservation, String> {
+        let displacement = plan.t_to[0] - t0;
+        let measured_nats = quantized_kl(displacement);
+        observed.push((displacement, measured_nats));
         Ok(AppliedDoseObservation {
             effective_delta: plan.delta.clone(),
             exact_directional_nats: plan.predicted_nats.expect("exact local dose"),
-            measured_nats: quantized_kl(plan.t_to[0] - t0),
+            measured_nats,
             certified_attainable_upper_nats: None,
         })
     };
@@ -900,6 +905,48 @@ fn target_dose_quantized_probe_ends_on_the_closer_plateau_within_the_safeguard_b
         lower < target && target < upper,
         "precondition: the target {target} must sit inside the jump {lower}..{upper}"
     );
+
+    // The safeguard's own contract, read from outside the loop: rebuild the bracket
+    // from the probed displacements and the side of the target each reading fell
+    // on, then require every three observations to halve it. On the lower plateau
+    // the weighted secant alone moves the lower end by about `2⁻²⁰` of the bracket
+    // per observation for about twenty observations, so three of them cannot halve
+    // it. Midpoint rounding cannot break the bar: the ends are floats of one binade,
+    // so each observation narrows the bracket by at least one ulp and a bisection
+    // overshoots the exact half by at most half an ulp.
+    assert_eq!(
+        observed.len(),
+        plan.iterations,
+        "the probe must be called once per observation"
+    );
+    let mut lo = 0.0_f64;
+    let mut hi = f64::INFINITY;
+    let mut widths = Vec::new();
+    for &(s, nats) in &observed {
+        if hi.is_finite() {
+            assert!(
+                lo < s && s < hi,
+                "a bracket observation must lie strictly inside [{lo}, {hi}]; got {s}"
+            );
+        }
+        if nats < target {
+            lo = s;
+        } else {
+            hi = s;
+        }
+        if hi.is_finite() {
+            widths.push(hi - lo);
+        }
+    }
+    for j in 0..widths.len().saturating_sub(3) {
+        assert!(
+            widths[j + 3] <= 0.5 * widths[j],
+            "the safeguarded bracket must halve at least once every three observations: \
+             width {:.6e} three observations after {:.6e} (bracket widths {widths:?})",
+            widths[j + 3],
+            widths[j]
+        );
+    }
 }
 
 /// gh#2263: the request names a direction to move along, not a target coordinate.
