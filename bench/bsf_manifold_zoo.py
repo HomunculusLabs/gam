@@ -33,10 +33,12 @@ contribution; we report per-factor R^2 on the rows where the factor is active.
 This prevents a collapsed dictionary from claiming several planted factors
 with the same atom. On top we report the two currencies the paper argues from:
 
-* Description length (their Eq. 4, uniform across featurizers): support bits
-  ``log2 C(G, L0)`` + water-filled code bits from the per-atom active-code
-  covariance spectra + water-filled residual bits + the dictionary amortized
-  over N tokens -- read at distortion floors ``1 - R2 in {.01,.05,.10,.20}``.
+* Description length (their Eq. 4, uniform across featurizers): the support,
+  code, residual and dictionary bits of ``gamfit._description_length`` (the
+  Rust Eq. 4 scorer, which documents each term), read at distortion floors
+  ``1 - R2 in {.01,.05,.10,.20}``. Every featurizer's dictionary penalty is
+  amortised over the same declared horizon, the training-row count
+  ``--n-train``; the ``--n-test`` rows only estimate the score.
   For ``ours_rust`` the fit's NATIVE bits/token (the repo's headline currency)
   is reported alongside.
 * Active coordinates per token: ours = sum of (intrinsic dim + amplitude) over
@@ -863,7 +865,7 @@ def main() -> int:
         scoring_seconds = time.perf_counter() - scoring_start
 
         mdl_start = time.perf_counter()
-        mdl = description_length(fitted, test_x)
+        mdl = description_length(fitted, test_x, amortization_horizon=args.n_train)
         mdl_seconds = time.perf_counter() - mdl_start
 
         dimensionality_start = time.perf_counter()
