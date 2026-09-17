@@ -2470,6 +2470,9 @@ enum ConstrainedModeResolution {
         direction: Array1<f64>,
         alpha: f64,
         lambda_min: f64,
+        /// The certificate's numerical eigenvalue floor, so a caller with no
+        /// cycle left to take the escape refuses on the evidence judged here.
+        numerical_floor: f64,
     },
     /// The face-tangent curvature is PSD, but the returned mode's Newton
     /// decrement is above the objective's resolution (#2695): the local model
@@ -2479,6 +2482,29 @@ enum ConstrainedModeResolution {
         newton_decrement: f64,
         weakly_identified_decrement: f64,
     },
+}
+
+/// Whether a returned point settles its tentative convergence (#2627, #2695).
+///
+/// One predicate for every settling site: the unconstrained head and the
+/// constrained head. The stationarity residual
+/// measured at the returned state must be within the target computed at that
+/// same state, and the Newton decrement the local model still promises, over the
+/// identified and the weakly identified modes, must be within the objective's
+/// resolution. Each site passes the decrements of its own spectrum.
+fn returned_mode_settles(
+    residual: f64,
+    residual_target: f64,
+    newton_decrement: f64,
+    weakly_identified_decrement: f64,
+    decrement_resolution: f64,
+) -> bool {
+    residual.is_finite()
+        && residual <= residual_target
+        && newton_decrement.is_finite()
+        && newton_decrement <= decrement_resolution
+        && weakly_identified_decrement.is_finite()
+        && weakly_identified_decrement <= decrement_resolution
 }
 
 /// Second-order certification of a constrained first-order KKT point, with a
@@ -2502,6 +2528,8 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
     previous_escape_lambda_min: Option<f64>,
     objective_tol: f64,
     decrement_resolution: f64,
+    tentative_residual: f64,
+    tentative_residual_target: f64,
     jeffreys_completion_calls: &mut usize,
 ) -> Result<ConstrainedModeResolution, CustomFamilyError> {
     // Certify on the tangent of every NUMERICALLY-TIGHT constraint, not only the
@@ -2537,6 +2565,8 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
         previous_escape_lambda_min,
         objective_tol,
         decrement_resolution,
+        tentative_residual,
+        tentative_residual_target,
         jeffreys_completion_calls,
         0,
     )
@@ -2562,6 +2592,8 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
     previous_escape_lambda_min: Option<f64>,
     objective_tol: f64,
     decrement_resolution: f64,
+    tentative_residual: f64,
+    tentative_residual_target: f64,
     jeffreys_completion_calls: &mut usize,
     face_exchanges: usize,
 ) -> Result<ConstrainedModeResolution, CustomFamilyError> {
@@ -2586,19 +2618,22 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
     if !certificate.has_resolvable_negative_curvature() {
         let newton_decrement = certificate.newton_decrement;
         let weakly_identified_decrement = certificate.weakly_identified_decrement;
-        // One returned-mode rule on both branches (#2695). PSD face curvature says
-        // this point can be a mode; it is one once the local model promises no
-        // decrease the objective can resolve. The unconstrained returned-mode
-        // certificate already asks this (ed776b85e); without it here, warm-started
-        // probes of the #2904 FD pin certified with a pending correction and priced
-        // the rho 0 LAML slope at 6.954 against the analytic 0.7520.
-        if !(newton_decrement.is_finite()
-            && newton_decrement <= decrement_resolution
-            && weakly_identified_decrement.is_finite()
-            && weakly_identified_decrement <= decrement_resolution)
-        {
+        // One returned-mode rule on both branches (#2695, #2627). PSD face
+        // curvature says this point can be a mode; it is one once its residual is
+        // within the target at this state and the local model promises no
+        // decrease the objective can resolve. Without the decrement here,
+        // warm-started probes of the #2904 FD pin certified with a pending
+        // correction and priced the rho 0 LAML slope at 6.954 against the analytic
+        // 0.7520.
+        if !returned_mode_settles(
+            tentative_residual,
+            tentative_residual_target,
+            newton_decrement,
+            weakly_identified_decrement,
+            decrement_resolution,
+        ) {
             log::info!(
-                "[PIRLS/joint-Newton mode certificate] constrained returned beta has PSD face curvature (lambda_min={lambda_min:.6e}, floor={numerical_floor:.6e}) but decrement={newton_decrement:.3e}, weak={weakly_identified_decrement:.3e} above the objective resolution {decrement_resolution:.3e}; iterating on",
+                "[PIRLS/joint-Newton mode certificate] constrained returned beta has PSD face curvature (lambda_min={lambda_min:.6e}, floor={numerical_floor:.6e}) but does not settle: residual={tentative_residual:.3e}/{tentative_residual_target:.3e}, decrement={newton_decrement:.3e}, weak={weakly_identified_decrement:.3e} against the objective resolution {decrement_resolution:.3e}; iterating on",
             );
             return Ok(ConstrainedModeResolution::Unresolved {
                 newton_decrement,
@@ -2838,6 +2873,8 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
             previous_escape_lambda_min,
             objective_tol,
             decrement_resolution,
+            tentative_residual,
+            tentative_residual_target,
             jeffreys_completion_calls,
             face_exchanges + 1,
         );
@@ -2867,6 +2904,7 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
         direction,
         alpha: sign * magnitude,
         lambda_min,
+        numerical_floor,
     })
 }
 

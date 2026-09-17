@@ -1285,7 +1285,8 @@ pub(crate) fn joint_newton_budget_exhaustion_refuses_coupled_exact_inner() {
 /// the reproducibility SPEC). Both marginal-slope families now route their
 /// coupled exact-joint inner solve through the SAME `inner_blockwise_fit`
 /// loop, which is bounded DETERMINISTICALLY by the inner cycle budget
-/// (`inner_loop_hard_ceiling = inner_max_cycles.max(200)`) plus the
+/// (`inner_loop_hard_ceiling = inner_max_cycles + 1`, the one extra head only
+/// settles a pending tentative convergence, #2627) plus the
 /// deterministic stall early-exit guards (gam#979 / #1040 / #1088). There is
 /// no per-family wall-clock arming site left to be asymmetric about
 /// (`grep -rn "OUTER_WALL_CLOCK_DEADLINE\|budget_secs\|unwrap_or(300"

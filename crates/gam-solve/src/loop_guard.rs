@@ -285,9 +285,19 @@ impl RejectEscalator {
 /// returns `false` while the solver believed it converged, the caller must
 /// downgrade to non-converged so the outer optimizer rejects the evaluation
 /// rather than consuming a phantom optimum.
+///
+/// A finite residual is not enough (gam#2627): the certificate must have judged
+/// its residual at or below the target it applied. Event-history's rank-1 fit
+/// published `converged=true` at residual 1.107e-5 against 8.589e-11 because
+/// only finiteness was asked. So `converged` survives iff the certified residual
+/// is finite and within its target; a missing target (`NaN`) certifies nothing.
 #[inline]
-pub fn inner_convergence_is_truthful(converged: bool, min_certified_residual: f64) -> bool {
-    !converged || min_certified_residual.is_finite()
+pub fn inner_convergence_is_truthful(
+    converged: bool,
+    certified_residual: f64,
+    certified_residual_tol: f64,
+) -> bool {
+    !converged || (certified_residual.is_finite() && certified_residual <= certified_residual_tol)
 }
 
 /// Deterministic slow-geometric-rate stall predicate (gam#979 survival
@@ -428,17 +438,28 @@ mod tests {
     /// that case and leaves every genuinely-certified exit untouched.
     #[test]
     fn inner_convergence_truthfulness_rejects_converged_with_nonfinite_residual() {
-        // converged with a finite certified residual: honest, survives.
-        assert!(inner_convergence_is_truthful(true, 8.0e-6));
-        assert!(inner_convergence_is_truthful(true, 0.0));
+        // converged with a finite certified residual within its target: honest.
+        assert!(inner_convergence_is_truthful(true, 8.0e-6, 1.0e-5));
+        assert!(inner_convergence_is_truthful(true, 0.0, 1.0e-11));
         // converged with NO finite certified residual (the cycle-1 certificate
         // exit symptom: best_residual_inf=inf): a truthfulness violation.
-        assert!(!inner_convergence_is_truthful(true, f64::INFINITY));
-        assert!(!inner_convergence_is_truthful(true, f64::NAN));
+        assert!(!inner_convergence_is_truthful(true, f64::INFINITY, 1.0e-5));
+        assert!(!inner_convergence_is_truthful(true, f64::NAN, 1.0e-5));
         // non-converged exits are always truthful regardless of the residual
         // sentinel — the report says "not converged", no contradiction.
-        assert!(inner_convergence_is_truthful(false, f64::INFINITY));
-        assert!(inner_convergence_is_truthful(false, 1.0e-3));
+        assert!(inner_convergence_is_truthful(false, f64::INFINITY, f64::NAN));
+        assert!(inner_convergence_is_truthful(false, 1.0e-3, 1.0e-6));
+    }
+
+    /// A finite residual above the target the certificate applied is a false
+    /// certificate (gam#2627). The rank-1 event-history terminal published
+    /// `converged=true` at 1.107e-5 against 8.589e-11, and a certificate that
+    /// recorded no target cannot vouch for any residual.
+    #[test]
+    fn inner_convergence_truthfulness_rejects_converged_above_its_target_2627() {
+        assert!(!inner_convergence_is_truthful(true, 1.107e-5, 8.589e-11));
+        assert!(!inner_convergence_is_truthful(true, 1.0e-6, f64::NAN));
+        assert!(inner_convergence_is_truthful(true, 8.589e-11, 8.589e-11));
     }
 
     /// The shared predicates pin the exact reweight.rs semantics they

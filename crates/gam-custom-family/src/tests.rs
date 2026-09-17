@@ -5540,10 +5540,517 @@ impl CustomFamily for TwoBlockPersistentGradientFamily {
     }
 }
 
+/// Two coupled coefficients whose gradient is exact but whose Newton model
+/// carries four times the objective's curvature. Each step then removes only a
+/// quarter of the error, and the model's Newton decrement is a quarter of the
+/// exact one. So the decrement certificate marks convergence while the
+/// stationarity residual is still orders of magnitude above its target, the
+/// shape of event-history's Louis-quadrature plateau (#2627).
+#[derive(Clone)]
+struct TwoBlockInexactNewtonModelFamily {
+    target: [f64; 2],
+    /// The Newton model's curvature as a multiple of the objective's own.
+    model_scale: f64,
+    /// A lower bound on the second coefficient, which routes every tentative
+    /// convergence through the constrained settlement.
+    lower_bound: Option<f64>,
+    /// The sign the family reports its score with. `-1.0` reports the score
+    /// reversed, so every Newton correction climbs the objective and the line
+    /// search rejects it.
+    score_sign: f64,
+}
+
+impl TwoBlockInexactNewtonModelFamily {
+    const CURVATURE: [[f64; 2]; 2] = [[1.0, 0.25], [0.25, 1.0]];
+
+    fn curvature_times_error(&self, block_states: &[ParameterBlockState]) -> [f64; 2] {
+        let e = [
+            block_states[0].beta[0] - self.target[0],
+            block_states[1].beta[0] - self.target[1],
+        ];
+        let c = Self::CURVATURE;
+        [
+            c[0][0] * e[0] + c[0][1] * e[1],
+            c[1][0] * e[0] + c[1][1] * e[1],
+        ]
+    }
+
+    fn stationarity_residual_inf(&self, block_states: &[ParameterBlockState]) -> f64 {
+        let ce = self.curvature_times_error(block_states);
+        ce[0].abs().max(ce[1].abs())
+    }
+}
+
+impl CustomFamily for TwoBlockInexactNewtonModelFamily {
+    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        let e = [
+            block_states[0].beta[0] - self.target[0],
+            block_states[1].beta[0] - self.target[1],
+        ];
+        let ce = self.curvature_times_error(block_states);
+        let c = Self::CURVATURE;
+        Ok(FamilyEvaluation {
+            log_likelihood: -0.5 * (e[0] * ce[0] + e[1] * ce[1]),
+            blockworking_sets: vec![
+                BlockWorkingSet::ExactNewton {
+                    gradient: array![-self.score_sign * ce[0]],
+                    hessian: SymmetricMatrix::Dense(array![[self.model_scale * c[0][0]]]),
+                },
+                BlockWorkingSet::ExactNewton {
+                    gradient: array![-self.score_sign * ce[1]],
+                    hessian: SymmetricMatrix::Dense(array![[self.model_scale * c[1][1]]]),
+                },
+            ],
+        })
+    }
+
+    fn exact_newton_joint_hessian(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Option<Array2<f64>>, String> {
+        let c = Self::CURVATURE;
+        let hessian = array![
+            [self.model_scale * c[0][0], self.model_scale * c[0][1]],
+            [self.model_scale * c[1][0], self.model_scale * c[1][1]]
+        ];
+        assert_joint_dim(block_states, hessian.nrows(), "inexact-model joint Hessian");
+        Ok(Some(hessian))
+    }
+
+    fn exact_newton_joint_hessian_directional_derivative(
+        &self,
+        block_states: &[ParameterBlockState],
+        d_beta_flat: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        assert_joint_direction(block_states, d_beta_flat, "inexact-model joint Hessian drift");
+        Ok(Some(Array2::zeros((2, 2))))
+    }
+
+    fn has_explicit_joint_hessian(&self) -> bool {
+        true
+    }
+
+    fn block_linear_constraints(
+        &self,
+        block_states: &[ParameterBlockState],
+        block_idx: usize,
+        block_spec: &ParameterBlockSpec,
+    ) -> Result<Option<ConstraintSet>, String> {
+        let Some(bound) = self.lower_bound else {
+            return Ok(None);
+        };
+        if block_idx != 1 {
+            return Ok(None);
+        }
+        let a = array![[1.0]];
+        let b = array![bound];
+        assert_block_face(block_states, block_idx, block_spec, &a, &b);
+        Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
+            a,
+            b,
+        })))
+    }
+}
+
+/// #2627: the cycle budget can end an inner solve but never certify one.
+///
+/// Starting 1e-2 from the mode, the 3/4-per-cycle contraction leaves the
+/// residual near 1e-3 after twelve cycles, far above the 1e-6 target. The
+/// decrement certificate marks convergence on every late cycle. Before the fix,
+/// the mark made on the last allowed cycle was never settled: the budget break
+/// ran first, and the solve returned `converged = true` at that residual.
+#[test]
+fn a_count_capped_inner_solve_never_publishes_a_certificate_above_its_target_2627() {
+    // Every face: no bound, an inactive bound, and the mode on its bound. With
+    // `y >= -0.2` the mode sits at x = 0.375, and the start is 1e-2 off in the free
+    // coordinate.
+    for (lower_bound, start, bound_active) in [
+        (None, [0.41, -0.29], false),
+        (Some(-10.0), [0.41, -0.29], false),
+        (Some(-0.2), [0.385, -0.2], true),
+    ] {
+        let family = TwoBlockInexactNewtonModelFamily {
+            target: [0.4, -0.3],
+            model_scale: 4.0,
+            lower_bound,
+            score_sign: 1.0,
+        };
+        let spec = |name: &str, beta: f64| ParameterBlockSpec {
+            name: name.to_string(),
+            design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
+            offset: array![0.0],
+            penalties: Vec::new(),
+            nullspace_dims: Vec::new(),
+            initial_log_lambdas: Array1::zeros(0),
+            initial_beta: Some(array![beta]),
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        };
+        let specs = [spec("first", start[0]), spec("second", start[1])];
+        let options = BlockwiseFitOptions {
+            inner_max_cycles: 12,
+            inner_tol: 1e-6,
+            use_remlobjective: false,
+            compute_covariance: false,
+            ..BlockwiseFitOptions::default()
+        };
+        let result = inner_blockwise_fit(
+            &family,
+            &specs,
+            &[Array1::zeros(0), Array1::zeros(0)],
+            &options,
+            None,
+        )
+        .expect("a count-capped solve ends with an inner result, not a refusal");
+        // On the bound only the free coordinate's stationarity is a residual.
+        let ce = family.curvature_times_error(&result.block_states);
+        let residual = if bound_active {
+            ce[0].abs()
+        } else {
+            ce[0].abs().max(ce[1].abs())
+        };
+        println!(
+            "[2627] capped inexact-model solve (bound {lower_bound:?}): converged={} cycles={} residual={residual:.3e}",
+            result.converged, result.cycles
+        );
+        assert!(
+            !result.converged || residual <= 2e-6,
+            "#2627: a count-capped inner solve must not report convergence above its stationarity target (bound {lower_bound:?})"
+        );
+    }
+}
+
+/// #2627: a Newton decrement at the step floor does not certify a mode whose
+/// stationarity residual is above its target.
+///
+/// With a model curvature 1e8 times the objective's, the proposal from a point
+/// 1e-2 off the mode sits at the step floor, and the model decrement is far
+/// below the objective tolerance. The residual is still about 1e-2. The
+/// returned-mode certificate used to accept that state through its step-floor
+/// disjunct within a few cycles, as event-history's `cycles=3/1200` exits at
+/// residual 3.07e-4 against 1.4e-6 did (job 1148116).
+#[test]
+fn a_decrement_at_the_step_floor_never_certifies_a_mode_above_its_target_2627() {
+    let family = TwoBlockInexactNewtonModelFamily {
+        target: [0.4, -0.3],
+        model_scale: 1e8,
+        lower_bound: None,
+        score_sign: 1.0,
+    };
+    let spec = |name: &str, beta: f64| ParameterBlockSpec {
+        name: name.to_string(),
+        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
+        offset: array![0.0],
+        penalties: Vec::new(),
+        nullspace_dims: Vec::new(),
+        initial_log_lambdas: Array1::zeros(0),
+        initial_beta: Some(array![beta]),
+        gauge_priority: 100,
+        jacobian_callback: None,
+        stacked_design: None,
+        stacked_offset: None,
+    };
+    let specs = [spec("first", 0.41), spec("second", -0.29)];
+    let options = BlockwiseFitOptions {
+        inner_max_cycles: 6,
+        inner_tol: 1e-6,
+        use_remlobjective: false,
+        compute_covariance: false,
+        ..BlockwiseFitOptions::default()
+    };
+    let result = inner_blockwise_fit(
+        &family,
+        &specs,
+        &[Array1::zeros(0), Array1::zeros(0)],
+        &options,
+        None,
+    )
+    .expect("a step-floor solve ends with an inner result, not a refusal");
+    let residual = family.stationarity_residual_inf(&result.block_states);
+    println!(
+        "[2627] step-floor inexact-model solve: converged={} cycles={} residual={residual:.3e}",
+        result.converged, result.cycles
+    );
+    assert!(
+        !result.converged || residual <= 2e-6,
+        "#2627: a decrement at the step floor must not certify a mode above its stationarity target"
+    );
+}
+
+/// #2627: neither head settles a state above its residual target, even with the
+/// decrement at the objective's resolution.
+///
+/// With a model curvature 1e12 times the objective's, the model decrement 1e-2
+/// off the mode is about 1.25e-16, below the objective's rounding (about 1.4e-14),
+/// while the residual is still about 1e-2 against a target near 1e-6. Only the
+/// residual conjunct of the settlement predicate refuses this state, so the pin
+/// isolates it at the unconstrained head and, with an inactive bound, at the
+/// constrained head.
+#[test]
+fn a_head_never_settles_above_its_residual_target_at_decrement_resolution_2627() {
+    for lower_bound in [None, Some(-10.0)] {
+        let family = TwoBlockInexactNewtonModelFamily {
+            target: [0.4, -0.3],
+            model_scale: 1e12,
+            lower_bound,
+            score_sign: 1.0,
+        };
+        let spec = |name: &str, beta: f64| ParameterBlockSpec {
+            name: name.to_string(),
+            design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
+            offset: array![0.0],
+            penalties: Vec::new(),
+            nullspace_dims: Vec::new(),
+            initial_log_lambdas: Array1::zeros(0),
+            initial_beta: Some(array![beta]),
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        };
+        let specs = [spec("first", 0.41), spec("second", -0.29)];
+        let options = BlockwiseFitOptions {
+            inner_max_cycles: 6,
+            inner_tol: 1e-6,
+            use_remlobjective: false,
+            compute_covariance: false,
+            ..BlockwiseFitOptions::default()
+        };
+        let result = inner_blockwise_fit(
+            &family,
+            &specs,
+            &[Array1::zeros(0), Array1::zeros(0)],
+            &options,
+            None,
+        )
+        .expect("a solve at decrement resolution ends with an inner result, not a refusal");
+        let residual = family.stationarity_residual_inf(&result.block_states);
+        println!(
+            "[2627] residual-conjunct solve (bound {lower_bound:?}): converged={} cycles={} residual={residual:.3e}",
+            result.converged, result.cycles
+        );
+        assert!(
+            !result.converged || residual <= 2e-6,
+            "#2627: a head must not settle a state above its residual target at decrement resolution (bound {lower_bound:?})"
+        );
+    }
+}
+
+/// #2627: a settlement the head revokes is followed by the correction it promised.
+///
+/// Started 5e-7 off the mode with an exact Newton model, the solve is inside its
+/// stationarity target (about 1e-6) with the proposal at the step floor, while its
+/// Newton decrement (1.25e-13) is still about nine times the objective's rounding.
+/// A pre-line-search exit marked that state converged, the head revoked it, and
+/// the next cycle marked it again, so the correction never ran. sas_2904's
+/// constrained probes read residual 3.197e-6 bit-identical from cycle 1137 to the
+/// budget (surv2695's job 1118533). The correction must be applied on every face:
+/// without a bound, with an inactive bound, and with the mode on its bound, where
+/// the head certifies on the face tangent. After one exact Newton step the free
+/// residual is at rounding, so any bar between rounding and the start's 5e-7
+/// separates the two outcomes; half the start is used.
+#[test]
+fn a_revoked_settlement_is_never_re_marked_without_a_step_2627() {
+    let start_residual = 5e-7;
+    // With `y >= -0.2` the mode sits on the bound: the free coordinate's
+    // stationarity `(x - 0.4) + 0.25 * (y + 0.3) = 0` puts it at x = 0.375.
+    for (lower_bound, start, bound_active) in [
+        (None, [0.4 + start_residual, -0.3], false),
+        (Some(-10.0), [0.4 + start_residual, -0.3], false),
+        (Some(-0.2), [0.375 + start_residual, -0.2], true),
+    ] {
+        let family = TwoBlockInexactNewtonModelFamily {
+            target: [0.4, -0.3],
+            model_scale: 1.0,
+            lower_bound,
+            score_sign: 1.0,
+        };
+        let spec = |name: &str, beta: f64| ParameterBlockSpec {
+            name: name.to_string(),
+            design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
+            offset: array![0.0],
+            penalties: Vec::new(),
+            nullspace_dims: Vec::new(),
+            initial_log_lambdas: Array1::zeros(0),
+            initial_beta: Some(array![beta]),
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        };
+        let specs = [spec("first", start[0]), spec("second", start[1])];
+        let options = BlockwiseFitOptions {
+            inner_max_cycles: 40,
+            inner_tol: 1e-6,
+            use_remlobjective: false,
+            compute_covariance: false,
+            ..BlockwiseFitOptions::default()
+        };
+        let result = inner_blockwise_fit(
+            &family,
+            &specs,
+            &[Array1::zeros(0), Array1::zeros(0)],
+            &options,
+            None,
+        )
+        .expect("a convex quadratic started near its mode returns an inner result");
+        // On the bound only the free coordinate's stationarity is a residual; the
+        // bound's multiplier carries the other component.
+        let ce = family.curvature_times_error(&result.block_states);
+        let residual = if bound_active {
+            ce[0].abs()
+        } else {
+            ce[0].abs().max(ce[1].abs())
+        };
+        println!(
+            "[2627] revoked-settlement solve (bound {lower_bound:?}): converged={} cycles={} residual={residual:.3e}",
+            result.converged, result.cycles
+        );
+        assert!(
+            result.converged,
+            "#2627: a revoked settlement must take its correction and certify (bound {lower_bound:?})"
+        );
+        assert!(
+            residual <= 0.5 * start_residual,
+            "#2627: the certified mode must lie past the correction the start promised (bound {lower_bound:?})"
+        );
+    }
+}
+
+/// #2627: a correction the line search rejects is refused, never certified in
+/// place.
+///
+/// The family reports its score reversed. From 5e-7 off the mode the reported
+/// residual is inside its target, the proposal sits at the step floor, and the
+/// decrement is about nine times the objective's rounding, but the correction
+/// climbs the objective and every trial is rejected. Nothing moves, so the solve
+/// must end non-converged or refuse. Before #2627 the budget break published the
+/// unchanged start as converged.
+#[test]
+fn a_correction_the_line_search_rejects_is_refused_not_certified_at_an_unchanged_iterate_2627() {
+    let family = TwoBlockInexactNewtonModelFamily {
+        target: [0.4, -0.3],
+        model_scale: 1.0,
+        lower_bound: None,
+        score_sign: -1.0,
+    };
+    let spec = |name: &str, beta: f64| ParameterBlockSpec {
+        name: name.to_string(),
+        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
+        offset: array![0.0],
+        penalties: Vec::new(),
+        nullspace_dims: Vec::new(),
+        initial_log_lambdas: Array1::zeros(0),
+        initial_beta: Some(array![beta]),
+        gauge_priority: 100,
+        jacobian_callback: None,
+        stacked_design: None,
+        stacked_offset: None,
+    };
+    let specs = [spec("first", 0.4 + 5e-7), spec("second", -0.3)];
+    let options = BlockwiseFitOptions {
+        inner_max_cycles: 30,
+        inner_tol: 1e-6,
+        use_remlobjective: false,
+        compute_covariance: false,
+        ..BlockwiseFitOptions::default()
+    };
+    let outcome = inner_blockwise_fit(
+        &family,
+        &specs,
+        &[Array1::zeros(0), Array1::zeros(0)],
+        &options,
+        None,
+    );
+    let certified_in_place = match &outcome {
+        Ok(result) => {
+            let residual = family.stationarity_residual_inf(&result.block_states);
+            println!(
+                "[2627] rejected-correction solve: converged={} cycles={} residual={residual:.3e}",
+                result.converged, result.cycles
+            );
+            result.converged
+        }
+        Err(error) => {
+            println!("[2627] rejected-correction solve refused: {error}");
+            false
+        }
+    };
+    assert!(
+        !certified_in_place,
+        "#2627: a correction the line search rejects must not be certified at the unchanged iterate"
+    );
+}
+
+/// #2627: a mode marked converged without a step is settled on its own residual.
+///
+/// Started exactly at the mode, the first trust-region trial has nothing to
+/// resolve, so the mark can come from an exit that runs before any post-step
+/// measurement: the trust-floor accept or a rejected-cycle certificate. A head
+/// that read the post-step record found no residual there and revoked the same
+/// state until the budget. sas_2904's constrained probes read `residual=inf/NaN,
+/// decrement=1.022e-19` for 1200 cycles (job 1161499). The mark now records its
+/// state's residual and target, so the solve settles well before the budget, at
+/// both heads.
+#[test]
+fn a_mode_marked_without_a_step_is_settled_on_its_own_residual_2627() {
+    for lower_bound in [None, Some(-10.0)] {
+        let family = TwoBlockInexactNewtonModelFamily {
+            target: [0.4, -0.3],
+            model_scale: 1.0,
+            lower_bound,
+            score_sign: 1.0,
+        };
+        let spec = |name: &str, beta: f64| ParameterBlockSpec {
+            name: name.to_string(),
+            design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
+            offset: array![0.0],
+            penalties: Vec::new(),
+            nullspace_dims: Vec::new(),
+            initial_log_lambdas: Array1::zeros(0),
+            initial_beta: Some(array![beta]),
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        };
+        let specs = [spec("first", 0.4), spec("second", -0.3)];
+        let options = BlockwiseFitOptions {
+            inner_max_cycles: 40,
+            inner_tol: 1e-6,
+            use_remlobjective: false,
+            compute_covariance: false,
+            ..BlockwiseFitOptions::default()
+        };
+        let result = inner_blockwise_fit(
+            &family,
+            &specs,
+            &[Array1::zeros(0), Array1::zeros(0)],
+            &options,
+            None,
+        )
+        .expect("a solve started at its mode returns an inner result");
+        let residual = family.stationarity_residual_inf(&result.block_states);
+        println!(
+            "[2627] at-mode solve (bound {lower_bound:?}): converged={} cycles={} residual={residual:.3e}",
+            result.converged, result.cycles
+        );
+        assert!(
+            result.converged && result.cycles < options.inner_max_cycles,
+            "#2627: a mode marked without a step must settle before the budget (bound {lower_bound:?})"
+        );
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct OneStepReturnedSaddleFamily {
     pub(crate) target: f64,
     pub(crate) evaluations: Arc<AtomicUsize>,
+    /// An inactive lower bound `y ≥ bound` on the second block. It routes a
+    /// tentative convergence through the constrained settlement (#2627).
+    pub(crate) lower_bound_on_y: Option<f64>,
 }
 
 pub(crate) struct ReturnedModeSaddleWorkspace {
@@ -5582,6 +6089,14 @@ impl OneStepReturnedSaddleFamily {
         Self {
             target,
             evaluations: Arc::new(AtomicUsize::new(0)),
+            lower_bound_on_y: None,
+        }
+    }
+
+    pub(crate) fn with_lower_bound_on_y(target: f64, bound: f64) -> Self {
+        Self {
+            lower_bound_on_y: Some(bound),
+            ..Self::new(target)
         }
     }
 
@@ -5696,6 +6211,27 @@ impl CustomFamily for OneStepReturnedSaddleFamily {
 
     fn has_explicit_joint_hessian(&self) -> bool {
         true
+    }
+
+    fn block_linear_constraints(
+        &self,
+        block_states: &[ParameterBlockState],
+        block_idx: usize,
+        block_spec: &ParameterBlockSpec,
+    ) -> Result<Option<ConstraintSet>, String> {
+        let Some(bound) = self.lower_bound_on_y else {
+            return Ok(None);
+        };
+        if block_idx != 1 {
+            return Ok(None);
+        }
+        let a = array![[1.0]];
+        let b = array![bound];
+        assert_block_face(block_states, block_idx, block_spec, &a, &b);
+        Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
+            a,
+            b,
+        })))
     }
 }
 
@@ -5877,6 +6413,38 @@ pub(crate) fn joint_newton_recovers_from_returned_strict_saddle_with_remaining_c
     )
     .expect("recovered local minimum should have certifiable exact curvature");
     assert!(!certificate.has_resolvable_negative_curvature());
+}
+
+/// #2627: past the cycle budget the settlement head settles and never steps.
+///
+/// With an inactive lower bound on `y`, the one-step saddle's tentative
+/// convergence settles through the constrained head, whose face certificate
+/// finds the saddle and proposes an escape. No cycle remains to resume from that
+/// escape, so the solve must refuse as the post-loop certificate refuses, not
+/// apply the escape and return a non-converged point.
+#[test]
+fn a_capped_constrained_saddle_is_refused_not_escaped_past_the_budget_2627() {
+    let family = OneStepReturnedSaddleFamily::with_lower_bound_on_y(0.125, -10.0);
+    let specs = one_step_returned_saddle_specs();
+    let result = inner_blockwise_fit(
+        &family,
+        &specs,
+        &[Array1::zeros(0), Array1::zeros(0)],
+        &BlockwiseFitOptions {
+            inner_max_cycles: 1,
+            use_remlobjective: false,
+            ..BlockwiseFitOptions::default()
+        },
+        None,
+    );
+    let error = result
+        .expect_err("a capped constrained solve must not escape a returned saddle past its budget");
+    assert!(
+        error
+            .to_string()
+            .contains("fresh exact returned-mode curvature"),
+        "unexpected capped constrained refusal: {error}",
+    );
 }
 
 pub(crate) fn certified_test_outer(

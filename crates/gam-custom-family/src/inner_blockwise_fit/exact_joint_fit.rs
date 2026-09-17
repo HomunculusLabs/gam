@@ -66,6 +66,15 @@ fn joint_stationarity_rounding_band(
     data_band + penalty_band
 }
 
+/// The refusal for a returned coefficient point whose fresh exact curvature is
+/// resolvably indefinite: such a point cannot define a Laplace mode. Every site
+/// that settles a tentative convergence refuses through this one message.
+fn indefinite_returned_mode_refusal(lambda_min: f64, numerical_floor: f64) -> CustomFamilyError {
+    CustomFamilyError::trial_point(format!(
+        "joint Newton tentative convergence rejected by fresh exact returned-mode curvature: lambda_min={lambda_min:.6e} < -floor={numerical_floor:.6e}; an indefinite coefficient point cannot define a Laplace mode",
+    ))
+}
+
 #[cfg(test)]
 mod rounding_tests {
     use super::joint_stationarity_rounding_band;
@@ -450,7 +459,12 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // working
     // (they advance `cycle` via the iterator), unlike a `while` +
     // manual-counter rewrite.
-    let inner_loop_hard_ceiling = inner_max_cycles.max(200);
+    // One head past the budget exists only to settle a convergence marked
+    // on the last allowed cycle (#2627); the loop head below admits it only
+    // while such a settlement is pending. The earlier `.max(200)` pad was an
+    // underived floor: the explicit budget break already bounds every run, so
+    // the range needs exactly the settlement head beyond the budget.
+    let inner_loop_hard_ceiling = inner_max_cycles + 1;
     // Verbose cadence for the inner joint-Newton log block. Boring cycles
     // (first-attempt accepts with no convergence event) emit ONE compact
     // one-liner instead of the 4-line pre-cycle/TR/cycle-summary/convergence
@@ -518,6 +532,10 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // the sentinel `inf` — converged=true must never be paired with a non-
     // finite residual in the log (#1040 inner-report truthfulness).
     let mut min_certified_residual: f64 = f64::INFINITY;
+    // The residual and target the settling certificate actually judged
+    // (#2627); the terminal invariant reads these, not the running minimum.
+    let mut certified_residual: f64 = f64::INFINITY;
+    let mut certified_residual_tol: f64 = f64::NAN;
     // What ONE evaluation of the inner objective carries in rounding, measured
     // from the trust region's own backtracking ladders (gam#2612). Lives at
     // SOLVE scope, not cycle scope: rounding does not get smaller because the
@@ -776,6 +794,9 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // per-block + spectrum breakdown without re-materializing H_pen.
     let mut last_kkt_refusal_report: Option<KktRefusalReport> = None;
     let mut prev_kkt_norm: Option<f64> = None;
+    // The projected stationarity residual and its target at the state a tentative
+    // convergence mark was made on, recorded by the mark itself (#2627).
+    let mut tentative_mark_kkt: Option<(f64, f64)> = None;
     // Convergence-endgame flag for the Jeffreys second-order completion
     // (gam#979): set once the post-step KKT residual enters
     // `JEFFREYS_COMPLETION_RESIDUAL_BAND × residual_tol`, consumed by the
@@ -842,7 +863,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // exposes a strict saddle, immediately runs the existing finite-radius
     // More-Sorensen hard case from the same beta.
     let mut returned_mode_curvature_pending = false;
-    let mut returned_mode_curvature_certified = false;
     // Constrained analogue of `returned_mode_curvature_pending`: a first-order
     // KKT point on an active face is tentative until the next cycle head
     // certifies its active-face-tangent curvature. On a strict face-tangent
@@ -876,7 +896,17 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // step policy before it belongs here; keep the matvec faithful to the
     // objective until then.
     'joint_newton_cycles: for cycle in 0..inner_loop_hard_ceiling {
-        if cycle >= inner_max_cycles {
+        // The cycle budget can end a solve but never certify one (#2627). A
+        // convergence marked on the last allowed cycle is tentative, exactly as
+        // on any other cycle, so one more head settles it with the same
+        // certificate. A revoke at that head ends the solve non-converged
+        // instead of taking a correction step. Before this, the budget break
+        // ran first and the tentative mark was published: event-history's
+        // rank-1 fit reported `converged=true cycles=1200/1200` at residual
+        // 1.107e-5 against 8.589e-11 (t2627-core's job 1107980).
+        let settlement_pending =
+            returned_mode_curvature_pending || returned_constrained_mode_pending;
+        if cycle >= inner_max_cycles && !settlement_pending {
             break;
         }
         // Constrained returned-mode second-order certification (gam#979).
@@ -900,6 +930,13 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 lastobjective,
                 objective_resolution_witness.measured(),
             );
+            // The state being settled is the tentative one. The mark that made it
+            // tentative recorded its projected stationarity residual and the target
+            // at that same state. The previous cycle's pre-step target is not this
+            // state's, and a mark made before any post-step measurement has no
+            // other record (#2627).
+            let (tentative_residual, tentative_residual_target) =
+                tentative_mark_kkt.unwrap_or((f64::INFINITY, f64::NAN));
             match resolve_constrained_converged_mode(
                 family,
                 &states,
@@ -915,11 +952,14 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 previous_escape_lambda_min,
                 escape_objective_tol,
                 decrement_resolution,
+                tentative_residual,
+                tentative_residual_target,
                 &mut jeffreys_completion_calls,
             )? {
                 ConstrainedModeResolution::Certified { workspace } => {
                     cached_joint_workspace = workspace;
-                    returned_mode_curvature_certified = true;
+                    certified_residual = tentative_residual;
+                    certified_residual_tol = tentative_residual_target;
                     converged = true;
                     cycles_done = cycle;
                     break;
@@ -929,7 +969,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     weakly_identified_decrement,
                 } => {
                     log::info!(
-                        "[PIRLS/joint-Newton mode certificate] tentative constrained convergence revoked at cycle {cycle}: decrement={newton_decrement:.3e}, weak={weakly_identified_decrement:.3e} > resolution={decrement_resolution:.3e}",
+                        "[PIRLS/joint-Newton mode certificate] tentative constrained convergence revoked at cycle {cycle}: residual={tentative_residual:.3e}/{tentative_residual_target:.3e}, decrement={newton_decrement:.3e}, weak={weakly_identified_decrement:.3e} against resolution={decrement_resolution:.3e}",
                     );
                     if family.joint_jeffreys_term_required() {
                         arm_jeffreys_completion_endgame(
@@ -946,15 +986,26 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     // Nothing moved and the model is unchanged, so the stall
                     // evidence gathered so far still describes this solve.
                     converged = false;
-                    returned_mode_curvature_certified = false;
                     last_cycle_residual_below_tol = false;
                     last_cycle_obj_change_below_tol = false;
+                    if cycle >= inner_max_cycles {
+                        cycles_done = cycle;
+                        break;
+                    }
                 }
                 ConstrainedModeResolution::Escape {
                     direction,
                     alpha,
                     lambda_min,
+                    numerical_floor,
                 } => {
+                    // Past the budget the head settles and never steps. The escape
+                    // has no cycle left to resume from, so the face saddle is
+                    // refused with the typed refusal the unconstrained head gives a
+                    // returned saddle.
+                    if cycle >= inner_max_cycles {
+                        return Err(indefinite_returned_mode_refusal(lambda_min, numerical_floor));
+                    }
                     for (block_idx, (start, _)) in ranges.iter().copied().enumerate() {
                         for (coefficient_idx, coefficient) in
                             states[block_idx].beta.iter_mut().enumerate()
@@ -1004,7 +1055,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     // The escaped point is a fresh iterate; every cross-cycle
                     // progress statistic collected at the saddle is stale.
                     converged = false;
-                    returned_mode_curvature_certified = false;
                     last_cycle_residual_below_tol = false;
                     last_cycle_obj_change_below_tol = false;
                     min_certified_residual = f64::INFINITY;
@@ -1092,11 +1142,15 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // certifies convergence must inherit that — which is exactly why the
         // stall-guard site calls this instead of assigning `converged` itself.
         macro_rules! finish_post_step_convergence {
-            () => {{
+            ($residual:expr, $residual_target:expr) => {{
+                // The marked state's projected stationarity residual and the
+                // target at that state. The head that settles this mark judges
+                // exactly these; nothing moves between the mark and that head
+                // (#2627).
+                tentative_mark_kkt = Some(($residual, $residual_target));
                 converged = true;
                 if joint_constraints.is_none() {
                     returned_mode_curvature_pending = true;
-                    returned_mode_curvature_certified = false;
                     continue 'joint_newton_cycles;
                 }
                 // Every constrained first-order convergence event is
@@ -1104,7 +1158,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 // the numerically-tight active-face tangent. Jeffreys modes
                 // are not a separate objective or a certificate exemption.
                 returned_constrained_mode_pending = true;
-                returned_mode_curvature_certified = false;
                 continue 'joint_newton_cycles;
             }};
         }
@@ -2695,20 +2748,22 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 lastobjective,
                 objective_resolution_witness.measured(),
             );
-            let decrement_at_resolution = returned_decrement.is_finite()
-                && returned_decrement <= decrement_resolution
-                && returned_weak_decrement.is_finite()
-                && returned_weak_decrement <= decrement_resolution;
-            let exact_first_order_certified = (current_stationarity_residual <= residual_tol
-                && decrement_at_resolution)
-                || (joint_proposal_at_step_floor(step_inf, step_tol)
-                    && joint_newton_decrement_certifies(
-                        returned_decrement,
-                        returned_weak_decrement,
-                        returned_null_stationarity,
-                        objective_tol,
-                        residual_tol,
-                    ));
+            // The residual at its target is necessary, and a decrement at
+            // resolution is not a substitute for it (#2627). A decrement speaks
+            // about the step model, which on an inexact Hessian (Louis
+            // quadrature, a divided-difference Jeffreys curvature) is not the
+            // objective's own. The step-floor disjunct that certified on the
+            // decrement alone published modes above their target: event-history
+            // `cycles=3/1200` at residual 3.07e-4 against 1.4e-6 (job 1148116).
+            // This head's residual and target were computed this cycle at this
+            // state. The constrained head calls the same predicate.
+            let exact_first_order_certified = returned_mode_settles(
+                current_stationarity_residual,
+                residual_tol,
+                returned_decrement,
+                returned_weak_decrement,
+                decrement_resolution,
+            );
             if has_resolvable_negative_curvature || !exact_first_order_certified {
                 log::info!(
                     "[PIRLS/joint-Newton mode certificate] tentative convergence revoked: \
@@ -2758,7 +2813,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     }
                 }
                 converged = false;
-                returned_mode_curvature_certified = false;
                 last_cycle_residual_below_tol = false;
                 last_cycle_obj_change_below_tol = false;
                 min_certified_residual = f64::INFINITY;
@@ -2775,43 +2829,39 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 last_kkt_refusal_report = None;
                 prev_kkt_norm = None;
                 geometric_tail_history.clear();
+                if cycle >= inner_max_cycles {
+                    // No cycle remains to take the escape, so a resolvably
+                    // indefinite returned point is refused with its typed refusal.
+                    if has_resolvable_negative_curvature {
+                        return Err(indefinite_returned_mode_refusal(
+                            returned_min,
+                            returned_spectrum.numerical_floor,
+                        ));
+                    }
+                    cycles_done = cycle;
+                    break;
+                }
             } else {
                 log::info!(
                     "[PIRLS/joint-Newton mode certificate] certified: residual={current_stationarity_residual:.3e}/{residual_tol:.3e}, decrement={returned_decrement:.3e}, weak={returned_weak_decrement:.3e}, null_score={returned_null_stationarity:.3e}, correction={step_inf:.3e}/{step_tol:.3e}"
                 );
-                returned_mode_curvature_certified = true;
+                certified_residual = current_stationarity_residual;
+                certified_residual_tol = residual_tol;
                 cached_joint_workspace = hessian_workspace_for_cycle.take();
                 cycles_done = cycle;
                 break;
             }
         }
-        if current_stationarity_residual <= residual_tol
-            && step_inf <= step_tol
-            && !has_resolvable_negative_curvature
-        {
-            log::info!(
-                "[PIRLS/joint-Newton convergence] cycle {:>3} | pre-line-search converged: proposal_inf={:.3e} (tol={:.3e}) | residual={:.3e} (tol={:.3e}) | relative_stationarity={:.3e} (scale={:.3e}, inner_tol={:.3e})",
-                cycle,
-                step_inf,
-                step_tol,
-                current_stationarity_residual,
-                residual_tol,
-                gam_problem::relative_stationarity(
-                    current_stationarity_residual,
-                    stationarity_scale
-                ),
-                stationarity_scale,
-                inner_tol,
-            );
-            // Pre-line-search convergence: β did not move this cycle (the
-            // proposal was at the step-tolerance floor), so the cycle
-            // workspace is still at the converged β and the post-loop
-            // covariance/IFT assembly can reuse it instead of rebuilding the
-            // full per-row kernel cache at the same β.
-            cached_joint_workspace = hessian_workspace_for_cycle.take();
-            cycles_done = cycle;
-            finish_post_step_convergence!();
-        }
+        // Nothing is marked converged here, before the line search. The exit that
+        // stood here marked convergence from caller tolerances (proposal ≤
+        // step_tol, residual ≤ tol): a second certification site beside the
+        // head's. It also re-marked states the head had just revoked, so their
+        // correction never ran. From cycle 1137 on, sas_2904's constrained probes
+        // read `pre-line-search converged: proposal_inf=1.132e-6 (tol=2.640e-6) |
+        // residual=3.197e-6 (tol=3.520e-6)`, then a revoke at decrement 2.449e-12
+        // against resolution 8.390e-14, with kkt bit-constant until the budget
+        // (surv2695's job 1118533). Every proposal now goes through the line
+        // search, and only the head certifies (#2627).
         if current_stationarity_residual <= residual_tol
             && step_inf <= step_tol
             && has_resolvable_negative_curvature
@@ -4342,8 +4392,9 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 // A trust-floor accept is a common saddle signature
                 // (negative curvature keeps every step rejected), so it
                 // routes through the same M_true certificate as every other
-                // tentative convergence event.
-                finish_post_step_convergence!();
+                // tentative convergence event. β is back at the head state, so
+                // the mark carries that state's head residual and target.
+                finish_post_step_convergence!(current_kkt_norm, residual_tol);
             }
             if secondary_ok {
                 if let Some(sig) = tr_log_sig.take() {
@@ -4509,27 +4560,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             }
         }
         let line_search_elapsed = line_search_started.elapsed();
-        if accepted && converged {
-            log::info!(
-                "[PIRLS/joint-Newton/cycle-summary] cycle={} accepted=true hessian_qp={:.3}s line_search={:.3}s line_search_attempts={} reject_model={} reject_likelihood={} reject_objective={} reject_feasibility={} first_likelihood_reject={} grad_reload=0.000s total={:.3}s",
-                cycle,
-                hessian_and_qp_elapsed.as_secs_f64(),
-                line_search_elapsed.as_secs_f64(),
-                line_search_attempts,
-                model_rejects,
-                likelihood_rejects,
-                objective_rejects,
-                feasibility_rejects,
-                first_likelihood_reject.as_deref().unwrap_or("none"),
-                cycle_started.elapsed().as_secs_f64(),
-            );
-            // Accepted step moved β; the cycle workspace is at the OLD
-            // (pre-step) β, so it must NOT be carried into the post-loop
-            // covariance/IFT assembly (which needs the converged β). Drop it.
-            cached_joint_workspace = None;
-            cycles_done = cycle + 1;
-            break;
-        }
         if !accepted {
             // Retry the joint Newton loop from the same state after a
             // failed trust-region search. Falling through into blockwise
@@ -4601,7 +4631,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // than fail the outer "inner solve did not converge"
             // panic on a fully resolved fit.
             if last_cycle_residual_below_tol && last_cycle_obj_change_below_tol {
-                finish_post_step_convergence!();
+                finish_post_step_convergence!(current_kkt_norm, residual_tol);
             }
             // Fully-rejected stall guard. See the constant declaration
             // at the top of this function for the full rationale. The
@@ -4763,8 +4793,9 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     // returned mode's curvature. On a strict saddle that head
                     // revokes it and resets every stall counter, so certifying
                     // here cannot short-circuit the gam#979 escape and cannot
-                    // spin: the guard's streak starts over.
-                    finish_post_step_convergence!();
+                    // spin: the guard's streak starts over. β is back at the head
+                    // state, so the mark carries that state's head residual and target.
+                    finish_post_step_convergence!(current_kkt_norm, residual_tol);
                 }
                 let last_math_summary = last_joint_math
                     .as_ref()
@@ -5408,7 +5439,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // unable to certify convergence on a problem that was
         // solved exactly in one Newton step.
         if joint_inner_kkt_converged(residual, residual_tol) {
-            finish_post_step_convergence!();
+            finish_post_step_convergence!(residual, residual_tol);
         }
         // Newton-decrement convergence certificate (gam#1040 / gam#1088).
         //
@@ -5593,7 +5624,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             if residual.is_finite() {
                 min_certified_residual = min_certified_residual.min(residual);
             }
-            finish_post_step_convergence!();
+            finish_post_step_convergence!(residual, residual_tol);
         }
 
         // Noise-floor KKT certificate.
@@ -5648,7 +5679,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 objective_change,
                 objective_tol,
             );
-            finish_post_step_convergence!();
+            finish_post_step_convergence!(residual, residual_tol);
         }
 
         // Constrained-stationary certificate.
@@ -5815,7 +5846,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         geometric_tail_bound.unwrap_or(objective_change),
                         objective_tol,
                     );
-                    finish_post_step_convergence!();
+                    finish_post_step_convergence!(residual, residual_tol);
                 }
                 // Constrained exact-fixed-point acceptance (gam#797).
                 //
@@ -5946,7 +5977,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                             linearized_rel,
                             residual,
                         );
-                        finish_post_step_convergence!();
+                        finish_post_step_convergence!(residual, residual_tol);
                     }
                 }
                 // Still-converging guard (gam#787 duchon centers≥20). The
@@ -6100,7 +6131,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         residual_tol,
                         linearized_rel,
                     );
-                    finish_post_step_convergence!();
+                    finish_post_step_convergence!(residual, residual_tol);
                 }
                 // Structured per-block + per-spectrum refusal report.
                 // The legacy one-line refusal log printed only aggregate
@@ -6549,7 +6580,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             if residual.is_finite() {
                 min_certified_residual = min_certified_residual.min(residual);
             }
-            finish_post_step_convergence!();
+            finish_post_step_convergence!(residual, residual_tol);
         }
         // Carry the KKT-stationarity / objective-stagnation signals
         // into the next cycle so the line-search-failure path above
@@ -6820,67 +6851,10 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // guard alongside the residual-stall detector above.
     }
 
-    if converged {
-        let block_constraints = collect_block_linear_constraints(family, &states, specs)?;
-        let joint_constraints =
-            assemble_joint_linear_constraints(&block_constraints, &ranges, total_p)?;
-        // A full-space PSD test is exact for the unconstrained CTN mode.
-        // Constrained modes certify on the active-face tangent (the
-        // critical-cone surrogate under strict complementarity) — the same
-        // Z the terminal determinant uses, so a mode this certificate
-        // accepts can never fail the downstream SPD logdet on curvature
-        // grounds. The same M_true certificate includes Jeffreys curvature;
-        // Jeffreys families are never exempt from second-order stationarity.
-        if !returned_mode_curvature_certified {
-            let mode_active_block = if joint_constraints.is_some() {
-                // Certify on the full numerically-tight face, not only the
-                // QP-recorded rows — see widen_active_sets_to_tight_face.
-                let tight_sets = crate::blockwise_solve::widen_active_sets_to_tight_face(
-                    &block_constraints,
-                    &states,
-                    &cached_active_sets,
-                )?;
-                crate::blockwise_solve::assemble_active_constraint_block(
-                    &block_constraints,
-                    &tight_sets,
-                    &ranges,
-                    total_p,
-                )
-            } else {
-                None
-            };
-            let certificate = exact_joint_mode_curvature_certificate(
-                family,
-                &states,
-                specs,
-                options,
-                &ranges,
-                &s_lambdas,
-                joint_bundle,
-                total_p,
-                mode_active_block.as_ref(),
-            )?;
-            if certificate.jeffreys_completion_assembled {
-                jeffreys_completion_calls += 1;
-            }
-            let has_negative_curvature = certificate.has_resolvable_negative_curvature();
-            let minimum_whitened_eigenvalue = certificate.minimum_whitened_eigenvalue;
-            let numerical_floor = certificate.numerical_floor;
-            cached_joint_workspace = certificate.workspace;
-            if has_negative_curvature {
-                return Err(CustomFamilyError::trial_point(format!(
-                    "joint Newton tentative convergence rejected by fresh exact returned-mode curvature: lambda_min={:.6e} < -floor={:.6e}; an indefinite coefficient point cannot define a Laplace mode",
-                    minimum_whitened_eigenvalue, numerical_floor,
-                )));
-            } else {
-                log::info!(
-                    "[PIRLS/joint-Newton mode certificate] returned beta certified from fresh exact curvature: lambda_min={:.6e}, floor={:.6e}",
-                    minimum_whitened_eigenvalue,
-                    numerical_floor,
-                );
-            }
-        }
-    }
+    // There is no post-loop certificate. Every convergence mark settles at a
+    // cycle head, so the loop ends in one of three ways: a head certified the
+    // mode, a head or guard refused it, or the budget ended the solve unsettled
+    // and non-converged (#2627).
 
     // Explicit terminal verdict for the joint-Newton inner solve.
     //
@@ -6911,15 +6885,17 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // flags. The honest status is then non-converged: downgrade it so
         // the outer REML/LAML evaluation rejects this ρ rather than
         // consuming a phantom optimum certified on no finite residual.
-        if !gam_solve::loop_guard::inner_convergence_is_truthful(converged, min_certified_residual)
-        {
+        if !gam_solve::loop_guard::inner_convergence_is_truthful(
+            converged,
+            certified_residual,
+            certified_residual_tol,
+        ) {
             log::warn!(
                 "[PIRLS/joint-Newton terminal] cycle {cycles_done}/{inner_max_cycles}: a converged \
-                 exit fired without any finite certified stationarity residual on record \
-                 (min_certified_residual is non-finite) — this would report \
-                 converged=true with best_residual_inf=inf, a convergence-truthfulness \
-                 violation (#1040). Downgrading to non-converged so the outer optimizer \
-                 rejects this evaluation."
+                 exit is not backed by a certificate at its target (certified residual \
+                 {certified_residual:.3e} against {certified_residual_tol:.3e}) — a \
+                 convergence-truthfulness violation (#1040, #2627). Downgrading to \
+                 non-converged so the outer optimizer rejects this evaluation."
             );
             converged = false;
         }
