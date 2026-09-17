@@ -785,6 +785,128 @@ struct SupportNegativeCurvatureMode {
     direction: SaeArrowVector,
 }
 
+/// The dimensionless resolution of a generalized curvature of the dense support
+/// pencil `(A, B)`: `√ε`, the smallest relative change an f64 assembly of either
+/// matrix resolves. The saddle classifier refuses no mode at or above
+/// `−max(√ε, backward error)`, the pseudoinverse drops every mode at or below
+/// `max(√ε, backward error)`, and the positive-definite certificate that spares
+/// the classifier its eigensystems certifies at half of it.
+fn support_outer_curvature_floor() -> f64 {
+    f64::EPSILON.sqrt()
+}
+
+/// A certificate that `A − τ·B` is positive definite ([`certify_shifted_pd`]).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CertifiedShiftedPd {
+    pub(crate) dim: usize,
+    pub(crate) tau: f64,
+    /// Rounding band, in the units of the scaled matrix, that the factorization
+    /// was taken against.
+    pub(crate) delta: f64,
+    /// How `delta` was derived.
+    pub(crate) band: BandProvenance,
+}
+
+/// The derivation behind a [`CertifiedShiftedPd`]'s rounding band.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum BandProvenance {
+    /// One dense diagonally scaled Cholesky: `δ = (3n² + n + 2)·ε·‖S₀‖_F`, with
+    /// `scaled_frobenius = ‖S₀‖_F`.
+    Dense { scaled_frobenius: f64 },
+}
+
+/// Why [`certify_shifted_pd`] did not certify `A − τ·B ≻ 0`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ShiftedPdRefusal {
+    /// `A` and `B` are not square matrices of one size.
+    ShapeMismatch { a: (usize, usize), b: (usize, usize) },
+    /// `τ` or an entry of `A − τ·B` is not finite.
+    NonFinite,
+    /// A diagonal entry of `A − τ·B` is not positive, so that matrix is not
+    /// positive definite.
+    NonPositiveDiagonal { index: usize, value: f64 },
+    /// The Cholesky factorization of `S₀ − δ·I` did not complete: `A − τ·B` is
+    /// not certified at this band, which does not say it is indefinite. `pivot`
+    /// is the index of the non-positive pivot the factorization stopped at, when
+    /// the factorization reports one.
+    CholeskyFailed { delta: f64, pivot: Option<usize> },
+}
+
+/// Certify that the dense symmetric `A − τ·B` is positive definite, for any sign
+/// of `τ`.
+///
+/// Let `M = A − τ·B` and `D = diag(M)`. A non-positive diagonal entry refutes
+/// positive definiteness outright. Otherwise `S₀ = D^{-1/2}·M·D^{-1/2}` has a unit
+/// diagonal, and a diagonal congruence preserves inertia, so `M ≻ 0` iff `S₀ ≻ 0`.
+/// Forming `S₀` in f64 moves each entry by at most `2ε` of itself.
+///
+/// A Cholesky factorization of `S` that runs to completion computes `RᵀR = S + ΔS`
+/// with `|ΔS| ≤ γ_{3n+1}·|Rᵀ|·|R|` (Higham, *Accuracy and Stability of Numerical
+/// Algorithms*, 2nd ed., Theorem 10.5), so to first order `‖ΔS‖₂ ≤ (3n + 1)·n·ε·‖S‖₂`.
+/// The factorization is applied to `S₀ − δ·I` with `δ = (3n² + n + 2)·ε·‖S₀‖_F`,
+/// which bounds both that backward error and the scaling error because
+/// `‖S₀‖₂ ≤ ‖S₀‖_F`. If it completes, `S₀ − δ·I + E ≻ 0` for some `‖E‖₂ ≤ δ`, so
+/// `λ_min(S₀) > 0` and `M ≻ 0`. Any failure is a refusal and never a claim of
+/// indefiniteness, so a caller falls back to an exact decision. The band is the
+/// bound, not a tuned margin.
+pub(crate) fn certify_shifted_pd(
+    a: ArrayView2<'_, f64>,
+    b: ArrayView2<'_, f64>,
+    tau: f64,
+) -> Result<CertifiedShiftedPd, ShiftedPdRefusal> {
+    let dim = a.nrows();
+    if a.dim() != (dim, dim) || b.dim() != (dim, dim) {
+        return Err(ShiftedPdRefusal::ShapeMismatch {
+            a: a.dim(),
+            b: b.dim(),
+        });
+    }
+    if !tau.is_finite() {
+        return Err(ShiftedPdRefusal::NonFinite);
+    }
+    let mut scaled = a.to_owned();
+    scaled.scaled_add(-tau, &b);
+    if scaled.iter().any(|value| !value.is_finite()) {
+        return Err(ShiftedPdRefusal::NonFinite);
+    }
+    let mut inverse_root = Vec::with_capacity(dim);
+    for index in 0..dim {
+        let value = scaled[[index, index]];
+        if !(value > 0.0) {
+            return Err(ShiftedPdRefusal::NonPositiveDiagonal { index, value });
+        }
+        inverse_root.push(value.sqrt().recip());
+    }
+    for row in 0..dim {
+        for column in 0..dim {
+            scaled[[row, column]] *= inverse_root[row] * inverse_root[column];
+        }
+    }
+    let scaled_frobenius = scaled.iter().map(|value| value * value).sum::<f64>().sqrt();
+    let n = dim as f64;
+    let delta = (3.0 * n * n + n + 2.0) * f64::EPSILON * scaled_frobenius;
+    for index in 0..dim {
+        scaled[[index, index]] -= delta;
+    }
+    match scaled.cholesky(Side::Lower) {
+        Ok(_) => Ok(CertifiedShiftedPd {
+            dim,
+            tau,
+            delta,
+            band: BandProvenance::Dense { scaled_frobenius },
+        }),
+        Err(error) => Err(ShiftedPdRefusal::CholeskyFailed {
+            delta,
+            pivot: match error {
+                gam_linalg::faer_ndarray::FaerLinalgError::Cholesky(
+                    faer::linalg::solvers::LltError::NonPositivePivot { index },
+                ) => Some(index),
+                _ => None,
+            },
+        }),
+    }
+}
+
 fn support_arrow_cross_forward(
     system: &ArrowSchurSystem,
     row: usize,
@@ -3458,13 +3580,16 @@ impl SaeSupportSparseTerm {
         Ok(out)
     }
 
-    fn support_outer_dense_hessian_pencil(
+    /// The symmetrized dense exact Hessian `A` and majorizer `B` of the support
+    /// stationarity pencil, materialized column by column from their matrix-free
+    /// applies. Every dense consumer reads the pencil through this seam.
+    fn support_outer_dense_hessian_matrices(
         &self,
         system: &ArrowSchurSystem,
         rows: &[SupportOuterDifferentialRow],
         t_len: usize,
         beta_len: usize,
-    ) -> Result<SupportOuterDensePencil, String> {
+    ) -> Result<(Array2<f64>, Array2<f64>), String> {
         let dim = t_len
             .checked_add(beta_len)
             .ok_or_else(|| "support outer Hessian-pencil dimension overflow".to_string())?;
@@ -3516,6 +3641,16 @@ impl SaeSupportSparseTerm {
         {
             return Err("support outer adjoint Hessian pencil is non-finite".to_string());
         }
+        Ok((exact, majorizer))
+    }
+
+    /// The generalized eigensystem of the dense pencil `(A, B)` from its
+    /// symmetrized matrices ([`Self::support_outer_dense_hessian_matrices`]).
+    fn support_outer_dense_hessian_pencil(
+        exact: Array2<f64>,
+        majorizer: Array2<f64>,
+    ) -> Result<SupportOuterDensePencil, String> {
+        let dim = exact.nrows();
         let (b_eigenvalues, b_eigenvectors) = majorizer
             .eigh(Side::Lower)
             .map_err(|error| format!("support outer adjoint majorizer eigensystem: {error}"))?;
@@ -3608,11 +3743,80 @@ impl SaeSupportSparseTerm {
     ) -> Result<Option<SupportNegativeCurvatureMode>, String> {
         let t_len = *system.row_offsets.last().unwrap_or(&0);
         let beta_len = system.k;
-        let pencil = self.support_outer_dense_hessian_pencil(system, rows, t_len, beta_len)?;
+        let (exact, majorizer) =
+            self.support_outer_dense_hessian_matrices(system, rows, t_len, beta_len)?;
+        // `A + (floor/2)·sym(B) ≻ 0` implies `A + (floor/2)·B_stiff ≻ 0`, because the
+        // deflation that forms `B_stiff` only raises eigenvalues of `sym(B)`. Then
+        // every generalized curvature exceeds `−floor/2 > −resolution`, there is no
+        // mode, and neither eigensystem is needed (#2634: they were 192 s of each
+        // 245 s admission at dim 7392). A refusal decides nothing.
+        //
+        // An index whose row is exactly zero in both symmetrized matrices is a common
+        // null direction: the pencil splits as `(A_r ⊕ 0, B_r ⊕ 0)`, the deflation
+        // gives that direction unit stiffness, and its curvature is exactly zero,
+        // never below `−resolution`. It would make `A + (floor/2)·sym(B)` singular, so
+        // the certificate is taken on the complement, where `B_r,stiff ⪰ sym(B_r)`
+        // still holds. Only bitwise-zero rows qualify, never merely small ones.
+        let certificate_shift = -0.5 * support_outer_curvature_floor();
+        let common_null: Vec<bool> = (0..exact.nrows())
+            .map(|index| {
+                exact.row(index).iter().all(|value| *value == 0.0)
+                    && majorizer.row(index).iter().all(|value| *value == 0.0)
+            })
+            .collect();
+        let certificate = if common_null.iter().any(|&null| null) {
+            let kept: Vec<usize> = (0..exact.nrows()).filter(|&index| !common_null[index]).collect();
+            let reduced_exact = exact
+                .select(ndarray::Axis(0), &kept)
+                .select(ndarray::Axis(1), &kept);
+            let reduced_majorizer = majorizer
+                .select(ndarray::Axis(0), &kept)
+                .select(ndarray::Axis(1), &kept);
+            certify_shifted_pd(
+                reduced_exact.view(),
+                reduced_majorizer.view(),
+                certificate_shift,
+            )
+        } else {
+            certify_shifted_pd(exact.view(), majorizer.view(), certificate_shift)
+        };
+        match certificate {
+            Ok(certificate) => {
+                let BandProvenance::Dense { scaled_frobenius } = certificate.band;
+                log::debug!(
+                    "support saddle classifier certified A − τ·B ≻ 0 without an eigensystem: \
+                     dim {}, τ {:.3e}, band {:.3e}, ‖S₀‖_F {:.3e}",
+                    certificate.dim,
+                    certificate.tau,
+                    certificate.delta,
+                    scaled_frobenius
+                );
+                return Ok(None);
+            }
+            Err(refusal) => {
+                let reason = match refusal {
+                    ShiftedPdRefusal::ShapeMismatch { a, b } => {
+                        format!("shapes {a:?} and {b:?} disagree")
+                    }
+                    ShiftedPdRefusal::NonFinite => "the shifted matrix is not finite".to_string(),
+                    ShiftedPdRefusal::NonPositiveDiagonal { index, value } => {
+                        format!("diagonal entry {index} is {value:.3e}")
+                    }
+                    ShiftedPdRefusal::CholeskyFailed { delta, pivot } => {
+                        format!("the factorization stopped at pivot {pivot:?} under band {delta:.3e}")
+                    }
+                };
+                log::debug!(
+                    "support saddle classifier could not certify positive curvature ({reason}); \
+                     solving the generalized eigensystem"
+                );
+            }
+        }
+        let pencil = Self::support_outer_dense_hessian_pencil(exact, majorizer)?;
         let curvature = pencil.curvatures[0];
         let resolution = pencil
             .minimum_backward_error
-            .max(f64::EPSILON.sqrt());
+            .max(support_outer_curvature_floor());
         if curvature >= -resolution {
             return Ok(None);
         }
@@ -3674,10 +3878,10 @@ impl SaeSupportSparseTerm {
                 })
                 .collect());
         }
-        let pencil = self.support_outer_dense_hessian_pencil(system, rows, t_len, beta_len)?;
-        let quotient_floor = f64::EPSILON
-            .sqrt()
-            .max(pencil.minimum_backward_error);
+        let (exact, majorizer) =
+            self.support_outer_dense_hessian_matrices(system, rows, t_len, beta_len)?;
+        let pencil = Self::support_outer_dense_hessian_pencil(exact, majorizer)?;
+        let quotient_floor = support_outer_curvature_floor().max(pencil.minimum_backward_error);
         if let Some(&negative) = pencil
             .curvatures
             .iter()
@@ -8906,6 +9110,64 @@ mod tests {
             stale_error > f64::EPSILON.sqrt(),
             "a bundle priced at another λ must not invert this arrow, or the bar above \
              discriminates nothing: backward error {stale_error:.3e}"
+        );
+    }
+
+    /// #2634: the positive-definite certificate that spares the saddle classifier
+    /// its eigensystems decides in both directions at its own band. `S₀` is
+    /// planted with a unit diagonal and `λ_min(S₀) = t`: the block
+    /// `[[1, 1 − t], [1 − t, 1]]` (eigenvalues `t` and `2 − t`) beside an identity,
+    /// so the certificate's scaling is exact to rounding and its band is
+    /// `δ = (3n² + n + 2)·ε·‖S₀‖_F`. With `A = S₀ + τ·I` and `B = I`, `A − τ·B = S₀`
+    /// for either sign of `τ`.
+    #[test]
+    fn shifted_pd_certificate_decides_at_its_band_in_both_directions_2634() {
+        let dim = 6usize;
+        let planted = |t: f64, tau: f64| {
+            let mut a = Array2::<f64>::eye(dim);
+            a[[0, 1]] = 1.0 - t;
+            a[[1, 0]] = 1.0 - t;
+            for index in 0..dim {
+                a[[index, index]] += tau;
+            }
+            a
+        };
+        let identity = Array2::<f64>::eye(dim);
+        let n = dim as f64;
+        let delta = (3.0 * n * n + n + 2.0) * f64::EPSILON * (n + 2.0).sqrt();
+        for tau in [-0.5 * support_outer_curvature_floor(), 0.3] {
+            let certified =
+                certify_shifted_pd(planted(2.0 * delta, tau).view(), identity.view(), tau)
+                    .expect("λ_min(S₀) = 2δ is certified");
+            assert_eq!(certified.dim, dim);
+            assert_eq!(certified.tau, tau);
+            assert!(
+                matches!(certified.band, BandProvenance::Dense { scaled_frobenius } if scaled_frobenius > 0.0),
+                "{:?}",
+                certified.band
+            );
+            assert!(
+                (certified.delta - delta).abs() <= 1.0e-6 * delta,
+                "band {} against the planted {delta}",
+                certified.delta
+            );
+            for t in [0.5 * delta, -delta] {
+                let refusal = certify_shifted_pd(planted(t, tau).view(), identity.view(), tau)
+                    .expect_err("λ_min(S₀) inside or below the band is refused");
+                assert!(
+                    matches!(refusal, ShiftedPdRefusal::CholeskyFailed { pivot: Some(_), .. }),
+                    "λ_min(S₀) = {t:e} at τ = {tau:e}: {refusal:?}"
+                );
+            }
+        }
+        let mut indefinite = Array2::<f64>::eye(dim);
+        indefinite[[3, 3]] = -1.0;
+        assert_eq!(
+            certify_shifted_pd(indefinite.view(), identity.view(), 0.0),
+            Err(ShiftedPdRefusal::NonPositiveDiagonal {
+                index: 3,
+                value: -1.0
+            })
         );
     }
 
