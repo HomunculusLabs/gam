@@ -563,6 +563,7 @@ fn build_saved_marginal_slope_survival_alo_input(
         offset_entry,
         offset_exit,
         derivative_offset_exit,
+        age_entry.mapv(|entry| entry <= gam::families::survival::ENTRY_AT_ORIGIN_THRESHOLD),
         marginal_build.design,
         marginal_offset,
         slope_exit_design,

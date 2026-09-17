@@ -302,14 +302,15 @@ impl SurvivalMarginalSlopeFamily {
             .into());
         }
         let wi = self.weights[row];
+        let wi_entry = self.entry_weight(row);
         let di = self.event[row];
         let (log_surv0, _) = signed_probit_logcdf_and_mills_ratio(-eta0);
         let (log_surv1, _) = signed_probit_logcdf_and_mills_ratio(-eta1);
         let log_phi_eta1 = -0.5 * (eta1 * eta1 + std::f64::consts::TAU.ln());
         let log_phi_q1 = -0.5 * (q1 * q1 + std::f64::consts::TAU.ln());
-        Ok(wi
-            * (log_surv0
-                - (1.0 - di) * log_surv1
+        Ok(wi_entry * log_surv0
+            + wi
+            * (-(1.0 - di) * log_surv1
                 - di * log_phi_eta1
                 - di * chi1.ln()
                 - di * log_phi_q1

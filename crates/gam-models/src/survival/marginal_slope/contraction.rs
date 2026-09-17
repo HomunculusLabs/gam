@@ -291,6 +291,7 @@ impl SurvivalMarginalSlopeFamily {
                         slope_workspace.values(),
                         z,
                         self.weights[row],
+                        self.entry_weight(row),
                         self.event[row],
                         self.derivative_guard,
                         probit_scale,

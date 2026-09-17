@@ -135,7 +135,7 @@ fn dynamic_row_fifth(
     let eta0 = primaries[PRIMARY_Q0] * c0[0] + b * primaries[PRIMARY_SLOPE];
     let eta1 = primaries[PRIMARY_Q1] * c1[0] + b * primaries[PRIMARY_SLOPE_EXIT];
     let entry = gam_math::probability::normal_logcdf_derivatives_through_fifth(-eta0)
-        .map(|value| inputs.wi * value);
+        .map(|value| inputs.wi_entry * value);
     let exit = gam_math::probability::normal_logcdf_derivatives_through_fifth(-eta1)
         .map(|value| -inputs.wi * (1.0 - inputs.di) * value);
     let q0 = mixed_fifth(primaries[PRIMARY_Q0], &c0.map(|x| -x), -b, &entry);
@@ -324,6 +324,7 @@ mod tests {
                 let inputs = RigidRowInputs {
                     row: 0,
                     wi: 1.7,
+                    wi_entry: 1.7,
                     di: event,
                     z_sum: 0.7,
                     covariance_ones: 1.2,
@@ -355,6 +356,117 @@ mod tests {
                                     assert!(
                                         (actual - fd).abs() <= 3e-6 * (1.0 + fd.abs()),
                                         "event={event} rate={rate} axes={a},{b},{c},{d},{axis}: exact={actual} FD={fd}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// gnomon#2336 on the follow-up frame: a row entering at the time origin has
+    /// `S(0) = 1` and no entry survival factor. With `wi_entry = 0` the row program
+    /// must not read the entry channels at all — neither the entry index nor the
+    /// entry-time slope — the removed amount must be exactly `wi·log Φ(−η₀)`, and
+    /// the hand-lowered fifth derivatives must still match the differentiated
+    /// fourth-order tower.
+    #[test]
+    fn follow_up_origin_entry_row_drops_the_entry_factor_and_keeps_the_fifth_gate_2336() {
+        for event in [0.0, 1.0] {
+            for rate in [-0.3, 0.0, 0.4] {
+                let origin = RigidRowInputs {
+                    row: 0,
+                    wi: 1.7,
+                    wi_entry: 0.0,
+                    di: event,
+                    z_sum: 0.7,
+                    covariance_ones: 1.2,
+                    probit_scale: 0.9,
+                    qd1_lower: 1e-8,
+                    anchor: None,
+                };
+                let delayed = RigidRowInputs {
+                    row: 0,
+                    wi: 1.7,
+                    wi_entry: 1.7,
+                    di: event,
+                    z_sum: 0.7,
+                    covariance_ones: 1.2,
+                    probit_scale: 0.9,
+                    qd1_lower: 1e-8,
+                    anchor: None,
+                };
+                let point = [-0.9, 0.4, 1.1, -0.7, 0.8, rate];
+                let tower = |at: [f64; 6], inputs: &RigidRowInputs| {
+                    let vars: [SparseTower4<6, RIGID_LINEAR_MASK>; 6] =
+                        std::array::from_fn(|a| SparseTower4::variable(at[a], a));
+                    rigid_row_nll::<6, DynamicSlopeGeometry, _>(&vars, inputs)
+                        .expect("admitted dynamic row")
+                };
+
+                let at_point = tower(point, &origin);
+                let mut entry_moved = point;
+                entry_moved[PRIMARY_Q0] += 2.5;
+                entry_moved[PRIMARY_SLOPE] -= 0.6;
+                let moved = tower(entry_moved, &origin);
+                assert_eq!(
+                    at_point.v, moved.v,
+                    "event={event} rate={rate}: the origin-entry NLL moved with the entry channels"
+                );
+                for axis in 0..6 {
+                    assert_eq!(
+                        at_point.g[axis], moved.g[axis],
+                        "event={event} rate={rate}: gradient axis {axis} moved with the entry channels"
+                    );
+                }
+                for entry_axis in [PRIMARY_Q0, PRIMARY_SLOPE] {
+                    assert_eq!(
+                        at_point.g[entry_axis], 0.0,
+                        "event={event} rate={rate}: the origin-entry row reads entry axis {entry_axis}"
+                    );
+                    for axis in 0..6 {
+                        assert_eq!(
+                            at_point.h[entry_axis][axis], 0.0,
+                            "event={event} rate={rate}: Hessian ({entry_axis},{axis}) reads the entry"
+                        );
+                    }
+                }
+
+                // What the gate removes is exactly the entry survival factor.
+                let a = origin.probit_scale.powi(2) * origin.covariance_ones;
+                let b = origin.probit_scale * origin.z_sum;
+                let slope0 = point[PRIMARY_SLOPE];
+                let eta0 = point[PRIMARY_Q0] * (1.0 + a * slope0 * slope0).sqrt() + b * slope0;
+                let log_entry_survival =
+                    gam_math::probability::normal_logcdf_derivatives_through_fifth(-eta0)[0];
+                let removed = tower(point, &delayed).v - at_point.v;
+                let expected = 1.7 * log_entry_survival;
+                assert!(
+                    (removed - expected).abs() <= 1e-12 * (1.0 + expected.abs()),
+                    "event={event} rate={rate}: the gate removed {removed} but the entry factor is {expected}"
+                );
+
+                let exact = dynamic_row_fifth(&point, &origin).expect("admitted dynamic origin row");
+                for axis in 0..6 {
+                    let step = 1e-5;
+                    let mut plus_point = point;
+                    plus_point[axis] += step;
+                    let mut minus_point = point;
+                    minus_point[axis] -= step;
+                    let plus = tower(plus_point, &origin);
+                    let minus = tower(minus_point, &origin);
+                    for a in 0..6 {
+                        for b in 0..6 {
+                            for c in 0..6 {
+                                for d in 0..6 {
+                                    let fd =
+                                        (plus.t4[a][b][c][d] - minus.t4[a][b][c][d]) / (2.0 * step);
+                                    let actual = exact[a][b][c][d][axis];
+                                    assert!(
+                                        (actual - fd).abs() <= 3e-6 * (1.0 + fd.abs()),
+                                        "origin entry, event={event} rate={rate} axes={a},{b},{c},{d},{axis}: exact={actual} FD={fd}"
                                     );
                                 }
                             }

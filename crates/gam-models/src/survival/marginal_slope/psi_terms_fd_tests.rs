@@ -323,6 +323,7 @@ fn family_at(axis: PsiAxis, frame: SlopeFrame, t: f64) -> SurvivalMarginalSlopeF
         offset_entry: Arc::new(geometry.offset_entry.clone()),
         offset_exit: Arc::new(geometry.offset_exit.clone()),
         derivative_offset_exit: Arc::new(geometry.derivative_offset_exit.clone()),
+        entry_at_origin: Arc::new(Array1::from_elem(n, false)),
         marginal_design: DesignMatrix::from(marginal),
         slope_layout,
         score_warp: None,

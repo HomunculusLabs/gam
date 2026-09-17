@@ -130,6 +130,9 @@ __device__ __forceinline__ void d_lognormpdf(double x, double out[3]) {
 
 struct RowIn {
     double wi;
+    // Weight of the entry survival factor: zero for a row entering at the time
+    // origin, where S(0) = 1 (gnomon#2336).
+    double wi_entry;
     double di;
     double z_sum;
     double covariance_ones;
@@ -148,6 +151,7 @@ extern "C" __global__ void __launch_bounds__(128, 1) survival_rowjet_vgh(
         const double* __restrict__ qd1,
         const double* __restrict__ g,
         const double* __restrict__ wi,
+        const double* __restrict__ wi_entry,
         const double* __restrict__ di,
         const double* __restrict__ z_sum,
         const double* __restrict__ cov_ones,
@@ -159,6 +163,7 @@ extern "C" __global__ void __launch_bounds__(128, 1) survival_rowjet_vgh(
     if (row >= n) return;
     RowIn in;
     in.wi = wi[row];
+    in.wi_entry = wi_entry[row];
     in.di = di[row];
     in.z_sum = z_sum[row];
     in.covariance_ones = cov_ones[row];

@@ -113,7 +113,7 @@ use crate::survival::construction::{
     parse_survival_likelihood_mode, parse_survival_time_basis_config,
     positive_survival_time_seed, require_structural_survival_time_basis,
     resolve_survival_time_anchor_for_mode, resolved_survival_time_basis_config_from_build,
-    survival_derivative_guard_for_likelihood, survival_marginal_slope_offset_baseline_config,
+    survival_derivative_guard_for_likelihood,
 };
 
 use crate::survival::location_scale::{

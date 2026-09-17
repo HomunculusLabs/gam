@@ -10,6 +10,8 @@ mod joint_latent_law_2929;
 mod follow_up_mode_response_fd_2765;
 #[path = "survival_acceptance/follow_up_varying_slope_2765.rs"]
 mod follow_up_varying_slope_2765;
+#[path = "survival_acceptance/landmark_short_horizon_calibration_2336.rs"]
+mod landmark_short_horizon_calibration_2336;
 #[path = "survival_acceptance/latent_frailty_inner_solve_2714.rs"]
 mod latent_frailty_inner_solve_2714;
 #[path = "survival_acceptance/latent_loaded_vs_unloaded_chart_2714.rs"]

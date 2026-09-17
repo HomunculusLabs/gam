@@ -385,6 +385,7 @@ impl FlexOuterPlan {
         surv0: [f64; 6],
         surv1: [f64; 6],
         wi: f64,
+        wi_entry: f64,
         di: f64,
     ) -> Self {
         let wd = wi * di;
@@ -393,7 +394,7 @@ impl FlexOuterPlan {
                 FlexOuterTerm {
                     source: FlexOuterSource::Eta0,
                     transform: FlexOuterTransform::Compose(surv0),
-                    scale: wi,
+                    scale: wi_entry,
                     combine: FlexOuterCombine::Add,
                 },
                 FlexOuterTerm {
@@ -484,9 +485,10 @@ fn flex_row_nll<J: FlexJet>(
     surv0: [f64; 6],
     surv1: [f64; 6],
     wi: f64,
+    wi_entry: f64,
     di: f64,
 ) -> J {
-    FlexOuterPlan::new(chi1.value(), d1.value(), qd1.value(), surv0, surv1, wi, di).evaluate(
+    FlexOuterPlan::new(chi1.value(), d1.value(), qd1.value(), surv0, surv1, wi, wi_entry, di).evaluate(
         &FlexJetSources {
             eta0,
             eta1,
@@ -1824,6 +1826,7 @@ impl SurvivalMarginalSlopeFamily {
         } = ch;
         let p = primary.total;
         let wi = self.weights[row];
+        let wi_entry = self.entry_weight(row);
         let di = self.event[row];
         let surv0 = surv_stack(eta0_v)?;
         let surv1 = surv_stack(eta1_v)?;
@@ -1838,7 +1841,7 @@ impl SurvivalMarginalSlopeFamily {
             let d1 = Jet1::from_view(d1_v, d1_g);
             let q1j = Jet1::primary(q1, primary.q1, p);
             let qd1j = Jet1::primary(qd1, primary.qd1, p);
-            let out = flex_row_nll(&eta0, &eta1, &chi1, &d1, &q1j, &qd1j, surv0, surv1, wi, di);
+            let out = flex_row_nll(&eta0, &eta1, &chi1, &d1, &q1j, &qd1j, surv0, surv1, wi, wi_entry, di);
             let value = out.v + wi * di * std::f64::consts::TAU.ln();
             let grad = Array1::from(out.g);
             return Ok((value, grad, Array2::zeros((p, p))));
@@ -1850,7 +1853,7 @@ impl SurvivalMarginalSlopeFamily {
         let chi1_h = chi1_h.ok_or("flex order-two lowering: missing chi1 Hessian")?;
         let d1_h = d1_h.ok_or("flex order-two lowering: missing d1 Hessian")?;
         let eta1_h = eta1_h.ok_or("flex order-two lowering: missing eta1 Hessian")?;
-        let plan = FlexOuterPlan::new(chi1_v, d1_v, qd1, surv0, surv1, wi, di);
+        let plan = FlexOuterPlan::new(chi1_v, d1_v, qd1, surv0, surv1, wi, wi_entry, di);
         let (row_value, row_gradient, row_hessian) = lower_flex_outer_plan_order2(
             &plan,
             FlexOrder2Inputs {
@@ -1904,6 +1907,7 @@ impl SurvivalMarginalSlopeFamily {
         } = packs;
         let p = primary.total;
         let wi = self.weights[row];
+        let wi_entry = self.entry_weight(row);
         let di = self.event[row];
         let surv0 = surv_stack(entry_base.eta)?;
         let surv1 = surv_stack(exit_base.eta)?;
@@ -1945,7 +1949,7 @@ impl SurvivalMarginalSlopeFamily {
         );
         let q1j = Jet3::primary(q1, primary.q1, p, dir[primary.q1]);
         let qd1j = Jet3::primary(qd1, primary.qd1, p, dir[primary.qd1]);
-        let out = flex_row_nll(&eta0, &eta1, &chi1, &d1, &q1j, &qd1j, surv0, surv1, wi, di);
+        let out = flex_row_nll(&eta0, &eta1, &chi1, &d1, &q1j, &qd1j, surv0, surv1, wi, wi_entry, di);
         Array2::from_shape_vec((p, p), out.contracted_third()).map_err(|e| e.to_string())
     }
 
@@ -1974,6 +1978,7 @@ impl SurvivalMarginalSlopeFamily {
         } = packs;
         let p = primary.total;
         let wi = self.weights[row];
+        let wi_entry = self.entry_weight(row);
         let di = self.event[row];
         let surv0 = surv_stack(entry_base.eta)?;
         let surv1 = surv_stack(exit_base.eta)?;
@@ -2039,7 +2044,7 @@ impl SurvivalMarginalSlopeFamily {
         );
         let q1j = Jet4::primary(q1, primary.q1, p, dir_u[primary.q1], dir_v[primary.q1]);
         let qd1j = Jet4::primary(qd1, primary.qd1, p, dir_u[primary.qd1], dir_v[primary.qd1]);
-        let out = flex_row_nll(&eta0, &eta1, &chi1, &d1, &q1j, &qd1j, surv0, surv1, wi, di);
+        let out = flex_row_nll(&eta0, &eta1, &chi1, &d1, &q1j, &qd1j, surv0, surv1, wi, wi_entry, di);
         Array2::from_shape_vec((p, p), out.contracted_fourth()).map_err(|e| e.to_string())
     }
 
@@ -2072,6 +2077,7 @@ impl SurvivalMarginalSlopeFamily {
         let [u, v, w] = dirs;
         let p = primary.total;
         let wi = self.weights[row];
+        let wi_entry = self.entry_weight(row);
         let di = self.event[row];
         let surv0 = surv_stack(entry_base.eta)?;
         let surv1 = surv_stack(exit_base.eta)?;
@@ -2182,7 +2188,7 @@ impl SurvivalMarginalSlopeFamily {
         );
         let q1j = Jet5::primary(q1, primary.q1, p, u[primary.q1], v[primary.q1], w[primary.q1]);
         let qd1j = Jet5::primary(qd1, primary.qd1, p, u[primary.qd1], v[primary.qd1], w[primary.qd1]);
-        let out = flex_row_nll(&eta0, &eta1, &chi1, &d1, &q1j, &qd1j, surv0, surv1, wi, di);
+        let out = flex_row_nll(&eta0, &eta1, &chi1, &d1, &q1j, &qd1j, surv0, surv1, wi, wi_entry, di);
         let fifth = out.contracted_fifth();
         if fifth.iter().any(|value| !value.is_finite()) {
             return Err(format!(
@@ -4245,6 +4251,7 @@ impl SurvivalMarginalSlopeFamily {
             surv_stack(eta0.value())?,
             surv_stack(eta1.value())?,
             self.weights[row],
+            self.entry_weight(row),
             self.event[row],
         );
         Ok(FlexFamilyDirectionRowTerms {
@@ -5635,6 +5642,7 @@ mod moment_engine_tests {
             jeffreys_armed: true,
             latent_law: None,
             n,
+            entry_at_origin: Arc::new(Array1::from_elem(n, false)),
             event: Arc::new(event),
             weights: Arc::new(weights),
             z: Arc::new(z.insert_axis(Axis(1))),
@@ -6487,11 +6495,12 @@ mod compiled_order2_oracle_tests {
                     surv0,
                     surv1,
                     wi,
+                    wi,
                     di,
                 );
 
                 // Production compiled lowering of that exact plan.
-                let plan = FlexOuterPlan::new(cv, dv, qd1v, surv0, surv1, wi, di);
+                let plan = FlexOuterPlan::new(cv, dv, qd1v, surv0, surv1, wi, wi, di);
                 let (f_value, f_gradient, f_hessian) = lower_flex_outer_plan_order2(
                     &plan,
                     FlexOrder2Inputs {
@@ -6573,7 +6582,7 @@ mod compiled_order2_oracle_tests {
             let q1v = (xorshift(&mut st) + 2.0).abs() + 0.2;
             let qd1v = (xorshift(&mut st) + 2.0).abs() + 0.2;
 
-            let plan = FlexOuterPlan::new(cv, dv, qd1v, surv0, surv1, wi, di);
+            let plan = FlexOuterPlan::new(cv, dv, qd1v, surv0, surv1, wi, wi, di);
 
             // Parity pin on the exact benchmarked inputs (the 2200-draw sweep
             // is `compiled_order2_row_nll_matches_generic_plan` above).
@@ -6586,6 +6595,7 @@ mod compiled_order2_oracle_tests {
                 &Jet2::primary(qd1v, qdax, p),
                 surv0,
                 surv1,
+                wi,
                 wi,
                 di,
             );
@@ -6674,6 +6684,7 @@ mod compiled_order2_oracle_tests {
                         &Jet2::primary(qd1v, qdax, p),
                         surv0,
                         surv1,
+                        wi,
                         wi,
                         di,
                     );

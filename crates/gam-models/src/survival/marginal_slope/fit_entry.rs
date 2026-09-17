@@ -84,9 +84,14 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         }
         .into());
     }
+    let entry_at_origin = Arc::new(
+        spec.age_entry
+            .mapv(|entry| entry <= crate::survival::base::ENTRY_AT_ORIGIN_THRESHOLD),
+    );
     install_time_nullspace_shrinkage_penalty(
         &mut spec.time_block,
         spec.timewiggle_block.as_ref().map_or(0, |wiggle| wiggle.ncols),
+        &entry_at_origin,
     )?;
     let (z_standardized, z_normalization) = standardize_latent_z_matrix_with_policy(
         &spec.z,
@@ -397,6 +402,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     let baseline_slope = pooled_survival_baseline(
         &spec.event_target,
         &spec.weights,
+        &entry_at_origin,
         &z_primary,
         &spec.time_block.offset_entry,
         &spec.time_block.offset_exit,
@@ -1072,6 +1078,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             offset_entry: family_offset_entry,
             offset_exit: family_offset_exit,
             derivative_offset_exit: family_derivative_offset_exit,
+            entry_at_origin: Arc::clone(&entry_at_origin),
             marginal_design: marginal_design.design.clone(),
             slope_layout,
             score_warp: score_warp_active,

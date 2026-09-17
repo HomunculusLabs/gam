@@ -692,6 +692,7 @@ mod rigid_row_admission_tests {
         RigidRowInputs {
             row: 7,
             wi,
+            wi_entry: wi,
             di,
             z_sum: 0.0,
             covariance_ones: 1.0,
@@ -767,6 +768,10 @@ pub(crate) fn rigid_row_kernel_primaries<const P: usize, G: SlopeRowGeometry<P>>
 pub(crate) struct RigidRowInputs<'a> {
     pub(crate) row: usize,
     pub(crate) wi: f64,
+    /// The weight of the entry survival factor `log Φ(−η₀)`: `wi` for a
+    /// delayed entry and `0` for a row entering at the time origin, where
+    /// `S(0) = 1` and the factor is absent (gnomon#2336).
+    pub(crate) wi_entry: f64,
     pub(crate) di: f64,
     pub(crate) z_sum: f64,
     pub(crate) covariance_ones: f64,
@@ -791,6 +796,7 @@ pub(crate) fn rigid_row_inputs<'a>(
     Ok(RigidRowInputs {
         row,
         wi: family.weights[row],
+        wi_entry: family.entry_weight(row),
         di: family.event[row],
         z_sum,
         covariance_ones,
@@ -841,6 +847,7 @@ pub(crate) fn rigid_row_nll<const P: usize, G: SlopeRowGeometry<P>, S: JetScalar
         rigid_feature_frame_program::<P, S>(
             &features,
             inputs.wi,
+            inputs.wi_entry,
             inputs.di,
             inputs.probit_scale,
             follow_up_varying_flag::<P, G>(),
@@ -932,7 +939,9 @@ pub(crate) fn validate_rigid_row_admission<const P: usize, G: SlopeRowGeometry<P
     // The guard respects zero weight (those terms drop out entirely).
     // A weighted margin must be finite or `+inf`; that is `margin > -inf`,
     // one compare, false for NaN as every comparison with NaN is.
-    if wi != 0.0 && !(neg_eta0 > f64::NEG_INFINITY) {
+    // The entry margin is read only when the row carries an entry factor; a row
+    // entering at the time origin has none (gnomon#2336).
+    if inputs.wi_entry != 0.0 && !(neg_eta0 > f64::NEG_INFINITY) {
         return Err(nonfinite_signed_margin(row, G::NAME, neg_eta0));
     }
     if wi * (1.0 - di) != 0.0 && !(neg_eta1 > f64::NEG_INFINITY) {
@@ -1090,6 +1099,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
                         // a truncation.
                         primaries: std::array::from_fn(|axis| p[axis]),
                         wi: inputs.wi,
+                        wi_entry: inputs.wi_entry,
                         di: inputs.di,
                         z_sum: inputs.z_sum,
                         cov_ones: inputs.covariance_ones,

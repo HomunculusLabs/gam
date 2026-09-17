@@ -111,6 +111,7 @@ fn family(frame_is_follow_up_varying: bool) -> SurvivalMarginalSlopeFamily {
         jeffreys_armed: true,
         latent_law: None,
         n: N_ROWS,
+        entry_at_origin: Arc::new(Array1::from_elem(N_ROWS, false)),
         event: Arc::new(events()),
         weights: Arc::new(Array1::from_elem(N_ROWS, 1.0)),
         z: Arc::new(latent_scores().insert_axis(Axis(1))),
@@ -273,6 +274,46 @@ fn the_value_only_likelihood_is_the_frame_kernels_likelihood_2765() {
                  {value_only:.12e} differs from the frame kernel's {kernel:.12e}"
             );
         }
+    }
+}
+
+/// A row entering at the time origin has `S(0) = 1` and no entry factor
+/// (gnomon#2336). The value-only likelihood must drop it on every frame, exactly
+/// as the frame kernel does, or the trust region scores a trial with the factor
+/// against a step built without it.
+#[test]
+fn the_value_only_likelihood_drops_the_origin_entry_factor_like_the_frame_kernel_2336() {
+    for frame_is_follow_up_varying in [false, true] {
+        let delayed = family(frame_is_follow_up_varying);
+        let mut landmarked = family(frame_is_follow_up_varying);
+        landmarked.entry_at_origin = Arc::new(Array1::from_shape_fn(N_ROWS, |row| row % 2 == 0));
+        let point = states(&landmarked, interior_slope_beta());
+        let value_only = landmarked
+            .log_likelihood_only(&point)
+            .expect("value-only likelihood");
+        let mut kernel = 0.0_f64;
+        for row in 0..N_ROWS {
+            let (nll, _, _) = landmarked
+                .compute_row_primary_gradient_hessian_uncached(row, &point)
+                .expect("frame kernel row");
+            kernel -= nll;
+        }
+        let scale = value_only.abs().max(kernel.abs()).max(1.0);
+        assert!(
+            (value_only - kernel).abs() <= 1e-10 * scale,
+            "follow_up_varying={frame_is_follow_up_varying}: value-only likelihood \
+             {value_only:.12e} differs from the frame kernel's {kernel:.12e}"
+        );
+        // The entry factor adds `−log Φ(−η₀) > 0` to a delayed row's
+        // log-likelihood, so dropping it must lower the total.
+        let delayed_value = delayed
+            .log_likelihood_only(&point)
+            .expect("value-only likelihood");
+        assert!(
+            value_only < delayed_value,
+            "follow_up_varying={frame_is_follow_up_varying}: the origin rows kept their entry \
+             factor; landmarked {value_only:.12e}, delayed {delayed_value:.12e}"
+        );
     }
 }
 

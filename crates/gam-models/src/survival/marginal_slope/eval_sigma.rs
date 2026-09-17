@@ -36,7 +36,7 @@ fn compiled_sigma_primary_terms(
     // taken with respect to `b` directly.
     let features = static_slope_feature_frame(q0, q1, qd1, linear, variance, 0.0);
     let (_, feature_gradient, feature_hessian, witnesses) =
-        rigid_feature_frame_order2(&features, inputs.wi, inputs.di, 1.0, follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>());
+        rigid_feature_frame_order2(&features, inputs.wi, inputs.wi_entry, inputs.di, 1.0, follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>());
     validate_rigid_row_admission::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
         qd1,
         inputs,
@@ -63,6 +63,7 @@ fn compiled_sigma_primary_terms(
         rigid_feature_frame_third_contracted(
             &features,
             inputs.wi,
+            inputs.wi_entry,
             inputs.di,
             1.0,
             follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(),
@@ -128,6 +129,7 @@ fn compiled_sigma_primary_terms(
         rigid_feature_frame_third_contracted(
             &features,
             inputs.wi,
+            inputs.wi_entry,
             inputs.di,
             1.0,
             follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(),
@@ -136,6 +138,7 @@ fn compiled_sigma_primary_terms(
     let fourth_tangent = rigid_feature_frame_fourth_contracted(
         &features,
         inputs.wi,
+        inputs.wi_entry,
         inputs.di,
         1.0,
         follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(),
@@ -317,6 +320,7 @@ impl SurvivalMarginalSlopeFamily {
                         g,
                         self.z[[i, 0]],
                         self.weights[i],
+                        self.entry_weight(i),
                         self.event[i],
                         guard,
                         probit_scale,
@@ -764,6 +768,7 @@ mod sigma_parameter_jet_release_tests {
         RigidRowInputs {
             row: 0,
             wi,
+            wi_entry: wi,
             di,
             z_sum,
             covariance_ones: 1.0,
@@ -930,7 +935,7 @@ mod sigma_parameter_jet_release_tests {
         let eta1 = q1 * correction[0] + b * inputs.z_sum;
         let adjusted = qd1 * correction[0];
 
-        let entry_raw = unary_derivatives_neglog_phi(-eta0, inputs.wi);
+        let entry_raw = unary_derivatives_neglog_phi(-eta0, inputs.wi_entry);
         let exit_raw = unary_derivatives_neglog_phi(-eta1, inputs.wi * (1.0 - inputs.di));
         let density_raw = unary_derivatives_log_normal_pdf(eta1);
         let log_raw = unary_derivatives_log(adjusted);

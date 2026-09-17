@@ -145,6 +145,15 @@ pub(crate) struct SurvivalMarginalSlopeFamily {
     pub(crate) offset_entry: Arc<Array1<f64>>,
     pub(crate) offset_exit: Arc<Array1<f64>>,
     pub(crate) derivative_offset_exit: Arc<Array1<f64>>,
+    /// Rows that enter at the time origin (`age_entry ≤ ENTRY_AT_ORIGIN_THRESHOLD`,
+    /// the predicate `survival::base` uses). Such a row is not left-truncated:
+    /// `S(0) = 1`, so its likelihood carries no `log Φ(−η₀)` entry factor. Its
+    /// entry time is floored to `SURVIVAL_TIME_FLOOR` and its entry design row
+    /// is the I-spline's left-boundary row, so the stand-in `η₀` is the fitted
+    /// index at the first exit time, not the `η₀ → −∞` limit. Conditioning on it
+    /// rewarded raising that index for every landmarked row: the fitted curve
+    /// went flat below the first exits with `S(0⁺) ≈ 0.97` (gnomon#2336).
+    pub(crate) entry_at_origin: Arc<Array1<bool>>,
     /// Baseline covariate block: contributes additively to q0 and q1, but not qd1.
     pub(crate) marginal_design: DesignMatrix,
     /// The slope coefficient design, its physical channels in current
@@ -194,6 +203,17 @@ pub(crate) struct SurvivalMarginalSlopeFamily {
 }
 
 impl SurvivalMarginalSlopeFamily {
+    /// The weight of the row's entry survival factor `log Φ(−η₀)`: the row's
+    /// prior weight for a delayed entry, `0` for an entry at the time origin.
+    #[inline]
+    pub(crate) fn entry_weight(&self, row: usize) -> f64 {
+        if self.entry_at_origin[row] {
+            0.0
+        } else {
+            self.weights[row]
+        }
+    }
+
     /// The row's slope index on its three follow-up channels (gam#2765).
     ///
     /// The block's own linear predictor is already the EXIT-time slope — the

@@ -1162,6 +1162,7 @@ pub(crate) fn row_primary_anchored_vector_into(
     slopes: &[f64],
     z: &[f64],
     w: f64,
+    w_entry: f64,
     d: f64,
     derivative_guard: f64,
     probit_scale: f64,
@@ -1256,6 +1257,7 @@ pub(crate) fn row_primary_anchored_vector_into(
         rigid_feature_frame_order2(
             &features,
             w,
+            w_entry,
             d,
             s,
             follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry>(),
@@ -1263,6 +1265,7 @@ pub(crate) fn row_primary_anchored_vector_into(
     let inputs = RigidRowInputs {
         row,
         wi: w,
+        wi_entry: w_entry,
         di: d,
         z_sum: 0.0,
         covariance_ones: 0.0,
@@ -1572,6 +1575,7 @@ pub(crate) fn per_score_row_hessian_derivative_into(
     direction: &[f64],
     z: &[f64],
     w: f64,
+    w_entry: f64,
     d: f64,
     derivative_guard: f64,
     probit_scale: f64,
@@ -1797,10 +1801,11 @@ pub(crate) fn per_score_row_hessian_derivative_into(
         follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>()
     };
     let (_, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
-        rigid_feature_frame_order2(&features, w, d, s, follow_up_varying);
+        rigid_feature_frame_order2(&features, w, w_entry, d, s, follow_up_varying);
     let inputs = RigidRowInputs {
         row,
         wi: w,
+        wi_entry: w_entry,
         di: d,
         z_sum: 0.0,
         covariance_ones: 0.0,
@@ -1828,6 +1833,7 @@ pub(crate) fn per_score_row_hessian_derivative_into(
     let feature_third = rigid_feature_frame_third_contracted(
         &features,
         w,
+        w_entry,
         d,
         s,
         follow_up_varying,
@@ -2086,6 +2092,7 @@ impl SurvivalMarginalSlopeFamily {
                         &direction,
                         z,
                         self.weights[row],
+                        self.entry_weight(row),
                         self.event[row],
                         self.derivative_guard,
                         probit_scale,
@@ -2159,6 +2166,7 @@ impl<'family> VectorRowWorkspace<'family> {
         slopes: &[f64],
         z: &[f64],
         w: f64,
+        w_entry: f64,
         d: f64,
         derivative_guard: f64,
         probit_scale: f64,
@@ -2172,6 +2180,7 @@ impl<'family> VectorRowWorkspace<'family> {
                 slopes,
                 z,
                 w,
+                w_entry,
                 d,
                 derivative_guard,
                 probit_scale,
@@ -2185,6 +2194,7 @@ impl<'family> VectorRowWorkspace<'family> {
                 slopes,
                 z,
                 w,
+                w_entry,
                 d,
                 derivative_guard,
                 probit_scale,
@@ -2384,10 +2394,11 @@ mod joint_latent_law_tests {
             }
         };
         let (nll, [neg_eta0, neg_eta1, adjusted_derivative]) =
-            rigid_feature_frame_program::<P, S>(&features, w, d, s, 0.0);
+            rigid_feature_frame_program::<P, S>(&features, w, w, d, s, 0.0);
         let inputs = RigidRowInputs {
             row,
             wi: w,
+            wi_entry: w,
             di: d,
             z_sum: 0.0,
             covariance_ones: 0.0,
@@ -2747,6 +2758,7 @@ mod joint_latent_law_tests {
                     &p[3..5],
                     &z,
                     1.1,
+                    1.1,
                     event,
                     1e-8,
                     0.9,
@@ -2824,11 +2836,11 @@ mod joint_latent_law_tests {
                 (0.1, 1.1, 1.3, [-0.8, 0.6], [-1.2, 0.5]),
             ] {
                 let closed_value = row_primary_closed_form_vector_into(
-                    0, q0, q1, qd1, &slopes, &z, 1.0, event, 1e-8, 0.95, &mut closed,
+                    0, q0, q1, qd1, &slopes, &z, 1.0, 1.0, event, 1e-8, 0.95, &mut closed,
                 )
                 .expect("closed form");
                 let anchored_value = row_primary_anchored_vector_into(
-                    0, q0, q1, qd1, &slopes, &z, 1.0, event, 1e-8, 0.95, &law, &mut anchored,
+                    0, q0, q1, qd1, &slopes, &z, 1.0, 1.0, event, 1e-8, 0.95, &law, &mut anchored,
                 )
                 .expect("anchored");
                 let (closed_gradient, closed_hessian) = closed.derivatives();
@@ -2885,7 +2897,7 @@ mod joint_latent_law_tests {
                     if anchored {
                         let mut workspace = JointAnchorRowWorkspace::new(&law);
                         let value = row_primary_anchored_vector_into(
-                            0, p[0], p[1], p[2], &p[3..5], &z, w, event, guard, s, &law,
+                            0, p[0], p[1], p[2], &p[3..5], &z, w, w, event, guard, s, &law,
                             &mut workspace,
                         )
                         .expect("anchored order-two row");
@@ -2895,7 +2907,7 @@ mod joint_latent_law_tests {
                         let mut workspace =
                             RigidVectorRowWorkspace::new(&field).expect("closed workspace");
                         let value = row_primary_closed_form_vector_into(
-                            0, p[0], p[1], p[2], &p[3..5], &z, w, event, guard, s, &mut workspace,
+                            0, p[0], p[1], p[2], &p[3..5], &z, w, w, event, guard, s, &mut workspace,
                         )
                         .expect("closed-form order-two row");
                         let (gradient, hessian) = workspace.derivatives();
@@ -3161,6 +3173,7 @@ mod joint_latent_law_tests {
             jeffreys_armed: false,
             latent_law,
             n,
+            entry_at_origin: Arc::new(Array1::from_elem(n, false)),
             event: Arc::new(event),
             weights: Arc::new(weights),
             z: Arc::new(z),

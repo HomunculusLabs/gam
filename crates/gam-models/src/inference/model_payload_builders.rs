@@ -1966,7 +1966,7 @@ fn payload_for_survival_marginal_slope(
     use crate::survival::construction::{
         build_survival_time_basis, parse_survival_likelihood_mode,
         parse_survival_time_basis_config, resolve_survival_time_anchor_for_mode,
-        survival_likelihood_modename, survival_marginal_slope_offset_baseline_config,
+        survival_likelihood_modename,
     };
     use ndarray::s;
 
@@ -2097,8 +2097,6 @@ fn payload_for_survival_marginal_slope(
             );
         }
     };
-    let saved_offset_baseline =
-        survival_marginal_slope_offset_baseline_config(&age_exit, &baseline_cfg);
     let (persisted_rank_int, persisted_conditional) =
         ms_result.persisted_latent_z_calibrations()?;
     // gam#2929: a K ≥ 2 per-score fit anchored on the joint law of its score
@@ -2183,7 +2181,7 @@ fn payload_for_survival_marginal_slope(
             survival_exit: exitname,
             survival_event: eventname,
             survivalspec: "net".to_string(),
-            baseline_cfg: saved_offset_baseline,
+            baseline_cfg,
             time_basis: SavedSurvivalTimeBasis::from_build(&time_build, time_anchor),
             survival_likelihood_label: survival_likelihood_modename(likelihood_mode).to_string(),
             resolved_marginalspec: frozen_marginal,

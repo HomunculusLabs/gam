@@ -171,6 +171,7 @@ pub(crate) fn gaussian_row_order2<const P: usize, G: GaussianFeatureMap<P>>(
         rigid_feature_frame_order2(
             &features,
             inputs.wi,
+            inputs.wi_entry,
             inputs.di,
             inputs.probit_scale,
             follow_up_varying_flag::<P, G>(),
@@ -232,6 +233,7 @@ pub(crate) fn gaussian_row_primary_mixed_in_z<const P: usize, G: GaussianFeature
         rigid_feature_frame_order2(
             &features,
             inputs.wi,
+            inputs.wi_entry,
             inputs.di,
             inputs.probit_scale,
             follow_up_varying_flag::<P, G>(),
@@ -858,6 +860,7 @@ impl AnchoredStaticSlopeGeometry {
             rigid_feature_frame_order2(
                 &features,
                 inputs.wi,
+                inputs.wi_entry,
                 inputs.di,
                 inputs.probit_scale,
                 follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, Self>(),
@@ -1028,6 +1031,7 @@ mod tests {
         RigidRowInputs {
             row: 0,
             wi: 0.75,
+            wi_entry: 0.75,
             di,
             z_sum,
             covariance_ones,
@@ -1258,6 +1262,7 @@ mod tests {
             let (_, _, _, [_, _, adjusted_derivative]) = rigid_feature_frame_order2(
                 &features,
                 row.wi,
+                row.wi,
                 row.di,
                 probit_scale,
                 follow_up_varying_flag::<DYNAMIC_SLOPE_PRIMARIES, DynamicSlopeGeometry>(),
@@ -1368,6 +1373,7 @@ mod anchored_frame_tests {
         RigidRowInputs {
             row: 0,
             wi,
+            wi_entry: wi,
             di,
             z_sum,
             covariance_ones: 1.0,

@@ -76,6 +76,10 @@ pub struct SavedMarginalSlopeSurvivalAloInput {
     offset_entry: Array1<f64>,
     offset_exit: Array1<f64>,
     derivative_offset_exit: Array1<f64>,
+    /// Rows entering at the time origin: their likelihood carries no entry
+    /// survival factor, and the replay must drop it exactly as the fit did
+    /// (gnomon#2336).
+    entry_at_origin: Array1<bool>,
     marginal_design: DesignMatrix,
     marginal_offset: Array1<f64>,
     slope_design: DesignMatrix,
@@ -397,6 +401,7 @@ impl SavedMarginalSlopeSurvivalAloInput {
         offset_entry: Array1<f64>,
         offset_exit: Array1<f64>,
         derivative_offset_exit: Array1<f64>,
+        entry_at_origin: Array1<bool>,
         marginal_design: DesignMatrix,
         marginal_offset: Array1<f64>,
         slope_design: DesignMatrix,
@@ -409,6 +414,7 @@ impl SavedMarginalSlopeSurvivalAloInput {
             || offset_entry.len() != n
             || offset_exit.len() != n
             || derivative_offset_exit.len() != n
+            || entry_at_origin.len() != n
             || marginal_offset.len() != n
             || slope_offset.len() != n
             || design_entry.nrows() != n
@@ -474,6 +480,7 @@ impl SavedMarginalSlopeSurvivalAloInput {
             offset_entry,
             offset_exit,
             derivative_offset_exit,
+            entry_at_origin,
             marginal_design,
             marginal_offset,
             slope_design,
@@ -2887,6 +2894,7 @@ fn compute_saved_marginal_slope_survival_alo(
             offset_entry: &input.offset_entry,
             offset_exit: &input.offset_exit,
             derivative_offset_exit: &input.derivative_offset_exit,
+            entry_at_origin: &input.entry_at_origin,
             marginal_design: &input.marginal_design,
             marginal_offset: &input.marginal_offset,
             slope_design: &input.slope_design,

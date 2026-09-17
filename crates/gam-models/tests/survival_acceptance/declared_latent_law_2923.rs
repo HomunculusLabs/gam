@@ -430,8 +430,10 @@ fn closed_form_is_miscalibrated_on_a_skewed_law_and_the_anchored_fit_is_not_2923
     // predicted survival for a subject at its own exit time, against the true
     // conditional survival. The closed form predicts with its own lowering,
     // the anchored fit with the anchor on the declared law.
-    let conditional_error = |fitted: &Fitted, anchored: bool| -> f64 {
-        fitted
+    // Returns the mean absolute error over the subjects and its Monte Carlo
+    // standard error over the draws.
+    let conditional_error = |fitted: &Fitted, anchored: bool| -> (f64, f64) {
+        let errors: Vec<f64> = fitted
             .exit_index
             .iter()
             .zip(&scores)
@@ -444,8 +446,11 @@ fn closed_form_is_miscalibrated_on_a_skewed_law_and_the_anchored_fit_is_not_2923
                 };
                 (normal_cdf(-(location + fitted.slope * z)) - truth).abs()
             })
-            .sum::<f64>()
-            / scores.len() as f64
+            .collect();
+        let count = errors.len() as f64;
+        let mean = errors.iter().sum::<f64>() / count;
+        let variance = errors.iter().map(|e| (e - mean).powi(2)).sum::<f64>() / (count - 1.0);
+        (mean, (variance / count).sqrt())
     };
     // And the MARGINAL index itself: `Φ(−q̂(t))` against `Φ(−q(t))`.
     let marginal_error = |fitted: &Fitted| -> f64 {
@@ -457,15 +462,17 @@ fn closed_form_is_miscalibrated_on_a_skewed_law_and_the_anchored_fit_is_not_2923
             .sum::<f64>()
             / truth.len() as f64
     };
-    let closed_form_conditional = conditional_error(&closed_form, false);
-    let anchored_conditional = conditional_error(&anchored, true);
+    let (closed_form_conditional, closed_form_conditional_se) =
+        conditional_error(&closed_form, false);
+    let (anchored_conditional, anchored_conditional_se) = conditional_error(&anchored, true);
     let closed_form_marginal = marginal_error(&closed_form);
     let anchored_marginal = marginal_error(&anchored);
     let closed_form_index_rmse = rmse(&closed_form.exit_index, &truth);
     let anchored_index_rmse = rmse(&anchored.exit_index, &truth);
     eprintln!(
         "[2923 skewed] n={N} planted b={SLOPE} | slope closed-form={:.4} anchored={:.4} | \
-         mean |Ŝ(t,z) − S(t,z)|: closed-form={closed_form_conditional:.4} anchored={anchored_conditional:.4} | \
+         mean |Ŝ(t,z) − S(t,z)|: closed-form={closed_form_conditional:.4} (se {closed_form_conditional_se:.5}) \
+         anchored={anchored_conditional:.4} (se {anchored_conditional_se:.5}) | \
          mean |Φ(−q̂)−Φ(−q)|: closed-form={closed_form_marginal:.4} anchored={anchored_marginal:.4} | \
          index rmse vs truth: closed-form={closed_form_index_rmse:.4} anchored={anchored_index_rmse:.4} | \
          log-lik closed-form={:.3} anchored={:.3}",
@@ -475,10 +482,18 @@ fn closed_form_is_miscalibrated_on_a_skewed_law_and_the_anchored_fit_is_not_2923
         anchored_conditional < 0.02,
         "the anchored fit must be calibrated in context; mean |Ŝ − S| = {anchored_conditional:.4}"
     );
+    // The closed form's miscalibration must be real — well clear of the Monte
+    // Carlo error of its mean over the draws — and more than twice the anchored
+    // fit's. The second half used to be an absolute floor of 0.03, calibrated
+    // while a Linear baseline was pinned to its cold-start Weibull offset
+    // (gnomon#2336): that put time-curve misfit into both arms on top of the
+    // closed form's wrong lowering, which is the only thing this test is about.
     assert!(
-        closed_form_conditional > 2.0 * anchored_conditional && closed_form_conditional > 0.03,
+        closed_form_conditional > 2.0 * anchored_conditional
+            && closed_form_conditional >= 4.0 * closed_form_conditional_se,
         "the closed form must be measurably miscalibrated on a skewed law; \
-         closed-form {closed_form_conditional:.4} vs anchored {anchored_conditional:.4}"
+         closed-form {closed_form_conditional:.4} (Monte Carlo se {closed_form_conditional_se:.5}) \
+         vs anchored {anchored_conditional:.4}"
     );
     assert!(
         (anchored.slope - SLOPE).abs() < 0.15,

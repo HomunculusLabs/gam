@@ -86,7 +86,7 @@ pub(super) fn static_row_fifth(
     }
     let neg_c = c.map(|value| -value);
     let entry = gam_math::probability::normal_logcdf_derivatives_through_fifth(neg_eta0)
-        .map(|value| inputs.wi * value);
+        .map(|value| inputs.wi_entry * value);
     let exit = gam_math::probability::normal_logcdf_derivatives_through_fifth(neg_eta1)
         .map(|value| -inputs.wi * (1.0 - inputs.di) * value);
     // The negative-index leaf's q derivative contributes (-c)^m.
@@ -181,7 +181,7 @@ fn static_row_sixth(
     }
     let neg_c = c.map(|value| -value);
     let entry = gam_math::probability::normal_logcdf_derivatives_through_sixth(neg_eta0)
-        .map(|value| inputs.wi * value);
+        .map(|value| inputs.wi_entry * value);
     let exit = gam_math::probability::normal_logcdf_derivatives_through_sixth(neg_eta1)
         .map(|value| -inputs.wi * (1.0 - inputs.di) * value);
     // The negative-index leaf's q derivative contributes (-c)^m.
@@ -1082,6 +1082,7 @@ mod tests {
                 let inputs = RigidRowInputs {
                     row: 0,
                     wi: 1.7,
+                    wi_entry: 1.7,
                     di: event,
                     z_sum: 0.7,
                     covariance_ones: 1.2,
@@ -1123,6 +1124,107 @@ mod tests {
         }
     }
 
+    /// gnomon#2336 on the static frame: with `wi_entry = 0` (a row entering at the
+    /// time origin) the row program does not read the entry index, removes
+    /// exactly `wi·log Φ(−η₀)`, and the hand-lowered fifth derivatives still match
+    /// the differentiated fourth-order tower.
+    #[test]
+    fn static_origin_entry_row_drops_the_entry_factor_and_keeps_the_fifth_gate_2336() {
+        for event in [0.0, 1.0] {
+            for slope in [-1.3, 0.0, 0.8] {
+                let origin = RigidRowInputs {
+                    row: 0,
+                    wi: 1.7,
+                    wi_entry: 0.0,
+                    di: event,
+                    z_sum: 0.7,
+                    covariance_ones: 1.2,
+                    probit_scale: 0.9,
+                    qd1_lower: 1e-8,
+                    anchor: None,
+                };
+                let delayed = RigidRowInputs {
+                    row: 0,
+                    wi: 1.7,
+                    wi_entry: 1.7,
+                    di: event,
+                    z_sum: 0.7,
+                    covariance_ones: 1.2,
+                    probit_scale: 0.9,
+                    qd1_lower: 1e-8,
+                    anchor: None,
+                };
+                let point = [-0.9, 0.4, 1.1, slope];
+                let tower = |at: [f64; 4], inputs: &RigidRowInputs| {
+                    let vars: [SparseTower4<4, RIGID_LINEAR_MASK>; 4] =
+                        std::array::from_fn(|a| SparseTower4::variable(at[a], a));
+                    rigid_row_nll::<4, StaticSlopeGeometry, _>(&vars, inputs).expect("admitted row")
+                };
+
+                let at_point = tower(point, &origin);
+                let mut entry_moved = point;
+                entry_moved[PRIMARY_Q0] += 2.5;
+                let moved = tower(entry_moved, &origin);
+                assert_eq!(
+                    at_point.v, moved.v,
+                    "event={event} slope={slope}: the origin-entry NLL moved with the entry index"
+                );
+                assert_eq!(
+                    at_point.g[PRIMARY_Q0], 0.0,
+                    "event={event} slope={slope}: the origin-entry row reads the entry index"
+                );
+                for axis in 0..4 {
+                    assert_eq!(
+                        at_point.g[axis], moved.g[axis],
+                        "event={event} slope={slope}: gradient axis {axis} moved with the entry index"
+                    );
+                    assert_eq!(
+                        at_point.h[PRIMARY_Q0][axis], 0.0,
+                        "event={event} slope={slope}: Hessian (q0,{axis}) reads the entry index"
+                    );
+                }
+
+                let a = origin.probit_scale.powi(2) * origin.covariance_ones;
+                let b = origin.probit_scale * origin.z_sum;
+                let eta0 = point[PRIMARY_Q0] * (1.0 + a * slope * slope).sqrt() + b * slope;
+                let log_entry_survival =
+                    gam_math::probability::normal_logcdf_derivatives_through_fifth(-eta0)[0];
+                let removed = tower(point, &delayed).v - at_point.v;
+                let expected = 1.7 * log_entry_survival;
+                assert!(
+                    (removed - expected).abs() <= 1e-12 * (1.0 + expected.abs()),
+                    "event={event} slope={slope}: the gate removed {removed} but the entry factor is {expected}"
+                );
+
+                let exact = static_row_fifth(&point, &origin).expect("admitted origin row");
+                for axis in 0..4 {
+                    let step = 1e-5;
+                    let mut plus_point = point;
+                    plus_point[axis] += step;
+                    let mut minus_point = point;
+                    minus_point[axis] -= step;
+                    let plus = tower(plus_point, &origin);
+                    let minus = tower(minus_point, &origin);
+                    for a in 0..4 {
+                        for b in 0..4 {
+                            for c in 0..4 {
+                                for d in 0..4 {
+                                    let fd =
+                                        (plus.t4[a][b][c][d] - minus.t4[a][b][c][d]) / (2.0 * step);
+                                    let actual = exact[a][b][c][d][axis];
+                                    assert!(
+                                        (actual - fd).abs() <= 2e-6 * (1.0 + fd.abs()),
+                                        "origin entry, event={event} slope={slope} axes={a},{b},{c},{d},{axis}: exact={actual} FD={fd}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn static_sixth_matches_differentiated_fifth_for_events_and_censoring_2894() {
         for event in [0.0, 1.0] {
@@ -1130,6 +1232,7 @@ mod tests {
                 let inputs = RigidRowInputs {
                     row: 0,
                     wi: 1.7,
+                    wi_entry: 1.7,
                     di: event,
                     z_sum: 0.7,
                     covariance_ones: 1.2,

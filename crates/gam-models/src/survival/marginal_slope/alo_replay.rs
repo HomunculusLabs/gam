@@ -17,6 +17,10 @@ pub struct SurvivalMarginalSlopeSavedAloReplayInput<'a> {
     pub offset_entry: &'a Array1<f64>,
     pub offset_exit: &'a Array1<f64>,
     pub derivative_offset_exit: &'a Array1<f64>,
+    /// Rows entering at the time origin, whose likelihood carries no entry
+    /// survival factor (gnomon#2336). The replay must use the fit's mask or it
+    /// replays a different likelihood.
+    pub entry_at_origin: &'a Array1<bool>,
     pub marginal_design: &'a DesignMatrix,
     pub marginal_offset: &'a Array1<f64>,
     pub slope_design: &'a DesignMatrix,
@@ -397,6 +401,7 @@ pub fn replay_saved_survival_marginal_slope_alo(
         offset_entry: Arc::new(input.offset_entry.clone()),
         offset_exit: Arc::new(input.offset_exit.clone()),
         derivative_offset_exit: Arc::new(input.derivative_offset_exit.clone()),
+        entry_at_origin: Arc::new(input.entry_at_origin.clone()),
         marginal_design: input.marginal_design.clone(),
         slope_layout,
         score_warp,
@@ -545,6 +550,7 @@ mod tests {
                 offset_entry: &zero,
                 offset_exit: &zero,
                 derivative_offset_exit: &zero,
+                entry_at_origin: &Array1::from_elem(n, false),
                 marginal_design: &marginal_design,
                 marginal_offset: &zero,
                 slope_design: &slope_design,

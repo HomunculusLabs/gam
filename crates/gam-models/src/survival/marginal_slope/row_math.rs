@@ -546,6 +546,7 @@ pub fn survival_marginal_slope_vector_neglog(
     z: &[f64],
     workspace: &RigidVectorValueWorkspace<'_>,
     weight: f64,
+    entry_weight: f64,
     event: f64,
     derivative_guard: f64,
     probit_scale: f64,
@@ -570,6 +571,7 @@ pub fn survival_marginal_slope_vector_neglog(
     let inputs = RigidRowInputs {
         row,
         wi: weight,
+        wi_entry: entry_weight,
         di: event,
         z_sum: 0.0,
         covariance_ones: 0.0,
@@ -1011,7 +1013,7 @@ pub(crate) fn static_slope_feature_frame<T: Clone>(
 row_program! {
     pub(crate) fn rigid_feature_program(
         q0, q1, qd1, linear0, linear1, dlinear1, variance0, variance1, dvariance1;
-        wi, di, probit_scale, follow_up_varying
+        wi, wi_entry, di, probit_scale, follow_up_varying
     )
     emit [generic, runtime, order2, third, fourth, witnesses, cuda];
     leaves {
@@ -1058,7 +1060,9 @@ row_program! {
         let adjusted_derivative = add(mul(qd1, correction1), slope_rate_term);
 
         let neg_eta0 = neg(eta0);
-        let entry = scale(compose(neglog_phi, neg_eta0, wi), -1.0);
+        // A row entering at the time origin has `S(0) = 1` and no entry factor:
+        // its `wi_entry` is zero (gnomon#2336).
+        let entry = scale(compose(neglog_phi, neg_eta0, wi_entry), -1.0);
         let neg_eta1 = neg(eta1);
         let exit = compose(neglog_phi, neg_eta1, wi * (1.0 - di));
 
@@ -1095,6 +1099,7 @@ row_program! {
 pub(crate) fn rigid_feature_frame_program<const K: usize, S: JetScalar<K>>(
     features: &[S; RIGID_FEATURE_DIMENSION],
     wi: f64,
+    wi_entry: f64,
     di: f64,
     probit_scale: f64,
     follow_up_varying: f64,
@@ -1110,6 +1115,7 @@ pub(crate) fn rigid_feature_frame_program<const K: usize, S: JetScalar<K>>(
         &features[7],
         &features[8],
         wi,
+        wi_entry,
         di,
         probit_scale,
         follow_up_varying,
@@ -1120,6 +1126,7 @@ pub(crate) fn rigid_feature_frame_program<const K: usize, S: JetScalar<K>>(
 pub(crate) fn rigid_feature_frame_order2(
     features: &[f64; RIGID_FEATURE_DIMENSION],
     wi: f64,
+    wi_entry: f64,
     di: f64,
     probit_scale: f64,
     follow_up_varying: f64,
@@ -1140,6 +1147,7 @@ pub(crate) fn rigid_feature_frame_order2(
         features[7],
         features[8],
         wi,
+        wi_entry,
         di,
         probit_scale,
         follow_up_varying,
@@ -1150,6 +1158,7 @@ pub(crate) fn rigid_feature_frame_order2(
 pub(crate) fn rigid_feature_frame_third_contracted(
     features: &[f64; RIGID_FEATURE_DIMENSION],
     wi: f64,
+    wi_entry: f64,
     di: f64,
     probit_scale: f64,
     follow_up_varying: f64,
@@ -1166,6 +1175,7 @@ pub(crate) fn rigid_feature_frame_third_contracted(
         features[7],
         features[8],
         wi,
+        wi_entry,
         di,
         probit_scale,
         follow_up_varying,
@@ -1177,6 +1187,7 @@ pub(crate) fn rigid_feature_frame_third_contracted(
 pub(crate) fn rigid_feature_frame_fourth_contracted(
     features: &[f64; RIGID_FEATURE_DIMENSION],
     wi: f64,
+    wi_entry: f64,
     di: f64,
     probit_scale: f64,
     follow_up_varying: f64,
@@ -1194,6 +1205,7 @@ pub(crate) fn rigid_feature_frame_fourth_contracted(
         features[7],
         features[8],
         wi,
+        wi_entry,
         di,
         probit_scale,
         follow_up_varying,
@@ -1282,6 +1294,7 @@ where
         &features[7],
         &features[8],
         inputs.wi,
+        inputs.wi_entry,
         inputs.di,
         inputs.probit_scale,
         follow_up_varying_flag::<P, G>(),
@@ -1808,6 +1821,7 @@ pub(crate) fn row_primary_closed_form_vector_into(
     slopes: &[f64],
     z: &[f64],
     w: f64,
+    w_entry: f64,
     d: f64,
     derivative_guard: f64,
     probit_scale: f64,
@@ -1837,6 +1851,7 @@ pub(crate) fn row_primary_closed_form_vector_into(
     validate_vector_probit_scale(&RigidRowInputs {
         row,
         wi: w,
+        wi_entry: w,
         di: d,
         z_sum: 0.0,
         covariance_ones: 0.0,
@@ -1880,6 +1895,7 @@ pub(crate) fn row_primary_closed_form_vector_into(
     let inputs = RigidRowInputs {
         row,
         wi: w,
+        wi_entry: w_entry,
         di: d,
         z_sum: 0.0,
         covariance_ones: 0.0,
@@ -1892,6 +1908,7 @@ pub(crate) fn row_primary_closed_form_vector_into(
         rigid_feature_frame_order2(
             &features,
             w,
+            w_entry,
             d,
             probit_scale,
             follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(),
@@ -1971,6 +1988,9 @@ pub(crate) fn c_derivatives(g: f64, probit_scale: f64) -> (f64, f64, f64, f64, f
 /// identifiability compilation, KKT refusal, and the `RowKernel`) therefore
 /// executes the same direct scalar schedule, including its leaf curvature and
 /// cross terms.
+///
+/// `w_entry` weighs the entry survival factor: `w` for a delayed entry and `0`
+/// for a row entering at the time origin, which has none (gnomon#2336).
 #[inline]
 pub(crate) fn row_primary_closed_form(
     q0: f64,
@@ -1979,6 +1999,7 @@ pub(crate) fn row_primary_closed_form(
     g: f64,
     z: f64,
     w: f64,
+    w_entry: f64,
     d: f64,
     derivative_guard: f64,
     probit_scale: f64,
@@ -1986,6 +2007,7 @@ pub(crate) fn row_primary_closed_form(
     let inputs = RigidRowInputs {
         row: 0,
         wi: w,
+        wi_entry: w_entry,
         di: d,
         z_sum: z,
         covariance_ones: 1.0,
@@ -2414,6 +2436,7 @@ mod tests {
             &[0.7, -1.2],
             1.0,
             1.0,
+            1.0,
             1.0e-8,
             0.9,
             &mut workspace,
@@ -2495,7 +2518,7 @@ mod tests {
                         let evaluate_production =
                             |q0: f64, workspace: &mut RigidVectorRowWorkspace<'_>| -> f64 {
                                 let value = row_primary_closed_form_vector_into(
-                                    0, q0, 0.53, 1.18, &slopes, &scores, 1.21, event, 1.0e-8,
+                                    0, q0, 0.53, 1.18, &slopes, &scores, 1.21, 1.21, event, 1.0e-8,
                                     0.87, workspace,
                                 )
                                 .expect("packed production width");
@@ -2593,7 +2616,7 @@ mod tests {
         for &(q0, q1, qd1, g, z, w, d, scale) in &cases {
             // Parity pin on the exact benchmarked inputs (the richer sweep
             // lives in `canonical_rigid_order2_matches_strongest_hand_schedule_932`).
-            let canonical = row_primary_closed_form(q0, q1, qd1, g, z, w, d, 1.0e-8, scale)
+            let canonical = row_primary_closed_form(q0, q1, qd1, g, z, w, w, d, 1.0e-8, scale)
                 .expect("canonical rigid row");
             let hand = test_support::row_primary_closed_form_hand_reference(
                 q0, q1, qd1, g, z, w, d, 1.0e-8, scale,
@@ -2617,7 +2640,7 @@ mod tests {
                 0x9320_5CA1 ^ (d.to_bits() >> 60),
                 batched(64, |nudge| {
                     let (value, gradient, hessian) =
-                        row_primary_closed_form(q0, q1, qd1, g + nudge, z, w, d, 1.0e-8, scale)
+                        row_primary_closed_form(q0, q1, qd1, g + nudge, z, w, w, d, 1.0e-8, scale)
                             .expect("canonical rigid row");
                     value + gradient[0] + hessian[0][0]
                 }),
@@ -2668,7 +2691,7 @@ mod tests {
         };
 
         for (case, &(q0, q1, qd1, g, z, w, d, scale)) in cases.iter().enumerate() {
-            let canonical = row_primary_closed_form(q0, q1, qd1, g, z, w, d, 1.0e-8, scale)
+            let canonical = row_primary_closed_form(q0, q1, qd1, g, z, w, w, d, 1.0e-8, scale)
                 .expect("canonical rigid row");
             let hand = test_support::row_primary_closed_form_hand_reference(
                 q0, q1, qd1, g, z, w, d, 1.0e-8, scale,

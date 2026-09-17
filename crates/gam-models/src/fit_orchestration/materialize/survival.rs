@@ -797,7 +797,7 @@ pub(crate) fn materialize_survival<'a>(
         )?;
         let baseline_hyper = match baseline_cfg.target {
             SurvivalBaselineTarget::Linear => SurvivalMarginalSlopeBaselineHyperSpec::Linear {
-                config: survival_marginal_slope_offset_baseline_config(&age_exit, &baseline_cfg),
+                config: baseline_cfg.clone(),
             },
             _ => SurvivalMarginalSlopeBaselineHyperSpec::Nonlinear {
                 chart: SurvivalMarginalSlopeFrozenOffsetChart::new(

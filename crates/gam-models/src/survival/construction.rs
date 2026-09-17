@@ -4171,31 +4171,6 @@ pub fn survival_derivative_guard_for_likelihood(likelihood_mode: SurvivalLikelih
     }
 }
 
-/// Resolve the actual parametric offset chart used by a marginal-slope fit.
-///
-/// A nominal `Linear` target has zero derivative and therefore starts the
-/// `-log(q')` barrier exactly on its guard.  Fitting consequently uses a
-/// deterministic exponential-survival (Weibull shape one) offset at the
-/// data-scale mean positive exit time.  This function is the shared authority
-/// for fitting and persistence: saving the nominal `Linear` request would not
-/// be enough to replay the fitted row likelihood.
-pub fn survival_marginal_slope_offset_baseline_config(
-    age_exit: &Array1<f64>,
-    requested: &SurvivalBaselineConfig,
-) -> SurvivalBaselineConfig {
-    if requested.target == SurvivalBaselineTarget::Linear {
-        SurvivalBaselineConfig {
-            target: SurvivalBaselineTarget::Weibull,
-            scale: Some(positive_survival_time_seed(age_exit)),
-            shape: Some(1.0),
-            rate: None,
-            makeham: None,
-        }
-    } else {
-        requested.clone()
-    }
-}
-
 pub fn build_survival_time_offsets_for_likelihood(
     age_entry: &Array1<f64>,
     age_exit: &Array1<f64>,
@@ -5181,6 +5156,79 @@ mod tests {
             0.0,
             ENTRY_AT_ORIGIN_THRESHOLD * 1.000_001
         ]));
+    }
+
+    /// gnomon#2336: gating an origin entry must be the limit of delayed entry,
+    /// not a jump. A row entering at `ε` below the first exit reads the time
+    /// basis on its linear lower tail, so at fixed coefficients its entry index
+    /// falls linearly in `log ε` and its entry factor `log Φ(−η(ε))` vanishes as
+    /// `ε → 0`. The origin row instead reads the left-boundary stand-in, whose
+    /// factor is finite — which is why the likelihood gate drops it rather than
+    /// evaluating it.
+    #[test]
+    fn delayed_entry_factor_vanishes_toward_the_origin_2336() {
+        let age_exit = array![0.05, 0.2, 0.6, 1.1, 1.8, 2.5, 3.3, 4.0, 4.8, 5.5];
+        let linear = SurvivalBaselineConfig {
+            target: SurvivalBaselineTarget::Linear,
+            scale: None,
+            shape: None,
+            rate: None,
+            makeham: None,
+        };
+        // The entry index of the first row at fixed coefficients `β = 0.2·1`.
+        let entry_index = |epsilon: f64| -> (f64, Option<Vec<f64>>) {
+            let age_entry = Array1::from_elem(age_exit.len(), epsilon);
+            let build = build_survival_time_basis(
+                &age_entry,
+                &age_exit,
+                SurvivalTimeBasisConfig::ISpline {
+                    degree: 3,
+                    knots: Array1::zeros(0),
+                    keep_cols: Vec::new(),
+                },
+                Some(4),
+            )
+            .expect("build survival time basis");
+            let (offset_entry, _, _) =
+                build_survival_marginal_slope_baseline_offsets(&age_entry, &age_exit, &linear)
+                    .expect("linear probit offsets");
+            let row = build.x_entry_time.to_dense().row(0).to_owned();
+            (0.2 * row.sum() + offset_entry[0], build.knots.clone())
+        };
+        let entry_factor =
+            |index: f64| gam_math::probability::normal_logcdf_derivatives_through_fifth(-index)[0];
+
+        let (at_1e2, knots) = entry_index(1e-2);
+        let (at_1e4, knots_1e4) = entry_index(1e-4);
+        let (at_1e6, knots_1e6) = entry_index(1e-6);
+        let (at_origin, knots_origin) = entry_index(0.0);
+        assert_eq!(knots, knots_1e4, "every entry time must share the exit-inferred knots");
+        assert_eq!(knots, knots_1e6, "every entry time must share the exit-inferred knots");
+        assert_eq!(knots, knots_origin, "every entry time must share the exit-inferred knots");
+        assert!(1e-6 > ENTRY_AT_ORIGIN_THRESHOLD, "1e-6 must be a delayed entry");
+
+        // Linear in log ε on the lower tail: equal log-spacing, equal steps.
+        let (step_high, step_low) = (at_1e2 - at_1e4, at_1e4 - at_1e6);
+        assert!(step_high > 0.0, "the lower tail must keep a positive log-time slope");
+        assert!(
+            (step_high - step_low).abs() <= 1e-10 * (1.0 + step_high.abs()),
+            "entry index is not linear in log ε below the first exit: steps {step_high} vs {step_low}"
+        );
+
+        // The factor vanishes monotonically toward the origin.
+        let (gap_1e4, gap_1e6) = (entry_factor(at_1e4), entry_factor(at_1e6));
+        assert!(
+            gap_1e4 < gap_1e6 && gap_1e6 < 0.0,
+            "entry factor must shrink toward 0 as ε → 0: log S(1e-4)={gap_1e4}, log S(1e-6)={gap_1e6}"
+        );
+
+        // The origin row reads the left-boundary stand-in, above every delayed
+        // tail value: its finite factor is not the limit the gate represents.
+        assert!(
+            at_origin > at_1e2,
+            "the origin stand-in {at_origin} must sit at the left boundary, above the tail value {at_1e2}"
+        );
+        assert!(entry_factor(at_origin) < gap_1e4);
     }
 
     /// Odd row counts take the true middle exit; the anchor is always floored so

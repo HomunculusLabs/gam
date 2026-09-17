@@ -35,6 +35,7 @@ pub(crate) struct SurvivalRowVghChannels {
 pub(crate) struct SurvivalRowInputs {
     pub(crate) primaries: [f64; 4],
     pub(crate) wi: f64,
+    pub(crate) wi_entry: f64,
     pub(crate) di: f64,
     pub(crate) z_sum: f64,
     pub(crate) cov_ones: f64,
@@ -247,6 +248,7 @@ mod device {
         Vec<f64>,
         Vec<f64>,
         Vec<f64>,
+        Vec<f64>,
     );
 
     fn flatten_inputs(rows: &[SurvivalRowInputs]) -> FlatInputs {
@@ -256,6 +258,7 @@ mod device {
         let mut qd1 = Vec::with_capacity(n);
         let mut g = Vec::with_capacity(n);
         let mut wi = Vec::with_capacity(n);
+        let mut wi_entry = Vec::with_capacity(n);
         let mut di = Vec::with_capacity(n);
         let mut z_sum = Vec::with_capacity(n);
         let mut cov_ones = Vec::with_capacity(n);
@@ -265,11 +268,12 @@ mod device {
             qd1.push(row.primaries[2]);
             g.push(row.primaries[3]);
             wi.push(row.wi);
+            wi_entry.push(row.wi_entry);
             di.push(row.di);
             z_sum.push(row.z_sum);
             cov_ones.push(row.cov_ones);
         }
-        (q0, q1, qd1, g, wi, di, z_sum, cov_ones)
+        (q0, q1, qd1, g, wi, wi_entry, di, z_sum, cov_ones)
     }
 
     pub(super) fn survival_rigid_row_vgh_device(
@@ -290,12 +294,15 @@ mod device {
             .load_function("survival_rowjet_vgh")
             .gpu_ctx("survival_rowjet_vgh load_function")?;
         let stream = backend.stream.clone();
-        let (q0, q1, qd1, g, wi, di, z_sum, cov_ones) = flatten_inputs(rows);
+        let (q0, q1, qd1, g, wi, wi_entry, di, z_sum, cov_ones) = flatten_inputs(rows);
         let q0_device = stream.clone_htod(&q0).gpu_ctx("vgh htod q0")?;
         let q1_device = stream.clone_htod(&q1).gpu_ctx("vgh htod q1")?;
         let qd1_device = stream.clone_htod(&qd1).gpu_ctx("vgh htod qd1")?;
         let g_device = stream.clone_htod(&g).gpu_ctx("vgh htod g")?;
         let wi_device = stream.clone_htod(&wi).gpu_ctx("vgh htod wi")?;
+        let wi_entry_device = stream
+            .clone_htod(&wi_entry)
+            .gpu_ctx("vgh htod wi_entry")?;
         let di_device = stream.clone_htod(&di).gpu_ctx("vgh htod di")?;
         let z_sum_device = stream.clone_htod(&z_sum).gpu_ctx("vgh htod z_sum")?;
         let cov_ones_device = stream.clone_htod(&cov_ones).gpu_ctx("vgh htod cov_ones")?;
@@ -321,6 +328,7 @@ mod device {
             .arg(&qd1_device)
             .arg(&g_device)
             .arg(&wi_device)
+            .arg(&wi_entry_device)
             .arg(&di_device)
             .arg(&z_sum_device)
             .arg(&cov_ones_device)

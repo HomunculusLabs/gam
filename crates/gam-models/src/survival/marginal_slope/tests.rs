@@ -179,9 +179,10 @@ fn time_nullspace_shrinkage_adds_precision_for_uncontrolled_time_direction() {
         initial_beta: Some(Array1::zeros(2)),
         ..base_time_block()
     };
+    let no_origin_entries = Array1::from_elem(block.design_entry.nrows(), false);
 
     assert!(
-        install_time_nullspace_shrinkage_penalty(&mut block, 0)
+        install_time_nullspace_shrinkage_penalty(&mut block, 0, &no_origin_entries)
             .expect("time nullspace shrinkage should build"),
         "expected a shrinkage penalty to be appended",
     );
@@ -198,6 +199,99 @@ fn time_nullspace_shrinkage_adds_precision_for_uncontrolled_time_direction() {
             );
         }
     }
+}
+
+/// gnomon#2336: a row entering at the time origin has no entry factor, so its
+/// entry evaluation carries no function-metric mass. The ridge must not read an
+/// origin row's entry design, and a fully landmarked block gets the exit metric.
+#[test]
+fn time_nullspace_shrinkage_metric_ignores_origin_entry_rows_2336() {
+    let (design_entry, design_exit) = full_span_time_endpoint_designs();
+    let block_with = |entry: DesignMatrix| TimeBlockInput {
+        design_entry: entry,
+        design_exit: design_exit.clone(),
+        design_derivative_exit: DesignMatrix::from(Array2::ones((3, 2))),
+        offset_entry: Array1::zeros(3),
+        offset_exit: Array1::zeros(3),
+        derivative_offset_exit: Array1::from_elem(
+            3,
+            DEFAULT_SURVIVAL_MARGINAL_SLOPE_DERIVATIVE_GUARD,
+        ),
+        penalties: vec![array![[1.0, 0.0], [0.0, 0.0]]],
+        nullspace_dims: vec![1],
+        initial_beta: Some(Array1::zeros(2)),
+        ..base_time_block()
+    };
+    let ridge = |mut block: TimeBlockInput, entry_at_origin: &Array1<bool>| {
+        assert!(
+            install_time_nullspace_shrinkage_penalty(&mut block, 0, entry_at_origin)
+                .expect("time nullspace shrinkage should build"),
+            "expected a shrinkage penalty to be appended",
+        );
+        block.penalties.last().expect("appended ridge").clone()
+    };
+
+    let one_origin_row = array![false, false, true];
+    let reference = ridge(block_with(design_entry.clone()), &one_origin_row);
+    let moved_origin_row = ridge(
+        block_with(DesignMatrix::from(array![[1.0, 0.0], [0.0, 1.0], [7.5, -3.0]])),
+        &one_origin_row,
+    );
+    assert_eq!(
+        reference, moved_origin_row,
+        "the ridge read the entry design of a row that enters at the origin"
+    );
+
+    let landmarked = ridge(block_with(design_entry), &Array1::from_elem(3, true));
+    let exit_metric = ridge(block_with(design_exit.clone()), &Array1::from_elem(3, false));
+    for i in 0..2 {
+        for j in 0..2 {
+            assert_close(
+                landmarked[[i, j]],
+                exit_metric[[i, j]],
+                1e-12,
+                &format!("landmarked block metric ({i},{j})"),
+            );
+        }
+    }
+}
+
+/// gnomon#2336: the pilot baseline slope solves the fitted row objective, so a
+/// row entering at the time origin contributes no entry factor there either.
+/// Moving the entry offsets of landmarked rows must leave the pilot slope
+/// unchanged, while the same move on delayed-entry rows must reach it.
+#[test]
+fn pooled_survival_baseline_ignores_origin_entry_offsets_2336() {
+    let n = 12;
+    let z = Array1::from_shape_fn(n, |i| (i as f64 - 5.5) / 4.0);
+    let event = Array1::from_shape_fn(n, |i| if (i * 7) % 12 < 7 { 1.0 } else { 0.0 });
+    let weights = Array1::from_elem(n, 1.0);
+    let q1 = Array1::from_shape_fn(n, |i| -0.8 + 0.1 * i as f64);
+    let qd1 = Array1::from_elem(n, 1.0);
+    let entry_low = Array1::from_elem(n, -2.5);
+    let entry_high = Array1::from_elem(n, -1.2);
+    let pilot = |entry_at_origin: &Array1<bool>, q0: &Array1<f64>| {
+        pooled_survival_baseline(&event, &weights, entry_at_origin, &z, q0, &q1, &qd1, 1.0)
+    };
+    let origin = Array1::from_elem(n, true);
+    let delayed = Array1::from_elem(n, false);
+
+    // The pilot returns exactly 0 when it declines to solve.
+    let origin_slope = pilot(&origin, &entry_low);
+    assert!(
+        origin_slope.is_finite() && origin_slope != 0.0,
+        "the landmarked pilot must solve for a slope; got {origin_slope:e}"
+    );
+    assert_eq!(
+        origin_slope,
+        pilot(&origin, &entry_high),
+        "the pilot read the entry offsets of rows that enter at the origin"
+    );
+    assert_ne!(
+        pilot(&delayed, &entry_low),
+        pilot(&delayed, &entry_high),
+        "the entry offsets must reach a delayed-entry pilot, or this gate is vacuous"
+    );
 }
 
 #[test]
@@ -218,9 +312,10 @@ fn time_nullspace_shrinkage_is_noop_for_full_rank_time_penalty() {
         initial_beta: Some(Array1::zeros(2)),
         ..base_time_block()
     };
+    let no_origin_entries = Array1::from_elem(block.design_entry.nrows(), false);
 
     assert!(
-        !install_time_nullspace_shrinkage_penalty(&mut block, 0)
+        !install_time_nullspace_shrinkage_penalty(&mut block, 0, &no_origin_entries)
             .expect("full-rank time penalty should be accepted"),
         "full-rank time penalties should not get another penalty",
     );
@@ -271,6 +366,7 @@ fn make_closed_form_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
         jeffreys_armed: true,
         latent_law: None,
         n,
+        entry_at_origin: Arc::new(Array1::from_elem(n, false)),
         event: Arc::new(event),
         weights: Arc::new(weights),
         z: Arc::new(z.insert_axis(Axis(1))),
@@ -871,6 +967,7 @@ fn test_family(
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
         z: Arc::new(array![0.0].insert_axis(Axis(1))),
@@ -1340,6 +1437,7 @@ fn exact_flex_row_matches_rigid_closed_form_without_deviations() {
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.7]),
         z: Arc::new(array![0.25].insert_axis(Axis(1))),
@@ -1392,6 +1490,7 @@ fn exact_flex_row_matches_rigid_closed_form_without_deviations() {
         block_states[2].eta[0],
         family.z[[0, 0]],
         family.weights[0],
+        family.entry_weight(0),
         family.event[0],
         family.derivative_guard,
         family.probit_frailty_scale(),
@@ -1411,7 +1510,7 @@ fn exact_flex_row_matches_rigid_closed_form_without_deviations() {
 
 #[test]
 fn row_primary_closed_form_rejects_negative_infinite_signed_margin() {
-    let err = row_primary_closed_form(f64::INFINITY, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1e-6, 1.0)
+    let err = row_primary_closed_form(f64::INFINITY, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1e-6, 1.0)
         .expect_err("exact closed-form row should reject -inf signed margins");
     assert!(err.contains("non-finite signed margin"));
 }
@@ -1457,7 +1556,7 @@ fn marginal_block_hessian_cancels_in_saturated_regime() {
     // cancellation must be ULP-exact for every η.
     for &eta in &[0.5_f64, 1.0, 2.0, 5.0, 10.0, 40.0, 100.0, 500.0, 988.0] {
         let (_nll, _grad, hess) =
-            row_primary_closed_form(eta, eta, qd1, g, z, w, 0.0, derivative_guard, probit_scale)
+            row_primary_closed_form(eta, eta, qd1, g, z, w, w, 0.0, derivative_guard, probit_scale)
                 .expect("rigid censored row");
         let sum = hess[0][0] + hess[1][1];
         assert!(
@@ -1473,7 +1572,7 @@ fn marginal_block_hessian_cancels_in_saturated_regime() {
     // 1/η² by Mills asymptotic M(−η) = η + 1/η + O(1/η³).
     for &eta in &[40.0_f64, 100.0, 500.0, 988.0] {
         let (_nll, _grad, hess) =
-            row_primary_closed_form(eta, eta, qd1, g, z, w, 1.0, derivative_guard, probit_scale)
+            row_primary_closed_form(eta, eta, qd1, g, z, w, w, 1.0, derivative_guard, probit_scale)
                 .expect("rigid event row");
         let sum = hess[0][0] + hess[1][1];
         let bound = 2.0 / (eta * eta);
@@ -1488,9 +1587,9 @@ fn marginal_block_hessian_cancels_in_saturated_regime() {
     // Cross-check at η = 988 (the user's large-scale saturation):
     // both kinds of rows hit the predicted floor exactly.
     let (_, _, ev) =
-        row_primary_closed_form(988.0, 988.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1e-6, 1.0).unwrap();
+        row_primary_closed_form(988.0, 988.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1e-6, 1.0).unwrap();
     let (_, _, ce) =
-        row_primary_closed_form(988.0, 988.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1e-6, 1.0).unwrap();
+        row_primary_closed_form(988.0, 988.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1e-6, 1.0).unwrap();
     let ev_sum = ev[0][0] + ev[1][1];
     let ce_sum = ce[0][0] + ce[1][1];
     assert!(
@@ -1505,7 +1604,7 @@ fn marginal_block_hessian_cancels_in_saturated_regime() {
 
 #[test]
 fn row_primary_closed_form_rejects_nan_signed_margin() {
-    let err = row_primary_closed_form(f64::NAN, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1e-6, 1.0)
+    let err = row_primary_closed_form(f64::NAN, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1e-6, 1.0)
         .expect_err("exact closed-form row should reject NaN signed margins");
     assert!(err.contains("non-finite signed margin"));
 }
@@ -1691,6 +1790,7 @@ fn oracle_rigid_family(
         jeffreys_armed: true,
         latent_law: None,
         n,
+        entry_at_origin: Arc::new(Array1::from_elem(n, false)),
         event: Arc::new(Array1::from(event.to_vec())),
         weights: Arc::new(Array1::from(weights.to_vec())),
         z: Arc::new(z_col),
@@ -1947,15 +2047,19 @@ fn rigid_feature_program_scalar_pullback_matches_generic_and_witnesses_932() {
     let mut max_rel = 0.0_f64;
     for _ in 0..4000 {
         let p = [nx() * 1.5, nx() * 1.5, 0.5 + nx().abs() * 2.0, nx() * 1.2];
-        let inputs = RigidRowInputs {
-            row: 0,
-            wi: 0.5 + nx().abs(),
-            di: if nx() > 0.0 { 1.0 } else { 0.0 },
-            z_sum: nx() * 1.2,
-            covariance_ones: 0.7 + nx().abs(),
-            probit_scale: 0.6 + nx().abs(),
-            qd1_lower: -1.0,
-            anchor: None,
+        let inputs = {
+            let wi = 0.5 + nx().abs();
+            RigidRowInputs {
+                row: 0,
+                wi,
+                wi_entry: wi,
+                di: if nx() > 0.0 { 1.0 } else { 0.0 },
+                z_sum: nx() * 1.2,
+                covariance_ones: 0.7 + nx().abs(),
+                probit_scale: 0.6 + nx().abs(),
+                qd1_lower: -1.0,
+                anchor: None,
+            }
         };
 
         let dense_vars: [Order2<4>; 4] = std::array::from_fn(|a| Order2::variable(p[a], a));
@@ -1976,6 +2080,7 @@ fn rigid_feature_program_scalar_pullback_matches_generic_and_witnesses_932() {
                 0.0,
             ),
             inputs.wi,
+            inputs.wi_entry,
             inputs.di,
             inputs.probit_scale,
             follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(),
@@ -2020,6 +2125,7 @@ fn exact_flex_row_value_matches_rigid_with_zero_score_and_link_coefficients() {
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![0.9]),
         z: Arc::new(array![-0.35].insert_axis(Axis(1))),
@@ -2080,6 +2186,7 @@ fn exact_flex_row_value_matches_rigid_with_zero_score_and_link_coefficients() {
         block_states[2].eta[0],
         family.z[[0, 0]],
         family.weights[0],
+        family.entry_weight(0),
         family.event[0],
         family.derivative_guard,
         family.probit_frailty_scale(),
@@ -2166,6 +2273,7 @@ fn flex_contracted_tower_matches_independent_rigid_tower_and_catches_sign_flip()
             jeffreys_armed: true,
             latent_law: None,
             n: 1,
+            entry_at_origin: Arc::new(Array1::from_elem(1, false)),
             event: Arc::new(array![fix.event]),
             weights: Arc::new(array![fix.weight]),
             z: Arc::new(array![fix.z].insert_axis(Axis(1))),
@@ -2364,6 +2472,7 @@ fn flex_contracted_tower_matches_independent_fd_witness_nonzero_deviation() {
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![event]),
         weights: Arc::new(array![weight]),
         z: Arc::new(array![z_row].insert_axis(Axis(1))),
@@ -2807,6 +2916,7 @@ fn link_flex_family_supports_second_order_exact_outer_path() {
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
         z: Arc::new(array![0.0].insert_axis(Axis(1))),
@@ -2855,6 +2965,7 @@ fn sigma_exact_joint_psi_terms_returns_analytic_terms() {
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
         z: Arc::new(array![0.15].insert_axis(Axis(1))),
@@ -2918,6 +3029,7 @@ fn censored_rows_still_reject_invalid_time_derivative() {
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
         z: Arc::new(array![0.0].insert_axis(Axis(1))),
@@ -2990,6 +3102,7 @@ fn exact_newton_evaluation_propagates_invalid_rows() {
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
         z: Arc::new(array![0.0].insert_axis(Axis(1))),
@@ -3055,6 +3168,7 @@ fn time_constraints_use_exact_derivative_guard_rows() {
         jeffreys_armed: true,
         latent_law: None,
         n: 2,
+        entry_at_origin: Arc::new(Array1::from_elem(2, false)),
         event: Arc::new(array![0.0, 1.0]),
         weights: Arc::new(array![1.0, 1.0]),
         z: Arc::new(array![0.0, 0.0].insert_axis(Axis(1))),
@@ -3150,6 +3264,7 @@ fn time_block_constraints_synthesize_qd1_rows_when_stored_constraints_missing() 
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
         z: Arc::new(array![0.0].insert_axis(Axis(1))),
@@ -3224,6 +3339,7 @@ fn time_block_max_feasible_step_uses_synthesized_qd1_rows() {
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
         z: Arc::new(array![0.0].insert_axis(Axis(1))),
@@ -3289,6 +3405,7 @@ fn coupled_qd1_guard_limits_time_step_before_post_update_projection() {
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
         z: Arc::new(array![0.0].insert_axis(Axis(1))),
@@ -3367,6 +3484,7 @@ fn timewiggle_tail_step_is_clipped_before_it_can_flip_derivative() {
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
         z: Arc::new(array![0.0].insert_axis(Axis(1))),
@@ -3422,6 +3540,7 @@ fn time_block_post_update_rejects_infeasible_beta_instead_of_projecting() {
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
         z: Arc::new(array![0.0].insert_axis(Axis(1))),
@@ -3512,6 +3631,7 @@ fn time_block_post_update_rejects_qd1_when_no_linear_constraints() {
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
         z: Arc::new(array![0.0].insert_axis(Axis(1))),
@@ -3598,6 +3718,7 @@ fn time_block_post_update_errors_when_current_violates_qd1() {
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
         z: Arc::new(array![0.0].insert_axis(Axis(1))),
@@ -3670,6 +3791,7 @@ fn time_block_feasible_step_stays_inside_derivative_guard() {
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
         z: Arc::new(array![0.0].insert_axis(Axis(1))),
@@ -3770,6 +3892,7 @@ fn mixed_blockwise_exact_newton_preserves_sparse_block_hessians() {
         jeffreys_armed: true,
         latent_law: None,
         n: 2,
+        entry_at_origin: Arc::new(Array1::from_elem(2, false)),
         event: Arc::new(array![1.0, 0.0]),
         weights: Arc::new(array![1.0, 0.8]),
         z: Arc::new(array![0.1, -0.2].insert_axis(Axis(1))),
@@ -4108,6 +4231,7 @@ fn make_block_psi_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
         jeffreys_armed: true,
         latent_law: None,
         n,
+        entry_at_origin: Arc::new(Array1::from_elem(n, false)),
         event: Arc::new(event),
         weights: Arc::new(weights),
         z: Arc::new(z.insert_axis(Axis(1))),
@@ -4249,6 +4373,7 @@ fn make_flex_baseline_psi_test_fixture() -> (
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![0.9]),
         z: Arc::new(array![0.2].insert_axis(Axis(1))),
@@ -5156,6 +5281,7 @@ fn make_flex_no_wiggle_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
         jeffreys_armed: true,
         latent_law: None,
         n,
+        entry_at_origin: Arc::new(Array1::from_elem(n, false)),
         event: Arc::new(event),
         weights: Arc::new(weights),
         z: Arc::new(z.insert_axis(Axis(1))),
@@ -5876,6 +6002,7 @@ fn flex_contraction_fixture_family(
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![fixture.event]),
         weights: Arc::new(array![fixture.weight]),
         z: Arc::new(array![fixture.z].insert_axis(Axis(1))),
@@ -6100,6 +6227,7 @@ fn make_time_guard_family(deriv_coeff: f64, deriv_offset: f64) -> SurvivalMargin
         jeffreys_armed: true,
         latent_law: None,
         n: 1,
+        entry_at_origin: Arc::new(Array1::from_elem(1, false)),
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
         z: Arc::new(array![0.0].insert_axis(Axis(1))),
@@ -6323,6 +6451,7 @@ fn zz_diag_failure1_flex_vs_rigid_vs_fdhess() {
             jeffreys_armed: true,
             latent_law: None,
             n: 1,
+            entry_at_origin: Arc::new(Array1::from_elem(1, false)),
             event: Arc::new(array![event]),
             weights: Arc::new(array![weight]),
             z: Arc::new(array![zr].insert_axis(Axis(1))),
@@ -7751,6 +7880,7 @@ fn make_timewiggle_test_family(
         jeffreys_armed: true,
         latent_law: None,
         n,
+        entry_at_origin: Arc::new(Array1::from_elem(n, false)),
         event: Arc::new(event),
         weights: Arc::new(weights),
         z: Arc::new(z),
@@ -8051,6 +8181,7 @@ fn rigid_row_primary_mixed_in_z_matches_finite_difference() {
                         let inputs_at = |z_value: f64| RigidRowInputs {
                             row: 0,
                             wi: w,
+                            wi_entry: w,
                             di: d,
                             z_sum: z_value,
                             covariance_ones,
@@ -8131,13 +8262,14 @@ fn time_shrinkage_metric_excludes_timewiggle_placeholder_columns() {
     // The same block through the all-columns metric is exactly the production
     // refusal: the placeholder columns have no value support.
     let mut all_columns = block.clone();
-    let refused = install_time_nullspace_shrinkage_penalty(&mut all_columns, 0);
+    let no_origin_entries = Array1::from_elem(block.design_entry.nrows(), false);
+    let refused = install_time_nullspace_shrinkage_penalty(&mut all_columns, 0, &no_origin_entries);
     assert!(
         refused.is_err(),
         "the control must refuse: an all-columns metric over zero placeholders is singular"
     );
     assert!(
-        install_time_nullspace_shrinkage_penalty(&mut block, 2)
+        install_time_nullspace_shrinkage_penalty(&mut block, 2, &no_origin_entries)
             .expect("value-block metric with placeholders excluded"),
         "expected a shrinkage penalty on the value block"
     );
@@ -8231,6 +8363,7 @@ fn release_measure_rigid_contracted_towers_vs_generic_tower_932() {
         let inputs = RigidRowInputs {
             row: 0,
             wi: w,
+            wi_entry: w,
             di: d,
             z_sum: z,
             covariance_ones: 1.0,
