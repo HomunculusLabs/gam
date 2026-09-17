@@ -227,22 +227,6 @@ impl PenaltySubspaceTrace {
         h
     }
 
-    /// Projected bilinear pseudo-inverse `aᵀ · K⁺ · b` where
-    /// `K⁺ = U_S · H_proj⁻¹ · U_Sᵀ`.
-    ///
-    /// Used by the rank-deficient LAML IFT correction path: when `b ∈
-    /// col(S_k) ⊂ range(S_+)`, applying the projected pseudo-inverse
-    /// instead of the full `H⁻¹` strips spurious null-space noise from
-    /// `a` (≈ the outer-stationarity residual `r`) before the inverse,
-    /// without biasing the numerator. Costs `O(p·r + r²)` versus the
-    /// `O(p²·r)` full solve.
-    pub(crate) fn bilinear_pseudo_inverse(&self, a: &Array1<f64>, b: &Array1<f64>) -> f64 {
-        let proj_a = gam_linalg::faer_ndarray::fast_atv(&self.u_s, a);
-        let proj_b = gam_linalg::faer_ndarray::fast_atv(&self.u_s, b);
-        let h_proj_inv_b = self.h_proj_inverse.dot(&proj_b);
-        proj_a.dot(&h_proj_inv_b)
-    }
-
     /// Euclidean projection onto the retained penalty/Hessian range used by
     /// this projected kernel: `P_S a = U_S U_Sᵀ a`.
     pub(crate) fn project_onto_subspace(&self, a: &Array1<f64>) -> Array1<f64> {

@@ -33,8 +33,10 @@ pub(crate) struct KktThetaCorrections {
 }
 
 /// Exact derivatives of the Newton/IFT residual correction `C(θ) = −½ r(θ)ᵀ K
-/// r(θ)`, `K = H⁻¹`, over the FULL θ = (ρ ‖ ψ) coordinate set covering the ρρ,
-/// cross-ρψ, and ψψ blocks uniformly.
+/// r(θ)` over the FULL θ = (ρ ‖ ψ) coordinate set covering the ρρ, cross-ρψ, and
+/// ψψ blocks uniformly. `K` is `mode_kernel`, the evaluation's one
+/// mode-response kernel: the cost-side correction and every mode response read
+/// the same object, on the inner stationarity system's own operator (#2695).
 ///
 /// At fixed β̂ each coordinate `i` contributes a score derivative `r_i = ∂_θᵢ r`
 /// and a frozen Hessian drift `A_i = ∂_θᵢ H|_β̂`:
@@ -74,8 +76,7 @@ pub(crate) struct KktThetaCorrections {
 /// coordinate freezes (its θ does not move), so its row/column correction is
 /// zero.
 pub(crate) fn compute_kkt_residual_theta_corrections<F>(
-    hop: &dyn HessianFactorization,
-    subspace: Option<&PenaltySubspaceTrace>,
+    mode_kernel: &ThetaModeResponseKernel<'_>,
     score_derivs: &[Array1<f64>],
     drift_apply: F,
     residual: &Array1<f64>,
@@ -113,18 +114,18 @@ where
         }
         .into());
     }
-    if residual.len() != hop.dim() {
+    if residual.len() != mode_kernel.hop.dim() {
         return Err(RemlError::DimensionMismatch {
             reason: format!(
                 "KKT residual dimension mismatch: residual={} Hessian dim={}",
                 residual.len(),
-                hop.dim()
+                mode_kernel.hop.dim()
             ),
         }
         .into());
     }
 
-    let q = solve_kkt_residual_kernel(hop, subspace, residual);
+    let q = mode_kernel.respond_one(residual);
     let mut a_i_qs = Vec::with_capacity(m);
     let mut r_i_dot_q = Vec::with_capacity(m);
     let mut q_a_i_q = Vec::with_capacity(m);
@@ -133,7 +134,7 @@ where
         if active[idx] {
             r_i_dot_q.push(0.0);
             q_a_i_q.push(0.0);
-            a_i_qs.push(Array1::<f64>::zeros(hop.dim()));
+            a_i_qs.push(Array1::<f64>::zeros(mode_kernel.hop.dim()));
             continue;
         }
         let a_i_q = drift_apply(idx, &q);
@@ -165,14 +166,14 @@ where
         let mut q_derivs = Vec::with_capacity(m);
         for idx in 0..m {
             if active[idx] {
-                a_solutions.push(Array1::<f64>::zeros(hop.dim()));
-                q_derivs.push(Array1::<f64>::zeros(hop.dim()));
+                a_solutions.push(Array1::<f64>::zeros(mode_kernel.hop.dim()));
+                q_derivs.push(Array1::<f64>::zeros(mode_kernel.hop.dim()));
                 continue;
             }
-            a_solutions.push(solve_kkt_residual_kernel(hop, subspace, &score_derivs[idx]));
+            a_solutions.push(mode_kernel.respond_one(&score_derivs[idx]));
             let mut rhs = score_derivs[idx].clone();
             rhs -= &a_i_qs[idx];
-            q_derivs.push(solve_kkt_residual_kernel(hop, subspace, &rhs));
+            q_derivs.push(mode_kernel.respond_one(&rhs));
         }
 
         // C_ij + (exact-KKT profile term r_iᵀ K r_j that the dense/operator
@@ -230,20 +231,6 @@ where
     };
 
     Ok(KktThetaCorrections { gradient, hessian })
-}
-
-pub(crate) fn solve_kkt_residual_kernel(
-    hop: &dyn HessianFactorization,
-    subspace: Option<&PenaltySubspaceTrace>,
-    rhs: &Array1<f64>,
-) -> Array1<f64> {
-    if let Some(kernel) = subspace {
-        let projected = gam_linalg::faer_ndarray::fast_atv(&kernel.u_s, rhs);
-        let solved_projected = kernel.h_proj_inverse.dot(&projected);
-        gam_linalg::faer_ndarray::fast_av(&kernel.u_s, &solved_projected)
-    } else {
-        hop.solve(rhs)
-    }
 }
 
 /// Freeze residual/IFT response only on the model's canonical upper face.

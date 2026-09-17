@@ -395,6 +395,17 @@ pub(crate) fn reml_laml_evaluate(
         hop.dim(),
         k,
     );
+    // #931 pass 2 / #2612: the ONE mode-response kernel of this evaluation. The
+    // mode responses `v_k`, the cost-side IFT correction below and that
+    // correction's θ-derivatives (`compute_kkt_residual_theta_corrections`) are
+    // all one-step Newton displacements of the INNER stationarity system, so
+    // every one of them reads this object, built on that system's own operator
+    // `mode_response_operator()`.
+    let mode_kernel = ThetaModeResponseKernel::select(
+        solution.penalty_subspace_trace.as_deref(),
+        solution.active_constraints.as_deref(),
+        solution.mode_response_operator(),
+    );
     let mut ift_residual_energy: Option<f64> = None;
     let mut inner_polish_step: Option<Array1<f64>> = None;
     if let Some(r) = kkt_residual_vec
@@ -402,58 +413,36 @@ pub(crate) fn reml_laml_evaluate(
         .filter(|_| kkt_residual_correction_active)
         .map(|r| r.as_ref())
     {
-        // Cost-side IFT correction `−½ rᵀ H⁻¹ r`. When the rank-deficient
-        // LAML fix is active (`penalty_subspace_trace = Some`), the
-        // mathematically correct inverse here is the Moore-Penrose
-        // pseudo-inverse on the kernel's identified subspace (`range(H_pen)`
-        // in the intrinsic #901 form; historically `range(S_+)`) — not the
-        // regularized full `H⁻¹`. The full-H solve at near-singular boundary
-        // states (the large-scale survival marginal-slope pathology) amplifies
-        // floating-point noise in `r` along sub-threshold directions by
-        // `1/σ_min(H) ≈ 10¹²`, which then propagates into a 10¹³-magnitude
-        // gradient component and traps the outer optimizer at max-iter.
-        // The spectral pseudo-inverse zeroes any component of `r` on
-        // directions excluded from the cost's pseudo-logdet before the
-        // inverse is applied — the same threshold for value and correction —
-        // recovering the honest correction.
-        // IFT mode response `w = H⁻¹ r` (full-rank) or `K r` (projected
-        // pseudo-inverse). Shared between the inner-objective residual energy
-        // `−½ rᵀ w` and the moving-Hessian log-det response below.
-        let mut polish_step_for_warm_start: Option<Array1<f64>> = None;
-        let (w, cost_correction, branch) =
-            if let Some(kernel) = solution.penalty_subspace_trace.as_ref() {
-                let w = kernel.apply_pseudo_inverse(r);
-                (
-                    w,
-                    -0.5_f64 * kernel.bilinear_pseudo_inverse(r, r),
-                    "projected",
-                )
-            } else {
-                // Full-H IFT mode response `w = H⁻¹ r`. The cached
-                // `DenseSpectralOperator` (materialized once for `log_det_h`
-                // at the top of this evaluator and shared via `RayonSafeOnce`)
-                // turns this into a single per-eigendirection `solve` — two
-                // GEMVs against the already-factored eigenbasis, NOT a refactor
-                // or row re-stream. Use the single-vector `solve` directly: it
-                // is the exact per-eigendirection form the gradient stack's
-                // unconstrained `respond_stack` arm uses column-by-column, so
-                // the cost-side and gradient-side IFT inverse stay bit-identical
-                // by construction (no separate `(p,1)` Array2 allocation +
-                // column copy, no second BLAS-3 entry point to drift from the
-                // gradient kernel's `solve_multi`).
-                //
-                // #2765: "bit-identical to the gradient side" means reading the
-                // SAME operator the gradient's `ThetaModeResponseKernel::select`
-                // reads, which is `mode_response_operator()` — equal to `hop` on
-                // every lane that installs no distinct IFT curvature, and NOT
-                // equal to it once the Jeffreys completion installs one. Both
-                // sides are one-step Newton displacements of the inner
-                // stationarity system, so both take that system's own operator.
-                let w = solution.mode_response_operator().solve(r);
-                let cost_correction = -0.5_f64 * r.view().dot(&w);
-                polish_step_for_warm_start = Some(w.clone());
-                (w, cost_correction, "full_h")
-            };
+        // Cost-side IFT correction `−½ rᵀ w`, where `w` is the returned mode's
+        // pending one-step displacement `β̂ − β*`. It is shared between the
+        // inner-objective residual energy `−½ rᵀ w` and the moving-Hessian
+        // log-det response below.
+        //
+        // When the rank-deficient LAML fix is active (`penalty_subspace_trace =
+        // Some`), `r` has already been reduced into the kernel's identified range
+        // (`projected_into_reduced_range` above), so no component on the cost's
+        // gauge directions reaches the inverse — the large-scale survival
+        // marginal-slope noise amplification that range reduction exists to stop.
+        //
+        // The displacement itself belongs to the stationarity system the inner
+        // solve iterated, not to the object the log-det is priced on. Before
+        // #2695 the projected lane applied `penalty_subspace_trace`'s own
+        // pseudo-inverse, built on `hessian_op` = H + S_λ + H_Φ, while the mode
+        // responses and the `full_h` lane solved on `mode_response_operator()`,
+        // which carries the Jeffreys completion when one exists. On the #2904
+        // SAS location-scale FD pin (Jeffreys-armed, projected lane) that direction
+        // was (−8.1e-8, −6.0e-7, −9.2e-7) against a measured β̂ − β* of (1.18e-7,
+        // 8.2e-9, −3.05e-8), so the moving-Hessian term was 10.26× the log-det
+        // displacement it corrects, and the ρ0/ρ1 central differences read
+        // 0.7806/−0.2109 against the analytic 0.7520/−0.1551 (pool jobs 1112782,
+        // 1114313).
+        let w = mode_kernel.respond_one(r);
+        let cost_correction = -0.5_f64 * r.view().dot(&w);
+        let (polish_step_for_warm_start, branch) = if solution.penalty_subspace_trace.is_some() {
+            (None, "projected")
+        } else {
+            (Some(w.clone()), "full_h")
+        };
         // MOVING-HESSIAN LOG-DET RESPONSE (gam#1395). The outer criterion
         // `V(β) = −ℓ(β) + ½βᵀSβ + ½log|H(β)+S| − ½log|S|` has the β-gradient
         // `∇_βV = r + g_ld`, where `r = ∇_β(−ℓ+½βᵀSβ)` is the inner KKT residual
@@ -687,12 +676,8 @@ pub(crate) fn reml_laml_evaluate(
         // #2612: the mode response is differentiated through the INNER
         // stationarity system, which is not always the object the logdet is
         // priced on. `mode_response_operator()` is that system's operator and
-        // equals `hop` on every lane that has not installed a distinct one.
-        let mode_kernel = ThetaModeResponseKernel::select(
-            solution.penalty_subspace_trace.as_deref(),
-            solution.active_constraints.as_deref(),
-            solution.mode_response_operator(),
-        );
+        // equals `hop` on every lane that has not installed a distinct one;
+        // `mode_kernel` is built on it once, above the cost correction.
         let mut rhs_stack = Array2::<f64>::zeros((dim, total_cols));
         let mut col_idx = 0;
         if need_rho_mode_responses {
@@ -1393,10 +1378,8 @@ pub(crate) fn reml_laml_evaluate(
         // an affine score, so their second self-derivative is zero here.
         let mut exponential_self_coupling = vec![true; k];
         exponential_self_coupling.extend(std::iter::repeat_n(false, ext_dim));
-        let subspace = solution.penalty_subspace_trace.as_deref();
         Some(compute_kkt_residual_theta_corrections(
-            hop,
-            subspace,
+            &mode_kernel,
             &score_derivs,
             drift_apply,
             r,
@@ -1874,9 +1857,9 @@ pub(crate) fn reml_laml_evaluate(
                  IFT-gate diagnostics: kkt_residual.is_some()={} (must be true; this is the \
                  projected-KKT residual the inner solver hands over), dispersion={} (must be \
                  `Fixed` for the LAML IFT identity to hold), penalty_subspace_trace.is_some()={} \
-                 (when true the cost IFT uses bilinear_pseudo_inverse on range(S₊); when false \
-                 the full H⁻¹·r solve is the only path and is numerically unreliable on \
-                 near-singular H). \
+                 (when true the residual is reduced into the kernel's identified range before \
+                 the mode-response solve; when false no range reduction precedes the solve, \
+                 which is numerically unreliable on near-singular H). \
                  If kkt_residual.is_some()=false under fixed dispersion, the convergent inner \
                  path forgot to populate `BlockwiseInnerResult::kkt_residual` (call \
                  `exact_newton_joint_kkt_residual_for_ift(..., Some(active_sets))` on return) \

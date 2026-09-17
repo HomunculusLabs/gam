@@ -1594,8 +1594,8 @@ pub(crate) fn ift_projected_pseudo_inverse_kills_null_subspace_noise() {
 
     // Honest reference: pseudo-inverse evaluated on the noise-free r
     // (gives the correction we'd see at exact inner KKT).
-    let corr_honest = kernel.bilinear_pseudo_inverse(&r_honest, &a_k);
-    let corr_proj = kernel.bilinear_pseudo_inverse(&r_total, &a_k);
+    let corr_honest = r_honest.dot(&kernel.apply_pseudo_inverse(&a_k));
+    let corr_proj = r_total.dot(&kernel.apply_pseudo_inverse(&a_k));
     let corr_full = full_h_inv_bilinear(&h_full, &r_total, &a_k);
 
     // Projected pseudo-inverse: matches the honest reference exactly
@@ -1629,7 +1629,7 @@ pub(crate) fn ift_full_h_solve_amplifies_null_subspace_noise_by_inverse_small_ei
     let r = array![0.0_f64, 0.0, 0.0, 0.0, eta];
     let a_k = array![0.0_f64, 0.0, 0.0, 0.0, xi];
 
-    let corr_proj = kernel.bilinear_pseudo_inverse(&r, &a_k);
+    let corr_proj = r.dot(&kernel.apply_pseudo_inverse(&a_k));
     let corr_full = full_h_inv_bilinear(&h_full, &r, &a_k);
 
     // Projection: U_Sᵀ kills both r and a_k entirely (they live in
@@ -1677,7 +1677,7 @@ pub(crate) fn ift_projected_pseudo_inverse_cannot_help_when_small_eig_lives_insi
     let r = array![eta, 0.0, 0.0, 0.0, 0.0]; // noise in e_0, which is in range(S_+)
     let a_k = array![xi, 0.0, 0.0, 0.0, 0.0];
 
-    let corr_proj = kernel.bilinear_pseudo_inverse(&r, &a_k);
+    let corr_proj = r.dot(&kernel.apply_pseudo_inverse(&a_k));
     let corr_full = full_h_inv_bilinear(&h_full, &r, &a_k);
 
     // Both methods give the same blow-up `ηξ/σ_min = 1e2` because
@@ -1712,7 +1712,7 @@ pub(crate) fn ift_projected_pseudo_inverse_matches_full_h_on_well_conditioned_fi
     let r = array![0.3_f64, -0.7, 1.2, 0.4, 0.0]; // honest in range(S_+)
     let a_k = array![0.5_f64, 0.1, -0.2, 0.8, 0.0]; // honest in range(S_+)
 
-    let corr_proj = kernel.bilinear_pseudo_inverse(&r, &a_k);
+    let corr_proj = r.dot(&kernel.apply_pseudo_inverse(&a_k));
     let corr_full = full_h_inv_bilinear(&h_full, &r, &a_k);
 
     assert_relative_eq!(corr_proj, corr_full, max_relative = 1e-12);
@@ -1798,7 +1798,7 @@ pub(crate) fn dense_h_inv_bilinear_via_eig(
 /// Independent ground-truth bilinear form `aᵀ U_S (U_Sᵀ H U_S)⁻¹
 /// U_Sᵀ b`. Recomputes the projected inverse via a fresh
 /// eigendecomposition of `U_Sᵀ H U_S` — a separate code path from
-/// `PenaltySubspaceTrace::bilinear_pseudo_inverse` (which applies a
+/// `PenaltySubspaceTrace::apply_pseudo_inverse` (which applies a
 /// PRECOMPUTED `h_proj_inverse`). Match between the two is non-
 /// trivial verification of the helper's inversion.
 pub(crate) fn projected_pseudo_inverse_truth(
@@ -1930,8 +1930,8 @@ pub(crate) fn ift_projected_pseudo_inverse_saves_orders_of_magnitude_on_cross_co
     // ── (P1) Helper matches independent ground-truth bilinear ──
     let truth_clean = projected_pseudo_inverse_truth(&h_full, &u_s, &r_clean, &a_k);
     let truth_total = projected_pseudo_inverse_truth(&h_full, &u_s, &r_total, &a_k);
-    let corr_proj_clean = kernel.bilinear_pseudo_inverse(&r_clean, &a_k);
-    let corr_proj_total = kernel.bilinear_pseudo_inverse(&r_total, &a_k);
+    let corr_proj_clean = r_clean.dot(&kernel.apply_pseudo_inverse(&a_k));
+    let corr_proj_total = r_total.dot(&kernel.apply_pseudo_inverse(&a_k));
     assert_relative_eq!(corr_proj_clean, truth_clean, max_relative = 1e-10);
     assert_relative_eq!(corr_proj_total, truth_total, max_relative = 1e-10);
 
@@ -2307,8 +2307,7 @@ pub(crate) fn ift_gradient_correction_with_zero_projected_residual_is_zero() {
         solution.penalty_coords[idx].scaled_matvec(v, lambdas[idx])
     };
     let corrections = compute_kkt_residual_theta_corrections(
-        &hop,
-        solution.penalty_subspace_trace.as_deref(),
+        &ThetaModeResponseKernel::select(solution.penalty_subspace_trace.as_deref(), None, &hop),
         &penalty_a_k_betas,
         drift_apply,
         &zero_residual,
@@ -2353,8 +2352,7 @@ pub(crate) fn ift_rho_upper_bound_masks_residual_correction_direction() {
         solution.penalty_coords[idx].scaled_matvec(v, lambdas[idx])
     };
     let corrections = compute_kkt_residual_theta_corrections(
-        &hop,
-        solution.penalty_subspace_trace.as_deref(),
+        &ThetaModeResponseKernel::select(solution.penalty_subspace_trace.as_deref(), None, &hop),
         &penalty_a_k_betas,
         drift_apply,
         &residual,
@@ -2436,8 +2434,7 @@ pub(crate) fn kkt_theta_correction_cross_and_psi_hessian_matches_finite_differen
     let hop = DenseSpectralOperator::from_symmetric(&h0).unwrap();
     let drift_apply = |idx: usize, v: &Array1<f64>| -> Array1<f64> { drift_mats[idx].dot(v) };
     let corrections = compute_kkt_residual_theta_corrections(
-        &hop,
-        None,
+        &ThetaModeResponseKernel::select(None, None, &hop),
         &score_derivs,
         drift_apply,
         &r0,

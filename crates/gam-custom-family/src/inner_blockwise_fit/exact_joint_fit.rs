@@ -895,6 +895,11 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             let escape_block_constraints =
                 collect_block_linear_constraints(family, &states, specs)?;
             let escape_objective_tol = inner_tol * (1.0 + lastobjective.abs());
+            let decrement_resolution = joint_objective_roundoff_slack(
+                lastobjective,
+                lastobjective,
+                objective_resolution_witness.measured(),
+            );
             match resolve_constrained_converged_mode(
                 family,
                 &states,
@@ -909,6 +914,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 saddle_escapes_used,
                 previous_escape_lambda_min,
                 escape_objective_tol,
+                decrement_resolution,
                 &mut jeffreys_completion_calls,
             )? {
                 ConstrainedModeResolution::Certified { workspace } => {
@@ -917,6 +923,32 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     converged = true;
                     cycles_done = cycle;
                     break;
+                }
+                ConstrainedModeResolution::Unresolved {
+                    newton_decrement,
+                    weakly_identified_decrement,
+                } => {
+                    log::info!(
+                        "[PIRLS/joint-Newton mode certificate] tentative constrained convergence revoked at cycle {cycle}: decrement={newton_decrement:.3e}, weak={weakly_identified_decrement:.3e} > resolution={decrement_resolution:.3e}",
+                    );
+                    if family.joint_jeffreys_term_required() {
+                        arm_jeffreys_completion_endgame(
+                            &mut jeffreys_completion_endgame,
+                            &mut best_residual_seen,
+                            &mut cycles_since_residual_improved,
+                            &mut tr_clamped_during_stall,
+                            &mut residual_descent_history,
+                            &mut residual_rate_history,
+                            &mut merit_window,
+                            &mut geometric_tail_history,
+                        );
+                    }
+                    // Nothing moved and the model is unchanged, so the stall
+                    // evidence gathered so far still describes this solve.
+                    converged = false;
+                    returned_mode_curvature_certified = false;
+                    last_cycle_residual_below_tol = false;
+                    last_cycle_obj_change_below_tol = false;
                 }
                 ConstrainedModeResolution::Escape {
                     direction,

@@ -93,6 +93,13 @@ pub(crate) struct ExactJointModeCurvatureCertificate {
     /// coefficient direction `δ = D^{-1/2} v` satisfies `δᵀ H_pen δ = γ_min`, so
     /// a step `s·δ` lowers the quadratic model by `½ s² |γ_min|`.
     pub(crate) negative_curvature_direction: Option<Array1<f64>>,
+    /// Newton decrement `½ Σ c_k²/|γ_k|` of the returned mode's stationarity
+    /// system `∇ℓ − Sβ + ∇Φ` over the certified face's identified modes, and its
+    /// weakly-identified counterpart (#2695). `NaN` when the family serves no
+    /// joint gradient at this point. The curvature verdict says whether the point
+    /// can be a mode; the decrements say how much the local model still promises.
+    pub(crate) newton_decrement: f64,
+    pub(crate) weakly_identified_decrement: f64,
 }
 
 impl ExactJointModeCurvatureCertificate {
@@ -2236,13 +2243,14 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
             }
         }
     }
+    let mut jeffreys_score: Option<Array1<f64>> = None;
     let jeffreys_curvature = if family.joint_jeffreys_term_required() {
         let z_joint = build_joint_jeffreys_subspace(family, specs, ranges)?.ok_or_else(|| {
             "fresh exact joint-mode curvature certificate: Jeffreys family has no coefficient subspace"
                 .to_string()
         })?;
         match custom_family_joint_jeffreys_term(family, states, specs, ranges, &z_joint)? {
-            Some((_phi, _gradient, hphi)) => {
+            Some((_phi, score, hphi)) => {
                 let completion = exact_joint_jeffreys_completion_at(
                     family,
                     states,
@@ -2251,6 +2259,7 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
                     total_p,
                     "fresh exact joint-mode curvature certificate",
                 )?;
+                jeffreys_score = Some(score);
                 Some((hphi, completion))
             }
             None => None,
@@ -2259,6 +2268,38 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
         None
     };
     let jeffreys_completion_assembled = jeffreys_curvature.is_some();
+    // The stationarity system this returned β was solved for, `∇ℓ − Sβ + ∇Φ`,
+    // read at the returned β itself. Its whitened coefficients on the certified
+    // face give the Newton decrement the local model still promises there.
+    let stationarity_rhs = match crate::joint_newton::load_joint_gradient_evaluation(
+        family,
+        specs,
+        options,
+        states,
+        false,
+        workspace.clone(),
+    )?
+    .1
+    {
+        Some(likelihood_gradient) if likelihood_gradient.len() == total_p => {
+            let beta = flatten_state_betas(states, specs);
+            let mut rhs = &likelihood_gradient
+                - &crate::covariance::apply_joint_block_penalty(
+                    ranges,
+                    s_lambdas,
+                    &beta,
+                    0.0,
+                    joint_bundle,
+                );
+            if let Some(score) = jeffreys_score.as_ref()
+                && score.len() == total_p
+            {
+                rhs += score;
+            }
+            Some(rhs)
+        }
+        _ => None,
+    };
     let hessian = assemble_true_joint_objective_hessian(
         likelihood_hessian,
         ranges,
@@ -2292,6 +2333,8 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
                     numerical_floor: 0.0,
                     jeffreys_completion_assembled,
                     negative_curvature_direction: None,
+                    newton_decrement: 0.0,
+                    weakly_identified_decrement: 0.0,
                 });
             }
             ActiveConstraintTangentGeometry::Tangent(z) => {
@@ -2311,10 +2354,14 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
         },
         None => (hessian, metric, None),
     };
-    let zero_rhs = Array1::<f64>::zeros(certificate_matrix.nrows());
+    let certificate_rhs = match (stationarity_rhs.as_ref(), tangent.as_ref()) {
+        (Some(rhs), Some(z)) => z.t().dot(rhs),
+        (Some(rhs), None) => rhs.clone(),
+        (None, _) => Array1::<f64>::zeros(certificate_matrix.nrows()),
+    };
     let spectrum = whitened_spectrum::WhitenedHessianSpectrum::decompose(
         &certificate_matrix,
-        &zero_rhs,
+        &certificate_rhs,
         &certificate_metric,
         KKT_REFUSAL_RANK_TOL,
     )?;
@@ -2370,6 +2417,16 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
         numerical_floor: spectrum.numerical_floor,
         jeffreys_completion_assembled,
         negative_curvature_direction,
+        newton_decrement: if stationarity_rhs.is_some() {
+            spectrum.newton_decrement()
+        } else {
+            f64::NAN
+        },
+        weakly_identified_decrement: if stationarity_rhs.is_some() {
+            spectrum.weakly_identified_decrement()
+        } else {
+            f64::NAN
+        },
     })
 }
 
@@ -2414,6 +2471,14 @@ enum ConstrainedModeResolution {
         alpha: f64,
         lambda_min: f64,
     },
+    /// The face-tangent curvature is PSD, but the returned mode's Newton
+    /// decrement is above the objective's resolution (#2695): the local model
+    /// still promises a correction that moves every criterion built on this
+    /// mode. The caller keeps iterating from the same point.
+    Unresolved {
+        newton_decrement: f64,
+        weakly_identified_decrement: f64,
+    },
 }
 
 /// Second-order certification of a constrained first-order KKT point, with a
@@ -2436,6 +2501,7 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
     saddle_escapes_used: usize,
     previous_escape_lambda_min: Option<f64>,
     objective_tol: f64,
+    decrement_resolution: f64,
     jeffreys_completion_calls: &mut usize,
 ) -> Result<ConstrainedModeResolution, CustomFamilyError> {
     // Certify on the tangent of every NUMERICALLY-TIGHT constraint, not only the
@@ -2470,6 +2536,7 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
         saddle_escapes_used,
         previous_escape_lambda_min,
         objective_tol,
+        decrement_resolution,
         jeffreys_completion_calls,
         0,
     )
@@ -2494,6 +2561,7 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
     saddle_escapes_used: usize,
     previous_escape_lambda_min: Option<f64>,
     objective_tol: f64,
+    decrement_resolution: f64,
     jeffreys_completion_calls: &mut usize,
     face_exchanges: usize,
 ) -> Result<ConstrainedModeResolution, CustomFamilyError> {
@@ -2516,8 +2584,29 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
     let lambda_min = certificate.minimum_whitened_eigenvalue;
     let numerical_floor = certificate.numerical_floor;
     if !certificate.has_resolvable_negative_curvature() {
+        let newton_decrement = certificate.newton_decrement;
+        let weakly_identified_decrement = certificate.weakly_identified_decrement;
+        // One returned-mode rule on both branches (#2695). PSD face curvature says
+        // this point can be a mode; it is one once the local model promises no
+        // decrease the objective can resolve. The unconstrained returned-mode
+        // certificate already asks this (ed776b85e); without it here, warm-started
+        // probes of the #2904 FD pin certified with a pending correction and priced
+        // the rho 0 LAML slope at 6.954 against the analytic 0.7520.
+        if !(newton_decrement.is_finite()
+            && newton_decrement <= decrement_resolution
+            && weakly_identified_decrement.is_finite()
+            && weakly_identified_decrement <= decrement_resolution)
+        {
+            log::info!(
+                "[PIRLS/joint-Newton mode certificate] constrained returned beta has PSD face curvature (lambda_min={lambda_min:.6e}, floor={numerical_floor:.6e}) but decrement={newton_decrement:.3e}, weak={weakly_identified_decrement:.3e} above the objective resolution {decrement_resolution:.3e}; iterating on",
+            );
+            return Ok(ConstrainedModeResolution::Unresolved {
+                newton_decrement,
+                weakly_identified_decrement,
+            });
+        }
         log::info!(
-            "[PIRLS/joint-Newton mode certificate] constrained returned beta certified from fresh exact curvature: lambda_min={lambda_min:.6e}, floor={numerical_floor:.6e}",
+            "[PIRLS/joint-Newton mode certificate] constrained returned beta certified from fresh exact curvature: lambda_min={lambda_min:.6e}, floor={numerical_floor:.6e}, decrement={newton_decrement:.3e}, weak={weakly_identified_decrement:.3e}",
         );
         return Ok(ConstrainedModeResolution::Certified {
             workspace: certificate.workspace,
@@ -2748,6 +2837,7 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
             saddle_escapes_used,
             previous_escape_lambda_min,
             objective_tol,
+            decrement_resolution,
             jeffreys_completion_calls,
             face_exchanges + 1,
         );
