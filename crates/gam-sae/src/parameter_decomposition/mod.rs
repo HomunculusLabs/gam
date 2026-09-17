@@ -83,7 +83,7 @@ pub mod codec;
 // [unlanded: field]
 
 // Joint finite-intervention objective and structural proposals.
-// [unlanded: fit]
+pub mod fit;
 
 // Exact masked rewrites of gated units, norms, biases and residual edges.
 // [unlanded: gated_rewrite]
