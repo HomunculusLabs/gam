@@ -1440,9 +1440,20 @@ mod shape_uncertainty_joint_recompute_tests {
             dispersion.posterior_covariance_scale() > 0.0,
             "a real residual ⇒ positive dispersion"
         );
+        let information = term
+            .exact_observed_information_shape_covariance(&rho, target.view(), &cache)
+            .expect("exact observed information at the converged state");
         let joint = term
-            .assemble_shape_uncertainty(&cache, dispersion)
+            .assemble_shape_uncertainty(&information, dispersion)
             .expect("direct joint bands");
+        assert!(
+            matches!(
+                joint.operator,
+                crate::manifold::SaeShapeCovarianceOperator::ObservedInformation { .. }
+            ),
+            "the converged PD basin must report an observed-information covariance; got {:?}",
+            joint.operator
+        );
 
         // Property 1: the final-state recompute reproduces the joint path (it IS
         // the joint path, rebuilt from the term + ρ rather than a cached factor).

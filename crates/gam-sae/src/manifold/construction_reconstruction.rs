@@ -660,13 +660,32 @@ impl SaeManifoldTerm {
         })
     }
 
+    /// The border range of each atom's decoder block in the joint cache layout:
+    /// the factored `(M_k·r_k)` range when frames are active, the full
+    /// `(M_k·p)` range otherwise. One owner, because the selected inverse blocks
+    /// of `A` and the bands that consume them must name the same coordinates.
+    pub(crate) fn shape_covariance_border_ranges(&self) -> Vec<std::ops::Range<usize>> {
+        if self.frames_active() {
+            let frame_projection = FrameProjection::new(self);
+            (0..self.k_atoms())
+                .map(|k| frame_projection.atom_border_range(k))
+                .collect()
+        } else {
+            self.beta_block_offsets().to_vec()
+        }
+    }
+
     /// Posterior covariance and ambient shape band for every atom — the
     /// user-facing uncertainty of the fitted manifold shapes.
     ///
     /// For atom `k` with decoder-block range `r_k` (see
-    /// [`Self::beta_block_offsets`]), `Cov(β_k) = φ·S_β⁻¹[r_k, r_k]` is the
-    /// φ-scaled posterior covariance of its decoder coefficients with the
-    /// latent coordinates marginalized out. The ambient point at a coordinate
+    /// [`Self::shape_covariance_border_ranges`]),
+    /// `Cov(β_k) = φ·[A⁺]_ββ[r_k, r_k]` is the φ-scaled posterior covariance of
+    /// its decoder coefficients with the latent coordinates and the other atoms
+    /// marginalized out through the exact observed information `A` (#2933 F33;
+    /// see [`SaeObservedInformationCovariance`]). An
+    /// [`SaeShapeInformation::Unavailable`] input yields explicit `None` bands
+    /// carrying its reason. The ambient point at a coordinate
     /// `t` is `m_k(t) = Φ_k(t)·B_k`, *linear* in `β_k`, so its per-channel
     /// posterior variance is the closed form
     /// `Var_c(t) = Σ_{b1,b2} Φ_k(t)[b1] Φ_k(t)[b2] · Cov(β_k)[(b1,c),(b2,c)]`
@@ -675,24 +694,30 @@ impl SaeManifoldTerm {
     /// values already stored on the atom, so it reports uncertainty exactly
     /// where the data lives and needs no basis-kind-specific grid.
     ///
-    /// A near-degenerate atom has a near-singular Schur block, so `Cov(β_k)` —
-    /// and the band — fans out automatically: the band width is a
+    /// A near-degenerate atom has small retained curvature in `A`, so
+    /// `Cov(β_k)` — and the band — fans out automatically: the band width is a
     /// per-coordinate visual of how well each atom is identified.
     ///
     /// `φ` is [`SaeReconstructionDispersion::posterior_covariance_scale`], the
-    /// likelihood-frame dispersion. `S_β` is assembled through the same row
+    /// likelihood-frame dispersion. `A` is assembled through the same row
     /// metric as the likelihood, so under a whitening metric it already carries
     /// the metric's variance scale and the multiplier is dimensionless: scaling
     /// every observation unit by `c` (with `Σ → c²Σ`) scales `Cov(β)` by `c²`.
     pub fn assemble_shape_uncertainty(
         &self,
-        cache: &ArrowFactorCache,
+        information: &SaeShapeInformation,
         dispersion: SaeReconstructionDispersion,
     ) -> Result<SaeShapeUncertainty, String> {
+        let covariance = match information {
+            SaeShapeInformation::ObservedInformation(covariance) => covariance,
+            SaeShapeInformation::Unavailable(reason) => {
+                return Ok(self.unavailable_shape_uncertainty(dispersion, reason.clone()));
+            }
+        };
         let p = self.output_dim();
         let covariance_scale = dispersion.posterior_covariance_scale();
-        // #972 / #977 T1: the cache β block is the FACTORED border when frames
-        // are active, so each atom's Schur inverse block is the `(M_k·r_k)`
+        // #972 / #977 T1: the β block is the FACTORED border when frames are
+        // active, so each atom's selected inverse block is the `(M_k·r_k)`
         // coordinate covariance `Cov(vec C_k)`. We LIFT it to the full
         // `(M_k·p)` decoder covariance `Cov(vec B_k) = (I_{M_k} ⊗ U_k) Cov(vec
         // C_k)(I_{M_k} ⊗ U_k)ᵀ` (since `B_k = C_k U_kᵀ`) so the downstream band
@@ -700,19 +725,26 @@ impl SaeManifoldTerm {
         // full-`B` path the block is already `(M_k·p)` and the lift is skipped.
         let frames_active = self.frames_active();
         let frame_projection = FrameProjection::new(self);
-        let block_ranges = if frames_active {
-            (0..self.k_atoms())
-                .map(|k| frame_projection.atom_border_range(k))
-                .collect::<Vec<_>>()
-        } else {
-            self.beta_block_offsets().to_vec()
-        };
+        let block_ranges = self.shape_covariance_border_ranges();
+        if covariance.blocks.len() != self.k_atoms() {
+            return Err(format!(
+                "assemble_shape_uncertainty: the information carries {} atom blocks for K={}",
+                covariance.blocks.len(),
+                self.k_atoms()
+            ));
+        }
         let mut atoms = Vec::with_capacity(self.k_atoms());
         for (k, atom) in self.atoms.iter().enumerate() {
             let m = atom.basis_size();
-            let cov_block = cache
-                .schur_inverse_block(block_ranges[k].clone())
-                .map_err(|e| format!("assemble_shape_uncertainty: atom {k}: {e}"))?;
+            let width = block_ranges[k].len();
+            if covariance.blocks[k].dim() != (width, width) {
+                return Err(format!(
+                    "assemble_shape_uncertainty: atom {k} information block {:?} does not \
+                     match its border range of width {width}",
+                    covariance.blocks[k].dim()
+                ));
+            }
+            let cov_block = covariance.blocks[k].clone();
             let n_rows = atom.n_obs();
             let d = atom.latent_dim();
             // Evenly-strided evaluation rows bound the band cost.
@@ -787,35 +819,42 @@ impl SaeManifoldTerm {
                 band_sd_robust: None,
             });
         }
-        Ok(SaeShapeUncertainty { dispersion, atoms })
+        Ok(SaeShapeUncertainty {
+            dispersion,
+            operator: SaeShapeCovarianceOperator::ObservedInformation {
+                identified_rank: covariance.identified_rank,
+                ambient_dim: covariance.ambient_dim,
+            },
+            atoms,
+        })
     }
 
-    /// Recompute the JOINT inverse-Hessian shape bands at the CURRENT (final)
-    /// term + ρ state — the same joint covariance
+    /// Recompute the JOINT observed-information shape bands at the CURRENT
+    /// (final) term + ρ state — the same joint covariance
     /// [`Self::assemble_shape_uncertainty`] forms, but rebuilt AFTER a
-    /// structure-changing or finalization move invalidated the pre-search Schur
-    /// factor.
+    /// structure-changing or finalization move invalidated the pre-search state.
     ///
     /// [`super::SaeManifoldOuterObjective::decoder_shape_uncertainty`] reads the
-    /// joint factor off the outer objective BEFORE `into_fitted` consumes it, so
+    /// information off the outer objective BEFORE `into_fitted` consumes it, so
     /// the bands it returns describe the PRE-search dictionary at the settled ρ.
     /// When evidence-guarded structure search grows / re-converges the whole
     /// dictionary (a certified birth / fission / fusion or a demoted death), or a
     /// finalization fallback swaps the settled basin / canonicalizes charts, that
-    /// factor no longer describes the returned model. This rebuilds the undamped
-    /// Direct joint-Hessian factor from THIS (final) term at `rho` — the exact
-    /// factor the penalized quasi-Laplace criterion forms at the inner optimum — and reads the
-    /// per-atom covariance and bands off its Schur factor, scaling by the
-    /// reconstruction dispersion `φ̂`. The result is the DOCUMENTED joint
-    /// covariance: it carries the cross-atom covariance and the decoder-coordinate
-    /// Schur couplings, and its per-channel band varies across output channels.
-    /// Every atom is covered because the factor is assembled at the final
-    /// dictionary's `k_atoms()`.
+    /// information no longer describes the returned model. This re-converges THIS
+    /// (final) term at `rho` through the penalized quasi-Laplace criterion,
+    /// re-forms the exact observed information `A` at that inner optimum
+    /// ([`Self::exact_observed_information_shape_covariance`]), and reads the
+    /// per-atom covariance and bands off its selected inverse, scaling by the
+    /// reconstruction dispersion `φ̂`. The result carries the cross-atom
+    /// covariance and the decoder-coordinate couplings, and its per-channel band
+    /// varies across output channels. Every atom is covered because `A` is
+    /// assembled at the final dictionary's `k_atoms()`.
     ///
     /// The term is already at its optimum, so the inner re-solve converges
-    /// immediately. When the streaming plan cannot expose the exact Direct
-    /// factor, the returned atom entries carry explicit `None` bands. Call before
-    /// `Self::into_fitted` has run is not required; it takes the fitted
+    /// immediately. When the streaming plan cannot materialize `A`, or `A` has
+    /// resolved negative curvature at the state, the returned atom entries carry
+    /// explicit `None` bands and [`SaeShapeUncertainty::operator`] names why.
+    /// Call before `Self::into_fitted` has run is not required; it takes the fitted
     /// `term`/`rho` directly.
     pub fn recompute_joint_shape_uncertainty(
         &mut self,
@@ -833,10 +872,13 @@ impl SaeManifoldTerm {
             self.k_atoms(),
         )?;
         if !plan.direct_logdet_admitted() {
-            // No exact Direct Schur factor at this scale: report explicit
+            // No dense exact observed information at this scale: report explicit
             // unavailability rather than substituting a different covariance.
             let dispersion = self.unfactored_reconstruction_dispersion(target, rho)?;
-            return Ok(self.unavailable_shape_uncertainty(dispersion));
+            return Ok(self.unavailable_shape_uncertainty(
+                dispersion,
+                SaeShapeCovarianceUnavailable::NoDenseObservedInformation,
+            ));
         }
         let (_cost, loss, cache) = self
             .penalized_quasi_laplace_criterion_with_cache(
@@ -852,14 +894,18 @@ impl SaeManifoldTerm {
         let residual = self.reconstruction_residual(target, rho)?;
         let dispersion =
             self.reconstruction_dispersion(&loss, &cache, rho, Some(residual.view()))?;
-        self.assemble_shape_uncertainty(&cache, dispersion)
+        let information = self.exact_observed_information_shape_covariance(rho, target, &cache)?;
+        self.assemble_shape_uncertainty(&information, dispersion)
     }
 
-    /// Explicitly unavailable joint shape uncertainty for a streaming fit whose
-    /// execution plan cannot expose the exact joint Schur factor.
+    /// Explicitly unavailable joint shape uncertainty, carrying why no covariance
+    /// exists: an execution plan that cannot materialize the dense observed
+    /// information, or a state whose observed information has resolved negative
+    /// curvature.
     pub(crate) fn unavailable_shape_uncertainty(
         &self,
         dispersion: SaeReconstructionDispersion,
+        reason: SaeShapeCovarianceUnavailable,
     ) -> SaeShapeUncertainty {
         let atoms = self
             .atoms

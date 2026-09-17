@@ -1790,12 +1790,14 @@ impl SaeManifoldOuterObjective {
     /// covariance and ambient bands (see
     /// [`SaeManifoldTerm::assemble_shape_uncertainty`]).
     ///
-    /// Recomputes the converged joint-Hessian Laplace factor at the settled ρ
-    /// — the same undamped Direct factor the penalized quasi-Laplace criterion forms at the inner
-    /// optimum — and reads the per-atom covariance and bands off its cached
-    /// Schur factor, scaling by the Gaussian reconstruction dispersion `φ̂`.
-    /// The term is already at the optimum after the outer fit, so the inner
-    /// re-solve converges immediately. Call before [`Self::into_fitted`].
+    /// Re-converges the penalized quasi-Laplace criterion at the settled ρ,
+    /// re-forms the exact observed information `A` at that inner optimum
+    /// ([`SaeManifoldTerm::exact_observed_information_shape_covariance`]), and
+    /// reads the per-atom covariance and bands off its selected inverse, scaling
+    /// by the Gaussian reconstruction dispersion `φ̂` (#2933 F33: not the
+    /// majorizer's Schur inverse). The term is already at the optimum after the
+    /// outer fit, so the inner re-solve converges immediately. Call before
+    /// [`Self::into_fitted`].
     /// The most recent curvature-homotopy entry walk outcome on the live term
     /// (#1007), or `None` when no walk has run. Surfaced on the objective so the
     /// arrival / bifurcation / collapse outcome is observable without consuming
@@ -1820,10 +1822,13 @@ impl SaeManifoldOuterObjective {
             let dispersion = self
                 .term
                 .unfactored_reconstruction_dispersion(self.target.view(), &rho)?;
-            return Ok(self.term.unavailable_shape_uncertainty(dispersion));
+            return Ok(self.term.unavailable_shape_uncertainty(
+                dispersion,
+                SaeShapeCovarianceUnavailable::NoDenseObservedInformation,
+            ));
         }
-        // Re-form the strict undamped joint factor at the settled ρ. A failure is
-        // an inference failure; it is never replaced by a different covariance.
+        // Re-form the converged inner optimum at the settled ρ. A failure is an
+        // inference failure; it is never replaced by a different covariance.
         let saved_term = self.term.clone();
         self.declare_collapse_prevention_gates_on_term();
         let evaluated = self.term.penalized_quasi_laplace_criterion_with_cache(
@@ -1848,7 +1853,12 @@ impl SaeManifoldOuterObjective {
         let dispersion =
             self.term
                 .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))?;
-        self.term.assemble_shape_uncertainty(&cache, dispersion)
+        let information = self.term.exact_observed_information_shape_covariance(
+            &rho,
+            self.target.view(),
+            &cache,
+        )?;
+        self.term.assemble_shape_uncertainty(&information, dispersion)
     }
 
     /// Record the discrete fitted-data collapse verdict without changing the

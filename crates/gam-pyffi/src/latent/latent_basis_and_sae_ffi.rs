@@ -2287,6 +2287,12 @@ fn sae_fit_report_into_dict<'py>(
         "dispersion",
         shape_uncertainty.dispersion.raw_output_noise_variance,
     )?;
+    // #2933 F33 — which operator the decoder covariances invert, or why every
+    // per-atom band above is absent. The wire names are owned by the Rust enum.
+    out.set_item(
+        "shape_covariance_operator",
+        shape_uncertainty.operator.as_str(),
+    )?;
     // Provenance of the per-row inner product the fit installed (#980). Object 4
     // reads this to certify which metric the gauge pulled back through:
     // "Euclidean" (no shard, bit-identical isotropic path) or "OutputFisher"

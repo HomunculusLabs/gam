@@ -18,17 +18,21 @@ pub const SAE_DECODER_COV_PAYLOAD_MAX_ENTRIES: usize = 1 << 24;
 /// In the primary path — [`SaeManifoldTerm::assemble_shape_uncertainty`], and
 /// after a structure/finalization change its final-state twin
 /// [`SaeManifoldTerm::recompute_joint_shape_uncertainty`] — the covariance is
-/// the φ-scaled β-block of the JOINT inverse Hessian (coordinates marginalized
-/// out); the band is its closed-form push-forward through the linear
-/// basis→ambient map `m_k(t) = Φ_k(t)·B_k`. This is what the production fit
-/// returns.
+/// the φ-scaled β-block of the pseudo-inverse of the JOINT exact observed
+/// information `A` (coordinates and the other atoms marginalized out), on the
+/// identified space the exact-A criterion prices; see
+/// [`SaeObservedInformationCovariance`]. The band is its closed-form
+/// push-forward through the linear basis→ambient map `m_k(t) = Φ_k(t)·B_k`.
+/// This is what the production fit returns.
 ///
-/// When a streaming fit cannot provide the exact joint factor, every band field
-/// is `None`. No per-atom marginal is substituted for the joint posterior.
+/// When no such covariance exists — a streaming plan that cannot materialize
+/// `A`, or a state where `A` has resolved negative curvature — every band field
+/// is `None` and [`SaeShapeUncertainty::operator`] names the reason. Neither a
+/// per-atom marginal nor the majorizer's inverse is substituted.
 #[derive(Debug, Clone)]
 pub struct SaeAtomShapeUncertainty {
     /// φ-scaled posterior covariance of this atom's decoder coefficients,
-    /// `Cov(β_k) = φ·S_β⁻¹[block_k]`, shape `(M_k·p, M_k·p)` in the decoder's
+    /// `Cov(β_k) = φ·[A⁺]_ββ[block_k]`, shape `(M_k·p, M_k·p)` in the decoder's
     /// row-major `(basis, channel)` flat layout (flat index `b·p + c`).
     ///
     /// `None` when materializing it would exceed
@@ -48,7 +52,7 @@ pub struct SaeAtomShapeUncertainty {
     /// `Var_c(t) = Σ_{b1,b2} Φ[b1] Φ[b2] Cov(β_k)[(b1,c),(b2,c)]`, shape
     /// `(G, p)`.
     ///
-    /// This is the MODEL-BASED band (`Cov = φ̂ H⁻¹`), correct only when the
+    /// This is the MODEL-BASED band (`Cov = φ̂ A⁺`), correct only when the
     /// working reconstruction likelihood is correctly specified. See
     /// [`Self::band_sd_robust`] for the misspecification-robust companion.
     pub band_sd: Option<Array2<f64>>,
@@ -119,6 +123,87 @@ impl SaeReconstructionDispersion {
     }
 }
 
+/// Selected inverse blocks of the exact observed information on its identified
+/// space, one per atom (#2933 F33).
+///
+/// `A = ∇²_θθ L` is the Hessian of the penalized inner objective in the joint
+/// `(t, β)` cache layout: Gauss–Newton curvature, the residual curvature
+/// `Σ_{i,c} (WMr)_{ic} ∇²f_{ic}`, and the exact prior curvature. It is not the
+/// positive majorizer `B` the inner Newton solve factors, whose Schur inverse
+/// this replaced: with `B = 2` and a residual-curvature correction of `−1`,
+/// `B⁻¹ = 0.5` while the observed-information variance is `A⁻¹ = 1`, and no
+/// accuracy in solving `B` turns one into the other.
+///
+/// Block `k` is `[A⁺]_ββ[r_k, r_k]` over atom `k`'s border range `r_k`: every
+/// latent coordinate and every other atom is marginalized through the whole
+/// joint operator. `A⁺` is the pseudo-inverse over the directions the exact-A
+/// value path retains (`λᵢ > rank_floor(i)`), so the covariance lives on the
+/// same identified space the criterion prices. The blocks are unscaled;
+/// [`SaeReconstructionDispersion::posterior_covariance_scale`] multiplies them
+/// at assembly.
+#[derive(Debug, Clone)]
+pub struct SaeObservedInformationCovariance {
+    /// `[A⁺]_ββ[r_k, r_k]` per atom, in the cache's border layout (the
+    /// factored `(M_k·r_k)` block when frames are active).
+    pub(crate) blocks: Vec<Array2<f64>>,
+    /// Number of retained directions of `A`.
+    pub(crate) identified_rank: usize,
+    /// Dimension of the joint `(t, β)` operator.
+    pub(crate) ambient_dim: usize,
+}
+
+/// The information a shape covariance is assembled from, or why none exists.
+#[derive(Debug, Clone)]
+pub enum SaeShapeInformation {
+    /// Selected inverse blocks of the exact observed information.
+    ObservedInformation(SaeObservedInformationCovariance),
+    /// No covariance exists at this state or on this execution plan.
+    Unavailable(SaeShapeCovarianceUnavailable),
+}
+
+/// Why a fit reports no shape covariance.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SaeShapeCovarianceUnavailable {
+    /// The admitted execution plan does not materialize the dense joint
+    /// observed information, so no selected inverse of `A` is formed.
+    NoDenseObservedInformation,
+    /// `A` has resolved negative curvature: the state is not a mode of the
+    /// penalized objective, so `A⁺` is not a Laplace covariance. The value path
+    /// may still price such a basin through the majorizer's concave clamp, but
+    /// that clamped operator has no probabilistic contract as a covariance.
+    IndefiniteObservedInformation {
+        negative_directions: usize,
+        most_negative_curvature: f64,
+    },
+}
+
+/// The operator a reported shape covariance inverts.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SaeShapeCovarianceOperator {
+    /// `φ̂·[A⁺]_ββ` on the identified space of the exact observed information.
+    ObservedInformation {
+        identified_rank: usize,
+        ambient_dim: usize,
+    },
+    /// No covariance was produced; every band field is `None`.
+    Unavailable(SaeShapeCovarianceUnavailable),
+}
+
+impl SaeShapeCovarianceOperator {
+    /// Wire name of the operator, owned here so bindings marshal rather than map.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ObservedInformation { .. } => "observed_information",
+            Self::Unavailable(SaeShapeCovarianceUnavailable::NoDenseObservedInformation) => {
+                "unavailable_no_dense_observed_information"
+            }
+            Self::Unavailable(
+                SaeShapeCovarianceUnavailable::IndefiniteObservedInformation { .. },
+            ) => "unavailable_indefinite_observed_information",
+        }
+    }
+}
+
 /// Posterior shape uncertainty for a whole SAE-manifold fit: one band per atom
 /// plus the reconstruction noise scales, of which
 /// [`SaeReconstructionDispersion::posterior_covariance_scale`] scales every
@@ -127,6 +212,8 @@ impl SaeReconstructionDispersion {
 pub struct SaeShapeUncertainty {
     /// Raw and likelihood-frame reconstruction noise scales.
     pub dispersion: SaeReconstructionDispersion,
+    /// The operator every atom's covariance inverts, or why none was produced.
+    pub operator: SaeShapeCovarianceOperator,
     /// One entry per atom, in atom order.
     pub atoms: Vec<SaeAtomShapeUncertainty>,
 }

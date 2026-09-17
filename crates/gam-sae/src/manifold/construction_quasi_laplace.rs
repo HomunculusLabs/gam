@@ -7947,9 +7947,135 @@ impl SaeManifoldTerm {
         })
     }
 
+    /// #2933 F33 — the information a shape covariance is assembled from: the
+    /// border blocks of the pseudo-inverse of the exact observed information
+    /// `A = ∇²_θθ L` at this converged state, on the identified space the
+    /// exact-A value path prices.
+    ///
+    /// The criterion prices `½log|A|` from its own dense materialization but
+    /// returns only the majorizer's factor cache, whose Schur inverse is
+    /// `[B⁻¹]_ββ`. This re-forms the same `A`
+    /// ([`Self::materialize_exact_hessian_dense_with_gap_border`], the operator
+    /// `exact_observed_information_log_dets_with_saddle_directions` classifies)
+    /// and reads every atom's block off one eigendecomposition. That costs one
+    /// extra dense build and `O(dim³)` decomposition per uncertainty report, on
+    /// the route whose admission (`direct_logdet_admitted`) already prices that
+    /// block for every criterion evaluation. The criterion's block has been
+    /// dropped by then, so the peak memory is unchanged.
+    ///
+    /// A resolved negative direction of `A` returns
+    /// [`SaeShapeCovarianceUnavailable::IndefiniteObservedInformation`]. The value
+    /// path may still price such a basin through the majorizer's concave clamp,
+    /// but a clamped operator is not an observed information, and inverting it
+    /// would report a regularized band under a posterior label.
+    pub(crate) fn exact_observed_information_shape_covariance(
+        &self,
+        rho: &SaeManifoldRho,
+        target: ArrayView2<'_, f64>,
+        cache: &ArrowFactorCache,
+    ) -> Result<SaeShapeInformation, String> {
+        let total_t = cache.delta_t_len();
+        let (a, e_beta) =
+            self.materialize_exact_hessian_dense_with_gap_border(rho, target, cache)?;
+        let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
+        let joint = Self::exact_hessian_spectral_block(
+            a,
+            &e_diag,
+            e_beta.as_ref(),
+            total_t,
+            ArrowMetric::Joint(cache),
+        )?;
+        joint.border_selected_inverse_blocks(total_t, &self.shape_covariance_border_ranges())
+    }
+
     // [#780 line-count gate] reconstruction_dispersion + assemble_shape_uncertainty
     // + recompute_joint_shape_uncertainty + unavailable_shape_uncertainty
     // (the contiguous trailing methods of this impl block) were split into the
     // sibling construction_reconstruction.rs (declared in mod.rs); callers reach
     // them bare via use super::*.
+}
+
+impl ExactHessianSpectralBlock {
+    /// Border blocks `[A⁺]_ββ[r, r]` of the pseudo-inverse over the retained
+    /// directions, or the typed refusal when `A` has a resolved negative
+    /// direction (#2933 F33).
+    ///
+    /// Classification is [`Self::rank_floor`], the one predicate the value, the
+    /// differential and the stationarity solve read: `λᵢ < −floor(i)` is a
+    /// negative direction, `|λᵢ| ≤ floor(i)` is unidentified and carries no
+    /// variance, `λᵢ > floor(i)` is retained. With `W = V_β[:, retained]·Λ^{−½}`
+    /// each block is the Gram `W_r W_rᵀ`, positive semidefinite by construction,
+    /// at `|r|²·rank` per atom beside the decomposition already paid.
+    fn border_selected_inverse_blocks(
+        &self,
+        total_t: usize,
+        ranges: &[std::ops::Range<usize>],
+    ) -> Result<SaeShapeInformation, String> {
+        let dim = self.eigenvalues.len();
+        if self.eigenvectors.dim() != (dim, dim) || total_t > dim {
+            return Err(format!(
+                "exact observed-information shape covariance: eigenvectors {:?}, spectrum \
+                 {dim}, t dimension {total_t}",
+                self.eigenvectors.dim()
+            ));
+        }
+        let mut negative_directions = 0usize;
+        let mut most_negative_curvature = 0.0_f64;
+        let mut retained = Vec::with_capacity(dim);
+        for index in 0..dim {
+            let lambda = self.eigenvalues[index];
+            let floor = self.rank_floor(index);
+            if lambda < -floor {
+                negative_directions += 1;
+                most_negative_curvature = most_negative_curvature.min(lambda);
+            } else if lambda > floor {
+                retained.push(index);
+            }
+        }
+        if negative_directions > 0 {
+            return Ok(SaeShapeInformation::Unavailable(
+                SaeShapeCovarianceUnavailable::IndefiniteObservedInformation {
+                    negative_directions,
+                    most_negative_curvature,
+                },
+            ));
+        }
+        let border_dim = dim - total_t;
+        let mut blocks = Vec::with_capacity(ranges.len());
+        for (atom, range) in ranges.iter().enumerate() {
+            if range.end > border_dim {
+                return Err(format!(
+                    "exact observed-information shape covariance: atom {atom} border range \
+                     {range:?} exceeds the border dimension {border_dim}"
+                ));
+            }
+            let scaled = Array2::from_shape_fn((range.len(), retained.len()), |(row, col)| {
+                let index = retained[col];
+                self.eigenvectors[[total_t + range.start + row, index]]
+                    / self.eigenvalues[index].sqrt()
+            });
+            let mut block = scaled.dot(&scaled.t());
+            let width = block.nrows();
+            for row in 0..width {
+                for col in (row + 1)..width {
+                    let average = 0.5 * (block[[row, col]] + block[[col, row]]);
+                    block[[row, col]] = average;
+                    block[[col, row]] = average;
+                }
+            }
+            if !block.iter().all(|value| value.is_finite()) {
+                return Err(format!(
+                    "exact observed-information shape covariance: atom {atom} block is non-finite"
+                ));
+            }
+            blocks.push(block);
+        }
+        Ok(SaeShapeInformation::ObservedInformation(
+            SaeObservedInformationCovariance {
+                blocks,
+                identified_rank: retained.len(),
+                ambient_dim: dim,
+            },
+        ))
+    }
 }
