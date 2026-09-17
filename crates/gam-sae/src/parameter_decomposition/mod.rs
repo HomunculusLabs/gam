@@ -113,7 +113,7 @@ pub mod lift;
 pub mod moments;
 
 // Global versus use-specific edits and occurrence scopes.
-// [unlanded: occurrence]
+pub mod occurrence;
 
 // Implementation-gauge families detected from native tensors, quotiented out of codes and intervention sets.
 pub mod gauge;
