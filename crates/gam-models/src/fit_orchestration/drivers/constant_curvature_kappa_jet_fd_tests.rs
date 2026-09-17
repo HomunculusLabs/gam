@@ -155,6 +155,126 @@ mod constant_curvature_kappa_jet_fd_tests {
         }
     }
 
+    /// #2280: the ψ jet survives a planted deviance its old chart could not resolve.
+    ///
+    /// The response is `1 + ρ·e`. The intercept is unpenalized, and `e` is a unit vector
+    /// orthogonal to the bordered design's column space. `e` is built from an SVD of the
+    /// design and certified by `‖Xᵀe‖ ≤ γ·‖X‖_F`. So at every λ the penalized deviance is
+    /// minimized by the intercept, at the value `ρ²`.
+    ///
+    /// `ρ² = 1e-10` sits above the forward fit's own resolution bar `γ_m·2·yᵀy` (about
+    /// `1.5e-11` at `yᵀy ≈ 80`), so the forward QR-tail r0 scores the fit. The old chart
+    /// formed `dp = yᵀy − bᵀβ`, which rounds against `yᵀy`, not against `dp`. At this
+    /// `dp` that miss moves `½ν·log dp` by more than the chart-agreement tolerance
+    /// `1e-7·(1 + |V|)` the jet holds itself to, so the old chart refused to differentiate
+    /// a fit it had no reason to refuse. That miss is asserted first, as the positive
+    /// control that the fixture reaches the regime. The residual-formed chart must then
+    /// reproduce the forward score and return a finite jet.
+    #[test]
+    fn the_psi_jet_survives_a_deviance_the_closed_form_cannot_resolve_2280() {
+        use faer::Side;
+        use gam_linalg::faer_ndarray::{FaerCholesky, FaerSvd};
+
+        let (data, wobble) = fixture();
+        let spec = spec_at(0.0, seed_eta(&data).exp());
+        let basis = gam_terms::basis::build_constant_curvature_basis(data.view(), &spec)
+            .expect("the fixture disk is inside the κ = 0 chart");
+        let smooth_design = basis.design.to_dense();
+        let (n, p) = smooth_design.dim();
+        let mut design = Array2::<f64>::ones((n, p + 1));
+        design.slice_mut(s![.., 1..]).assign(&smooth_design);
+        let mut penalty = Array2::<f64>::zeros((p + 1, p + 1));
+        penalty
+            .slice_mut(s![1.., 1..])
+            .assign(&basis.active_penalties[0].matrix);
+
+        let u_design = design
+            .svd(true, false)
+            .expect("design SVD")
+            .0
+            .expect("left singular vectors");
+        let off_design = &wobble - &u_design.dot(&u_design.t().dot(&wobble));
+        let direction = &off_design / off_design.dot(&off_design).sqrt();
+        let gamma = gam_linalg::roundoff::accumulation_growth(n * (p + 1) * (p + 1));
+        let design_frobenius = design.iter().map(|value| value * value).sum::<f64>().sqrt();
+        let leak = design.t().dot(&direction).iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        assert!(
+            leak <= gamma * design_frobenius,
+            "instrument: the planted direction must be orthogonal to the design's column space, \
+             but ‖Xᵀe‖∞ = {leak:.3e} exceeds γ·‖X‖_F = {:.3e}",
+            gamma * design_frobenius
+        );
+
+        let residual_norm = 1.0e-5;
+        let planted_deviance = residual_norm * residual_norm;
+        let planted = direction.mapv(|value| 1.0 + residual_norm * value);
+        let response_2d = planted.view().insert_axis(ndarray::Axis(1));
+        let fit = gam_solve::gaussian_reml::gaussian_reml_multi_closed_form(
+            design.view(),
+            response_2d.view(),
+            penalty.view(),
+            None,
+            None,
+        )
+        .expect("the planted deviance is above the forward fit's resolution bar");
+        let nu = n as f64 - fit.cache.nullity as f64;
+
+        // The closed form the chart used to take, on the same arithmetic.
+        let mut hessian = design.t().dot(&design);
+        hessian += &(&penalty * fit.lambda);
+        let hessian = (&hessian + &hessian.t()) * 0.5;
+        let rhs = design.t().dot(&planted);
+        let closed_beta = hessian
+            .cholesky(Side::Lower)
+            .expect("H = XᵀX + λS is SPD")
+            .solvevec(&rhs);
+        let closed_form = planted.dot(&planted) - rhs.dot(&closed_beta);
+        let agreement = 1.0e-7 * (1.0 + fit.reml_score.abs());
+        let closed_value_miss = if closed_form > 0.0 {
+            0.5 * nu * (closed_form / planted_deviance).ln().abs()
+        } else {
+            f64::INFINITY
+        };
+
+        let jet = constant_curvature_psi_profile_jet(data.view(), planted.view(), &spec);
+        println!(
+            "[2280-kappa-jet] n={n} p={} nu={nu} lambda={:.3e} planted={planted_deviance:.6e} \
+             closed_form={closed_form:.6e} closed_value_miss={closed_value_miss:.3e} \
+             agreement={agreement:.3e} reml_score={:.9e} jet={:?}",
+            p + 1,
+            fit.lambda,
+            fit.reml_score,
+            jet.as_ref().map(|value| (value.value, value.gradient)),
+        );
+
+        assert!(
+            closed_value_miss > agreement,
+            "REGIME: yᵀy − bᵀβ = {closed_form:.6e} against the planted deviance \
+             {planted_deviance:.6e} moves ½ν·log dp by {closed_value_miss:.3e}, which is inside \
+             the chart-agreement tolerance {agreement:.3e}, so this fixture does not reach the \
+             defect"
+        );
+        let jet = jet.unwrap_or_else(|error| {
+            panic!(
+                "the residual-formed chart must reproduce the forward score at a resolvable \
+                 planted deviance {planted_deviance:.6e}: {error}"
+            )
+        });
+        assert!(
+            (jet.value - fit.reml_score).abs() <= 1e-9 * (1.0 + fit.reml_score.abs()),
+            "the jet's value {:.9e} must be the forward score {:.9e}",
+            jet.value,
+            fit.reml_score
+        );
+        assert!(
+            jet.gradient.iter().all(|value| value.is_finite())
+                && jet.hessian.iter().flatten().all(|value| value.is_finite()),
+            "the jet at the planted deviance must be finite: gradient {:?}, hessian {:?}",
+            jet.gradient,
+            jet.hessian
+        );
+    }
+
     /// The jet's `∇V` against the INDEPENDENT reverse-mode adjoint contraction
     /// the route used to ship — `∂V/∂X · dX/dψ + ∂V/∂S · dS/dψ` through
     /// `gaussian_reml_multi_closed_form_backward_from_fit`, now for BOTH

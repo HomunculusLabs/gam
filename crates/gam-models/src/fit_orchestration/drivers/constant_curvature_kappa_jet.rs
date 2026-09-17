@@ -179,9 +179,9 @@ fn profiled_gaussian_reml_psi_jet(
         );
     }
 
-    // Reduced ψ-jets. `A = XᵀX` and `b = Xᵀy` are the only places `n` appears;
-    // everything after this is p×p. Index order is (κ, η) for first derivatives
-    // and (κκ, κη, ηη) for seconds.
+    // Reduced ψ-jets. `A = XᵀX`, `b = Xᵀy` and the residual `r = y − Xβ` with its
+    // design images are the only places `n` appears; everything else is p×p. Index
+    // order is (κ, η) for first derivatives and (κκ, κη, ηη) for seconds.
     let sym = |m: Array2<f64>| -> Array2<f64> { (&m + &m.t()) * 0.5 };
     let pair = |a: usize| -> (usize, usize) {
         match a {
@@ -207,13 +207,6 @@ fn profiled_gaussian_reml_psi_jet(
         })
         .collect();
     let b0 = fast_atv(&design.view(), &response);
-    let b1: Vec<Array1<f64>> = (0..2)
-        .map(|a| fast_atv(&blocks.design_first[a].view(), &response))
-        .collect();
-    let b2: Vec<Array1<f64>> = (0..3)
-        .map(|s| fast_atv(&blocks.design_second[s].view(), &response))
-        .collect();
-    let yty = response.dot(&response);
 
     let s0 = sym(penalty.clone());
     let s1: Vec<Array2<f64>> = (0..2).map(|a| sym(blocks.penalty_first[a].clone())).collect();
@@ -229,16 +222,27 @@ fn profiled_gaussian_reml_psi_jet(
         .cholesky(Side::Lower)
         .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
     let beta0 = chol.solvevec(&b0);
-    let beta1: Vec<Array1<f64>> = (0..2)
-        .map(|a| chol.solvevec(&(&b1[a] - &h1[a].dot(&beta0))))
-        .collect();
-    let beta2: Vec<Array1<f64>> = (0..3)
-        .map(|s| {
-            let (a, b) = pair(s);
-            chol.solvevec(
-                &(&b2[s] - &h1[a].dot(&beta1[b]) - &h1[b].dot(&beta1[a]) - &h2[s].dot(&beta0)),
-            )
+    // #2280: the deviance and every one of its jets are formed from the residual
+    // `r = y − Xβ` and the design images `X_a·β`, never as `yᵀy − bᵀβ`-shaped
+    // differences. Those equal the forms below only at the exact solve, and they
+    // round against `yᵀy` and `‖X_a‖·‖β‖·‖y‖` rather than against the residual they
+    // come to, so a residual below that scale came back as roundoff.
+    let residual = &response - &design.dot(&beta0);
+    let design_image1: Vec<Array1<f64>> =
+        (0..2).map(|a| blocks.design_first[a].dot(&beta0)).collect();
+    let design_image2: Vec<Array1<f64>> =
+        (0..3).map(|s| blocks.design_second[s].dot(&beta0)).collect();
+    // `∂β/∂ψ_a = H⁻¹v_a`, with `v_a = X_aᵀr − XᵀX_aβ − λS_aβ` the ψ_a-derivative of
+    // the normal equations' residual `Xᵀ(y − Xβ) − λSβ` at fixed `β`.
+    let normal_residual1: Vec<Array1<f64>> = (0..2)
+        .map(|a| {
+            fast_atv(&blocks.design_first[a].view(), &residual)
+                - fast_atv(&design.view(), &design_image1[a])
+                - s1[a].dot(&beta0) * lambda
         })
+        .collect();
+    let beta1: Vec<Array1<f64>> = (0..2)
+        .map(|a| chol.solvevec(&normal_residual1[a]))
         .collect();
 
     // log|H| and its ψ-jets. `g_a = H⁻¹H_a` is formed once and reused.
@@ -331,20 +335,28 @@ fn profiled_gaussian_reml_psi_jet(
         })
         .collect();
 
-    // Penalized deviance `dp = yᵀy − bᵀβ` and its ψ-jets.
-    let dp = yty - b0.dot(&beta0);
+    // Penalized deviance `dp = ‖y − Xβ‖² + λβᵀSβ` and its ψ-jets. `β` minimizes the
+    // penalized sum of squares, so by the envelope theorem its ψ response does not
+    // enter the first derivative, and enters the second only through `β_a = H⁻¹v_a`:
+    //   dp_a  = −2(X_aβ)ᵀr + λβᵀS_aβ
+    //   dp_ab = 2(X_aβ)ᵀ(X_bβ) − 2(X_abβ)ᵀr + λβᵀS_abβ − 2·v_aᵀβ_b
+    let penalty_quadratic = |m: &Array2<f64>| -> f64 { beta0.dot(&m.dot(&beta0)) };
+    let dp = residual.dot(&residual) + lambda * penalty_quadratic(&s0);
     if !(dp > 0.0) {
         crate::bail_invalid_estim!(
             "constant-curvature profile ψ-jet found a non-positive profiled deviance {dp:.6e}"
         );
     }
     let dp_1: Vec<f64> = (0..2)
-        .map(|a| -b1[a].dot(&beta0) - b0.dot(&beta1[a]))
+        .map(|a| -2.0 * design_image1[a].dot(&residual) + lambda * penalty_quadratic(&s1[a]))
         .collect();
     let dp_2: Vec<f64> = (0..3)
         .map(|s| {
             let (a, b) = pair(s);
-            -b2[s].dot(&beta0) - b1[a].dot(&beta1[b]) - b1[b].dot(&beta1[a]) - b0.dot(&beta2[s])
+            2.0 * design_image1[a].dot(&design_image1[b])
+                - 2.0 * design_image2[s].dot(&residual)
+                + lambda * penalty_quadratic(&s2[s])
+                - 2.0 * normal_residual1[a].dot(&beta1[b])
         })
         .collect();
 
@@ -371,21 +383,19 @@ fn profiled_gaussian_reml_psi_jet(
         })
         .collect();
 
-    // Mixed ∂²F/∂ψ_a∂ρ. Only H and β carry ρ: ∂H/∂ρ = λS, ∂H_a/∂ρ = λS_a.
+    // Mixed ∂²F/∂ψ_a∂ρ. Only H and β carry ρ: ∂H/∂ρ = λS, ∂H_a/∂ρ = λS_a, and
+    // `∂β/∂ρ = −λH⁻¹Sβ`. The deviance's ρ-jets follow from the same envelope as
+    // its ψ-jets: `dp_ρ = λβᵀSβ` and `dp_aρ = λβᵀS_aβ + 2λ·β_aᵀSβ`.
     let lambda_s0 = &s0 * lambda;
-    let beta0_rho = chol.solvevec(&lambda_s0.dot(&beta0)) * -1.0;
+    let dp_rho = lambda * penalty_quadratic(&s0);
+    let s0_beta0 = s0.dot(&beta0);
     let f_1rho: Vec<f64> = (0..2)
         .map(|a| {
             let lambda_s1 = &s1[a] * lambda;
-            let beta1_rho = {
-                let inner =
-                    lambda_s1.dot(&beta0) * -1.0 + h1[a].dot(&chol.solvevec(&lambda_s0.dot(&beta0)));
-                chol.solvevec(&(&inner - &lambda_s0.dot(&beta1[a])))
-            };
             let logdet_h_1rho = trace(&chol.solve_mat(&lambda_s1))
                 - trace_product(&chol.solve_mat(&lambda_s0), &g1[a]);
-            let dp_rho = -b0.dot(&beta0_rho);
-            let dp_1rho = -b1[a].dot(&beta0_rho) - b0.dot(&beta1_rho);
+            let dp_1rho =
+                lambda * penalty_quadratic(&s1[a]) + 2.0 * lambda * beta1[a].dot(&s0_beta0);
             0.5 * logdet_h_1rho + 0.5 * nu * (dp_1rho / dp - dp_1[a] * dp_rho / (dp * dp))
         })
         .collect();

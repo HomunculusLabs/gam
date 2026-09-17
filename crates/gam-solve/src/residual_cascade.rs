@@ -3367,13 +3367,30 @@ impl Core {
         Ok(a)
     }
 
-    /// Penalized residual quadratic at a solution: `y'Wy − c'X'Wy`.
-    fn rss_pen(&self, coeff: &[f64]) -> f64 {
-        let mut quad = 0.0;
-        for (c, r) in coeff.iter().zip(self.rhs.iter()) {
-            quad += c * r;
+    /// Penalized residual quadratic at a solution: `‖y − Xc‖²_W + λ·c'Dc`.
+    ///
+    /// #2280: formed as the sum of squares it is, never as `y'Wy − c'X'Wy`. The
+    /// two agree only at the exact solution of `Ac = X'Wy`, and the difference
+    /// carries two errors this sum does not. Its subtraction rounds at `u·y'Wy`,
+    /// which buries every residual below that scale. And the solve's own residual
+    /// `r = X'Wy − Ac` enters it at first order: `y'Wy − c'X'Wy` exceeds this sum
+    /// by exactly `c'r`, and the iterative route certifies only
+    /// `‖r‖ ≤ CG_RTOL·‖X'Wy‖`. This sum exceeds the objective's minimum by
+    /// `r'A⁻¹r`, second order in the solve's error.
+    fn rss_pen(&self, lambda: f64, coeff: &[f64]) -> f64 {
+        let mut total = 0.0;
+        for (i, (&weight, &response)) in self.w.iter().zip(self.y.iter()).enumerate() {
+            let mut fitted = 0.0;
+            for e in self.row_ptr[i]..self.row_ptr[i + 1] {
+                fitted += self.vals[e] * coeff[self.col_idx[e] as usize];
+            }
+            let residual = response - fitted;
+            total += weight * residual * residual;
         }
-        self.ytwy - quad
+        for (&c, &d) in coeff.iter().zip(self.pen_diag.iter()) {
+            total += lambda * d * c * c;
+        }
+        total
     }
 
     /// Number of unpenalized (polynomial) columns.
@@ -4044,7 +4061,7 @@ impl ResidualCascadeDesign {
             None
         };
         let (coeff, rel_res, iters) = core.solve_coeff(lambda, &core.rhs, warm)?;
-        let rss_pen = core.rss_pen(&coeff);
+        let rss_pen = core.rss_pen(lambda, &coeff);
         let dof = (core.y.len() - core.nullity()) as f64;
         let sigma2 = match sigma2 {
             Some(s) => {
@@ -6045,6 +6062,193 @@ mod refinement_decision_tests {
         (x1, x2, y)
     }
 
+    /// #2280: the penalized objective survives a planted residual below the rounding
+    /// of `y'Wy`, on the dense solve and at the iterative route's certificate boundary.
+    ///
+    /// The response is `X·c₀ + ρ·e`. `c₀` lives on the unpenalized polynomial layer,
+    /// and `e` is a unit vector orthogonal to the design's column space, so at every λ
+    /// the penalized objective is minimized by `c₀` at the value `ρ²`. With `ρ²` below
+    /// one ulp of `y'Wy`, the closed form `y'Wy − c'X'Wy` cannot represent it on the
+    /// dense solve. At an iterate the iterative certificate admits, residual
+    /// `r = X'Wy − Ac` with `‖r‖ ≤ CG_RTOL·‖X'Wy‖`, it also misses by `c'r` at first
+    /// order. Both misses are asserted first, as the positive control that the fixture
+    /// reaches the regime. The dense closed form's result is quantized at that ulp, so
+    /// its miss is held to half the residual.
+    ///
+    /// The reference is an independent SVD residual of the augmented system
+    /// `[X; √(λD)]·c ≈ [y; 0]`, taken as `‖t − U·Uᵀt‖²`. At a computed `c` the sum of
+    /// squares exceeds the minimum by `δ'Aδ`. A backward-stable dense solve with growth
+    /// `γ` bounds that by `(γ·κ·scale)²`, with `scale = ‖t‖ + σ_max·‖c₀‖`. The boundary
+    /// iterate `(1 + CG_RTOL)·c*` exceeds it by exactly `CG_RTOL²·c*'X'Wy`. Rounding moves
+    /// the sum by `γ·scale` along the residual at first order. The SVD residual carries
+    /// the same rounding band, so the difference is allowed it twice.
+    #[test]
+    fn the_penalized_objective_survives_a_residual_below_the_rounding_of_ytwy_2280() {
+        use gam_linalg::faer_ndarray::FaerSvd;
+        let (x1, x2, wobble) = dense_fixture(10);
+        let n = wobble.len();
+        let weights = vec![1.0; n];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let probe = ResidualCascadeDesign::build(&axes, &wobble, &weights, &[1.0, 1.0], 2.0, 2)
+            .expect("probe design");
+        let m = probe.core.m;
+        let q = probe.core.nullity();
+        assert!(
+            m < n,
+            "the fixture needs a column space with an orthogonal complement: {m} columns, {n} rows"
+        );
+        let mut design = ndarray::Array2::<f64>::zeros((n, m));
+        for i in 0..n {
+            for e in probe.core.row_ptr[i]..probe.core.row_ptr[i + 1] {
+                design[[i, probe.core.col_idx[e] as usize]] += probe.core.vals[e];
+            }
+        }
+        let u_design = design
+            .svd(true, false)
+            .expect("design SVD")
+            .0
+            .expect("left singular vectors");
+        let wobble = Array1::from(wobble);
+        let off_design = &wobble - &u_design.dot(&u_design.t().dot(&wobble));
+        let direction = &off_design / off_design.dot(&off_design).sqrt();
+        let mut c0 = Array1::<f64>::zeros(m);
+        for j in 0..q {
+            c0[j] = 1.0;
+        }
+        let residual_norm = 3.0e-8;
+        let planted_squared = residual_norm * residual_norm;
+        let planted: Vec<f64> = (&design.dot(&c0) + &(&direction * residual_norm)).to_vec();
+        let cascade =
+            ResidualCascadeDesign::build(&axes, &planted, &weights, &[1.0, 1.0], 2.0, 2)
+                .expect("planted design");
+        let core = &cascade.core;
+        assert!(core.dense_gram.is_some(), "the fixture must take the dense route");
+        assert_eq!(core.m, m, "the planted design must be the probe's design");
+        let target_norm = planted.iter().map(|value| value * value).sum::<f64>().sqrt();
+        let c0_norm = (q as f64).sqrt();
+        let rhs_norm = core.rhs.iter().map(|value| value * value).sum::<f64>().sqrt();
+        let closed_form = |coeff: &[f64]| {
+            core.ytwy
+                - coeff
+                    .iter()
+                    .zip(core.rhs.iter())
+                    .map(|(&c, &b)| c * b)
+                    .sum::<f64>()
+        };
+
+        for log_lambda in [-2.0_f64, 1.0] {
+            let lambda = log_lambda.exp();
+            let mut augmented = ndarray::Array2::<f64>::zeros((n + m, m));
+            for i in 0..n {
+                for j in 0..m {
+                    augmented[[i, j]] = design[[i, j]];
+                }
+            }
+            for j in 0..m {
+                augmented[[n + j, j]] = (lambda * core.pen_diag[j]).sqrt();
+            }
+            let mut target = Array1::<f64>::zeros(n + m);
+            for i in 0..n {
+                target[i] = planted[i];
+            }
+            let decomposition = augmented.svd(true, false).expect("augmented SVD");
+            let u_augmented = decomposition.0.expect("left singular vectors");
+            let sigma = decomposition.1;
+            let svd_residual = (&target - &u_augmented.dot(&u_augmented.t().dot(&target)))
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>();
+            let sigma_max = sigma.iter().copied().fold(0.0_f64, f64::max);
+            let sigma_min = sigma.iter().copied().fold(f64::INFINITY, f64::min);
+            let condition = sigma_max / sigma_min;
+            let gamma = gam_linalg::roundoff::accumulation_growth((n + m) * m * m);
+            let scale = target_norm + sigma_max * c0_norm;
+            let rounding_band =
+                2.0 * (2.0 * gamma * scale * svd_residual.sqrt() + (gamma * condition * scale).powi(2));
+
+            let dense_coeff = core
+                .solve_coeff(lambda, &core.rhs, None)
+                .expect("dense solve")
+                .0;
+            let dense_objective = core.rss_pen(lambda, &dense_coeff);
+            let dense_closed = closed_form(&dense_coeff);
+
+            // The iterative route's certificate admits any iterate with
+            // `‖X'Wy − Ac‖ ≤ CG_RTOL·‖X'Wy‖`. This fixture's coarse space solves the system
+            // exactly, so a PCG run stops at roundoff and says nothing about that bar. The arm
+            // takes the iterate ON the bar instead, `c = (1 + CG_RTOL)·c*`, whose residual is
+            // `−CG_RTOL·X'Wy` up to the dense solve's own. There the closed form misses by
+            // `CG_RTOL·c*'X'Wy`, at first order, while the sum of squares exceeds the minimum
+            // by exactly `CG_RTOL²·c*'Ac* = CG_RTOL²·c*'X'Wy`.
+            let boundary_coeff: Vec<f64> =
+                dense_coeff.iter().map(|&c| (1.0 + CG_RTOL) * c).collect();
+            let relative_residual = |coeff: &[f64]| {
+                let mut applied = vec![0.0; m];
+                core.matvec(lambda, coeff, &mut applied);
+                core.rhs
+                    .iter()
+                    .zip(applied.iter())
+                    .map(|(&b, &ac)| (b - ac) * (b - ac))
+                    .sum::<f64>()
+                    .sqrt()
+                    / rhs_norm
+            };
+            let dense_relative_residual = relative_residual(&dense_coeff);
+            let boundary_relative_residual = relative_residual(&boundary_coeff);
+            let explained = dense_coeff
+                .iter()
+                .zip(core.rhs.iter())
+                .map(|(&c, &b)| c * b)
+                .sum::<f64>();
+            let second_order_excess = CG_RTOL * CG_RTOL * explained;
+            let boundary_objective = core.rss_pen(lambda, &boundary_coeff);
+            let boundary_closed = closed_form(&boundary_coeff);
+            println!(
+                "[2280-cascade] log_lambda={log_lambda} n={n} m={m} condition={condition:.3e} \
+                 planted={planted_squared:.6e} svd={svd_residual:.6e} dense={dense_objective:.6e} \
+                 dense_closed={dense_closed:.6e} boundary={boundary_objective:.6e} \
+                 boundary_closed={boundary_closed:.6e} second_order_excess={second_order_excess:.6e} \
+                 dense_relative_residual={dense_relative_residual:.3e} \
+                 boundary_relative_residual={boundary_relative_residual:.3e} band={rounding_band:.3e}"
+            );
+
+            assert!(
+                (svd_residual - planted_squared).abs() <= rounding_band,
+                "the SVD instrument must recover the planted residual {planted_squared:.6e}: got \
+                 {svd_residual:.6e} (band {rounding_band:.3e})"
+            );
+            assert!(
+                boundary_relative_residual <= CG_RTOL + (1.0 + CG_RTOL) * dense_relative_residual,
+                "premise: the boundary iterate must be one the iterative certificate admits, \
+                 relative residual {boundary_relative_residual:.3e} against CG_RTOL {CG_RTOL:.1e} \
+                 plus the dense solve's {dense_relative_residual:.3e}"
+            );
+            assert!(
+                (dense_closed - svd_residual).abs() > 0.5 * svd_residual,
+                "REGIME: y'Wy − c'X'Wy on the dense solve {dense_closed:.6e} must miss the SVD \
+                 residual {svd_residual:.6e} by more than half of it, or this fixture does not \
+                 reach the defect"
+            );
+            assert!(
+                (boundary_closed - svd_residual).abs() > svd_residual,
+                "REGIME: y'Wy − c'X'Wy at the certificate's boundary iterate {boundary_closed:.6e} \
+                 must miss the SVD residual {svd_residual:.6e} by more than the residual itself, \
+                 or this fixture does not reach the defect"
+            );
+            assert!(
+                (dense_objective - svd_residual).abs() <= rounding_band,
+                "the dense-solve objective {dense_objective:.6e} must match the SVD residual \
+                 {svd_residual:.6e} within {rounding_band:.3e} at log lambda {log_lambda}"
+            );
+            assert!(
+                (boundary_objective - (svd_residual + second_order_excess)).abs() <= rounding_band,
+                "at the certificate's boundary iterate the objective {boundary_objective:.6e} must \
+                 exceed the SVD residual {svd_residual:.6e} by the second-order \
+                 {second_order_excess:.6e}, within {rounding_band:.3e}, at log lambda {log_lambda}"
+            );
+        }
+    }
+
     #[test]
     fn rank_boundary_is_not_an_empty_column_loose_bound_or_dyadic_artifact_2628() {
         struct TestRng(u64);
@@ -6154,7 +6358,7 @@ mod refinement_decision_tests {
                         .core
                         .solve_coeff(lambda, &design.core.rhs, None)
                         .expect("dense exact coefficient solve");
-                    return (design.core.rss_pen(&coeff), "dense", 0);
+                    return (design.core.rss_pen(lambda, &coeff), "dense", 0);
                 }
                 let factor = design
                     .core
@@ -6164,7 +6368,7 @@ mod refinement_decision_tests {
                     let coeff = solve_sparse_spd(&factor, &Array1::from(design.core.rhs.clone()))
                         .expect("sparse exact coefficient solve")
                         .to_vec();
-                    (design.core.rss_pen(&coeff), "sparse", 0)
+                    (design.core.rss_pen(lambda, &coeff), "sparse", 0)
                 } else {
                     let (coeff, relative_residual, iterations) = design
                         .core
@@ -6174,7 +6378,7 @@ mod refinement_decision_tests {
                         relative_residual <= CG_RTOL,
                         "iterative coefficient solve did not certify"
                     );
-                    (design.core.rss_pen(&coeff), "pcg", iterations)
+                    (design.core.rss_pen(lambda, &coeff), "pcg", iterations)
                 }
             };
             let (current_rss, current_route, current_iterations) = exact_rss(&current, lambda);
@@ -6984,7 +7188,7 @@ mod refinement_decision_tests {
                 .collect();
             let (u, _, _) = core.solve_coeff(lambda, &dc, None).expect("second solve");
             let solved = [
-                core.rss_pen(&coeff),
+                core.rss_pen(lambda, &coeff),
                 coeff.iter().zip(dc.iter()).map(|(&c, &v)| c * v).sum(),
                 dc.iter().zip(u.iter()).map(|(&a, &b)| a * b).sum(),
                 u.iter()
@@ -6997,10 +7201,12 @@ mod refinement_decision_tests {
 
             let condition = (largest + lambda) / (smallest + lambda);
             // The three quadratic forms are sums of positive terms, so their
-            // relative error is `O(m)·eps·cond(A)`. `R` is not: BOTH routes form
-            // it by subtracting a fitted energy from an anchor energy, so its
+            // relative error is `O(m)·eps·cond(A)`. `R` is not, on the spectral
+            // route: it subtracts a fitted energy from an anchor energy, so its
             // relative error carries that cancellation's own condition number,
-            // `anchor/|R|`. Charging the sum of the two is the honest bound.
+            // `anchor/|R|`. Charging the sum of the two is the honest bound. The
+            // solved route forms `R` as a sum of squares (#2280) and carries only
+            // the first part, so the charge below is the spectral comparand's.
             //
             // AND IT IS CHARGED TWICE, once per comparand. This is a comparison
             // of two INDEPENDENT computations of one quantity, so the gap it can
@@ -7214,7 +7420,7 @@ mod refinement_decision_tests {
                 .solve_coeff(lambda, &design.core.rhs, None)
                 .expect("dense solve")
                 .0;
-            let rss = design.core.rss_pen(&coefficients);
+            let rss = design.core.rss_pen(lambda, &coefficients);
             let direct = -0.5
                 * (logdet - rank * log_lambda - design.core.pen_logdet_const
                     + dof * (rss / dof).ln());
@@ -7506,7 +7712,7 @@ mod refinement_decision_tests {
                 .expect("second certified solve");
             let anchor = spectrum.anchor_energy[0];
             let solved = [
-                anchor - core.rss_pen(&coeff),
+                anchor - core.rss_pen(lambda, &coeff),
                 coeff.iter().zip(dc.iter()).map(|(&c, &v)| c * v).sum(),
                 dc.iter().zip(u.iter()).map(|(&a, &b)| a * b).sum(),
                 u.iter()

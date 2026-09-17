@@ -676,11 +676,40 @@ impl FrozenRhoCertificate {
     }
 }
 
-/// Wilkinson growth for the response's Cholesky-based solves — the operation
-/// count `eval` charges its gradient band at, shared with the stationarity
-/// quadratic so both bands are the same statement about the same arithmetic.
-fn response_solve_growth(p: usize) -> f64 {
-    gam_linalg::roundoff::accumulation_growth(2 * p * p * p + 8 * p * p + 8 * p)
+/// Wilkinson growth for the response's arithmetic — the operation count `eval`
+/// charges its gradient band at, shared with the stationarity quadratic so both
+/// bands are the same statement about the same arithmetic.
+///
+/// The `p`-terms count the Cholesky of `A(λ)`, its solves and its traces. The
+/// `n`-terms count the residual sums the penalized RSS is formed from (#2280):
+/// two passes of `X·β` over the rows, with their subtractions, squares and sums.
+fn response_solve_growth(n: usize, p: usize) -> f64 {
+    gam_linalg::roundoff::accumulation_growth(
+        2 * p * p * p + 8 * p * p + 8 * p + 4 * n * p + 8 * n,
+    )
+}
+
+/// `(Σ_i r_i², Σ_i r_i² + 2·|r_i|·s_i)` over the residuals `r_i = y_i − x_iᵀβ`,
+/// with `s_i = |y_i| + Σ_j |x_ij·β_j|`.
+///
+/// A residual is a difference, so it rounds against the magnitudes it cancelled,
+/// `u·s_i`, not against itself, and its square carries `2·|r_i|` times that. The
+/// second value is the scale that rounding is charged against (#2280).
+fn residual_sum_of_squares(x: &Array2<f64>, y: &Array1<f64>, beta: &Array1<f64>) -> (f64, f64) {
+    let mut total = 0.0;
+    let mut scale = 0.0;
+    for (row, &response) in x.rows().into_iter().zip(y.iter()) {
+        let mut fitted = 0.0;
+        let mut cancelled = response.abs();
+        for (&entry, &coefficient) in row.iter().zip(beta.iter()) {
+            fitted += entry * coefficient;
+            cancelled += (entry * coefficient).abs();
+        }
+        let residual = response - fitted;
+        total += residual * residual;
+        scale += residual * residual + 2.0 * residual.abs() * cancelled;
+    }
+    (total, scale)
 }
 
 /// `L⁻¹·B` for a lower-triangular `L`, by forward substitution.
@@ -733,10 +762,13 @@ impl StationarityQuadratic {
         self.q[0] + self.q[1] * z + self.q[2] * z * z
     }
 
-    /// The rounding band of `value(z)`: `γ·u·Σ_k |m_k·z^k|`.
+    /// The rounding band of `value(z)`: `γ·Σ_k |m_k·z^k|`.
+    ///
+    /// `γ` is Wilkinson's `γ_n = n·u/(1 − n·u)`, which already carries the unit
+    /// roundoff. This band once multiplied it by `u` a second time, which put it
+    /// about `1/u ≈ 9e15` times below the rounding it bounds (#2280).
     fn band(&self, z: f64) -> f64 {
         self.growth
-            * gam_linalg::roundoff::UNIT_ROUNDOFF
             * (self.magnitude[0] + self.magnitude[1] * z.abs() + self.magnitude[2] * z * z)
     }
 
@@ -832,7 +864,6 @@ pub struct GaussianRemlRhoResponse<'a> {
     rank_s: usize,
     xtx: Array2<f64>,
     xty: Array1<f64>,
-    yty: f64,
     rho_domain: (f64, f64),
     augmented_rho_domain: (f64, f64),
 }
@@ -847,9 +878,10 @@ struct RemlEval {
     /// `G = ∂Ṽ/∂ρ`.
     grad: f64,
     /// Rounding band of `grad`: Wilkinson's growth factor for the operations
-    /// the gradient accumulates (a `p×p` Cholesky, two solves and two traces)
-    /// times the magnitude sum of its three terms. A gradient inside this band
-    /// is zero to the arithmetic; that is what "stationary" means here.
+    /// the gradient accumulates (a `p×p` Cholesky, two solves, two traces and the
+    /// residual sums `D` is formed from) times the magnitude sum of its three
+    /// terms, plus `D`'s own rounding carried through `pen/D`. A gradient inside
+    /// this band is zero to the arithmetic; that is what "stationary" means here.
     grad_band: f64,
     /// `∂²Ṽ/∂ρ²`.
     hess: f64,
@@ -911,7 +943,6 @@ impl<'a> GaussianRemlRhoResponse<'a> {
         let rank_s = evals.iter().filter(|&&e| e > threshold).count();
         let xtx = x.t().dot(x);
         let xty = x.t().dot(y);
-        let yty = y.dot(y);
         // #2902 row 8: ρ is searched in the #2812 resolvability domain of the Gram
         // against S. The test row adds `x_* x_*ᵀ` to the Gram whatever z is, so
         // every ρ̂(z) shares one augmented domain.
@@ -941,7 +972,6 @@ impl<'a> GaussianRemlRhoResponse<'a> {
             rank_s,
             xtx,
             xty,
-            yty,
             rho_domain,
             augmented_rho_domain,
         })
@@ -990,16 +1020,41 @@ impl<'a> GaussianRemlRhoResponse<'a> {
             }
         }
         let beta = chol.solvevec(&c);
-        let yty_eff = self.yty + z.map_or(0.0, |zv| zv * zv);
-        let d = yty_eff - c.dot(&beta);
+        let sbeta = self.s.dot(&beta);
+        let pen = lambda * beta.dot(&sbeta);
+
+        // #2280: `D` is the penalized sum of squares at β̂, formed as one:
+        // `‖y − Xβ̂‖² [+ (z − x_*ᵀβ̂)²] + pen`. The closed form it equals at the exact
+        // solve, `yᵀy [+ z²] − cᵀβ̂`, is a difference that rounds at `u·yᵀy` and takes
+        // the solve's backward error `E` at first order, as `β̂ᵀEβ̂`, so a `D` below
+        // that scale came back as roundoff, or as a non-positive "degenerate fit".
+        // Formed from residuals, the solve's error enters `D` only at second order,
+        // and the rounding is charged against the residuals rather than against `yᵀy`.
+        let (training_rss, training_scale) = residual_sum_of_squares(self.x, self.y, &beta);
+        let (test_rss, test_scale) = match z {
+            Some(zv) => {
+                let mut fitted = 0.0;
+                let mut cancelled = zv.abs();
+                for (&entry, &coefficient) in self.x_star.iter().zip(beta.iter()) {
+                    fitted += entry * coefficient;
+                    cancelled += (entry * coefficient).abs();
+                }
+                let residual = zv - fitted;
+                (
+                    residual * residual,
+                    residual * residual + 2.0 * residual.abs() * cancelled,
+                )
+            }
+            None => (0.0, 0.0),
+        };
+        let d = training_rss + test_rss + pen;
         if !(d > 0.0) {
             return Err(format!(
                 "gaussian reml response: non-positive penalized RSS D = {d}; degenerate fit"
             ));
         }
-
-        let sbeta = self.s.dot(&beta);
-        let pen = lambda * beta.dot(&sbeta);
+        let growth = response_solve_growth(n_eff, p);
+        let d_band = growth * (training_scale + test_scale + pen.abs());
 
         // Z = A⁻¹ S for the trace terms tr(A⁻¹S), tr((A⁻¹S)²).
         let z_mat = chol.solve_mat(self.s);
@@ -1019,8 +1074,9 @@ impl<'a> GaussianRemlRhoResponse<'a> {
         let logdet: f64 = 2.0 * chol.diag().iter().map(|d| d.ln()).sum::<f64>();
         let value = coef * d.ln() + logdet - r * rho;
         let grad = coef * pen / d + lambda * tr_ainv_s - r;
-        let grad_band = gam_linalg::roundoff::accumulation_growth(2 * p * p * p + 8 * p * p + 8 * p)
-            * ((coef * pen / d).abs() + (lambda * tr_ainv_s).abs() + r.abs());
+        // `D`'s own rounding reaches the gradient through `pen/D`.
+        let grad_band = growth * ((coef * pen / d).abs() + (lambda * tr_ainv_s).abs() + r.abs())
+            + (coef * pen / d).abs() * d_band / d;
         let pen_prime = pen - 2.0 * lambda * lambda * quad;
         let hess = coef * (pen_prime * d - pen * pen) / (d * d) + lambda * tr_ainv_s
             - lambda * lambda * tr_ainv_s_sq;
@@ -1075,25 +1131,92 @@ impl<'a> GaussianRemlRhoResponse<'a> {
         let sb = self.s.dot(&b);
         // pen(z) = λ·(aᵀSa + 2·aᵀSb·z + bᵀSb·z²).
         let pen = [lambda * a.dot(&sa), 2.0 * lambda * a.dot(&sb), lambda * b.dot(&sb)];
-        // D(z) = (yᵀy − c₀ᵀa) − (c₀ᵀb + x_*ᵀa)·z + (1 − x_*ᵀb)·z².
+        // #2280: D(z) is the penalized sum of squares at β̂(z), and its coefficients
+        // are formed from residuals. The training rows' residuals are `e − f·z`, with
+        // `e = y − Xa` and `f = Xb`, and the test row's is `(1 − x_*ᵀb)·z − x_*ᵀa`, so
+        //   D(z) = (‖e‖² + (x_*ᵀa)² + pen₀) + (pen₁ − 2·(eᵀf + (x_*ᵀa)(1 − x_*ᵀb)))·z
+        //        + (‖f‖² + (1 − x_*ᵀb)² + pen₂)·z².
+        // At the exact solve these are `yᵀy − c₀ᵀa`, `−(c₀ᵀb + x_*ᵀa)` and `1 − x_*ᵀb`,
+        // differences that round against `yᵀy` and the leverage rather than against
+        // the coefficient, so a coefficient below that scale was roundoff returned as
+        // a number. Each scale below is what its coefficient's rounding is charged
+        // against: a residual rounds against the magnitudes it cancelled.
+        let mut sums = [0.0_f64; 3];
+        let mut sum_scales = [0.0_f64; 3];
+        for (row, &response) in self.x.rows().into_iter().zip(self.y.iter()) {
+            let mut fitted_a = 0.0;
+            let mut cancelled_a = response.abs();
+            let mut image_b = 0.0;
+            let mut cancelled_b = 0.0;
+            for ((&entry, &coefficient_a), &coefficient_b) in
+                row.iter().zip(a.iter()).zip(b.iter())
+            {
+                fitted_a += entry * coefficient_a;
+                cancelled_a += (entry * coefficient_a).abs();
+                image_b += entry * coefficient_b;
+                cancelled_b += (entry * coefficient_b).abs();
+            }
+            let e = response - fitted_a;
+            sums[0] += e * e;
+            sum_scales[0] += e * e + 2.0 * e.abs() * cancelled_a;
+            sums[1] += e * image_b;
+            sum_scales[1] +=
+                (e * image_b).abs() + e.abs() * cancelled_b + image_b.abs() * cancelled_a;
+            sums[2] += image_b * image_b;
+            sum_scales[2] += image_b * image_b + 2.0 * image_b.abs() * cancelled_b;
+        }
+        let test_image_a = self.x_star.dot(&a);
+        let test_cancelled_a: f64 = self
+            .x_star
+            .iter()
+            .zip(a.iter())
+            .map(|(&entry, &coefficient)| (entry * coefficient).abs())
+            .sum();
+        let test_image_b = self.x_star.dot(&b);
+        let test_cancelled_b: f64 = self
+            .x_star
+            .iter()
+            .zip(b.iter())
+            .map(|(&entry, &coefficient)| (entry * coefficient).abs())
+            .sum();
+        let complement = 1.0 - test_image_b;
+        let complement_scale = 1.0 + test_cancelled_b;
         let rss = [
-            self.yty - self.xty.dot(&a),
-            -(self.xty.dot(&b) + self.x_star.dot(&a)),
-            1.0 - self.x_star.dot(&b),
+            sums[0] + test_image_a * test_image_a + pen[0],
+            pen[1] - 2.0 * (sums[1] + test_image_a * complement),
+            sums[2] + complement * complement + pen[2],
+        ];
+        let rss_scale = [
+            sum_scales[0]
+                + test_image_a * test_image_a
+                + 2.0 * test_image_a.abs() * test_cancelled_a
+                + pen[0].abs(),
+            pen[1].abs()
+                + 2.0
+                    * (sum_scales[1]
+                        + (test_image_a * complement).abs()
+                        + complement.abs() * test_cancelled_a
+                        + test_image_a.abs() * complement_scale),
+            sum_scales[2]
+                + complement * complement
+                + 2.0 * complement.abs() * complement_scale
+                + pen[2].abs(),
         ];
         let z_mat = chol.solve_mat(self.s);
         let tr_ainv_s: f64 = (0..p).map(|i| z_mat[[i, i]]).sum();
         let g = lambda * tr_ainv_s - self.rank_s as f64;
+        // `g` is itself a difference, so its rounding is charged against its terms.
+        let g_scale = (lambda * tr_ainv_s).abs() + self.rank_s as f64;
         let mut q = [0.0_f64; 3];
         let mut magnitude = [0.0_f64; 3];
         for k in 0..3 {
             q[k] = coef * pen[k] + g * rss[k];
-            magnitude[k] = (coef * pen[k]).abs() + (g * rss[k]).abs();
+            magnitude[k] = (coef * pen[k]).abs() + g_scale * rss_scale[k];
         }
         Ok(StationarityQuadratic {
             q,
             magnitude,
-            growth: response_solve_growth(p),
+            growth: response_solve_growth(n_eff, p),
         })
     }
 
@@ -2717,6 +2840,129 @@ mod tests {
                     from_eval
                 );
             }
+        }
+    }
+
+    /// #2280: the penalized RSS and the stationarity quadratic survive a planted
+    /// residual below the rounding of `yᵀy`.
+    ///
+    /// The response is `X·β₀ + ρ·e`, with `β₀` on the penalty's null space (the
+    /// `cos πt` column) and `e` a unit vector orthogonal to the design's column space.
+    /// The test row sits at `t = ½`, where `x_*ᵀβ₀ = cos(π/2)` vanishes to rounding. At
+    /// `z = 0` the augmented penalized objective is minimized by `β₀` at the value
+    /// `ρ² + (x_*ᵀβ₀)²`, and `ρ² = 1e-16` sits below one ulp of `yᵀy ≈ 22`. So the
+    /// closed form `yᵀy − cᵀβ̂`, which at `z = 0` is also the quadratic's old constant
+    /// coefficient `yᵀy − c₀ᵀa`, cannot represent it. That miss is asserted first, as
+    /// the positive control that the fixture reaches the regime. Because the closed
+    /// form's result is quantized at that ulp, it is held to half the residual.
+    ///
+    /// The reference is an independent SVD residual of the augmented system
+    /// `[X; x_*ᵀ; √λ·S½]·β ≈ [y; 0; 0]`, taken as `‖t − U·Uᵀt‖²`. At a computed `β` the
+    /// sum of squares exceeds the minimum by `δᵀAδ ≤ (γ·κ·scale)²`, with
+    /// `scale = ‖t‖ + σ_max·‖β₀‖`, and its rounding moves it by `γ·scale` along the
+    /// residual. The SVD residual carries the same band, so the difference is allowed
+    /// it twice. The quadratic is checked through `Q(0) = ∂V/∂ρ·D(ρ, 0)`, the identity
+    /// the certificate's wall test rests on.
+    #[test]
+    fn the_penalized_rss_survives_a_residual_below_the_rounding_of_yty_2280() {
+        use gam_linalg::faer_ndarray::FaerSvd;
+        let (n, p) = (45usize, 8usize);
+        let (x, wobble, s) = gauss_reml_fixture(n, p);
+        let u_design = x
+            .svd(true, false)
+            .expect("design SVD")
+            .0
+            .expect("left singular vectors");
+        let off_design = &wobble - &u_design.dot(&u_design.t().dot(&wobble));
+        let direction = &off_design / off_design.dot(&off_design).sqrt();
+        let mut beta0 = Array1::<f64>::zeros(p);
+        beta0[1] = 1.0;
+        let residual_norm = 1.0e-8;
+        let y = x.dot(&beta0) + &(&direction * residual_norm);
+        let x_star = cosine_row(p, 0.5);
+        let resp = GaussianRemlRhoResponse::new(&x, &y, &s, &x_star).expect("response");
+        let test_leak = x_star.dot(&beta0);
+        let expected_minimum = residual_norm * residual_norm + test_leak * test_leak;
+
+        for &rho in &[-2.0_f64, 0.0] {
+            let lambda = rho.exp();
+            let mut augmented = Array2::<f64>::zeros((n + 1 + p, p));
+            for i in 0..n {
+                for j in 0..p {
+                    augmented[[i, j]] = x[[i, j]];
+                }
+            }
+            for j in 0..p {
+                augmented[[n, j]] = x_star[j];
+                augmented[[n + 1 + j, j]] = (lambda * s[[j, j]]).sqrt();
+            }
+            let mut target = Array1::<f64>::zeros(n + 1 + p);
+            for i in 0..n {
+                target[i] = y[i];
+            }
+            let decomposition = augmented.svd(true, false).expect("augmented SVD");
+            let u_augmented = decomposition.0.expect("left singular vectors");
+            let sigma = decomposition.1;
+            let svd_rss = (&target - &u_augmented.dot(&u_augmented.t().dot(&target)))
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>();
+            let sigma_max = sigma.iter().copied().fold(0.0_f64, f64::max);
+            let sigma_min = sigma.iter().copied().fold(f64::INFINITY, f64::min);
+            let condition = sigma_max / sigma_min;
+            let gamma = gam_linalg::roundoff::accumulation_growth((n + 1 + p) * p * p);
+            let scale = target.dot(&target).sqrt() + sigma_max * beta0.dot(&beta0).sqrt();
+            let band =
+                2.0 * (2.0 * gamma * scale * svd_rss.sqrt() + (gamma * condition * scale).powi(2));
+
+            // The closed form this replaced, on the same arithmetic.
+            let mut a_matrix = resp.xtx.clone();
+            for i in 0..p {
+                for j in 0..p {
+                    a_matrix[[i, j]] += lambda * s[[i, j]] + x_star[i] * x_star[j];
+                }
+            }
+            let closed_beta = a_matrix
+                .cholesky(Side::Lower)
+                .expect("A(λ) is SPD")
+                .solvevec(&resp.xty);
+            let closed_form = y.dot(&y) - resp.xty.dot(&closed_beta);
+            let production = resp.penalized_rss(rho, Some(0.0)).expect("penalized RSS");
+            let quadratic = resp.stationarity_quadratic_in_z(rho).expect("quadratic");
+            let evaluation = resp.eval(rho, Some(0.0)).expect("eval");
+            let from_reference = evaluation.grad * svd_rss;
+            let allowance = quadratic.band(0.0)
+                + evaluation.grad_band * svd_rss
+                + evaluation.grad.abs() * band;
+            println!(
+                "[2280-conformal] rho={rho} condition={condition:.3e} \
+                 planted={expected_minimum:.6e} svd={svd_rss:.6e} production={production:.6e} \
+                 closed_form={closed_form:.6e} band={band:.3e} q0={:.6e} \
+                 grad_times_svd={from_reference:.6e} allowance={allowance:.3e}",
+                quadratic.value(0.0)
+            );
+
+            assert!(
+                (svd_rss - expected_minimum).abs() <= band,
+                "the SVD instrument must recover the planted minimum {expected_minimum:.6e}: got \
+                 {svd_rss:.6e} (band {band:.3e})"
+            );
+            assert!(
+                (closed_form - svd_rss).abs() > 0.5 * svd_rss,
+                "REGIME: yᵀy − cᵀβ̂ = {closed_form:.6e} must miss the SVD residual {svd_rss:.6e} \
+                 by more than half of it, or this fixture does not reach the defect"
+            );
+            assert!(
+                (production - svd_rss).abs() <= band,
+                "the penalized RSS {production:.6e} must match the SVD residual {svd_rss:.6e} \
+                 within {band:.3e} at rho={rho}"
+            );
+            assert!(
+                (quadratic.value(0.0) - from_reference).abs() <= allowance,
+                "Q(0) = {:.6e} must equal ∂V/∂ρ·D = {from_reference:.6e} on the SVD residual \
+                 within {allowance:.3e} at rho={rho}",
+                quadratic.value(0.0)
+            );
         }
     }
 
