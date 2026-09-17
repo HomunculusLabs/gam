@@ -7,6 +7,7 @@ use super::gradient_paths::*;
 use super::hessian_paths::{new_cell_moment_cache_stats, new_cell_moment_lru_cache};
 use super::install_flex::validate_spec;
 use super::*;
+use crate::fit_orchestration::FitFailure;
 use crate::marginal_slope_orthogonal::influence_absorber_log_lambda;
 use faer::Side;
 use gam_linalg::faer_ndarray::{FaerEigh, fast_ab, fast_atb, fast_xt_diag_x};
@@ -1923,7 +1924,7 @@ fn inner_fit(
     family: &BernoulliMarginalSlopeFamily,
     blocks: &[ParameterBlockSpec],
     options: &BlockwiseFitOptions,
-) -> Result<UnifiedFitResult, String> {
+) -> Result<UnifiedFitResult, FitFailure> {
     let mut options = options.clone();
     // BMS carries fixed physical ridge penalties that regularize coefficient
     // geometry but are not REML coordinates. The exact hyper-Hessian route can
@@ -1932,7 +1933,7 @@ fn inner_fit(
     options.use_outer_hessian = false;
     options.outer_tol = options.outer_tol.max(2.0e-5);
     crate::custom_family::fit_custom_family_arming_on_evidence(family, blocks, &options)
-        .map_err(|e| e.to_string())
+        .map_err(FitFailure::from)
 }
 
 fn inner_fit_from_certified_outer(
@@ -1942,14 +1943,14 @@ fn inner_fit_from_certified_outer(
     mode: CustomFamilyJointHyperModeSelection,
     theta: &Array1<f64>,
     outer: &gam_solve::rho_optimizer::CertifiedOuterResult,
-) -> Result<UnifiedFitResult, String> {
+) -> Result<UnifiedFitResult, FitFailure> {
     let mut options = crate::outer_subsample::exact_outer_options(options);
     options.use_outer_hessian = false;
     options.outer_tol = options.outer_tol.max(2.0e-5);
     fit_custom_family_fixed_log_lambdas_from_mode_selection(
         family, blocks, &options, mode, theta, outer,
     )
-    .map_err(|error| error.to_string())
+    .map_err(FitFailure::from)
 }
 
 pub(crate) fn fit_bernoulli_marginal_slope_terms(
@@ -1958,7 +1959,7 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
     options: &BlockwiseFitOptions,
     kappa_options: &SpatialLengthScaleOptimizationOptions,
     policy: &gam_runtime::resource::ResourcePolicy,
-) -> Result<BernoulliMarginalSlopeFitResult, String> {
+) -> Result<BernoulliMarginalSlopeFitResult, FitFailure> {
     let mut spec = spec;
     let data_view = data;
     validate_spec(data_view, &spec)?;
@@ -2090,10 +2091,10 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         } => Some(*initial_sigma),
         FrailtySpec::None => None,
         FrailtySpec::HazardMultiplier { .. } => {
-            return Err(
-                "internal: validate_spec should have rejected unsupported marginal-slope frailty"
-                    .to_string(),
-            );
+            return Err(FitFailure::raised(
+                gam_problem::FailureCategory::Invariant,
+                "internal: validate_spec should have rejected unsupported marginal-slope frailty",
+            ));
         }
     };
     let probit_scale = probit_frailty_scale(initial_sigma);
@@ -2158,8 +2159,10 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
             conditioning_dense.as_ref().map(|d| d.view()),
         )?;
     if latent_measure.is_empirical() && sigma_learnable {
-        return Err("empirical latent-measure marginal-slope calibration requires fixed GaussianShift sigma; learnable sigma derivatives must be fit under the standard-normal latent measure"
-                    .to_string());
+        return Err(FitFailure::raised(
+            gam_problem::FailureCategory::Input,
+            "empirical latent-measure marginal-slope calibration requires fixed GaussianShift sigma; learnable sigma derivatives must be fit under the standard-normal latent measure",
+        ));
     }
 
     let y = Arc::new(spec.y.clone());
@@ -2277,10 +2280,13 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
             .try_to_dense_arc("bernoulli marginal-slope influence-block protected projection")?;
         let protected_dense = protected_dense_for_proj.as_ref();
         if jac.nrows() != protected_dense.nrows() {
-            return Err(format!(
-                "influence block: Jacobian has {} rows, protected design has {}",
-                jac.nrows(),
-                protected_dense.nrows()
+            return Err(FitFailure::raised(
+                gam_problem::FailureCategory::Invariant,
+                format!(
+                    "influence block: Jacobian has {} rows, protected design has {}",
+                    jac.nrows(),
+                    protected_dense.nrows()
+                ),
             ));
         }
         // Z̃ = residualize(diag(s_f·β̂₀)·J) against the fitted target span in
@@ -2694,8 +2700,10 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
     let analytic_joint_derivatives_available =
         marginal_has_spatial || slope_has_spatial || setup.log_kappa_dim() == 0;
     if setup.log_kappa_dim() > 0 && !analytic_joint_derivatives_available {
-        return Err("exact bernoulli marginal-slope spatial optimization requires analytic joint psi derivatives"
-                    .to_string());
+        return Err(FitFailure::raised(
+            gam_problem::FailureCategory::Input,
+            "exact bernoulli marginal-slope spatial optimization requires analytic joint psi derivatives",
+        ));
     }
     let initial_rho = setup.theta0().slice(s![..setup.rho_dim()]).to_owned();
     let initial_blocks = build_blocks(&initial_rho, &marginal_design, &slope_design)?;
@@ -2806,7 +2814,7 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
     // a stalled first attempt that silently falls back.
     let outer_policy = initial_family.outer_derivative_policy(&initial_blocks, options);
     let exact_spatial_outer_tol = kappa_options_ref.rel_tol;
-    let solved = optimize_spatial_length_scale_exact_joint(
+    let solved = optimize_spatial_length_scale_exact_joint_typed(
         data_view,
         &[marginalspec_boot.clone(), slopespec_boot.clone()],
         &[marginal_terms.clone(), slope_terms.clone()],
@@ -2820,7 +2828,9 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         outer_policy,
         |theta, specs: &[TermCollectionSpec], designs: &[TermCollectionDesign], provenance| {
             if let Some(err) = runaway_error.borrow().as_ref().cloned() {
-                return Err(err);
+                // A separation-scale runaway: the data leave the probit
+                // marginal/slope coupling without a finite optimum.
+                return Err(FitFailure::raised(gam_problem::FailureCategory::Input, err));
             }
             assert_eq!(
                 specs.len(),
@@ -2848,7 +2858,7 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
                 )
             {
                 runaway_error.replace(Some(err.clone()));
-                return Err(err);
+                return Err(FitFailure::raised(gam_problem::FailureCategory::Input, err));
             }
             let mut hints_mut = hints.borrow_mut();
             let mut bidx = 0usize;
@@ -3165,10 +3175,13 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
             .design
             .try_to_dense_arc("bms generated-regressor marginal design")?;
         if p_beta != vb.ncols() {
-            return Err(format!(
-                "bms generated-regressor: covariance_conditional must be square, got {}×{}",
-                vb.nrows(),
-                vb.ncols()
+            return Err(FitFailure::raised(
+                gam_problem::FailureCategory::Invariant,
+                format!(
+                    "bms generated-regressor: covariance_conditional must be square, got {}×{}",
+                    vb.nrows(),
+                    vb.ncols()
+                ),
             ));
         }
         let correction_family =
@@ -3191,10 +3204,13 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
                 .try_to_dense_arc("bms generated-regressor fitted slope design")?;
             let p_score = score_marginal_dense.ncols() + score_slope_dense.ncols();
             if p_beta != p_score {
-                return Err(format!(
-                    "bms generated-regressor rigid covariance/frame mismatch: covariance width {p_beta} != marginal({}) + slope({})",
-                    score_marginal_dense.ncols(),
-                    score_slope_dense.ncols()
+                return Err(FitFailure::raised(
+                    gam_problem::FailureCategory::Invariant,
+                    format!(
+                        "bms generated-regressor rigid covariance/frame mismatch: covariance width {p_beta} != marginal({}) + slope({})",
+                        score_marginal_dense.ncols(),
+                        score_slope_dense.ncols()
+                    ),
                 ));
             }
             let marginal_eta = &solved_fit.block_states[0].eta;
@@ -3212,11 +3228,11 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
                     let grid = match &latent_measure {
                         LatentMeasureKind::GlobalEmpirical { grid } => grid,
                         _ => {
-                            return Err(
+                            return Err(FitFailure::raised(
+                                gam_problem::FailureCategory::Invariant,
                                 "bms generated-regressor: an empirical build record without a \
-                                 global-empirical measure"
-                                    .to_string(),
-                            );
+                                 global-empirical measure",
+                            ));
                         }
                     };
                     let channels = rigid_empirical_score_zeta_channels(
@@ -3234,11 +3250,14 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
                     )?;
                     let cross_row = build.node_zeta_vjp(channels.node.view())?;
                     if cross_row.nrows() != channels.direct.nrows() {
-                        return Err(format!(
-                            "bms generated-regressor: the empirical cross-row channel has {} \
-                             rows against the fit's {}",
-                            cross_row.nrows(),
-                            channels.direct.nrows()
+                        return Err(FitFailure::raised(
+                            gam_problem::FailureCategory::Invariant,
+                            format!(
+                                "bms generated-regressor: the empirical cross-row channel has {} \
+                                 rows against the fit's {}",
+                                cross_row.nrows(),
+                                channels.direct.nrows()
+                            ),
                         ));
                     }
                     log::info!(
@@ -3273,9 +3292,12 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
                     latent_measure: measure,
                     unavailable_channel: channel,
                 } => {
-                    return Err(format!(
-                        "bms generated-regressor: reached the correction with a {measure} \
-                         measure whose channel is unavailable ({channel})"
+                    return Err(FitFailure::raised(
+                        gam_problem::FailureCategory::Invariant,
+                        format!(
+                            "bms generated-regressor: reached the correction with a {measure} \
+                             measure whose channel is unavailable ({channel})"
+                        ),
                     ));
                 }
             }

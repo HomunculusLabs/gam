@@ -7480,6 +7480,10 @@ pub(crate) fn exact_joint_multistart_outer_problem(
     Ok(problem)
 }
 
+/// [`optimize_spatial_length_scale_exact_joint_typed`] for callers whose final
+/// coefficient fit still reports text. Their fit failures cross as prose, which
+/// the typed driver records as unclassified; its own failures are rendered to
+/// the text these callers used to receive (#2937).
 pub fn optimize_spatial_length_scale_exact_joint<FitOut, Mode, FitFn, ExactFn, ExactEfsFn, SeedFn>(
     data: ArrayView2<'_, f64>,
     block_specs: &[TermCollectionSpec],
@@ -7493,9 +7497,9 @@ pub fn optimize_spatial_length_scale_exact_joint<FitOut, Mode, FitFn, ExactFn, E
     screening_cap: Option<Arc<AtomicUsize>>,
     outer_derivative_policy: gam_model_api::families::custom_family::OuterDerivativePolicy,
     mut fit_fn: FitFn,
-    mut exact_fn: ExactFn,
-    mut exact_efs_fn: ExactEfsFn,
-    mut seed_inner_beta_fn: SeedFn,
+    exact_fn: ExactFn,
+    exact_efs_fn: ExactEfsFn,
+    seed_inner_beta_fn: SeedFn,
 ) -> Result<SpatialLengthScaleOptimizationResult<FitOut>, String>
 where
     FitFn: FnMut(
@@ -7518,14 +7522,90 @@ where
     ) -> Result<ExactJointEfsEvaluation<Mode>, String>,
     SeedFn: FnMut(&Array1<f64>) -> Result<gam_solve::rho_optimizer::SeedOutcome, EstimationError>,
 {
+    optimize_spatial_length_scale_exact_joint_typed(
+        data,
+        block_specs,
+        block_term_indices,
+        kappa_options,
+        joint_setup,
+        seed_risk_profile,
+        analytic_joint_gradient_available,
+        analytic_joint_hessian_available,
+        disable_fixed_point,
+        screening_cap,
+        outer_derivative_policy,
+        |theta: &Array1<f64>,
+         specs: &[TermCollectionSpec],
+         designs: &[TermCollectionDesign],
+         provenance: SpatialFitProvenance<'_, Mode>| {
+            fit_fn(theta, specs, designs, provenance).map_err(FitFailure::from)
+        },
+        exact_fn,
+        exact_efs_fn,
+        seed_inner_beta_fn,
+    )
+    .map_err(|failure| failure.to_string())
+}
+
+/// The n-block exact-joint spatial driver. Its final coefficient fit and the
+/// outer search's own verdict both reach the caller as a typed [`FitFailure`]
+/// (#2937).
+pub fn optimize_spatial_length_scale_exact_joint_typed<
+    FitOut,
+    Mode,
+    FitFn,
+    ExactFn,
+    ExactEfsFn,
+    SeedFn,
+>(
+    data: ArrayView2<'_, f64>,
+    block_specs: &[TermCollectionSpec],
+    block_term_indices: &[Vec<usize>],
+    kappa_options: &SpatialLengthScaleOptimizationOptions,
+    joint_setup: &ExactJointHyperSetup,
+    seed_risk_profile: gam_problem::SeedRiskProfile,
+    analytic_joint_gradient_available: bool,
+    analytic_joint_hessian_available: bool,
+    disable_fixed_point: bool,
+    screening_cap: Option<Arc<AtomicUsize>>,
+    outer_derivative_policy: gam_model_api::families::custom_family::OuterDerivativePolicy,
+    mut fit_fn: FitFn,
+    mut exact_fn: ExactFn,
+    mut exact_efs_fn: ExactEfsFn,
+    mut seed_inner_beta_fn: SeedFn,
+) -> Result<SpatialLengthScaleOptimizationResult<FitOut>, FitFailure>
+where
+    FitFn: FnMut(
+        &Array1<f64>,
+        &[TermCollectionSpec],
+        &[TermCollectionDesign],
+        SpatialFitProvenance<'_, Mode>,
+    ) -> Result<FitOut, FitFailure>,
+    ExactFn: FnMut(
+        &Array1<f64>,
+        &[TermCollectionSpec],
+        &[TermCollectionDesign],
+        gam_solve::estimate::reml::reml_outer_engine::EvalMode,
+        Option<Mode>,
+    ) -> Result<ExactJointEvaluation<Mode>, String>,
+    ExactEfsFn: FnMut(
+        &Array1<f64>,
+        &[TermCollectionSpec],
+        &[TermCollectionDesign],
+    ) -> Result<ExactJointEfsEvaluation<Mode>, String>,
+    SeedFn: FnMut(&Array1<f64>) -> Result<gam_solve::rho_optimizer::SeedOutcome, EstimationError>,
+{
     let n_blocks = block_specs.len();
     if block_term_indices.len() != n_blocks {
-        return Err(SmoothError::dimension_mismatch(format!(
-            "block_specs ({}) and block_term_indices ({}) length mismatch",
-            n_blocks,
-            block_term_indices.len()
-        ))
-        .into());
+        return Err(FitFailure::raised(
+            gam_problem::FailureCategory::Invariant,
+            SmoothError::dimension_mismatch(format!(
+                "block_specs ({}) and block_term_indices ({}) length mismatch",
+                n_blocks,
+                block_term_indices.len()
+            ))
+            .to_string(),
+        ));
     }
 
     let log_kappa_dim = joint_setup.log_kappa_dim();
@@ -7579,14 +7659,17 @@ where
     let mut lower = joint_setup.lower();
     let mut upper = joint_setup.upper();
     if theta0.len() < log_kappa_dim || lower.len() != theta0.len() || upper.len() != theta0.len() {
-        return Err(SmoothError::dimension_mismatch(format!(
-            "invalid exact joint theta setup: theta0={}, lower={}, upper={}, required_log_kappa_dim={}",
-            theta0.len(),
-            lower.len(),
-            upper.len(),
-            log_kappa_dim
-        ))
-        .into());
+        return Err(FitFailure::raised(
+            gam_problem::FailureCategory::Invariant,
+            SmoothError::dimension_mismatch(format!(
+                "invalid exact joint theta setup: theta0={}, lower={}, upper={}, required_log_kappa_dim={}",
+                theta0.len(),
+                lower.len(),
+                upper.len(),
+                log_kappa_dim
+            ))
+            .to_string(),
+        ));
     }
     let rho_dim = joint_setup.rho_dim();
     let all_dims = joint_setup.log_kappa_dims_per_term();
@@ -7793,8 +7876,7 @@ where
         // Multi-block optimization has no preceding scalar Matérn endpoint
         // certificate, so retain its family-specific seed cascade.
         false,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
 
     // Helper: collect specs and designs from cache into owned Vecs for closure calls.
     fn collect_specs(cache: &ExactJointDesignCache<'_>) -> Vec<TermCollectionSpec> {
@@ -8107,9 +8189,9 @@ where
                 OuterEvalOrder::ValueAndGradient
             });
 
-        problem
-            .run_certified(&mut obj, "n-block exact-joint spatial")
-            .map_err(|error| error.to_string())?
+        // The outer search's verdict stays typed: a search whose every seed was
+        // refused is not the same failure as one that started and stalled.
+        problem.run_certified(&mut obj, "n-block exact-joint spatial")?
     }; // obj dropped here, releasing mutable borrow on state
 
     // ── κ-optimization scaling summary ──
@@ -8165,19 +8247,24 @@ where
     // coefficient fit.
     state.ensure_theta(&theta_star)?;
     let (mode_theta, mode_objective, mode) = state.terminal_mode.take().ok_or_else(|| {
-        "n-block exact-joint spatial optimization produced a certificate without retaining the owned terminal coefficient mode"
-            .to_string()
+        FitFailure::raised(
+            gam_problem::FailureCategory::Invariant,
+            "n-block exact-joint spatial optimization produced a certificate without retaining the owned terminal coefficient mode",
+        )
     })?;
     if !theta_values_match(&mode_theta, &theta_star) {
-        return Err(
-            "n-block exact-joint spatial terminal coefficient mode does not bitwise match the certified hyperparameter vector"
-                .to_string(),
-        );
+        return Err(FitFailure::raised(
+            gam_problem::FailureCategory::Invariant,
+            "n-block exact-joint spatial terminal coefficient mode does not bitwise match the certified hyperparameter vector",
+        ));
     }
     if mode_objective.to_bits() != certified_outer.final_value().to_bits() {
-        return Err(format!(
-            "n-block exact-joint spatial terminal coefficient mode objective does not bitwise match the certified objective: mode={mode_objective:.17e}, certified={:.17e}",
-            certified_outer.final_value(),
+        return Err(FitFailure::raised(
+            gam_problem::FailureCategory::Invariant,
+            format!(
+                "n-block exact-joint spatial terminal coefficient mode objective does not bitwise match the certified objective: mode={mode_objective:.17e}, certified={:.17e}",
+                certified_outer.final_value(),
+            ),
         ));
     }
 

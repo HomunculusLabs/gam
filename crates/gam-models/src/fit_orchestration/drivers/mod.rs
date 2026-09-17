@@ -7,6 +7,7 @@
 // `prelude.rs`/`term_specs.rs` used to provide is reconstructed below with the
 // relocated paths (families now resolve as `crate::*`, the solver as
 // `gam_solve::*`, basis/term machinery as `gam_terms::*`).
+use crate::fit_orchestration::FitFailure;
 use gam_terms::basis::{
     BasisError, BasisMetadata, BasisPsiDerivativeResult, BasisPsiSecondDerivativeResult,
     BasisWorkspace, CenterStrategy, FixedRowSpaceProjector, MaternIdentifiability,
