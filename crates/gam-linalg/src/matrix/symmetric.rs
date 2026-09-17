@@ -465,7 +465,7 @@ pub(crate) fn xt_diag_x_symmetric(
                         &mut xtwx,
                         CrossprodStructure::Full,
                         CrossprodAccum::Replace,
-                        effective_global_parallelism(),
+                        pool_parallelism(),
                     );
                 } else {
                     let (symbolic, values) = xs.parts();
@@ -753,7 +753,7 @@ mod tests {
             &mut via_dense,
             CrossprodStructure::Full,
             CrossprodAccum::Replace,
-            effective_global_parallelism(),
+            pool_parallelism(),
         );
 
         let (symbolic, values) = sparse.parts();

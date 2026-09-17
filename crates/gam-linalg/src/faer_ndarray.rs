@@ -1,10 +1,10 @@
 use dyn_stack::{MemBuffer, MemStack};
 use faer::diag::{Diag, DiagRef};
-use faer::linalg::solvers::{self, Lblt as FaerLblt, Ldlt as FaerLdlt, Solve};
-pub use faer::linalg::solvers::Llt as FaerLlt;
+use faer::linalg::solvers;
 use faer::linalg::svd::{self, ComputeSvdVectors};
+use faer::perm::Perm;
 use faer::prelude::ReborrowMut;
-use faer::{Conj, Mat, MatMut, MatRef, Par, Side, Unbind, get_global_parallelism};
+use faer::{Conj, Mat, MatMut, MatRef, Par, Side, get_global_parallelism};
 use ndarray::{Array1, Array2, ArrayBase, ArrayView1, ArrayViewMut1, Data, Ix1, Ix2};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -65,7 +65,7 @@ impl Drop for NestedParallelGuard {
 
 /// Run `body` with the current thread marked as inside a data-parallel row
 /// region, so any faer GEMM it issues (directly or transitively) pins to
-/// `Par::Seq` via `effective_global_parallelism` instead of re-fanning the
+/// `Par::Seq` via `pool_parallelism` instead of re-fanning the
 /// global Rayon pool. The guard is held for exactly the duration of `body` and
 /// dropped on return — including early `?` returns from inside `body`, since the
 /// guard lives in this function's frame.
@@ -126,8 +126,8 @@ static EIGH_NANOS: AtomicU64 = AtomicU64::new(0);
 ///   scoped decision or a global left over from an earlier phase.
 /// * the cores available to THIS PROCESS, which is not the machine's core count.
 ///
-/// Deliberately NOT reported: `effective_global_parallelism`. That is
-/// thread-local and only governs the codebase's own `matmul` calls; it cannot
+/// Deliberately NOT reported: `pool_parallelism`. That is
+/// per call and only governs the codebase's own products and LLTs; it cannot
 /// reach faer's high-level entry points, so printing it beside a factorization
 /// would name a policy that did not apply to it.
 ///
@@ -245,29 +245,48 @@ impl std::fmt::Display for ParallelismSnapshot {
     }
 }
 
-/// faer parallelism policy that respects nested data-parallel regions: returns
-/// faer's global policy at the top level, but `Par::Seq` once a
-/// `NestedParallelGuard` is active so a GEMM issued from inside a parallel row
-/// fan-out does not multiply the live thread count against the outer pool.
+/// #2627 — the degree a matrix product, a Gram, or an LLT factorization runs at,
+/// passed to faer per call: the width of the pool the call runs in, or `Par::Seq`
+/// once a `NestedParallelGuard` or a [`FaerSequentialScope`] is live, so a product
+/// issued from inside a parallel fan-out does not multiply the live thread count
+/// against the outer pool or wait on a `spindle` barrier the outer pool holds.
 ///
-/// Use this in place of `faer::get_global_parallelism()` for any matmul that can
-/// be reached from inside a row-parallel closure.
+/// These kernels give identical bits at every degree and every pool width (GEMM
+/// 2000, LLT 2000 and Gram 200k×100 at degrees Seq/4/8/16/24/48 on pools of
+/// 1/4/24 threads; pool job 1120486), so the degree moves only the wall time.
 #[inline]
-pub(crate) fn effective_global_parallelism() -> Par {
-    if in_nested_parallel_region() {
+pub(crate) fn pool_parallelism() -> Par {
+    if in_nested_parallel_region() || faer_sequential_scope_depth() > 0 {
         Par::Seq
     } else {
-        get_global_parallelism()
+        Par::rayon(0)
     }
+}
+
+/// #2627 — the degree every decomposition and triangular solve runs at:
+/// sequential, passed to faer per call.
+///
+/// A decomposition's arithmetic partition follows its degree — thin QR and SVD
+/// split at `min(degree, K, 4)`, the self-adjoint EVD at every degree ≥ 2 (pool
+/// jobs 1101442 and 1120486) — so a degree read from the pool made a fit a
+/// function of `RAYON_NUM_THREADS`. On one core sequential is also the fastest
+/// degree; at production sizes it costs up to 2.4× on the EVD (1500: 1.70 s
+/// against 0.71 s at the best parallel degree on four threads), 1.2× on QR
+/// (50k×200) and nothing on the SVD.
+#[inline]
+pub fn decomposition_parallelism() -> Par {
+    Par::Seq
 }
 
 /// Process-global depth counter + saved parallelism for [`FaerSequentialScope`].
 ///
-/// The `effective_global_parallelism` / [`NestedParallelGuard`] pair only pins
-/// the codebase's OWN `matmul` calls to `Par::Seq`; it CANNOT reach faer's
-/// high-level factorization/solve entry points (`Llt::new`, `Solve::solve`, SVD,
-/// col-pivoted QR), which read `faer::get_global_parallelism()` internally and
-/// have no per-call parallelism argument. When such a solver runs from inside a
+/// gam-linalg's own factorizations and products take their degree per call
+/// ([`decomposition_parallelism`], [`pool_parallelism`]) and never read faer's
+/// global policy. What this scope still reaches is faer's high-level
+/// factorization/solve entry points called directly outside gam-linalg (`thin_svd`,
+/// `self_adjoint_eigen`, `col_piv_qr().solve_lstsq`, the sparse LLT), which read
+/// `faer::get_global_parallelism()` internally and have no per-call parallelism
+/// argument, and [`pool_parallelism`], which it collapses to `Par::Seq`. When such a solver runs from inside a
 /// Rayon worker (e.g. the topology race fans candidate fits into per-candidate
 /// pools via `run_topology_race_parallel`), faer's default `Par::rayon(0)`
 /// dispatches the factorization through its `spindle` barrier pool, which
@@ -278,10 +297,11 @@ pub(crate) fn effective_global_parallelism() -> Par {
 ///
 /// [`FaerSequentialScope`] closes that hole by pinning faer's PROCESS-GLOBAL
 /// parallelism to `Par::Seq` around the nested solve, so every faer solver it
-/// reaches stays single-threaded and never spawns a nested barrier pool. The
-/// codebase engineers its faer reductions to be parallelism-invariant
-/// (`tests_parallelism_invariance_1557` asserts byte-identical `Par::Seq` vs
-/// `Par::rayon` output), so collapsing to sequential is bit-for-bit neutral.
+/// reaches stays single-threaded and never spawns a nested barrier pool. The swap
+/// is bit-for-bit neutral only for degree-invariant kernels (products, Grams,
+/// LLT). A decomposition still called through faer's high-level solvers gives
+/// different bits under it (#2627), which is why gam-linalg's decompositions run
+/// at [`decomposition_parallelism`] per call instead.
 static FAER_SEQ_STATE: std::sync::Mutex<FaerSeqState> = std::sync::Mutex::new(FaerSeqState {
     depth: 0,
     saved: None,
@@ -376,10 +396,380 @@ pub enum FaerLinalgError {
     Ldlt(solvers::LdltError),
 }
 
+/// The lower triangle of the symmetric matrix `a` whose stored triangle `side`
+/// names.
+fn lower_triangle(a: MatRef<'_, f64>, side: Side) -> Mat<f64> {
+    let n = a.nrows();
+    let mut lower = Mat::<f64>::zeros(n, n);
+    match side {
+        Side::Lower => lower.copy_from_triangular_lower(a),
+        Side::Upper => lower.copy_from_triangular_lower(a.transpose()),
+    }
+    lower
+}
+
+/// Zero everything above the diagonal of `a`.
+fn zero_strict_upper(mut a: MatMut<'_, f64>) {
+    for j in 0..a.ncols() {
+        for i in 0..j.min(a.nrows()) {
+            a[(i, j)] = 0.0;
+        }
+    }
+}
+
+/// #2627 — `A = L Lᵀ` of a symmetric positive-definite matrix, owned by gam
+/// rather than borrowed from `faer::linalg::solvers`. faer's high-level solvers
+/// read faer's PROCESS-GLOBAL parallelism, whose default under the `rayon` feature
+/// is `Par::rayon(0)`: the width of whatever pool the call runs in. This type calls
+/// faer's low-level entry points with the degree passed per call —
+/// [`pool_parallelism`] for the factorization, whose bits are degree-invariant, and
+/// [`decomposition_parallelism`] for the triangular solves — so gam never reads or
+/// sets faer's global policy, and never leaks one into another faer user.
+#[derive(Clone)]
+pub struct FaerLlt<T> {
+    l: Mat<T>,
+}
+
+impl FaerLlt<f64> {
+    /// Factor the symmetric matrix `a` from the triangle `side` names.
+    pub fn new(a: MatRef<'_, f64>, side: Side) -> Result<Self, solvers::LltError> {
+        let mut l = lower_triangle(a, side);
+        let par = pool_parallelism();
+        let n = l.nrows();
+        let mut mem = MemBuffer::new(
+            faer::linalg::cholesky::llt::factor::cholesky_in_place_scratch::<f64>(
+                n,
+                par,
+                Default::default(),
+            ),
+        );
+        faer::linalg::cholesky::llt::factor::cholesky_in_place(
+            l.as_mut(),
+            Default::default(),
+            par,
+            MemStack::new(&mut mem),
+            Default::default(),
+        )?;
+        zero_strict_upper(l.as_mut());
+        Ok(Self { l })
+    }
+
+    /// The lower-triangular factor `L`.
+    pub fn lower(&self) -> MatRef<'_, f64> {
+        self.l.as_ref()
+    }
+
+    /// The dimension of the factored matrix.
+    pub fn nrows(&self) -> usize {
+        self.l.nrows()
+    }
+
+    /// Overwrite `rhs` with `A⁻¹ rhs`.
+    pub fn solve_in_place(&self, rhs: MatMut<'_, f64>) {
+        let par = decomposition_parallelism();
+        let mut mem = MemBuffer::new(
+            faer::linalg::cholesky::llt::solve::solve_in_place_scratch::<f64>(
+                self.l.nrows(),
+                rhs.ncols(),
+                par,
+            ),
+        );
+        faer::linalg::cholesky::llt::solve::solve_in_place_with_conj(
+            self.l.as_ref(),
+            Conj::No,
+            rhs,
+            par,
+            MemStack::new(&mut mem),
+        );
+    }
+
+    /// `A⁻¹ rhs`.
+    pub fn solve(&self, rhs: MatRef<'_, f64>) -> Mat<f64> {
+        let mut out = rhs.to_owned();
+        self.solve_in_place(out.as_mut());
+        out
+    }
+}
+
+/// `A = L D Lᵀ` of a symmetric matrix at [`decomposition_parallelism`].
+#[derive(Clone)]
+pub struct FaerLdlt {
+    l: Mat<f64>,
+    d: Diag<f64>,
+}
+
+impl FaerLdlt {
+    /// Factor the symmetric matrix `a` from the triangle `side` names.
+    pub fn new(a: MatRef<'_, f64>, side: Side) -> Result<Self, solvers::LdltError> {
+        let mut l = lower_triangle(a, side);
+        let par = decomposition_parallelism();
+        let n = l.nrows();
+        let mut mem = MemBuffer::new(
+            faer::linalg::cholesky::ldlt::factor::cholesky_in_place_scratch::<f64>(
+                n,
+                par,
+                Default::default(),
+            ),
+        );
+        faer::linalg::cholesky::ldlt::factor::cholesky_in_place(
+            l.as_mut(),
+            Default::default(),
+            par,
+            MemStack::new(&mut mem),
+            Default::default(),
+        )?;
+        let mut d = Diag::<f64>::zeros(n);
+        d.copy_from(l.diagonal());
+        l.diagonal_mut().fill(1.0);
+        zero_strict_upper(l.as_mut());
+        Ok(Self { l, d })
+    }
+
+    /// The diagonal factor `D`.
+    pub fn diagonal(&self) -> DiagRef<'_, f64> {
+        self.d.as_ref()
+    }
+
+    /// The dimension of the factored matrix.
+    pub fn nrows(&self) -> usize {
+        self.l.nrows()
+    }
+
+    /// Overwrite `rhs` with `A⁻¹ rhs`.
+    pub fn solve_in_place(&self, rhs: MatMut<'_, f64>) {
+        let par = decomposition_parallelism();
+        let mut mem = MemBuffer::new(
+            faer::linalg::cholesky::ldlt::solve::solve_in_place_scratch::<f64>(
+                self.l.nrows(),
+                rhs.ncols(),
+                par,
+            ),
+        );
+        faer::linalg::cholesky::ldlt::solve::solve_in_place_with_conj(
+            self.l.as_ref(),
+            self.d.as_ref(),
+            Conj::No,
+            rhs,
+            par,
+            MemStack::new(&mut mem),
+        );
+    }
+
+    /// `A⁻¹ rhs`.
+    pub fn solve(&self, rhs: MatRef<'_, f64>) -> Mat<f64> {
+        let mut out = rhs.to_owned();
+        self.solve_in_place(out.as_mut());
+        out
+    }
+}
+
+/// `P A Pᵀ = L B Lᵀ` (Bunch-Kaufman) of a symmetric matrix at
+/// [`decomposition_parallelism`].
+#[derive(Clone)]
+pub struct FaerLblt {
+    l: Mat<f64>,
+    b_diag: Diag<f64>,
+    b_subdiag: Diag<f64>,
+    perm: Perm<usize>,
+}
+
+impl FaerLblt {
+    /// Factor the symmetric matrix `a` from the triangle `side` names.
+    pub fn new(a: MatRef<'_, f64>, side: Side) -> Self {
+        let mut l = lower_triangle(a, side);
+        let par = decomposition_parallelism();
+        let n = l.nrows();
+        let mut b_subdiag = Diag::<f64>::zeros(n);
+        let mut forward = vec![0usize; n];
+        let mut inverse = vec![0usize; n];
+        let mut mem = MemBuffer::new(
+            faer::linalg::cholesky::lblt::factor::cholesky_in_place_scratch::<usize, f64>(
+                n,
+                par,
+                Default::default(),
+            ),
+        );
+        faer::linalg::cholesky::lblt::factor::cholesky_in_place(
+            l.as_mut(),
+            b_subdiag.as_mut(),
+            &mut forward,
+            &mut inverse,
+            par,
+            MemStack::new(&mut mem),
+            Default::default(),
+        );
+        let mut b_diag = Diag::<f64>::zeros(n);
+        b_diag.copy_from(l.diagonal());
+        l.diagonal_mut().fill(1.0);
+        zero_strict_upper(l.as_mut());
+        let perm = Perm::new_checked(forward.into_boxed_slice(), inverse.into_boxed_slice(), n);
+        Self {
+            l,
+            b_diag,
+            b_subdiag,
+            perm,
+        }
+    }
+
+    /// The dimension of the factored matrix.
+    pub fn nrows(&self) -> usize {
+        self.l.nrows()
+    }
+
+    /// Overwrite `rhs` with `A⁻¹ rhs`.
+    pub fn solve_in_place(&self, rhs: MatMut<'_, f64>) {
+        let par = decomposition_parallelism();
+        let mut mem = MemBuffer::new(
+            faer::linalg::cholesky::lblt::solve::solve_in_place_scratch::<usize, f64>(
+                self.l.nrows(),
+                rhs.ncols(),
+                par,
+            ),
+        );
+        faer::linalg::cholesky::lblt::solve::solve_in_place_with_conj(
+            self.l.as_ref(),
+            self.b_diag.as_ref(),
+            self.b_subdiag.as_ref(),
+            Conj::No,
+            self.perm.as_ref(),
+            rhs,
+            par,
+            MemStack::new(&mut mem),
+        );
+    }
+
+    /// `A⁻¹ rhs`.
+    pub fn solve(&self, rhs: MatRef<'_, f64>) -> Mat<f64> {
+        let mut out = rhs.to_owned();
+        self.solve_in_place(out.as_mut());
+        out
+    }
+}
+
+/// Householder QR `A = Q R` at [`decomposition_parallelism`]: the unit lower
+/// trapezoidal reflector basis (`m × min(m, n)`), its block coefficients, and the
+/// upper trapezoidal `R` (`min(m, n) × n`).
+fn householder_qr(a: MatRef<'_, f64>) -> (Mat<f64>, Mat<f64>, Mat<f64>) {
+    let (m, n) = a.shape();
+    let size = m.min(n);
+    let par = decomposition_parallelism();
+    let mut qr = a.to_owned();
+    let block_size = faer::linalg::qr::no_pivoting::factor::recommended_block_size::<f64>(m, n);
+    let mut coeff = Mat::<f64>::zeros(block_size, size);
+    let mut mem = MemBuffer::new(faer::linalg::qr::no_pivoting::factor::qr_in_place_scratch::<f64>(
+        m,
+        n,
+        block_size,
+        par,
+        Default::default(),
+    ));
+    faer::linalg::qr::no_pivoting::factor::qr_in_place(
+        qr.as_mut(),
+        coeff.as_mut(),
+        par,
+        MemStack::new(&mut mem),
+        Default::default(),
+    );
+    let (basis, r) = split_householder(qr.as_ref());
+    (basis, coeff, r)
+}
+
+/// Split a factored `QR` buffer into the unit lower trapezoidal reflector basis
+/// and the upper trapezoidal `R`.
+fn split_householder(qr: MatRef<'_, f64>) -> (Mat<f64>, Mat<f64>) {
+    let (m, n) = qr.shape();
+    let size = m.min(n);
+    let mut r = Mat::<f64>::zeros(size, n);
+    for j in 0..n {
+        for i in 0..size.min(j + 1) {
+            r[(i, j)] = qr[(i, j)];
+        }
+    }
+    let mut basis = Mat::<f64>::zeros(m, size);
+    for j in 0..size {
+        basis[(j, j)] = 1.0;
+        for i in j + 1..m {
+            basis[(i, j)] = qr[(i, j)];
+        }
+    }
+    (basis, r)
+}
+
+/// Apply the reflector sequence `Q` of a Householder factorization to `target`
+/// from the left at [`decomposition_parallelism`].
+fn apply_householder_on_the_left(basis: MatRef<'_, f64>, coeff: MatRef<'_, f64>, target: MatMut<'_, f64>) {
+    let columns = target.ncols();
+    faer::linalg::householder::apply_block_householder_sequence_on_the_left_in_place_with_conj(
+        basis,
+        coeff,
+        Conj::No,
+        target,
+        decomposition_parallelism(),
+        MemStack::new(&mut MemBuffer::new(
+            faer::linalg::householder::apply_block_householder_sequence_on_the_left_in_place_scratch::<f64>(
+                basis.nrows(),
+                coeff.nrows(),
+                columns,
+            ),
+        )),
+    );
+}
+
+/// Column-pivoted Householder QR `A P = Q R` at [`decomposition_parallelism`].
+struct ColumnPivotedQr {
+    basis: Mat<f64>,
+    coeff: Mat<f64>,
+    r: Mat<f64>,
+    forward: Vec<usize>,
+}
+
+impl ColumnPivotedQr {
+    fn new(a: MatRef<'_, f64>) -> Self {
+        let (m, n) = a.shape();
+        let size = m.min(n);
+        let par = decomposition_parallelism();
+        let mut qr = a.to_owned();
+        let block_size = faer::linalg::qr::no_pivoting::factor::recommended_block_size::<f64>(m, n);
+        let mut coeff = Mat::<f64>::zeros(block_size, size);
+        let mut forward = vec![0usize; n];
+        let mut inverse = vec![0usize; n];
+        let mut mem = MemBuffer::new(
+            faer::linalg::qr::col_pivoting::factor::qr_in_place_scratch::<usize, f64>(
+                m,
+                n,
+                block_size,
+                par,
+                Default::default(),
+            ),
+        );
+        faer::linalg::qr::col_pivoting::factor::qr_in_place(
+            qr.as_mut(),
+            coeff.as_mut(),
+            &mut forward,
+            &mut inverse,
+            par,
+            MemStack::new(&mut mem),
+            Default::default(),
+        );
+        let (basis, r) = split_householder(qr.as_ref());
+        Self {
+            basis,
+            coeff,
+            r,
+            forward,
+        }
+    }
+
+    /// The upper trapezoidal `R`, `min(m, n) × n`.
+    fn thin_r(&self) -> MatRef<'_, f64> {
+        self.r.as_ref()
+    }
+}
+
 pub enum FaerSymmetricFactor {
     Llt(FaerLlt<f64>),
-    Ldlt(FaerLdlt<f64>),
-    Lblt(FaerLblt<f64>),
+    Ldlt(FaerLdlt),
+    Lblt(FaerLblt),
 }
 
 #[inline]
@@ -400,7 +790,6 @@ impl FaerSymmetricFactor {
     /// Returns the dimension of the factorized square matrix.
     #[inline]
     pub fn n(&self) -> usize {
-        use faer::linalg::solvers::ShapeCore;
         match self {
             FaerSymmetricFactor::Llt(f) => f.nrows(),
             FaerSymmetricFactor::Ldlt(f) => f.nrows(),
@@ -455,8 +844,8 @@ impl crate::matrix::FactorizedSystem for FaerSymmetricFactor {
 
     fn logdet(&self) -> f64 {
         match self {
-            FaerSymmetricFactor::Llt(f) => cholesky_factor_logdet(f.L()),
-            FaerSymmetricFactor::Ldlt(f) => diagonal_log_sum(f.D()),
+            FaerSymmetricFactor::Llt(f) => cholesky_factor_logdet(f.lower()),
+            FaerSymmetricFactor::Ldlt(f) => diagonal_log_sum(f.diagonal()),
             FaerSymmetricFactor::Lblt(..) => {
                 // lblt doesn't easily expose diagonal determinant. Fallback to sparse or other representations if needed, but typically Lblt is indefinite!
                 // Actually faer doesn't easily expose lblt logdet since it has 2x2 blocks.
@@ -506,10 +895,10 @@ pub fn matmul_parallelism(m: usize, n: usize, k: usize) -> Par {
     let flop_scale = m.saturating_mul(n).saturating_mul(k);
     let long_dim = m.max(n).max(k);
     if flop_scale >= PAR_MIN_FLOP_SCALE && long_dim >= PAR_MIN_LONG_DIM {
-        // `effective_global_parallelism` collapses to `Par::Seq` when this GEMM
-        // is reached from inside a `NestedParallelGuard` row region, preventing
-        // the Rayon-pool × faer-pool multiplicative oversubscription.
-        effective_global_parallelism()
+        // `pool_parallelism` collapses to `Par::Seq` when this GEMM is reached
+        // from inside a `NestedParallelGuard` row region, preventing the
+        // Rayon-pool × faer-pool multiplicative oversubscription.
+        pool_parallelism()
     } else {
         Par::Seq
     }
@@ -2280,7 +2669,7 @@ impl<S: Data<Elem = f64>> FaerSvd for ArrayBase<S, Ix2> {
         if !compute_u && !computevt {
             let (rows, cols) = faer_mat.shape();
             let mut singular = Diag::<f64>::zeros(rows.min(cols));
-            let par = get_global_parallelism();
+            let par = decomposition_parallelism();
             let mut mem = MemBuffer::new(svd::svd_scratch::<f64>(
                 rows,
                 cols,
@@ -2323,7 +2712,7 @@ impl<S: Data<Elem = f64>> FaerSvd for ArrayBase<S, Ix2> {
         let mut u_storage = compute_u.then(|| Mat::<f64>::zeros(rows, rank));
         let mut v_storage = computevt.then(|| Mat::<f64>::zeros(cols, rank));
 
-        let par = get_global_parallelism();
+        let par = decomposition_parallelism();
         let mut mem = MemBuffer::new(svd::svd_scratch::<f64>(
             rows,
             cols,
@@ -2368,6 +2757,34 @@ pub trait FaerEigh {
     fn eigh(&self, side: Side) -> Result<(Array1<f64>, Array2<f64>), FaerLinalgError>;
 }
 
+/// Self-adjoint eigendecomposition `A = U diag(S) Uᵀ` of the triangle `side`
+/// names, at [`decomposition_parallelism`].
+fn self_adjoint_evd(a: MatRef<'_, f64>, side: Side) -> Result<(Diag<f64>, Mat<f64>), solvers::EvdError> {
+    let n = a.nrows();
+    let par = decomposition_parallelism();
+    let lower = match side {
+        Side::Lower => a,
+        Side::Upper => a.transpose(),
+    };
+    let mut s = Diag::<f64>::zeros(n);
+    let mut u = Mat::<f64>::zeros(n, n);
+    let mut mem = MemBuffer::new(faer::linalg::evd::self_adjoint_evd_scratch::<f64>(
+        n,
+        faer::linalg::evd::ComputeEigenvectors::Yes,
+        par,
+        Default::default(),
+    ));
+    faer::linalg::evd::self_adjoint_evd(
+        lower,
+        s.as_mut(),
+        Some(u.as_mut()),
+        par,
+        MemStack::new(&mut mem),
+        Default::default(),
+    )?;
+    Ok((s, u))
+}
+
 /// Strict self-adjoint eigendecomposition of the exact supplied matrix.
 ///
 /// This entrypoint performs finite/symmetry validation and one direct faer EVD
@@ -2398,13 +2815,13 @@ pub fn strict_symmetric_eigh<S: Data<Elem = f64>>(
         },
     )?;
     let view = FaerArrayView::new(&owned);
-    let eigen = catch_unwind(AssertUnwindSafe(|| view.as_ref().self_adjoint_eigen(side)))
+    let (s, u) = catch_unwind(AssertUnwindSafe(|| self_adjoint_evd(view.as_ref(), side)))
         .map_err(|_| FaerLinalgError::FactorizationFailed {
             context: "strict self-adjoint eigendecomposition panic boundary",
         })?
         .map_err(FaerLinalgError::SelfAdjointEigen)?;
-    let values = diag_to_array(eigen.S());
-    let vectors = mat_to_array(eigen.U());
+    let values = diag_to_array(s.as_ref());
+    let vectors = mat_to_array(u.as_ref());
     if values.iter().any(|value| !value.is_finite())
         || vectors.iter().any(|value| !value.is_finite())
     {
@@ -2423,17 +2840,8 @@ impl<S: Data<Elem = f64>> FaerEigh for ArrayBase<S, Ix2> {
         ) -> Result<(Array1<f64>, Array2<f64>), FaerLinalgError> {
             let faerview = FaerArrayView::new(matrix);
             // #2267/#2738 — time the decomposition and name the parallelism that
-            // actually governed it.
-            //
-            // `self_adjoint_eigen` is one of faer's high-level entry points: it
-            // takes no parallelism argument and reads
-            // `faer::get_global_parallelism()` internally. So the policy that
-            // decides whether this runs on one core or many is the PROCESS-GLOBAL
-            // one — which a live `FaerSequentialScope` anywhere in the process
-            // pins to `Par::Seq` for every thread — and NOT
-            // `effective_global_parallelism`, whose nested-region guard cannot
-            // reach here. Reporting the wrong one would name a policy that did
-            // not apply.
+            // governed it: the degree passed to faer per call (#2627), never
+            // faer's process-global policy.
             //
             // This is `O(dim^3)`, so at `dim` in the thousands the difference
             // between sequential and a wide pool is hours. #2267 lost two
@@ -2441,29 +2849,27 @@ impl<S: Data<Elem = f64>> FaerEigh for ArrayBase<S, Ix2> {
             // duration and its parallelism; the count makes "one slow call or
             // many?" answerable without a second run.
             let eigh_started = std::time::Instant::now();
-            let eigh_par = get_global_parallelism();
-            let eigen = catch_unwind(AssertUnwindSafe(|| {
-                faerview.as_ref().self_adjoint_eigen(side)
-            }))
-            .map_err(|_| FaerLinalgError::FactorizationFailed {
-                context: "self-adjoint eigendecomposition panic boundary",
-            })?
-            .map_err(FaerLinalgError::SelfAdjointEigen)?;
+            let eigh_par = decomposition_parallelism();
+            let (s, u) = catch_unwind(AssertUnwindSafe(|| self_adjoint_evd(faerview.as_ref(), side)))
+                .map_err(|_| FaerLinalgError::FactorizationFailed {
+                    context: "self-adjoint eigendecomposition panic boundary",
+                })?
+                .map_err(FaerLinalgError::SelfAdjointEigen)?;
             let eigh_elapsed = eigh_started.elapsed();
             let eigh_calls = EIGH_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
             let eigh_nanos_total = EIGH_NANOS
                 .fetch_add(eigh_elapsed.as_nanos() as u64, Ordering::Relaxed)
                 + eigh_elapsed.as_nanos() as u64;
             log::debug!(
-                "[eigh] dim={} elapsed={:.3}s faer_global_parallelism={:?} \
+                "[eigh] dim={} elapsed={:.3}s faer_parallelism={:?} \
                  calls_so_far={eigh_calls} cumulative={:.3}s",
                 matrix.nrows(),
                 eigh_elapsed.as_secs_f64(),
                 eigh_par,
                 eigh_nanos_total as f64 / 1e9,
             );
-            let values = diag_to_array(eigen.S());
-            let vectors = mat_to_array(eigen.U());
+            let values = diag_to_array(s.as_ref());
+            let vectors = mat_to_array(u.as_ref());
             Ok((values, vectors))
         }
 
@@ -2522,7 +2928,7 @@ impl<S: Data<Elem = f64>> FaerEigh for ArrayBase<S, Ix2> {
 }
 
 pub struct FaerCholeskyFactor {
-    factor: solvers::Llt<f64>,
+    factor: FaerLlt<f64>,
 }
 
 impl FaerCholeskyFactor {
@@ -2557,11 +2963,11 @@ impl FaerCholeskyFactor {
     }
 
     pub fn diag(&self) -> Array1<f64> {
-        diag_to_array(self.factor.L().diagonal())
+        diag_to_array(self.factor.lower().diagonal())
     }
 
     pub fn lower_triangular(&self) -> Array2<f64> {
-        mat_to_array(self.factor.L())
+        mat_to_array(self.factor.lower())
     }
 }
 
@@ -2585,7 +2991,7 @@ impl crate::matrix::FactorizedSystem for FaerCholeskyFactor {
     }
 
     fn logdet(&self) -> f64 {
-        cholesky_factor_logdet(self.factor.L())
+        cholesky_factor_logdet(self.factor.lower())
     }
 }
 
@@ -2596,10 +3002,7 @@ pub trait FaerCholesky {
 impl<S: Data<Elem = f64>> FaerCholesky for ArrayBase<S, Ix2> {
     fn cholesky(&self, side: Side) -> Result<FaerCholeskyFactor, FaerLinalgError> {
         let faerview = FaerArrayView::new(self);
-        let factor = faerview
-            .as_ref()
-            .llt(side)
-            .map_err(FaerLinalgError::Cholesky)?;
+        let factor = FaerLlt::new(faerview.as_ref(), side).map_err(FaerLinalgError::Cholesky)?;
         Ok(FaerCholeskyFactor { factor })
     }
 }
@@ -2611,10 +3014,10 @@ pub trait FaerQr {
 impl<S: Data<Elem = f64>> FaerQr for ArrayBase<S, Ix2> {
     fn qr(&self) -> Result<(Array2<f64>, Array2<f64>), FaerLinalgError> {
         let faerview = FaerArrayView::new(self);
-        let qr = faerview.as_ref().qr();
-        let q = qr.compute_thin_Q();
-        let r = qr.thin_R();
-        Ok((mat_to_array(q.as_ref()), mat_to_array(r)))
+        let (basis, coeff, r) = householder_qr(faerview.as_ref());
+        let mut q = Mat::<f64>::identity(basis.nrows(), basis.ncols());
+        apply_householder_on_the_left(basis.as_ref(), coeff.as_ref(), q.as_mut());
+        Ok((mat_to_array(q.as_ref()), mat_to_array(r.as_ref())))
     }
 }
 
@@ -2683,8 +3086,8 @@ fn rrqr_nullspace_basis_inner<S: Data<Elem = f64>>(
     cutoff: RrqrRankCutoff,
 ) -> Result<(Array2<f64>, usize), FaerLinalgError> {
     let faerview = FaerArrayView::new(a);
-    let qr = faerview.as_ref().col_piv_qr();
-    let r = qr.thin_R();
+    let qr = ColumnPivotedQr::new(faerview.as_ref());
+    let r = qr.thin_r();
     let diag_len = r.nrows().min(r.ncols());
     let leading_diag = if diag_len > 0 { r[(0, 0)].abs() } else { 0.0 };
     let tol = match cutoff {
@@ -2707,21 +3110,7 @@ fn rrqr_nullspace_basis_inner<S: Data<Elem = f64>>(
         for j in 0..nullity {
             selector[(rank + j, j)] = 1.0;
         }
-        let par = get_global_parallelism();
-        faer::linalg::householder::apply_block_householder_sequence_on_the_left_in_place_with_conj(
-            qr.Q_basis(),
-            qr.Q_coeff(),
-            Conj::No,
-            selector.as_mut(),
-            par,
-            MemStack::new(&mut MemBuffer::new(
-                faer::linalg::householder::apply_block_householder_sequence_on_the_left_in_place_scratch::<f64>(
-                    a.nrows(),
-                    qr.Q_coeff().nrows(),
-                    nullity,
-                ),
-            )),
-        );
+        apply_householder_on_the_left(qr.basis.as_ref(), qr.coeff.as_ref(), selector.as_mut());
         mat_to_array(selector.as_ref())
     };
     Ok((z, rank))
@@ -2767,16 +3156,15 @@ pub fn rrqr_with_permutation<S: Data<Elem = f64>>(
         });
     }
     let faerview = FaerArrayView::new(a);
-    let qr = faerview.as_ref().col_piv_qr();
-    let r = qr.thin_R();
+    let qr = ColumnPivotedQr::new(faerview.as_ref());
+    let r = qr.thin_r();
     let diag_len = r.nrows().min(r.ncols());
     let leading_diag = if diag_len > 0 { r[(0, 0)].abs() } else { 0.0 };
     // The pivoted QR's backward error is `α·ε·max(m, p)·|R₁₁|`, in the matrix's own
     // units: a pivot inside it is zero to the precision the factorization has.
     let tol = rank_alpha * f64::EPSILON * (a.nrows().max(a.ncols()).max(1) as f64) * leading_diag;
     let rank = (0..diag_len).filter(|&i| r[(i, i)].abs() > tol).count();
-    let (forward, _inverse) = qr.P().arrays();
-    let column_permutation: Vec<usize> = forward.iter().copied().map(|idx| idx.unbound()).collect();
+    let column_permutation = qr.forward.clone();
     Ok(RrqrWithPermutation {
         rank,
         column_permutation,
@@ -2885,13 +3273,12 @@ pub fn rrqr_from_gram_with_permutation<S: Data<Elem = f64>>(
     // and leading pivot equal those of col-piv QR on the original tall design
     // (FᵀF = G), so this reproduces the exact tall-path geometry.
     let faer_f = FaerArrayView::new(&f);
-    let qr = faer_f.as_ref().col_piv_qr();
-    let r = qr.thin_R();
+    let qr = ColumnPivotedQr::new(faer_f.as_ref());
+    let r = qr.thin_r();
     let diag_len = r.nrows().min(r.ncols());
     let pivots: Vec<f64> = (0..diag_len).map(|i| r[(i, i)].abs()).collect();
     let leading_diag = pivots.first().copied().unwrap_or(0.0);
-    let (forward, _inverse) = qr.P().arrays();
-    let column_permutation: Vec<usize> = forward.iter().copied().map(|idx| idx.unbound()).collect();
+    let column_permutation = qr.forward.clone();
     // Re-scale the tolerance from F's `max(p, p)=p` row dimension to the
     // original tall design's `max(m_rows, p)`, keeping the rank cut bit-
     // identical to what the tall [`rrqr_with_permutation`] would have produced.

@@ -342,7 +342,7 @@ impl LinearOperator for TensorProductDesignOperator {
                     &mut block,
                     CrossprodStructure::Full,
                     CrossprodAccum::Replace,
-                    effective_global_parallelism(),
+                    pool_parallelism(),
                 );
                 Ok((a_flat, b_flat, block))
             })

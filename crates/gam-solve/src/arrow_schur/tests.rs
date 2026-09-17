@@ -2465,7 +2465,6 @@ pub(crate) fn cluster_jacobi_build_deterministic_and_matches_serial() {
         FaerLlt::new(view.as_ref(), Side::Lower).expect("reference Schur block must be PD")
     };
     let solved_ref = {
-        use faer::linalg::solvers::Solve;
         let mut rhs = r.clone();
         let stride = rhs.strides()[0];
         let len = rhs.len();
@@ -3924,7 +3923,6 @@ pub(crate) fn parallel_block_jacobi_deterministic_and_matches_sequential() {
                 .expect("ref block must be PD")
         };
         let rhs = Array1::from_iter((0..b).map(|bi| r[range.start + bi]));
-        use faer::linalg::solvers::Solve;
         let stride = rhs.strides()[0];
         let len = rhs.len();
         // SAFETY: `rhs` is a live `Array1<f64>` that outlives `rhs_mat` (both

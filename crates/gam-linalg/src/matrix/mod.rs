@@ -1,6 +1,6 @@
 use crate::faer_ndarray::{
     CrossprodAccum, CrossprodStructure, FaerArrayView, array2_to_matmut,
-    effective_global_parallelism, fast_ab, fast_atb, fast_atv, fast_atv_into, fast_av,
+    pool_parallelism, fast_ab, fast_atb, fast_atv, fast_atv_into, fast_av,
     fast_av_into, fast_xt_diag_x, stream_weighted_crossprod_into,
 };
 use faer::Accum;
@@ -1690,7 +1690,7 @@ impl LinearOperator for DenseDesignMatrix {
                     &mut xtwx,
                     CrossprodStructure::Full,
                     CrossprodAccum::Replace,
-                    effective_global_parallelism(),
+                    pool_parallelism(),
                 );
                 Ok(xtwx)
             }
@@ -3456,7 +3456,7 @@ impl LinearOperator for CoefficientTransformOperator {
                 &mut xtwx,
                 CrossprodStructure::Full,
                 CrossprodAccum::Replace,
-                effective_global_parallelism(),
+                pool_parallelism(),
             );
             return Ok(xtwx);
         }
@@ -4285,7 +4285,7 @@ impl LinearOperator for DesignMatrix {
                             &mut xtwx,
                             CrossprodStructure::Full,
                             CrossprodAccum::Replace,
-                            effective_global_parallelism(),
+                            pool_parallelism(),
                         );
                     } else {
                         let (symbolic, values) = xs.parts();

@@ -83,11 +83,11 @@ extern crate self as gam;
 /// costs nothing until the deep jet paths actually use it.
 const RAYON_WORKER_STACK_SIZE: usize = 64 << 20;
 
-/// Initialize faer's global parallelism backend to a Rayon pool sized at
-/// `rayon::current_num_threads()`. Rayon's pool itself honors the standard
-/// `RAYON_NUM_THREADS` environment variable on first use, so callers that
-/// need to constrain the worker count (e.g. the benchmark harnesses) set it
-/// once on the spawned subprocess and rayon picks it up natively.
+/// Build the global Rayon pool the numerics fan out through. Rayon's pool
+/// honors the standard `RAYON_NUM_THREADS` environment variable on first use,
+/// so callers that need to constrain the worker count (e.g. the benchmark
+/// harnesses) set it once on the spawned subprocess and rayon picks it up
+/// natively.
 ///
 /// The global pool is built explicitly here with a wide per-worker stack
 /// (`RAYON_WORKER_STACK_SIZE`) so the survival-LS `Tower4<9>` jet kernel — and
@@ -99,8 +99,12 @@ const RAYON_WORKER_STACK_SIZE: usize = 64 << 20;
 /// wins the race that matters.
 ///
 /// Idempotent: only the first call has effect (guarded by `std::sync::Once`).
-/// Without this, faer's global default is `Par::Seq` and matmul/factorizations
-/// run single-threaded even when the host has many cores.
+///
+/// faer's process-global parallelism is deliberately left alone (#2627). gam's
+/// factorizations and products pass their degree to faer per call
+/// (`gam_linalg::faer_ndarray::{decomposition_parallelism, pool_parallelism}`),
+/// so a fit does not depend on how many threads the pool has, and gam sets no
+/// policy another faer user in the process would inherit.
 pub fn init_parallelism() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
@@ -128,7 +132,6 @@ pub fn init_parallelism() {
                 .stack_size(RAYON_WORKER_STACK_SIZE)
                 .build_global(),
         );
-        faer::set_global_parallelism(faer::Par::rayon(0));
     });
 }
 

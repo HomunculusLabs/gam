@@ -5133,7 +5133,6 @@ impl JacobiPreconditioner {
                     for (local, gi) in range.clone().enumerate() {
                         rhs[local] = r[gi];
                     }
-                    use faer::linalg::solvers::Solve;
                     let stride = rhs.strides()[0];
                     let len = rhs.len();
                     // SAFETY: rhs is a uniquely-borrowed contiguous Array1
@@ -5737,7 +5736,6 @@ pub(crate) fn local_inverse_diagonal(a: &Array2<f64>) -> Option<Vec<f64>> {
         let view = FaerArrayView::new(a);
         FaerLlt::new(view.as_ref(), Side::Lower).ok()?
     };
-    use faer::linalg::solvers::Solve;
     let mut diag = Vec::with_capacity(b);
     for col in 0..b {
         // Solve `A x = e_col`; the `col`-th entry of `x` is `(A⁻¹)_{col,col}`.
@@ -5797,7 +5795,6 @@ pub(crate) fn apply_cluster(
             for (local, &gi) in cols.iter().enumerate() {
                 rhs[local] = r[gi];
             }
-            use faer::linalg::solvers::Solve;
             let stride = rhs.strides()[0];
             let len = rhs.len();
             // SAFETY: rhs is uniquely-borrowed contiguous Array1 with positive stride.
@@ -6927,7 +6924,7 @@ pub(crate) fn cholesky_lower(a: &Array2<f64>) -> Result<Array2<f64>, String> {
     if n >= FAER_CHOLESKY_MIN {
         let view = gam_linalg::faer_ndarray::FaerArrayView::new(a);
         if let Ok(llt) = gam_linalg::faer_ndarray::FaerLlt::new(view.as_ref(), faer::Side::Lower) {
-            let l_faer = llt.L();
+            let l_faer = llt.lower();
             let mut l = Array2::<f64>::zeros((n, n));
             for i in 0..n {
                 for j in 0..=i {
