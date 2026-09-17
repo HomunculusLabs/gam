@@ -159,56 +159,50 @@ fn max_abs_entry(matrix: &Array2<f64>) -> f64 {
         .fold(0.0_f64, |acc, value| acc.max(value.abs()))
 }
 
-/// How far the penalized Hessian's spectrum can move over a smoothing-parameter
-/// step (#2901 V22).
+/// How far the curvature weights can move over a smoothing-parameter step
+/// (#2901 V22).
 ///
-/// Along `ρ ↦ ρ + δρ` the criterion's Hessian is
-/// `H' = Σ_k e^{δρ_k}·λ_k S_k + XᵀW'X`. Every `λ_k S_k ⪰ 0`, so with
-/// `t = max_k |δρ_k|` the penalty satisfies `e^{−t}·S_λ ⪯ S'_λ ⪯ e^{t}·S_λ`
-/// exactly, for any finite step. The curvature weights move through `β̂`, and a
-/// row with `W_i > 0` moves by at most `m·W_i`, `m = max_i |ΔW_i|/W_i`. In
-/// Loewner order
+/// The weights move through `β̂` by at most `ΔW_i` per row, so a row with
+/// `W_i > 0` moves by at most `m·W_i`, `m = max_{W_i > 0} ΔW_i/W_i`. The rows
+/// are split by sign. With `G = XᵀWX` and
+/// `V = Σ_{W_i ≤ 0} (m·|W_i| + ΔW_i)·x_i x_iᵀ`, in Loewner order
 ///
 /// ```text
-///   s₋·H − E₋ ⪯ H' ⪯ s₊·H + E₊,   s₊ = max(e^t, 1 + m),   s₋ = min(e^{−t}, 1 − m),
+///   (1 − m)·G − V ⪯ XᵀW'X ⪯ (1 + m)·G + V,
 /// ```
 ///
-/// where `E±` collects the rows whose weight is not positive:
-/// `‖E±‖₂ ≤ a = ‖Σ_{W_i ≤ 0} v_i·x_i x_iᵀ‖₂` with
-/// `v_i = max(s₊ − 1, 1 − s₋)·|W_i| + |ΔW_i|`. By Weyl every eigenvalue `σ` of
-/// `H` is carried into `[s₋σ − a, s₊σ + a]`. The bound is relative: a railed λ
-/// moves the directions it dominates in proportion to themselves, and never
-/// charges its magnitude to a direction it does not reach.
-#[derive(Clone, Copy, Debug)]
+/// row by row and exactly, whatever the weights' signs: a positive row is
+/// scaled by `1 ∓ m`, and on a row whose weight is not positive, scaling `G` by
+/// `1 ∓ m` moves `W_i` by `m·|W_i|` the wrong way and the row's own motion adds
+/// `ΔW_i`, both of which `V` returns, so that row is bounded by `W_i ∓ ΔW_i`. A
+/// non-canonical link or observed information can make `G` indefinite, and the
+/// bound does not ask it to be semidefinite.
+#[derive(Clone, Debug)]
 pub(crate) struct HessianSpectrumMotion {
-    /// `s₋`.
-    lower_factor: f64,
-    /// `s₊`.
-    upper_factor: f64,
-    /// `a`.
-    additive: f64,
+    /// `m`.
+    relative_weight_motion: f64,
+    /// `V` in the Hessian's basis, when some row whose weight is not positive
+    /// carries mass.
+    nonpositive_rows: Option<Array2<f64>>,
     /// Whether every weight is positive or still at zero, with `m ≤ 1`: then
     /// `XᵀW'X ⪰ 0` everywhere the step reaches, so `H' ⪰ S'_λ`.
     weights_stay_nonnegative: bool,
 }
 
 impl HessianSpectrumMotion {
-    /// The motion over a step whose largest coordinate is `step_radius`, for
-    /// curvature `weights` whose first-order motion over the step is at most
-    /// `weight_motion`, row by row. `nonpositive_row_norm(v)` is
-    /// `‖Xᵀdiag(v)X‖₂` for a nonnegative `v` that vanishes on every row with a
-    /// positive weight; it is asked only when some other row carries mass.
-    pub(crate) fn over_step(
-        step_radius: f64,
+    /// The motion of curvature `weights` whose first-order motion over the step
+    /// is at most `weight_motion`, row by row. `nonpositive_row_gram(v)` is
+    /// `Xᵀdiag(v)X` in the Hessian's basis, for a nonnegative `v` that vanishes on
+    /// every row with a positive weight; it is asked only when some other row
+    /// carries mass.
+    pub(crate) fn over_weights(
         weights: ArrayView1<'_, f64>,
         weight_motion: ArrayView1<'_, f64>,
-        nonpositive_row_norm: impl FnOnce(&Array1<f64>) -> Result<f64, EstimationError>,
+        nonpositive_row_gram: impl FnOnce(&Array1<f64>) -> Result<Array2<f64>, EstimationError>,
     ) -> Result<Self, EstimationError> {
-        if !(step_radius.is_finite() && step_radius >= 0.0) || weights.len() != weight_motion.len()
-        {
+        if weights.len() != weight_motion.len() {
             return Err(EstimationError::InvalidInput(format!(
-                "Hessian spectrum motion needs a finite nonnegative step radius and one weight \
-                 motion per row: radius {step_radius:.4e}, {} weights, {} motions",
+                "Hessian spectrum motion needs one weight motion per row: {} weights, {} motions",
                 weights.len(),
                 weight_motion.len()
             )));
@@ -228,10 +222,6 @@ impl HessianSpectrumMotion {
                 still_or_positive &= weight == 0.0 && motion == 0.0;
             }
         }
-        let growth = step_radius.exp();
-        let upper_factor = growth.max(1.0 + relative_motion);
-        let lower_factor = growth.recip().min(1.0 - relative_motion);
-        let spread = (upper_factor - 1.0).max(1.0 - lower_factor);
         let mass: Array1<f64> = weights
             .iter()
             .zip(weight_motion.iter())
@@ -239,28 +229,163 @@ impl HessianSpectrumMotion {
                 if weight > 0.0 {
                     0.0
                 } else {
-                    spread * weight.abs() + motion
+                    relative_motion * weight.abs() + motion
                 }
             })
             .collect();
-        let additive = if mass.iter().any(|&value| value > 0.0) {
-            nonpositive_row_norm(&mass)?
+        let nonpositive_rows = if mass.iter().any(|&value| value > 0.0) {
+            let gram = nonpositive_row_gram(&mass)?;
+            if !gram.iter().all(|value| value.is_finite()) {
+                return Err(EstimationError::InvalidInput(
+                    "Hessian spectrum motion: the nonpositive-weight rows' Gram is not finite"
+                        .to_string(),
+                ));
+            }
+            Some(gram)
         } else {
-            0.0
+            None
         };
-        if !(additive.is_finite() && additive >= 0.0) {
-            return Err(EstimationError::InvalidInput(format!(
-                "Hessian spectrum motion: the nonpositive-weight row norm {additive:.4e} is not \
-                 a finite nonnegative spectral norm"
-            )));
-        }
         Ok(Self {
-            lower_factor,
-            upper_factor,
-            additive,
+            relative_weight_motion: relative_motion,
+            nonpositive_rows,
             weights_stay_nonnegative: still_or_positive && relative_motion <= 1.0,
         })
     }
+}
+
+/// Loewner bounds on the penalized Hessian's spectrum over a smoothing-parameter
+/// step (#2901 V22).
+///
+/// Along `ρ ↦ ρ + δρ` with `|δρ_k| ≤ t_k` the criterion's Hessian is
+/// `H' = XᵀW'X + Σ_k e^{δρ_k}·λ_k S_k`. Every `λ_k S_k ⪰ 0` is scaled by a factor
+/// in `[e^{−t_k}, e^{t_k}]`, exactly, for any finite step, and the curvature
+/// weights move as [`HessianSpectrumMotion`] bounds them. With
+/// `G = H − S_λ = XᵀWX`,
+///
+/// ```text
+///   H₋ ⪯ H' ⪯ H₊,
+///   H₋ = (1 − m)·G − V + Σ_k e^{−t_k}·λ_k S_k,   H₊ = (1 + m)·G + V + Σ_k e^{t_k}·λ_k S_k,
+/// ```
+///
+/// so by Weyl's monotonicity theorem `σ_i(H₋) ≤ σ_i(H') ≤ σ_i(H₊)` for every
+/// `i`. Each coordinate's step is charged to its own penalty, and each row's
+/// motion to its own row, so only to the directions they reach.
+///
+/// Scaling all of `H` by `e^{±max_k t_k}` bounds the same motion, but it charges
+/// one coordinate's step to every eigenvalue and to the band together. On a
+/// gamma-log Matérn fit whose largest step, 5.48, fell on a penalty the smallest
+/// identified direction does not see (Rayleigh quotient 9.4e-7 against
+/// σ_r = 132.36), that uniform scale let σ_r fall to 0.552 and the band rise to
+/// 3.15 and refused the fit. The Hessian re-solved at the Newton point, at both
+/// ends of every axis and at every corner of the step kept its rank, its
+/// smallest eigenvalue (133.57) and its band (1.32e-2) to five digits.
+pub(crate) struct HessianSpectrumBounds {
+    /// `σ_i(H₋)`, descending.
+    lower: Vec<f64>,
+    /// `σ_i(H₊)`, descending.
+    upper: Vec<f64>,
+    /// See [`HessianSpectrumMotion`].
+    weights_stay_nonnegative: bool,
+}
+
+impl HessianSpectrumBounds {
+    /// The bounds for the penalized `hessian` over a step of at most `step[k]` in
+    /// coordinate `k`, for the curvature weights' `motion` over that step.
+    /// `penalties` yields one `(range, block)` per coordinate, in coordinate
+    /// order: `block` is `λ_k S_k` on `hessian`'s rows and columns `range`, zero
+    /// elsewhere.
+    pub(crate) fn over_step(
+        hessian: &Array2<f64>,
+        penalties: impl IntoIterator<Item = (std::ops::Range<usize>, Array2<f64>)>,
+        step: ArrayView1<'_, f64>,
+        motion: HessianSpectrumMotion,
+    ) -> Result<Self, EstimationError> {
+        let dimension = hessian.nrows();
+        if hessian.ncols() != dimension
+            || step.iter().any(|&radius| !(radius.is_finite() && radius >= 0.0))
+        {
+            return Err(EstimationError::InvalidInput(format!(
+                "Hessian spectrum bounds need a square Hessian and finite nonnegative steps: \
+                 {}x{} Hessian, steps {step}",
+                hessian.nrows(),
+                hessian.ncols()
+            )));
+        }
+        let m = motion.relative_weight_motion;
+        // `H₋ = (1 − m)·H + Σ_k (e^{−t_k} − (1 − m))·λ_k S_k`, and `H₊` likewise.
+        let mut lower = hessian * (1.0 - m);
+        let mut upper = hessian * (1.0 + m);
+        let mut upper_unbounded = false;
+        let mut coordinates = 0usize;
+        for (range, block) in penalties {
+            let Some(&radius) = step.get(coordinates) else {
+                return Err(EstimationError::InvalidInput(format!(
+                    "Hessian spectrum bounds: more penalties than the {} step coordinates",
+                    step.len()
+                )));
+            };
+            if range.end > dimension || block.dim() != (range.len(), range.len()) {
+                return Err(EstimationError::InvalidInput(format!(
+                    "Hessian spectrum bounds: penalty {coordinates} is a {}x{} block on columns \
+                     {}..{} of a {dimension}x{dimension} Hessian",
+                    block.nrows(),
+                    block.ncols(),
+                    range.start,
+                    range.end
+                )));
+            }
+            lower
+                .slice_mut(s![range.clone(), range.clone()])
+                .scaled_add((-radius).exp() - (1.0 - m), &block);
+            let growth = radius.exp();
+            if growth.is_finite() {
+                upper
+                    .slice_mut(s![range.clone(), range])
+                    .scaled_add(growth - (1.0 + m), &block);
+            } else {
+                upper_unbounded = true;
+            }
+            coordinates += 1;
+        }
+        if coordinates != step.len() {
+            return Err(EstimationError::InvalidInput(format!(
+                "Hessian spectrum bounds: {coordinates} penalties for {} step coordinates",
+                step.len()
+            )));
+        }
+        if let Some(rows) = motion.nonpositive_rows.as_ref() {
+            if rows.dim() != (dimension, dimension) {
+                return Err(EstimationError::InvalidInput(format!(
+                    "Hessian spectrum bounds: a {}x{} nonpositive-row Gram for a \
+                     {dimension}x{dimension} Hessian",
+                    rows.nrows(),
+                    rows.ncols()
+                )));
+            }
+            lower -= rows;
+            upper += rows;
+        }
+        Ok(Self {
+            lower: descending_spectrum(lower)?,
+            upper: if upper_unbounded {
+                vec![f64::INFINITY; dimension]
+            } else {
+                descending_spectrum(upper)?
+            },
+            weights_stay_nonnegative: motion.weights_stay_nonnegative,
+        })
+    }
+}
+
+fn descending_spectrum(mut matrix: Array2<f64>) -> Result<Vec<f64>, EstimationError> {
+    gam_linalg::matrix::symmetrize_in_place(&mut matrix);
+    let mut values = matrix
+        .eigh(Side::Lower)
+        .map_err(EstimationError::EigendecompositionFailed)?
+        .0
+        .to_vec();
+    values.sort_by(|left, right| right.total_cmp(left));
+    Ok(values)
 }
 
 /// The outer certificate's own Newton displacement `|H_ρ⁺·g|` at ρ̂, coordinate
@@ -333,30 +458,35 @@ pub(crate) struct IdentifiedRankCertificate {
 }
 
 /// Certify that the identified rank of a penalized Hessian with `eigenvalues`,
-/// for a penalty of rank `penalty_rank`, is the same at every point `motion`
+/// for a penalty of rank `penalty_rank`, is the same at every point `bounds`
 /// reaches (#2901 V22).
 ///
 /// The criterion prices `½log|H|₊` over the top
 /// [`DenseSpectralOperator::identified_rank`] eigenvalues: those above
-/// `p·ε·‖H‖₂`, and never fewer than `rank(S_λ)`. Over the step the smallest kept
-/// eigenvalue can fall to `s₋σ_r − a` while the band rises to
-/// `p·ε·(s₊‖H‖₂ + a)`, and the largest dropped eigenvalue can rise to
-/// `s₊σ_{r+1} + a` while the band falls to `p·ε·(s₋‖H‖₂ − a)`. The rank is
-/// constant when each stays on its own side of the band. At the floor
-/// `rank = rank(S_λ)` the kept set cannot shrink while the curvature weights stay
-/// nonnegative: `H' ⪰ S'_λ` gives `σ_{rank(S_λ)}(H') ≥ σ_{rank(S_λ)}(S'_λ) > 0`,
-/// and `rank(S_λ)` does not depend on ρ.
+/// `p·ε·‖H‖₂`, and never fewer than `rank(S_λ)`. Anywhere the step reaches, the
+/// smallest kept eigenvalue is at least `σ_r(H₋)` and the largest dropped one at
+/// most `σ_{r+1}(H₊)`, while the spectral radius lies between
+/// `max(σ_1(H₋), −σ_p(H₊), 0)` and `max(σ_1(H₊), −σ_p(H₋))`, so the band lies
+/// between `p·ε` times those. The rank is constant when each stays
+/// on its own side of the band. At the floor `rank = rank(S_λ)` the kept set
+/// cannot shrink while the curvature weights stay nonnegative: `H' ⪰ S'_λ` gives
+/// `σ_{rank(S_λ)}(H') ≥ σ_{rank(S_λ)}(S'_λ) > 0`, and `rank(S_λ)` does not depend
+/// on ρ.
 pub(crate) fn certify_identified_rank_locally_constant(
     eigenvalues: &[f64],
     penalty_rank: usize,
-    motion: HessianSpectrumMotion,
+    bounds: &HessianSpectrumBounds,
 ) -> Result<IdentifiedRankCertificate, EstimationError> {
     let coefficients = eigenvalues.len();
+    if bounds.lower.len() != coefficients || bounds.upper.len() != coefficients {
+        return Err(EstimationError::InvalidInput(format!(
+            "identified-rank certificate: {coefficients} eigenvalues against bounds of {} and {}",
+            bounds.lower.len(),
+            bounds.upper.len()
+        )));
+    }
     let rank = DenseSpectralOperator::identified_rank(eigenvalues, penalty_rank);
     let band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(eigenvalues);
-    let spectral_radius = eigenvalues
-        .iter()
-        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
     let mut descending = eigenvalues.to_vec();
     descending.sort_by(|left, right| right.total_cmp(left));
     let Some(&smallest_identified) = rank.checked_sub(1).and_then(|index| descending.get(index))
@@ -368,22 +498,18 @@ pub(crate) fn certify_identified_rank_locally_constant(
         ));
     };
     let largest_unidentified = descending.get(rank).copied();
-    let HessianSpectrumMotion {
-        lower_factor,
-        upper_factor,
-        additive,
-        weights_stay_nonnegative,
-    } = motion;
     let resolution = coefficients as f64 * f64::EPSILON;
     let reachable_band = (
-        resolution * (lower_factor * spectral_radius - additive).max(0.0),
-        resolution * (upper_factor * spectral_radius + additive),
+        resolution
+            * bounds.lower[0]
+                .max(-bounds.upper[coefficients - 1])
+                .max(0.0),
+        resolution * bounds.upper[0].max(-bounds.lower[coefficients - 1]),
     );
-    let reachable_smallest_identified = lower_factor * smallest_identified - additive;
-    let reachable_largest_unidentified =
-        largest_unidentified.map(|sigma| upper_factor * sigma + additive);
-    let kept_set_holds = (rank == penalty_rank && weights_stay_nonnegative)
-        || (lower_factor > 0.0 && reachable_smallest_identified > reachable_band.1);
+    let reachable_smallest_identified = bounds.lower[rank - 1];
+    let reachable_largest_unidentified = largest_unidentified.map(|_| bounds.upper[rank]);
+    let kept_set_holds = (rank == penalty_rank && bounds.weights_stay_nonnegative)
+        || reachable_smallest_identified > reachable_band.1;
     let dropped_set_holds = match reachable_largest_unidentified {
         Some(sigma) => sigma <= reachable_band.0,
         None => true,
@@ -412,6 +538,8 @@ pub(crate) fn certify_identified_rank_locally_constant(
 /// The fitted penalized Hessian's spectrum and the identified rank the criterion
 /// priced it at (#2901 V22).
 pub(crate) struct FittedHessianSpectrum {
+    /// `H` itself, symmetrized.
+    hessian: Array2<f64>,
     /// Every eigenvalue of `H`, in the eigensolver's order.
     eigenvalues: Vec<f64>,
     /// The matching eigenvectors, one column each, in `H`'s basis.
@@ -434,6 +562,7 @@ impl FittedHessianSpectrum {
         let eigenvalues = eigenvalues.to_vec();
         let rank = DenseSpectralOperator::identified_rank(&eigenvalues, penalty_rank);
         Ok(Self {
+            hessian: symmetric,
             eigenvalues,
             eigenvectors,
             penalty_rank,
@@ -471,7 +600,8 @@ impl FittedHessianSpectrum {
 /// `Δβ = Σ_k δρ_k·∂β̂/∂ρ_k` and `∂β̂/∂ρ_k = −H⁺λ_kS_kβ̂` over the identified
 /// subspace the criterion priced, so row `i` moves by at most
 /// `|c_i|·Σ_k |δρ_k|·|x_iᵀ∂β̂/∂ρ_k|`. Rows whose weight is not positive are
-/// charged by the exact spectral norm of their weighted rank-one sum.
+/// charged by their own weighted rank-one sum, in PIRLS's transformed basis. The
+/// bounds are taken at this certified state, the one the criterion priced.
 pub(crate) fn certify_fitted_identified_rank(
     pirls: &crate::pirls::PirlsResult,
     spectrum: &FittedHessianSpectrum,
@@ -532,8 +662,7 @@ pub(crate) fn certify_fitted_identified_rank(
     } else {
         Array1::<f64>::zeros(rows)
     };
-    let motion = HessianSpectrumMotion::over_step(
-        step_radius,
+    let motion = HessianSpectrumMotion::over_weights(
         pirls.finalweights.view(),
         weight_motion.view(),
         |mass| {
@@ -547,16 +676,27 @@ pub(crate) fn certify_fitted_identified_rank(
                 }
             }
             gam_linalg::matrix::symmetrize_in_place(&mut gram);
-            let spectrum = gram
-                .eigh(Side::Lower)
-                .map_err(EstimationError::EigendecompositionFailed)?
-                .0;
-            Ok(spectrum
-                .iter()
-                .fold(0.0_f64, |acc, value| acc.max(value.abs())))
+            let qs = &pirls.reparam_result.qs;
+            Ok(qs.t().dot(&gram).dot(qs))
         },
     )?;
-    certify_identified_rank_locally_constant(&eigenvalues, penalty_rank, motion)
+    let bounds = HessianSpectrumBounds::over_step(
+        &spectrum.hessian,
+        pirls
+            .reparam_result
+            .canonical_transformed
+            .iter()
+            .zip(lambdas.iter())
+            .map(|(penalty, &lambda)| {
+                (
+                    penalty.col_range.clone(),
+                    penalty.root.t().dot(&penalty.root) * lambda,
+                )
+            }),
+        displacement.view(),
+        motion,
+    )?;
+    certify_identified_rank_locally_constant(eigenvalues, penalty_rank, &bounds)
         .map(|certificate| (certificate, step_radius))
 }
 
@@ -596,13 +736,32 @@ mod tests {
         }
     }
 
-    /// The motion over a step for positive curvature weights that do not move.
-    fn still_weights_motion(step_radius: f64) -> HessianSpectrumMotion {
+    /// Positive curvature weights that do not move.
+    fn still_weights() -> HessianSpectrumMotion {
         let weights = Array1::from_elem(4, 1.0);
         let weight_motion = Array1::<f64>::zeros(4);
-        HessianSpectrumMotion::over_step(step_radius, weights.view(), weight_motion.view(), |mass| {
-            Ok(mass.sum())
+        HessianSpectrumMotion::over_weights(weights.view(), weight_motion.view(), |mass| {
+            Ok(Array2::from_diag(mass))
         })
+        .unwrap()
+    }
+
+    fn diagonal(values: &[f64]) -> Array2<f64> {
+        Array2::from_diag(&Array1::from(values.to_vec()))
+    }
+
+    /// The bounds for `diag(hessian)` carrying the penalties `diag(penalty)`,
+    /// each over its own step, with still weights.
+    fn diagonal_bounds(hessian: &[f64], penalties: &[(&[f64], f64)]) -> HessianSpectrumBounds {
+        let steps = Array1::from_iter(penalties.iter().map(|entry| entry.1));
+        HessianSpectrumBounds::over_step(
+            &diagonal(hessian),
+            penalties
+                .iter()
+                .map(|entry| (0..hessian.len(), diagonal(entry.0))),
+            steps.view(),
+            still_weights(),
+        )
         .unwrap()
     }
 
@@ -610,26 +769,33 @@ mod tests {
     /// everywhere a tenth of a log-unit reaches.
     #[test]
     fn a_resolved_spectrum_certifies_its_rank_over_the_step() {
-        let certificate =
-            certify_identified_rank_locally_constant(&[3.0, 1.0, 0.5, 0.0], 2, still_weights_motion(0.1))
-                .unwrap();
+        let spectrum = [3.0, 1.0, 0.5, 0.0];
+        let bounds = diagonal_bounds(&spectrum, &[(&[0.0, 1.0, 0.5, 0.0], 0.1)]);
+        let certificate = certify_identified_rank_locally_constant(&spectrum, 2, &bounds).unwrap();
         assert_eq!(certificate.rank, 3);
         assert_eq!(certificate.largest_unidentified, Some(0.0));
     }
 
-    /// An unidentified data direction just under the band is certified at a
-    /// zero step, and refused once the step can lift it over the band.
+    /// A penalized direction just under the band is certified at a zero step,
+    /// and refused once its penalty's step can lift it over the band.
     #[test]
     fn an_unidentified_direction_straddling_the_band_refuses() {
         let band = 3.0 * f64::EPSILON;
         let spectrum = [1.0, 0.3, 0.6 * band];
-        let pointwise =
-            certify_identified_rank_locally_constant(&spectrum, 2, still_weights_motion(0.0))
-                .unwrap();
+        let penalty: &[f64] = &[0.0, 0.3, 0.6 * band];
+        let pointwise = certify_identified_rank_locally_constant(
+            &spectrum,
+            2,
+            &diagonal_bounds(&spectrum, &[(penalty, 0.0)]),
+        )
+        .unwrap();
         assert_eq!(pointwise.rank, 2);
-        let refusal =
-            certify_identified_rank_locally_constant(&spectrum, 2, still_weights_motion(0.5))
-                .unwrap_err();
+        let refusal = certify_identified_rank_locally_constant(
+            &spectrum,
+            2,
+            &diagonal_bounds(&spectrum, &[(penalty, 1.0)]),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 refusal,
@@ -639,20 +805,27 @@ mod tests {
         );
     }
 
-    /// An identified data direction just over the band, above the penalty-rank
-    /// floor, is certified at a zero step and refused once the step can push it
-    /// under the band.
+    /// A penalized direction just over the band, above the penalty-rank floor,
+    /// is certified at a zero step and refused once its penalty's step can push
+    /// it under the band.
     #[test]
     fn an_identified_direction_straddling_the_band_refuses() {
         let band = 3.0 * f64::EPSILON;
         let spectrum = [1.0, 1.5 * band, 0.0];
-        let pointwise =
-            certify_identified_rank_locally_constant(&spectrum, 1, still_weights_motion(0.0))
-                .unwrap();
+        let penalty: &[f64] = &[0.0, 1.5 * band, 0.0];
+        let pointwise = certify_identified_rank_locally_constant(
+            &spectrum,
+            1,
+            &diagonal_bounds(&spectrum, &[(penalty, 0.0)]),
+        )
+        .unwrap();
         assert_eq!(pointwise.rank, 2);
-        let refusal =
-            certify_identified_rank_locally_constant(&spectrum, 1, still_weights_motion(0.5))
-                .unwrap_err();
+        let refusal = certify_identified_rank_locally_constant(
+            &spectrum,
+            1,
+            &diagonal_bounds(&spectrum, &[(penalty, 1.0)]),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 refusal,
@@ -667,13 +840,86 @@ mod tests {
     /// structural null stays at zero, so the rank is certified.
     #[test]
     fn a_railed_penalty_does_not_charge_the_directions_it_does_not_reach() {
-        let certificate = certify_identified_rank_locally_constant(
-            &[1.0e15, 5.0e14, 1.0e3, 0.0],
+        let spectrum = [1.0e15, 5.0e14, 1.0e3, 0.0];
+        let bounds = diagonal_bounds(&spectrum, &[(&[1.0e15, 5.0e14, 0.0, 0.0], 0.05)]);
+        let certificate = certify_identified_rank_locally_constant(&spectrum, 2, &bounds).unwrap();
+        assert_eq!(certificate.rank, 3);
+    }
+
+    /// #2901 V22: a coordinate's step is charged to its own penalty, so a large
+    /// step on a penalty the smallest identified direction does not see moves
+    /// that direction by nothing. This is the gamma-log Matérn refusal's shape: a
+    /// data direction sets `‖H‖₂ = 4.9713e12`, the smallest identified direction
+    /// (132.36) is data too, and the step of 5.48 falls on a penalty of a third
+    /// direction. Scaling all of `H` by `e^{±5.48}` let σ_r fall to 0.552 under a
+    /// band of 0.79 and refused. The control: a penalty that does carry the
+    /// smallest identified direction, over a step that takes it under the band,
+    /// still refuses.
+    #[test]
+    fn a_step_is_charged_only_to_the_directions_its_penalty_reaches_2901() {
+        let spectrum = [4.9713e12, 1.0e5, 132.36];
+        let flat: (&[f64], f64) = (&[0.0, 4.68e3, 0.0], 5.48);
+        let certificate =
+            certify_identified_rank_locally_constant(&spectrum, 1, &diagonal_bounds(&spectrum, &[flat]))
+                .unwrap();
+        assert_eq!(certificate.rank, 3);
+        let reaching: (&[f64], f64) = (&[0.0, 0.0, 132.36], 14.66);
+        let refusal = certify_identified_rank_locally_constant(
+            &spectrum,
             2,
-            still_weights_motion(0.05),
+            &diagonal_bounds(&spectrum, &[flat, reaching]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                refusal,
+                EstimationError::IdentifiedRankNotLocallyConstant { rank: 3, .. }
+            ),
+            "{refusal}"
+        );
+    }
+
+    /// The bounds hold the spectrum wherever the step reaches: a rotated data
+    /// block and two overlapping penalties, re-assembled at every corner of the
+    /// step and at interior points, keep each eigenvalue inside
+    /// `[σ_i(H₋), σ_i(H₊)]`.
+    #[test]
+    fn the_bounds_hold_the_spectrum_everywhere_the_step_reaches() {
+        let s = 0.5_f64.sqrt();
+        let rotation = array![[s, s, 0.0], [-s, s, 0.0], [0.0, 0.0, 1.0]];
+        let data = rotation.dot(&diagonal(&[2.0, 0.5, 0.25])).dot(&rotation.t());
+        let first = array![[1.0, 0.5, 0.0], [0.5, 1.0, 0.2], [0.0, 0.2, 0.3]];
+        let second = rotation.dot(&diagonal(&[0.0, 3.0, 1.0])).dot(&rotation.t());
+        let hessian = &data + &first + &second;
+        let steps = array![1.3, 0.4];
+        let bounds = HessianSpectrumBounds::over_step(
+            &hessian,
+            [(0..3, first.clone()), (0..3, second.clone())],
+            steps.view(),
+            still_weights(),
         )
         .unwrap();
-        assert_eq!(certificate.rank, 3);
+        let tolerance = 16.0 * f64::EPSILON * bounds.upper[0];
+        for (first_step, second_step) in [
+            (1.3, 0.4),
+            (-1.3, 0.4),
+            (1.3, -0.4),
+            (-1.3, -0.4),
+            (0.7, -0.1),
+            (-0.2, 0.3),
+        ] {
+            let displaced = &data + &(&first * f64::exp(first_step)) + &(&second * f64::exp(second_step));
+            let values = descending_spectrum(displaced).unwrap();
+            for (index, &value) in values.iter().enumerate() {
+                assert!(
+                    bounds.lower[index] - tolerance <= value && value <= bounds.upper[index] + tolerance,
+                    "eigenvalue {index} at steps ({first_step}, {second_step}) is {value:.6e}, outside \
+                     [{:.6e}, {:.6e}]",
+                    bounds.lower[index],
+                    bounds.upper[index]
+                );
+            }
+        }
     }
 
     /// A coordinate certified on a rail is certified by its tail, so only the
@@ -689,20 +935,64 @@ mod tests {
         assert!((interior[1] - 50.0).abs() < 1e-10, "{interior}");
     }
 
-    /// A row whose curvature weight is negative is charged additively, by the
-    /// norm its row mass returns, and voids the penalty-rank floor.
+    /// A row whose curvature weight is negative is charged by its own row mass
+    /// `m·|W_i| + ΔW_i`, and voids the penalty-rank floor.
     #[test]
-    fn a_negative_weight_row_is_charged_additively() {
+    fn a_negative_weight_row_is_charged_its_own_mass() {
         let weights = array![1.0, -0.5];
         let weight_motion = array![0.1, 0.2];
         let motion =
-            HessianSpectrumMotion::over_step(0.0, weights.view(), weight_motion.view(), |mass| {
-                Ok(mass.sum())
+            HessianSpectrumMotion::over_weights(weights.view(), weight_motion.view(), |mass| {
+                Ok(Array2::from_diag(mass))
             })
             .unwrap();
-        assert!((motion.upper_factor - 1.1).abs() < 1e-15);
-        assert!((motion.lower_factor - 0.9).abs() < 1e-15);
-        assert!((motion.additive - 0.25).abs() < 1e-15);
+        assert!((motion.relative_weight_motion - 0.1).abs() < 1e-15);
+        let rows = motion.nonpositive_rows.as_ref().expect("the negative row carries mass");
+        assert_eq!(rows[[0, 0]], 0.0);
+        assert!((rows[[1, 1]] - 0.25).abs() < 1e-15);
         assert!(!motion.weights_stay_nonnegative);
+    }
+
+    /// #2901 V22: split by sign, a row whose weight is negative is bounded by
+    /// `W_i ∓ ΔW_i`, not scaled with the positive rows. With `X = I`,
+    /// `W = [1, −0.4]` and a penalty of 0.5 on the second direction, `H =
+    /// diag(1, 0.1)` has rank 2. Moving the negative row by 0.1 takes `H'` to
+    /// `diag(1, 0)`, rank 1, so the rank is not constant and the certificate must
+    /// refuse. The same spectrum with that row still certifies: the charge, not
+    /// the spectrum, is what refuses.
+    #[test]
+    fn a_negative_weight_rows_motion_refuses_the_direction_it_can_empty_2901() {
+        let spectrum = [1.0, 0.1];
+        let penalty = (0..2, diagonal(&[0.0, 0.5]));
+        let weights = array![1.0, -0.4];
+        let bounds_for = |weight_motion: Array1<f64>| {
+            let motion =
+                HessianSpectrumMotion::over_weights(weights.view(), weight_motion.view(), |mass| {
+                    Ok(Array2::from_diag(mass))
+                })
+                .unwrap();
+            HessianSpectrumBounds::over_step(
+                &diagonal(&spectrum),
+                [penalty.clone()],
+                array![0.0].view(),
+                motion,
+            )
+            .unwrap()
+        };
+        let still = certify_identified_rank_locally_constant(&spectrum, 1, &bounds_for(array![0.0, 0.0]))
+            .unwrap();
+        assert_eq!(still.rank, 2);
+        let displaced = [1.0, -0.4 - 0.1 + 0.5];
+        assert_eq!(DenseSpectralOperator::identified_rank(&displaced, 1), 1);
+        let refusal =
+            certify_identified_rank_locally_constant(&spectrum, 1, &bounds_for(array![0.0, 0.1]))
+                .unwrap_err();
+        assert!(
+            matches!(
+                refusal,
+                EstimationError::IdentifiedRankNotLocallyConstant { rank: 2, .. }
+            ),
+            "{refusal}"
+        );
     }
 }

@@ -163,7 +163,7 @@ fn binomial_logit_reml_outer_cost_is_bounded_1575() {
     let offset = Array1::<f64>::zeros(N);
 
     let t0 = std::time::Instant::now();
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x.clone(),
         y.view(),
         weights.view(),
@@ -268,7 +268,7 @@ fn binomial_logit_reml_outer_cost_is_n_independent_1575() {
         let mut opts = logit_options();
         opts.nullspace_dims = vec![2; N_SMOOTH];
         let t0 = std::time::Instant::now();
-        let fit = fit_gamwith_heuristic_lambdas(
+        let fit = fit_gamwith_heuristic_log_lambdas(
             x,
             y.view(),
             weights.view(),
@@ -1029,7 +1029,7 @@ fn binomial_logit_fit_publishes_a_certified_identified_subspace_2901() {
     let (x, y, s_list) = build_fixture();
     let weights = Array1::<f64>::ones(N);
     let offset = Array1::<f64>::zeros(N);
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x,
         y.view(),
         weights.view(),
@@ -1100,17 +1100,19 @@ fn binomial_logit_fit_publishes_a_certified_identified_subspace_2901() {
 }
 
 /// #2901 V22, the refusal pin: the certificate refuses a real fit's identified
-/// rank once the step it must hold over can carry the smallest identified
-/// eigenvalue under the rounding band, and certifies the same fit at a zero
-/// step. A converged, well-posed fit's own Newton step is far too small to
-/// refuse, so the step is set from the fit's own spectrum: with
-/// `t = ln(σ_r / band)`, `e^{−t}·σ_r = band < e^{t}·band`.
+/// rank once the step it must hold over can lift the rounding band past the
+/// smallest identified eigenvalue, and certifies the same fit at a zero step. A
+/// converged, well-posed fit's own Newton step is far too small to refuse, so
+/// the step is set from the fit's own spectrum. Every coordinate's penalty can
+/// grow by `e^t`, so the reachable `‖H'‖₂` is at least `e^t·‖S_λ‖₂`; with
+/// `t = ln(2σ_r / (p·ε·‖S_λ‖₂))` the band can reach `2σ_r`, above anything the
+/// smallest identified eigenvalue can be.
 #[test]
 fn a_fits_identified_rank_refuses_over_a_step_that_reaches_its_band_2901() {
     let (x, y, s_list) = build_fixture();
     let weights = Array1::<f64>::ones(N);
     let offset = Array1::<f64>::zeros(N);
-    let fit = fit_gamwith_heuristic_lambdas(
+    let fit = fit_gamwith_heuristic_log_lambdas(
         x.clone(),
         y.view(),
         weights.view(),
@@ -1158,12 +1160,36 @@ fn a_fits_identified_rank_refuses_over_a_step_that_reaches_its_band_2901() {
         .expect("a zero step certifies the fitted rank");
         assert_eq!(zero_radius, 0.0);
         assert_eq!(at_zero_step.rank, spectrum.rank());
-        let reaching_step = (at_zero_step.smallest_identified / at_zero_step.band).ln();
+        let penalty_norm = {
+            use gam_linalg::faer_ndarray::FaerEigh;
+            let mut total_penalty = Array2::<f64>::zeros(hessian.dim());
+            for (penalty, &lambda) in pirls
+                .reparam_result
+                .canonical_transformed
+                .iter()
+                .zip(fit.lambdas.iter())
+            {
+                let range = penalty.col_range.clone();
+                total_penalty
+                    .slice_mut(ndarray::s![range.clone(), range])
+                    .scaled_add(lambda, &penalty.root.t().dot(&penalty.root));
+            }
+            gam_linalg::matrix::symmetrize_in_place(&mut total_penalty);
+            total_penalty
+                .eigh(faer::Side::Lower)
+                .expect("the penalty decomposes")
+                .0
+                .iter()
+                .fold(0.0_f64, |acc, value| acc.max(value.abs()))
+        };
+        let resolution = hessian.nrows() as f64 * f64::EPSILON;
+        let reaching_step =
+            (2.0 * at_zero_step.smallest_identified / (resolution * penalty_norm)).ln();
         assert!(
             reaching_step > 0.0,
-            "the fit resolves its smallest identified direction: {:.3e} against band {:.3e}",
+            "the fit resolves its smallest identified direction: {:.3e} against a penalty norm \
+             {penalty_norm:.3e}",
             at_zero_step.smallest_identified,
-            at_zero_step.band
         );
         let refusal = super::identified_hessian::certify_fitted_identified_rank(
             pirls,
