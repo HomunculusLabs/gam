@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 //! #2933 F05 — the analytic outer ρ-gradient must be the derivative of the value
 //! the production objective reports, with every collapse-prevention gate decided by
 //! production at every endpoint.
