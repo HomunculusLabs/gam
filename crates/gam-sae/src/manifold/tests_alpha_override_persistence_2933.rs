@@ -271,6 +271,7 @@ fn overridden_learnable_alpha_log_strength_traces_match_the_fixed_twin_2933() {
                 .is_ok()
         })
         .expect("no PD-region rho for the fixed-alpha twin");
+    rho.log_lambda_sparse = feasible;
     let (_value, _loss, cache) = twin
         .penalized_quasi_laplace_criterion_with_cache(
             target.view(),
