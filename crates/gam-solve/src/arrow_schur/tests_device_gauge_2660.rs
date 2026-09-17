@@ -183,7 +183,7 @@ fn device_reduced_factor_seam_is_the_canonical_direct_factor_2660() {
     let options = ArrowSolveOptions::direct()
         .with_newton_schur_tikhonov(SPECTRAL_DEFLATION_REL_FLOOR);
     let (_, expected_factor, _) =
-        solve_dense_reduced_system(&schur, &Array1::zeros(3), &options, None)
+        solve_dense_reduced_system(&schur, &Array1::zeros(3), &options)
             .expect("canonical CPU Direct factor");
     let expected_factor = expected_factor.expect("Direct returns its dense factor");
     for column in 0..3 {

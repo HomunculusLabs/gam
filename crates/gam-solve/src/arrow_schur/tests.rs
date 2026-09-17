@@ -5408,7 +5408,6 @@ pub(crate) fn covisibility_partition_recovers_groups_and_beats_scalar_jacobi() {
             &backend,
             None,
             None,
-            None,
         )
         .expect("scalar-Jacobi PCG")
     };
@@ -5430,7 +5429,6 @@ pub(crate) fn covisibility_partition_recovers_groups_and_beats_scalar_jacobi() {
         &pcg,
         &trust,
         &backend,
-        None,
         None,
         None,
     )

@@ -397,6 +397,15 @@
     "evidence": "Backfilled: b66b77353 (jets' gam-linalg slop deletion) removed these public functions and landed its source-removal entry but omitted this acknowledgement. scripts/public_api_census.py on MSI over 8bd188841..b66b77353 measured exactly this removed map (/scratch.global/sauer354/sw5-logs/backfill.b66b77353.pubapi.txt)."
   },
   {
+    "base": "58c6180ddf5bcc7ab8c41f91c3850fdaf63ce374",
+    "removed": {
+      "crates/gam-solve/src/arrow_schur/reduced_solve.rs::metric_dot": 1,
+      "crates/gam-solve/src/arrow_schur/reduced_solve.rs::metric_norm": 1
+    },
+    "reason": "#2627 (SPEC 25): the Steihaug-CG metric_weights option was None at every producer, so the weighted arms of metric_dot and metric_norm never ran. The option is deleted through the seven solver functions that only forwarded it; metric_dot's callers use dot, and metric_norm becomes euclidean_norm, the loop its None arm ran (docs/source-removal-changes.json).",
+    "evidence": "At the base, git grep -n finds metric_dot and metric_norm only in crates/gam-solve/src/arrow_schur/reduced_solve.rs (their declarations and calls) and one arrow_schur/prelude.rs doc comment, all rewritten in this commit. gam-custom-family's joint_newton.rs metric_norm is a different item."
+  },
+  {
     "base": "0b5288b44e866112f7fc14bfbb4b6cea5f61b07b",
     "removed": {
       "crates/gam-terms/src/basis/closed_form_penalty.rs::anisotropic_duchon_penalty": 1,

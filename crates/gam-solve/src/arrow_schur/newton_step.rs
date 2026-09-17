@@ -2095,7 +2095,6 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
     // The Schur solve is over the reduced β vector. Latent manifold metric
     // weights live on each d-dimensional t_i block, so the induced metric for
     // this β-only Steihaug problem is Euclidean.
-    let trust_metric_weights = None;
 
     // 3. Solve reduced shared system using the selected BA mode.
     let mut mixed_precision_status = MixedPrecisionStatus::Off;
@@ -2165,7 +2164,6 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                 &schur,
                 &rhs_beta_evidence,
                 options,
-                trust_metric_weights,
             )?;
             (db, sf, diag, Some(schur))
         }
@@ -2223,7 +2221,6 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                 &schur,
                 &rhs_beta_evidence,
                 options,
-                trust_metric_weights,
             )?;
             (db, sf, diag, None)
         }
@@ -2375,7 +2372,6 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                 &options.trust_region,
                 &backend,
                 options.gpu_matvec.as_ref(),
-                trust_metric_weights,
                 // #1026 — the same opt-in floor the dense path uses, here gating
                 // the matrix-free unbounded-PCG curvature-floor retry.
                 options.newton_schur_tikhonov_rel_floor,

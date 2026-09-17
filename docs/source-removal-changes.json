@@ -1017,6 +1017,16 @@
     "evidence": "At 6a27cdf34, git grep -nw over crates, src, tests, examples, bench and benches found no production caller of any item: each is named only by its own definition, its own error strings, doc links or prose comments, and, for freeze_routing_from_current_logits, thaw_routing and from_topk_support, by tests. Those tests keep what they pin: the four #1033 frozen-routing tests now freeze through with_frozen_routing (None thaws), and support_parameter_certificate_survives_raw_global_refusal_2634 builds its state with from_topk_support_heterogeneous. The six unweighted prior wrappers only forwarded None to their _weighted forms. RoutingPredictor and from_blocks_with_mode were kept, because a production doc link and a bench name them. MSI verification (ban scanner, workspace --all-targets check, cargo doc -p gam-sae, guard and census) runs on the landed sha."
   },
   {
+    "base": "58c6180ddf5bcc7ab8c41f91c3850fdaf63ce374",
+    "items": [
+      "crates/gam-solve/src/arrow_schur/prelude.rs:type:MetricWeights",
+      "crates/gam-solve/src/arrow_schur/reduced_solve.rs:fn:metric_dot",
+      "crates/gam-solve/src/arrow_schur/reduced_solve.rs:fn:metric_norm"
+    ],
+    "reason": "#2627 (SPEC 25): every producer of the Steihaug-CG metric_weights option set it to None (newton_step.rs for the Direct, SqrtBA and InexactPCG solves, ArrowSchurSystem's streaming dense solve, canonicalize_device_beta_factor and the tests), and every function between them only forwarded it, so the weighted arms never ran. The option is deleted through solve_dense_reduced_system, steihaug_pcg_auto, run_pcg_with_preconditioner, steihaug_dense_system, steihaug_cg, step_to_trust_boundary and step_inside_trust_region, together with the MetricWeights alias. metric_dot's callers use dot, and metric_norm becomes euclidean_norm, the loop its None arm ran, so each call site runs the arithmetic it ran before.",
+    "evidence": "At the base, git grep -n -E 'metric_dot|metric_norm|MetricWeights|metric_weights' over crates, tests, src, bench, benches and examples finds MetricWeights only in arrow_schur/prelude.rs (the alias) and reduced_solve.rs; metric_dot and metric_norm only in reduced_solve.rs (their declarations and calls) and one prelude.rs doc comment; and the trust_metric_weights = None producers at newton_step.rs:2098 and system.rs:1543. Every caller of the seven functions outside reduced_solve.rs (newton_step.rs, system.rs, tests.rs, tests_device_gauge_2660.rs, gpu_kernels/arrow_schur.rs) passes None and is rewritten in this commit. The grep's other matches are different items: gam-custom-family's own joint_newton.rs metric_norm and block_penalized_metric_norm, and metric_weights accessors or locals in gam-problem, gam-terms, gam-sae, gam-identifiability and gam-solve factorization.rs."
+  },
+  {
     "base": "b66a7d04e22eb7be06917bddafa9a1408ac13d76",
     "items": [
       "crates/gam-sae/src/manifold/certificate.rs:fn:dictionary_incoherence_report",

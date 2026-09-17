@@ -1617,7 +1617,6 @@ pub(crate) fn solve_dense_reduced_system(
     schur: &Array2<f64>,
     rhs_beta: &Array1<f64>,
     options: &ArrowSolveOptions,
-    metric_weights: Option<&MetricWeights>,
 ) -> Result<(Array1<f64>, Option<Array2<f64>>, ArrowPcgDiagnostics), ArrowSchurError> {
     let policy = ReducedSchurPolicy::newton(options.newton_schur_tikhonov_rel_floor);
     let DenseReducedSchurFactorization {
@@ -1628,7 +1627,7 @@ pub(crate) fn solve_dense_reduced_system(
     if let Some(floored) = floored_schur {
         let direct = mixed_precision_reduced_beta(&floored, &factor, rhs_beta, options)
             .unwrap_or_else(|| cholesky_solve_vector(&factor, rhs_beta));
-        if step_inside_trust_region(direct.view(), options.trust_region.radius, metric_weights) {
+        if step_inside_trust_region(direct.view(), options.trust_region.radius) {
             return Ok((direct, Some(factor), ArrowPcgDiagnostics::default()));
         }
         let identity = IdentityPreconditioner;
@@ -1641,7 +1640,6 @@ pub(crate) fn solve_dense_reduced_system(
                 relative_tolerance: options.trust_region.steihaug_relative_tolerance,
             },
             &options.trust_region,
-            metric_weights,
         )?;
         return Ok((delta, Some(factor), diag));
     }
@@ -1683,7 +1681,7 @@ pub(crate) fn solve_dense_reduced_system(
         {
             let direct = mixed_precision_reduced_beta(&floored, &floored_factor, rhs_beta, options)
                 .unwrap_or_else(|| cholesky_solve_vector(&floored_factor, rhs_beta));
-            if step_inside_trust_region(direct.view(), options.trust_region.radius, metric_weights)
+            if step_inside_trust_region(direct.view(), options.trust_region.radius)
             {
                 return Ok((direct, Some(floored_factor), ArrowPcgDiagnostics::default()));
             }
@@ -1697,7 +1695,6 @@ pub(crate) fn solve_dense_reduced_system(
                     relative_tolerance: options.trust_region.steihaug_relative_tolerance,
                 },
                 &options.trust_region,
-                metric_weights,
             )?;
             return Ok((delta, Some(floored_factor), diag));
         }
@@ -1717,7 +1714,7 @@ pub(crate) fn solve_dense_reduced_system(
     // as the automatic fallback); the certificate is the f64 backward error.
     let direct = mixed_precision_reduced_beta(schur, &factor, rhs_beta, options)
         .unwrap_or_else(|| cholesky_solve_vector(&factor, rhs_beta));
-    if step_inside_trust_region(direct.view(), options.trust_region.radius, metric_weights) {
+    if step_inside_trust_region(direct.view(), options.trust_region.radius) {
         return Ok((direct, Some(factor), ArrowPcgDiagnostics::default()));
     }
 
@@ -1734,7 +1731,6 @@ pub(crate) fn solve_dense_reduced_system(
             relative_tolerance: options.trust_region.steihaug_relative_tolerance,
         },
         &options.trust_region,
-        metric_weights,
     )?;
     Ok((delta, Some(factor), diag))
 }
@@ -1742,9 +1738,8 @@ pub(crate) fn solve_dense_reduced_system(
 pub(crate) fn step_inside_trust_region(
     step: ArrayView1<'_, f64>,
     radius: f64,
-    metric_weights: Option<&MetricWeights>,
 ) -> bool {
-    !radius.is_finite() || metric_norm(step, metric_weights) <= radius
+    !radius.is_finite() || euclidean_norm(step) <= radius
 }
 
 /// Below this row count the per-row Schur loop stays sequential: the rayon
@@ -6832,7 +6827,6 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
     trust: &ArrowTrustRegionOptions,
     backend: &B,
     gpu_matvec: Option<&GpuSchurMatvec>,
-    metric_weights: Option<&MetricWeights>,
     curvature_floor: Option<f64>,
 ) -> Result<(Array1<f64>, ArrowPcgDiagnostics), ArrowSchurError> {
     // #1017 CPU residency: stage the per-row reduced-Schur factors `(L_i, Y_i)`
@@ -6870,7 +6864,6 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
             trust,
             backend,
             gpu_matvec,
-            metric_weights,
             resident.as_ref(),
         )?;
         // Mirror the non-gauge contract: below the escalation threshold a MaxIter
@@ -6910,7 +6903,7 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
     let mut effective_ridge = ridge_beta;
     let mut x0_diag0: Option<(Array1<f64>, ArrowPcgDiagnostics)> = None;
     let mut last_curvature_err: Option<ArrowSchurError> = None;
-    let rhs_scale = metric_norm(rhs.view(), metric_weights).max(1.0);
+    let rhs_scale = euclidean_norm(rhs.view()).max(1.0);
     let ridge_ceiling = ridge_beta.max(SCHUR_CURVATURE_FLOOR_REL_CEILING * rhs_scale);
     for _attempt in 0..=SCHUR_CURVATURE_FLOOR_MAX_ATTEMPTS {
         // The Jacobi preconditioner build itself refuses a non-PD Schur diagonal
@@ -6970,7 +6963,6 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
             trust,
             backend,
             gpu_matvec,
-            metric_weights,
             resident.as_ref(),
         ) {
             Ok(result) => {
@@ -7060,7 +7052,6 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
         trust,
         backend,
         gpu_matvec,
-        metric_weights,
         resident.as_ref(),
     )?;
     if diag1.stopping_reason != PcgStopReason::MaxIter {
@@ -7083,7 +7074,6 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
         trust,
         backend,
         gpu_matvec,
-        metric_weights,
         resident.as_ref(),
     )?;
     if diag2.stopping_reason != PcgStopReason::MaxIter {
@@ -7113,7 +7103,6 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
         trust,
         backend,
         gpu_matvec,
-        metric_weights,
         resident.as_ref(),
     )?;
     if diag3.stopping_reason != PcgStopReason::MaxIter {
@@ -7144,7 +7133,6 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
         trust,
         backend,
         gpu_matvec,
-        metric_weights,
         resident.as_ref(),
     )?;
     // All five preconditioner tiers (Jacobi -> ClusterJacobi -> AdditiveSchwarz
@@ -7180,7 +7168,6 @@ pub(crate) fn run_pcg_with_preconditioner<ApplyPrec, B: BatchedBlockSolver + Syn
     trust: &ArrowTrustRegionOptions,
     backend: &B,
     gpu_matvec: Option<&GpuSchurMatvec>,
-    metric_weights: Option<&MetricWeights>,
     resident: Option<&SaeResidentReducedSchur>,
 ) -> Result<(Array1<f64>, ArrowPcgDiagnostics), ArrowSchurError>
 where
@@ -7205,7 +7192,6 @@ where
         max_iters,
         tol,
         trust.radius,
-        metric_weights,
     )
 }
 
@@ -7224,7 +7210,6 @@ pub(crate) fn steihaug_dense_system(
     preconditioner: &IdentityPreconditioner,
     pcg: &ArrowPcgOptions,
     trust: &ArrowTrustRegionOptions,
-    metric_weights: Option<&MetricWeights>,
 ) -> Result<(Array1<f64>, ArrowPcgDiagnostics), ArrowSchurError> {
     steihaug_cg(
         rhs,
@@ -7233,7 +7218,6 @@ pub(crate) fn steihaug_dense_system(
         pcg.max_iterations,
         pcg.relative_tolerance,
         trust.radius,
-        metric_weights,
     )
 }
 
@@ -7244,26 +7228,18 @@ pub(crate) fn steihaug_cg<MatVec, ApplyPrec>(
     max_iterations: usize,
     relative_tolerance: f64,
     trust_radius: f64,
-    metric_weights: Option<&MetricWeights>,
 ) -> Result<(Array1<f64>, ArrowPcgDiagnostics), ArrowSchurError>
 where
     MatVec: FnMut(&Array1<f64>, &mut Array1<f64>),
     ApplyPrec: FnMut(&Array1<f64>) -> Array1<f64>,
 {
     let n = rhs.len();
-    if let Some(weights) = metric_weights {
-        assert_eq!(
-            weights.len(),
-            n,
-            "Steihaug-CG metric weight length must match solve dimension"
-        );
-    }
     let radius = if trust_radius.is_finite() && trust_radius > 0.0 {
         trust_radius
     } else {
         f64::INFINITY
     };
-    let rhs_norm = metric_norm(rhs.view(), metric_weights);
+    let rhs_norm = euclidean_norm(rhs.view());
     if rhs_norm == 0.0 {
         return Ok((Array1::<f64>::zeros(n), ArrowPcgDiagnostics::default()));
     }
@@ -7276,12 +7252,12 @@ where
         ..ArrowPcgDiagnostics::default()
     };
     let mut p = z.clone();
-    let mut rz = metric_dot(&r, &z, metric_weights);
+    let mut rz = dot(&r, &z);
     if rz <= 0.0 || !rz.is_finite() {
         if radius.is_finite() {
-            diag.final_relative_residual = metric_norm(r.view(), metric_weights) / rhs_norm;
+            diag.final_relative_residual = euclidean_norm(r.view()) / rhs_norm;
             diag.stopping_reason = PcgStopReason::TrustRegion;
-            return Ok((step_to_trust_boundary(&x, &r, radius, metric_weights), diag));
+            return Ok((step_to_trust_boundary(&x, &r, radius), diag));
         }
         // Unbounded (radius = ∞) non-positive preconditioned residual: the
         // reduced Schur is indefinite at the very first direction. Surface the
@@ -7291,10 +7267,10 @@ where
         // report it with the residual norm² as the direction scale.
         return Err(ArrowSchurError::UnboundedNegativeCurvature {
             curvature: rz,
-            direction_norm_sq: metric_dot(&r, &r, metric_weights),
+            direction_norm_sq: dot(&r, &r),
         });
     }
-    if metric_norm(r.view(), metric_weights) <= tol {
+    if euclidean_norm(r.view()) <= tol {
         diag.final_relative_residual = 0.0;
         diag.stopping_reason = PcgStopReason::Converged;
         return Ok((x, diag));
@@ -7306,12 +7282,12 @@ where
         matvec(&p, &mut ap);
         diag.matvec_calls += 1;
         diag.iterations += 1;
-        let pap = metric_dot(&p, &ap, metric_weights);
+        let pap = dot(&p, &ap);
         if pap <= 0.0 || !pap.is_finite() {
             if radius.is_finite() {
-                diag.final_relative_residual = metric_norm(r.view(), metric_weights) / rhs_norm;
+                diag.final_relative_residual = euclidean_norm(r.view()) / rhs_norm;
                 diag.stopping_reason = PcgStopReason::TrustRegion;
-                return Ok((step_to_trust_boundary(&x, &p, radius, metric_weights), diag));
+                return Ok((step_to_trust_boundary(&x, &p, radius), diag));
             }
             // Unbounded negative curvature `pᵀSp ≤ 0`: the reduced Schur is
             // indefinite along `p` (the #1026 co-collapse direction). Surface
@@ -7320,30 +7296,30 @@ where
             // `pᵀ(S+δI)p = 0⁺`) plus a margin, and retries.
             return Err(ArrowSchurError::UnboundedNegativeCurvature {
                 curvature: pap,
-                direction_norm_sq: metric_dot(&p, &p, metric_weights),
+                direction_norm_sq: dot(&p, &p),
             });
         }
         let alpha = rz / pap;
         for i in 0..n {
             candidate[i] = x[i] + alpha * p[i];
         }
-        if radius.is_finite() && metric_norm(candidate.view(), metric_weights) >= radius {
-            diag.final_relative_residual = metric_norm(r.view(), metric_weights) / rhs_norm;
+        if radius.is_finite() && euclidean_norm(candidate.view()) >= radius {
+            diag.final_relative_residual = euclidean_norm(r.view()) / rhs_norm;
             diag.stopping_reason = PcgStopReason::TrustRegion;
-            return Ok((step_to_trust_boundary(&x, &p, radius, metric_weights), diag));
+            return Ok((step_to_trust_boundary(&x, &p, radius), diag));
         }
         x.assign(&candidate);
         for i in 0..n {
             r[i] -= alpha * ap[i];
         }
-        if metric_norm(r.view(), metric_weights) <= tol {
-            diag.final_relative_residual = metric_norm(r.view(), metric_weights) / rhs_norm;
+        if euclidean_norm(r.view()) <= tol {
+            diag.final_relative_residual = euclidean_norm(r.view()) / rhs_norm;
             diag.stopping_reason = PcgStopReason::Converged;
             return Ok((x, diag));
         }
         z = apply_preconditioner(&r);
         diag.precond_apply_calls += 1;
-        let rz_next = metric_dot(&r, &z, metric_weights);
+        let rz_next = dot(&r, &z);
         if rz_next <= 0.0 || !rz_next.is_finite() {
             return Err(ArrowSchurError::PcgFailed {
                 reason: "non-positive or non-finite PCG residual".to_string(),
@@ -7355,7 +7331,7 @@ where
         }
         rz = rz_next;
     }
-    diag.final_relative_residual = metric_norm(r.view(), metric_weights) / rhs_norm;
+    diag.final_relative_residual = euclidean_norm(r.view()) / rhs_norm;
     diag.stopping_reason = PcgStopReason::MaxIter;
     Ok((x, diag))
 }
@@ -7364,14 +7340,13 @@ pub(crate) fn step_to_trust_boundary(
     x: &Array1<f64>,
     p: &Array1<f64>,
     radius: f64,
-    metric_weights: Option<&MetricWeights>,
 ) -> Array1<f64> {
-    let pp = metric_dot(p, p, metric_weights);
+    let pp = dot(p, p);
     if pp == 0.0 {
         return x.clone();
     }
-    let xp = metric_dot(x, p, metric_weights);
-    let xx = metric_dot(x, x, metric_weights);
+    let xp = dot(x, p);
+    let xx = dot(x, x);
     let disc = (xp * xp + pp * (radius * radius - xx)).max(0.0);
     let tau = (-xp + disc.sqrt()) / pp;
     let mut out = x.clone();
@@ -7400,39 +7375,10 @@ pub(crate) fn dot(a: &Array1<f64>, b: &Array1<f64>) -> f64 {
     acc
 }
 
-pub(crate) fn metric_dot(
-    a: &Array1<f64>,
-    b: &Array1<f64>,
-    metric_weights: Option<&MetricWeights>,
-) -> f64 {
-    assert_eq!(a.len(), b.len());
-    match metric_weights {
-        Some(weights) => {
-            assert_eq!(weights.len(), a.len());
-            let mut acc = 0.0;
-            for i in 0..a.len() {
-                acc += weights[i] * a[i] * b[i];
-            }
-            acc
-        }
-        None => dot(a, b),
-    }
-}
-
-pub(crate) fn metric_norm(v: ArrayView1<'_, f64>, metric_weights: Option<&MetricWeights>) -> f64 {
+pub(crate) fn euclidean_norm(v: ArrayView1<'_, f64>) -> f64 {
     let mut acc = 0.0;
-    match metric_weights {
-        Some(weights) => {
-            assert_eq!(weights.len(), v.len());
-            for i in 0..v.len() {
-                acc += weights[i] * v[i] * v[i];
-            }
-        }
-        None => {
-            for x in v.iter() {
-                acc += x * x;
-            }
-        }
+    for x in v.iter() {
+        acc += x * x;
     }
     acc.sqrt()
 }

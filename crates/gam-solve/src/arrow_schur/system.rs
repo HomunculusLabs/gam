@@ -1540,9 +1540,8 @@ impl StreamingArrowSchur {
             self.rhs_acc[j] -= self.gb[j];
         }
         symmetrize_upper_from_lower(&mut self.s_acc);
-        let trust_metric_weights = None;
         let (delta_beta, schur_factor, _diag) =
-            solve_dense_reduced_system(&self.s_acc, &self.rhs_acc, options, trust_metric_weights)?;
+            solve_dense_reduced_system(&self.s_acc, &self.rhs_acc, options)?;
         let delta_t = self.back_substitute(ridge_t, delta_beta.view())?;
         Ok((delta_t, delta_beta, schur_factor))
     }

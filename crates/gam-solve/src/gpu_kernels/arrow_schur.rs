@@ -270,7 +270,7 @@ pub(crate) fn canonicalize_device_beta_factor(
         newton_schur_tikhonov_rel_floor;
     let zero_rhs = Array1::<f64>::zeros(k);
     let (_, factor, _) =
-        solve_dense_reduced_system(&conditioned_input, &zero_rhs, &canonical_options, None)
+        solve_dense_reduced_system(&conditioned_input, &zero_rhs, &canonical_options)
             .map_err(|error| ArrowSchurGpuFailure::SchurFactorFailed {
                 reason: format!("canonical reduced-border factorization failed: {error}"),
             })?;

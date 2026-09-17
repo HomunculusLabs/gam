@@ -27,7 +27,7 @@ pub(crate) const DEFAULT_PCG_RELATIVE_TOLERANCE: f64 = 1e-4;
 ///
 /// The native PCG criterion is purely relative: `tol = rel_tol · ‖rhs‖`. When
 /// `‖rhs‖` is tiny (degenerate / near-stationary reduced systems) this product
-/// can fall below the roundoff resolution of `metric_norm` (~1e-15 for f64),
+/// can fall below the roundoff resolution of `euclidean_norm` (~1e-15 for f64),
 /// so the loop would "converge" on floating-point noise rather than a genuinely
 /// accurate solution. Floor the threshold at 1e-14: above machine epsilon
 /// (~2.2e-16) yet below any practical single-iteration residual reduction, so
@@ -135,5 +135,3 @@ pub type StreamingArrowRowBuilder =
 /// `cuda_selected()` and K ≥ 5000. The closure is `Send + Sync` so PCG callers
 /// can hold it in an `Arc`.
 pub type GpuSchurMatvec = Arc<dyn Fn(&Array1<f64>, &mut Array1<f64>) + Send + Sync>;
-
-pub(crate) type MetricWeights = [f64];
