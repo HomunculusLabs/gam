@@ -992,17 +992,21 @@ fn a_row_keeps_its_retained_support_unless_the_routed_support_lowers_its_loss_25
     let routed = route().blocks[0];
     assert!(routed < 2, "the router must pick a duplicate, got block {routed}");
     let duplicate = 1 - routed;
-    let (kept, kept_projection) =
+    let (kept, kept_projection, declined) =
         super::descend_block_support(x.row(0), decoder.view(), 1.0, 1, 1, route(), &[duplicate]);
     assert_eq!(kept.blocks, vec![duplicate]);
     assert_ne!(kept.gates[0], 0.0);
     assert_eq!(kept_projection.rss, 0.0);
-    let (adopted, adopted_projection) =
+    // The routed duplicate admits a different block and resolves no loss decrease, so
+    // it is declined at zero excess.
+    assert_eq!(declined, Some(0.0));
+    let (adopted, adopted_projection, adopted_declined) =
         super::descend_block_support(x.row(0), decoder.view(), 1.0, 1, 1, route(), &[2]);
     assert_eq!(adopted.blocks, vec![routed]);
     assert_eq!(adopted_projection.rss, 0.0);
+    assert_eq!(adopted_declined, None);
     // A row no committed pass has seen takes its routed support.
-    let (first, _) = super::descend_block_support(
+    let (first, _, first_declined) = super::descend_block_support(
         x.row(0),
         decoder.view(),
         1.0,
@@ -1012,6 +1016,7 @@ fn a_row_keeps_its_retained_support_unless_the_routed_support_lowers_its_loss_25
         &[super::NO_BLOCK],
     );
     assert_eq!(first.blocks, vec![routed]);
+    assert_eq!(first_declined, None);
 }
 
 #[test]

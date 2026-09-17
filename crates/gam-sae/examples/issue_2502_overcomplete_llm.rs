@@ -381,6 +381,83 @@ fn row_sample_frames(
     Ok((decoder, fallbacks))
 }
 
+/// Column means of the first `n_eval` held-out rows, read `chunk` rows at a time.
+fn eval_column_means(eval: &Npy, n_eval: usize, chunk: usize, p: usize) -> Vec<f64> {
+    let chunk = chunk.min(n_eval).max(1);
+    let mut eval_mean = vec![0.0f64; p];
+    let mut buf = Array2::<f32>::zeros((chunk, p));
+    let mut row0 = 0usize;
+    while row0 < n_eval {
+        let take = (n_eval - row0).min(chunk);
+        eval.read_into(row0, buf.slice_mut(ndarray::s![0..take, ..]), None);
+        for i in 0..take {
+            let row = buf.row(i);
+            for c in 0..p {
+                eval_mean[c] += row[c] as f64;
+            }
+        }
+        row0 += take;
+    }
+    for m in eval_mean.iter_mut() {
+        *m /= n_eval as f64;
+    }
+    eval_mean
+}
+
+/// Held-out EV of frames `decoder` with tied scalar `gamma`, measured as the final
+/// held-out pass measures it: the eval rows centred on the train mean, encoded by the
+/// greedy router, reconstructed, and scored against the eval mean.
+fn score_heldout_checkpoint(
+    eval: &Npy,
+    n_eval: usize,
+    chunk: usize,
+    train_mean_f32: &[f32],
+    train_mean: &[f64],
+    eval_mean: &[f64],
+    decoder: ArrayView2<'_, f32>,
+    gamma: f32,
+    block_size: usize,
+    block_topk: usize,
+    block_tile: usize,
+) -> Result<f64, String> {
+    let p = decoder.ncols();
+    let chunk = chunk.min(n_eval).max(1);
+    let mut buf = Array2::<f32>::zeros((chunk, p));
+    let mut rss = 0.0f64;
+    let mut tss_about_eval_mean = 0.0f64;
+    let mut row0 = 0usize;
+    while row0 < n_eval {
+        let take = (n_eval - row0).min(chunk);
+        eval.read_into(
+            row0,
+            buf.slice_mut(ndarray::s![0..take, ..]),
+            Some(train_mean_f32),
+        );
+        let view = buf.slice(ndarray::s![0..take, ..]);
+        let (blocks, _gates, codes) = block_sparse_dictionary_transform(
+            view,
+            decoder,
+            gamma,
+            block_size,
+            block_topk,
+            block_tile,
+        )?;
+        let recon =
+            reconstruct_block_sparse_rows(decoder, blocks.view(), codes.view(), block_size)?;
+        for i in 0..take {
+            for c in 0..p {
+                let target = view[[i, c]] as f64;
+                let d = target - recon[[i, c]] as f64;
+                rss += d * d;
+                let about_eval = target + train_mean[c] - eval_mean[c];
+                tss_about_eval_mean += about_eval * about_eval;
+            }
+        }
+        row0 += take;
+    }
+    Ok(1.0 - rss / tss_about_eval_mean)
+}
+
 fn parse_args() -> Result<Args, String> {
     let raw: Vec<String> = std::env::args().collect();
     let mut a = Args {
@@ -592,11 +669,21 @@ fn main() -> Result<(), String> {
     );
     let mut state = BlockSparseStreamState::new_with_decoder(seed, &cfg)?;
 
+    let eval_mean = eval_column_means(&eval, n_eval, args.minibatch, p);
     let train_start = Instant::now();
     let mut shard = Array2::<f32>::zeros((args.minibatch.min(n_train).max(1), p));
     let mut epoch_rows: Vec<serde_json::Value> = Vec::new();
     let mut converged = false;
     let mut last_ev = f64::NAN;
+    // Support census (#2502): the previous pass's committed supports, each row's
+    // support before its last change, and how often each row has changed. A change
+    // that returns a row to the support it held before its last change is a revert,
+    // so late changes that are mostly reverts are rows alternating between two
+    // supports rather than rows finding new ones.
+    let k_slots = state.block_topk();
+    let mut previous_supports: Vec<u32> = Vec::new();
+    let mut support_before_last_change: Vec<u32> = Vec::new();
+    let mut support_change_counts = vec![0u32; n_train];
     for epoch in 0..(if reload { 0 } else { args.epochs }) {
         let mut row0 = 0usize;
         while row0 < n_train {
@@ -611,12 +698,67 @@ fn main() -> Result<(), String> {
         }
         let stats = state.end_epoch()?;
         last_ev = stats.explained_variance;
+        let supports = state.retained_supports();
+        let mut support_reverts = 0usize;
+        let mut changed_rows_max_changes = 0u32;
+        if previous_supports.len() == supports.len() {
+            for (row, (current, previous)) in supports
+                .chunks_exact(k_slots)
+                .zip(previous_supports.chunks_exact(k_slots))
+                .enumerate()
+            {
+                if current == previous {
+                    continue;
+                }
+                let before = &mut support_before_last_change[row * k_slots..(row + 1) * k_slots];
+                if support_change_counts[row] > 0 && *current == *before {
+                    support_reverts += 1;
+                }
+                before.copy_from_slice(previous);
+                support_change_counts[row] += 1;
+                changed_rows_max_changes = changed_rows_max_changes.max(support_change_counts[row]);
+            }
+        } else {
+            support_before_last_change = supports.to_vec();
+        }
+        previous_supports.clear();
+        previous_supports.extend_from_slice(supports);
+        // A held-out checkpoint at every power-of-two epoch and at the last one: the eval
+        // rows encoded by the greedy router at the frames the next pass routes against.
+        // It measures the trajectory, not a fitted dictionary.
+        let epochs_closed = epoch + 1;
+        let checkpoint_heldout_ev =
+            if epochs_closed.is_power_of_two() || epochs_closed == args.epochs || stats.converged {
+                let heldout_ev = score_heldout_checkpoint(
+                    &eval,
+                    n_eval,
+                    args.minibatch,
+                    &mean_f32,
+                    &mean,
+                    &eval_mean,
+                    state.decoder(),
+                    state.gamma(),
+                    args.block_size,
+                    k,
+                    args.block_tile,
+                )?;
+                println!(
+                    "[a5] arm={} checkpoint epoch {epochs_closed} heldout_ev={heldout_ev:.6} \
+                     (greedy router at the frames the next pass routes against; not a fitted \
+                     dictionary)",
+                    args.arm
+                );
+                Some(heldout_ev)
+            } else {
+                None
+            };
         println!(
             "[a5] arm={} epoch {}/{} train_ev={:.6} gamma={:.6} dead={} accepted_births={} \
              gamma_residual={:.3e} frame_residual={:.3e} displacement={:.3e} gradient={:.3e} \
              binding_block={:?} binding_rows={} blocks_above_tolerance={:?} \
-             median_frame_residual={:.3e} rerouted_rows={:?} support_changes={} admitted_blocks={:.3} \
-             elapsed={:.1}s",
+             median_frame_residual={:.3e} rerouted_rows={:?} support_changes={} support_reverts={} \
+             changed_rows_max_changes={} declined_routes={} declined_route_ev_cost={:.3e} \
+             admitted_blocks={:.3} elapsed={:.1}s",
             args.arm,
             epoch + 1,
             args.epochs,
@@ -634,6 +776,10 @@ fn main() -> Result<(), String> {
             stats.frame_residual_median,
             stats.rerouted_rows,
             stats.support_changes,
+            support_reverts,
+            changed_rows_max_changes,
+            stats.declined_routes,
+            stats.declined_route_ev_cost,
             stats.mean_admitted_blocks,
             started.elapsed().as_secs_f64(),
         );
@@ -653,6 +799,11 @@ fn main() -> Result<(), String> {
             "frame_residual_median": stats.frame_residual_median,
             "rerouted_rows": stats.rerouted_rows,
             "support_changes": stats.support_changes,
+            "support_reverts": support_reverts,
+            "changed_rows_max_changes": changed_rows_max_changes,
+            "declined_routes": stats.declined_routes,
+            "declined_route_ev_cost": stats.declined_route_ev_cost,
+            "checkpoint_heldout_ev": checkpoint_heldout_ev,
             "mean_admitted_blocks": stats.mean_admitted_blocks,
             "converged": stats.converged,
             "seconds": started.elapsed().as_secs_f64(),
@@ -661,6 +812,35 @@ fn main() -> Result<(), String> {
             converged = true;
             break;
         }
+    }
+    if !reload {
+        // Rows by how often they changed support, bucketed at the power of two at or
+        // below each count, and the rows that changed most often. The census prints
+        // before `finalize`, so a run that exhausts `--epochs` still reports it.
+        let mut rows_by_power_of_two = vec![0usize; u32::BITS as usize];
+        let mut ranked: Vec<(u32, usize)> = Vec::new();
+        for (row, &count) in support_change_counts.iter().enumerate() {
+            if count > 0 {
+                rows_by_power_of_two[(u32::BITS - 1 - count.leading_zeros()) as usize] += 1;
+                ranked.push((count, row));
+            }
+        }
+        ranked.sort_unstable_by(|left, right| right.cmp(left));
+        let histogram: Vec<(u64, usize)> = rows_by_power_of_two
+            .iter()
+            .enumerate()
+            .filter(|(_, rows)| **rows > 0)
+            .map(|(bucket, rows)| (1u64 << bucket, *rows))
+            .collect();
+        println!(
+            "[a5] arm={} support census after {} epochs: rows_changed={} \
+             rows_by_changes_at_least={:?} most_changed(count,row)={:?}",
+            args.arm,
+            state.epochs_run(),
+            ranked.len(),
+            histogram,
+            &ranked[..ranked.len().min(16)],
+        );
     }
     let train_seconds = train_start.elapsed().as_secs_f64();
     // `--load-decoder` re-scores an ALREADY FITTED dictionary: the same held-out
@@ -700,26 +880,6 @@ fn main() -> Result<(), String> {
     // the usage census are made of. Chunked so the N x K score matrix and the
     // N x p reconstruction never both have to be resident.
     let eval_start = Instant::now();
-    let mut eval_mean = vec![0.0f64; p];
-    {
-        let chunk = args.minibatch.min(n_eval).max(1);
-        let mut buf = Array2::<f32>::zeros((chunk, p));
-        let mut row0 = 0usize;
-        while row0 < n_eval {
-            let take = (n_eval - row0).min(chunk);
-            eval.read_into(row0, buf.slice_mut(ndarray::s![0..take, ..]), None);
-            for i in 0..take {
-                let row = buf.row(i);
-                for c in 0..p {
-                    eval_mean[c] += row[c] as f64;
-                }
-            }
-            row0 += take;
-        }
-        for m in eval_mean.iter_mut() {
-            *m /= n_eval as f64;
-        }
-    }
 
     let mut rss = 0.0f64;
     let mut rss_ls = 0.0f64;

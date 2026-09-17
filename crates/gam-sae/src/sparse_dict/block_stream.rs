@@ -222,6 +222,9 @@ fn kept_block_code(
 /// unless a routed one lowers the row's loss by an amount its arithmetic resolves
 /// makes the support step descend the same tied objective as the frame and γ steps,
 /// so a row changes support only finitely often: #2283's rule for the atom lane.
+///
+/// The third value is the routed loss minus the retained loss when the routed support
+/// admits different blocks and is declined, and `None` otherwise.
 fn descend_block_support(
     row: ArrayView1<'_, f32>,
     decoder: ArrayView2<'_, f32>,
@@ -230,15 +233,15 @@ fn descend_block_support(
     k: usize,
     fresh: RowBlockCode,
     prior: &[u32],
-) -> (RowBlockCode, RowProjection) {
+) -> (RowBlockCode, RowProjection, Option<f64>) {
     let fresh_projection = row_projection(row, decoder, &fresh, b, gamma);
     if prior.first().is_none_or(|&block| block == NO_BLOCK) {
-        return (fresh, fresh_projection);
+        return (fresh, fresh_projection, None);
     }
     let kept = kept_block_code(row, decoder, gamma, b, k, prior);
     let kept_projection = row_projection(row, decoder, &kept, b, gamma);
     if same_admitted_blocks(&fresh, &kept) {
-        return (kept, kept_projection);
+        return (kept, kept_projection, None);
     }
     let row_norm = row
         .iter()
@@ -260,10 +263,21 @@ fn descend_block_support(
     if fresh_projection.rss + rounding(&fresh_projection)
         < kept_projection.rss - rounding(&kept_projection)
     {
-        (fresh, fresh_projection)
+        (fresh, fresh_projection, None)
     } else {
-        (kept, kept_projection)
+        let excess = fresh_projection.rss - kept_projection.rss;
+        (kept, kept_projection, Some(excess))
     }
+}
+
+/// The routed supports one minibatch declined: rows whose routed support admits
+/// different blocks than their retained support without lowering their loss beyond
+/// rounding, and the sum of those rows' routed loss minus retained loss at the pass's
+/// frames and γ.
+#[derive(Default)]
+struct DeclinedRoutes {
+    rows: usize,
+    excess: f64,
 }
 
 /// [`descend_block_support`] for every routed row of one minibatch whose first row
@@ -278,8 +292,8 @@ fn descend_supports(
     routed: Vec<RowBlockCode>,
     retained: &[u32],
     offset: usize,
-) -> (Vec<RowBlockCode>, Vec<RowProjection>) {
-    routed
+) -> (Vec<RowBlockCode>, Vec<RowProjection>, DeclinedRoutes) {
+    let arbitrated: Vec<(RowBlockCode, RowProjection, Option<f64>)> = routed
         .into_par_iter()
         .enumerate()
         .map(|(row, fresh)| {
@@ -290,7 +304,19 @@ fn descend_supports(
             };
             descend_block_support(rows.row(row), decoder, gamma, b, k, fresh, prior)
         })
-        .unzip()
+        .collect();
+    let mut codes = Vec::with_capacity(arbitrated.len());
+    let mut projections = Vec::with_capacity(arbitrated.len());
+    let mut declined = DeclinedRoutes::default();
+    for (code, projection, excess) in arbitrated {
+        if let Some(excess) = excess {
+            declined.rows += 1;
+            declined.excess += excess;
+        }
+        codes.push(code);
+        projections.push(projection);
+    }
+    (codes, projections, declined)
 }
 
 /// Stable sparse incidence lists let one worker own each block's moments.
@@ -494,6 +520,14 @@ pub struct BlockEpochStats {
     /// a routed support only on a loss decrease beyond rounding, so this reaches
     /// zero, and `converged` requires it.
     pub support_changes: usize,
+    /// Rows of the live pass whose routed support admitted different blocks than their
+    /// retained support and was declined, because it did not lower the row's loss
+    /// beyond rounding.
+    pub declined_routes: usize,
+    /// The EV the live pass would lose by adopting every declined routed support: the
+    /// declined rows' routed loss minus retained loss at the pass's frames and γ, over
+    /// the pass's total sum of squares.
+    pub declined_route_ev_cost: f64,
     /// Mean admitted blocks per row this pass, at most `k`: the per-row
     /// multiplier the frame step's simultaneous-update majorizer charges.
     pub mean_admitted_blocks: f64,
@@ -610,6 +644,9 @@ pub struct BlockSparseStreamState {
     retained_fingerprints: Vec<u64>,
     pass_supports: Vec<u32>,
     pass_fingerprints: Vec<u64>,
+    // The live pass's declined routed supports (`DeclinedRoutes`), taken by `end_epoch`.
+    pass_declined_routes: usize,
+    pass_declined_excess: f64,
 }
 
 /// Per-block honest-charge ledger over the last closed epoch, as parallel
@@ -718,6 +755,8 @@ impl BlockSparseStreamState {
             retained_fingerprints: Vec::new(),
             pass_supports: Vec::new(),
             pass_fingerprints: Vec::new(),
+            pass_declined_routes: 0,
+            pass_declined_excess: 0.0,
         })
     }
 
@@ -799,6 +838,8 @@ impl BlockSparseStreamState {
             retained_fingerprints: Vec::new(),
             pass_supports: Vec::new(),
             pass_fingerprints: Vec::new(),
+            pass_declined_routes: 0,
+            pass_declined_excess: 0.0,
         })
     }
 
@@ -889,7 +930,7 @@ impl BlockSparseStreamState {
                     )
                 })
             };
-            let (codes, projected) = route_descending(self.decoder.view(), gamma)?;
+            let (codes, projected, declined) = route_descending(self.decoder.view(), gamma)?;
             // Route the complete pre-birth model on these same rows before
             // mutating moments. Birth evidence uses a true paired full pass.
             let baseline_codes = self
@@ -897,6 +938,7 @@ impl BlockSparseStreamState {
                 .as_ref()
                 .map(|pending| {
                     route_descending(pending.baseline_decoder.view(), pending.baseline_gamma)
+                        .map(|arbitrated| (arbitrated.0, arbitrated.1))
                 })
                 .transpose()?;
             let frame_baseline_codes = self
@@ -904,6 +946,7 @@ impl BlockSparseStreamState {
                 .as_ref()
                 .map(|pending| {
                     route_descending(pending.baseline_decoder.view(), pending.baseline_gamma)
+                        .map(|arbitrated| (arbitrated.0, arbitrated.1))
                 })
                 .transpose()?;
             let postings = block_row_postings(&codes, self.g);
@@ -1103,6 +1146,8 @@ impl BlockSparseStreamState {
             }
             append_supports(&mut self.pass_supports, &codes, k);
             self.pass_fingerprints.extend(fingerprints);
+            self.pass_declined_routes += declined.rows;
+            self.pass_declined_excess += declined.excess;
             self.row_count += rows.nrows();
             // Every completed minibatch leaves coherent accumulated state,
             // including when a later minibatch's router returns an error.
@@ -1165,6 +1210,13 @@ impl BlockSparseStreamState {
         for c in 0..p {
             tss += self.col_sumsq[c] - self.col_sum[c] * self.col_sum[c] / n;
         }
+        let declined_routes = std::mem::take(&mut self.pass_declined_routes);
+        let declined_excess = std::mem::take(&mut self.pass_declined_excess);
+        let declined_route_ev_cost = if tss > 0.0 {
+            declined_excess / tss
+        } else {
+            0.0
+        };
         let mut rejected_frame = false;
         let mut rerouted_rows = None;
         if let Some(mut trial) = self.pending_frame.take() {
@@ -1527,6 +1579,8 @@ impl BlockSparseStreamState {
             frame_residual_median,
             rerouted_rows,
             support_changes,
+            declined_routes,
+            declined_route_ev_cost,
             mean_admitted_blocks,
             converged,
             epoch,
@@ -1750,6 +1804,13 @@ impl BlockSparseStreamState {
     /// Block size `b`.
     pub fn block_size(&self) -> usize {
         self.b
+    }
+
+    /// Each row's `k`-slot support out of the last committed pass, by stream position
+    /// (`rows·k`, the admitted blocks in slot order, padded with `u32::MAX`). Empty
+    /// before the first pass commits.
+    pub fn retained_supports(&self) -> &[u32] {
+        &self.retained_supports
     }
 
     /// Epochs closed so far.
