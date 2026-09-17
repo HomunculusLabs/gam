@@ -150,7 +150,8 @@ pub(crate) fn fit_transformation_normal(
     config: &TransformationNormalConfig,
     options: &BlockwiseFitOptions,
     kappa_options: &SpatialLengthScaleOptimizationOptions,
-) -> Result<TransformationNormalFitResult, String> {
+) -> Result<TransformationNormalFitResult, crate::fit_orchestration::FitFailure> {
+    use crate::fit_orchestration::FitFailure;
     let options = options.clone();
     // CTN advertises profiled outer-Hessian HVP support and supplies the
     // callback derivative kernel consumed by the unified REML/LAML evaluator.
@@ -251,7 +252,7 @@ pub(crate) fn fit_transformation_normal(
         let rho0 = family.penalty_scale_log_lambdas()?;
         let blocks = vec![family.block_spec(&rho0)?];
         let fit = fit_custom_family(&family, &blocks, &options)
-            .map_err(|e| format!("transformation fit failed: {e}"))?;
+            .map_err(|e| FitFailure::from(e).context("transformation fit failed"))?;
         let (fit, score_calibration) = calibrate_transformation_scores(&family, fit)?;
 
         return Ok(TransformationNormalFitResult {
@@ -372,10 +373,10 @@ pub(crate) fn fit_transformation_normal(
     );
 
     if !analytic_psi_available {
-        return Err(
-            "transformation-normal spatial length-scale optimization requires analytic spatial psi derivatives"
-                .to_string(),
-        );
+        return Err(FitFailure::raised(
+            gam_problem::FailureCategory::Input,
+            "transformation-normal spatial length-scale optimization requires analytic spatial psi derivatives",
+        ));
     }
 
     // A rank-deficient transformation chart can have multiple equivalent
@@ -396,10 +397,13 @@ pub(crate) fn fit_transformation_normal(
         crate::custom_family::per_block_resolvability_rho_domain(&probe_blocks, &options)
             .map_err(|error| format!("transformation-normal rho resolvability domain: {error}"))?;
     if rho_lower.len() != rho0.len() || rho_upper.len() != rho0.len() {
-        return Err(format!(
-            "transformation-normal rho resolvability domain has {} coordinates for {} smoothing penalties",
-            rho_lower.len(),
-            rho0.len(),
+        return Err(FitFailure::raised(
+            gam_problem::FailureCategory::Invariant,
+            format!(
+                "transformation-normal rho resolvability domain has {} coordinates for {} smoothing penalties",
+                rho_lower.len(),
+                rho0.len(),
+            ),
         ));
     }
     let joint_setup = ExactJointHyperSetup::new(rho0, kappa0, kappa_lower, kappa_upper)
@@ -521,7 +525,7 @@ pub(crate) fn fit_transformation_normal(
         analytic_hessian,
     );
     let outer_derivative_policy = probe_family.outer_derivative_policy(&probe_blocks, &options);
-    let solved = optimize_spatial_length_scale_exact_joint(
+    let solved = optimize_spatial_length_scale_exact_joint_typed(
         covariate_data,
         &block_specs_slice,
         &block_term_indices_slice,
@@ -565,7 +569,7 @@ pub(crate) fn fit_transformation_normal(
                         &warm_starts,
                         gam_problem::EvalMode::ValueOnly,
                     )
-                    .map_err(|e| format!("transformation fixed mode profile: {e}"))?;
+                    .map_err(|e| FitFailure::from(e).context("transformation fixed mode profile"))?;
                     log::info!(
                         "[transformation-normal] user-fixed coefficient mode selected candidate={} objective={:.16e}",
                         selection.selected_candidate,
@@ -594,7 +598,7 @@ pub(crate) fn fit_transformation_normal(
                     )
                 }
             }
-            .map_err(|e| format!("transformation fit_fn: {e}"))?;
+            .map_err(|e| FitFailure::from(e).context("transformation fit_fn"))?;
             if let Some(block) = fit.block_states.first() {
                 *geometry
                     .family

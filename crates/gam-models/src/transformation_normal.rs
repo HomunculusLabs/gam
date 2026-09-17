@@ -47,7 +47,7 @@ pub(crate) use crate::custom_family::{
 };
 pub(crate) use crate::fit_orchestration::drivers::{
     ExactJointEfsEvaluation, ExactJointEvaluation, ExactJointHyperSetup, SpatialFitProvenance,
-    freeze_term_collection_from_design, optimize_spatial_length_scale_exact_joint,
+    freeze_term_collection_from_design, optimize_spatial_length_scale_exact_joint_typed,
     spatial_length_scale_term_indices,
 };
 pub(crate) use crate::exact_mode_branch::ExactCoefficientModeBranch;
