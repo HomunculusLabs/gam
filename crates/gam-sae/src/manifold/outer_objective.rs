@@ -665,6 +665,7 @@ struct ReactiveWaypointCheckpoint {
     termination: OuterTerminationLedger,
     fit_verdict: Option<SaeOuterVerdict>,
     crosscoder_blocks: Option<CrosscoderBlockPricing>,
+    collapse_prevention_gates: Option<CollapsePreventionGates>,
 }
 
 struct MatrixFreeOuterArtifacts {
@@ -786,6 +787,16 @@ pub struct SaeManifoldOuterObjective {
     /// Present only while one reactive coupled waypoint is being evaluated.
     /// Success commits the probe handoff; failure restores this full snapshot.
     reactive_waypoint_checkpoint: Option<ReactiveWaypointCheckpoint>,
+    /// #2933 F05 — the collapse-prevention gates this objective holds for its whole
+    /// hyperparameter solve (see [`CollapsePreventionGates`]). `None` until the first
+    /// finite priced root chooses them: that evaluation converges until its root
+    /// reproduces its own gates, and every later drive declares that set on the term
+    /// it drives. Re-deriving them at each ρ would report `L(θ̂; W(θ̂))`, whose
+    /// ρ-derivative carries `L_w·W_θ·θ̂_ρ` through an implicit Jacobian
+    /// `L_θθ + L_θw·W_θ` the analytic gradient does not contain; held, that gradient is
+    /// the exact derivative of the reported value. A reactive scalar waypoint installs
+    /// another objective and chooses again.
+    collapse_prevention_gates: Option<CollapsePreventionGates>,
 }
 
 /// #2230/#2087 exact basin-bundle memory admission.
@@ -976,6 +987,9 @@ impl SaeManifoldOuterObjective {
     ) -> Result<Option<SaeVanishedStageState>, String> {
         let rho = self.baseline_rho.from_flat(rho_flat)?;
         let mut term = self.term.clone();
+        if let Some(gates) = self.collapse_prevention_gates.as_ref() {
+            term.declare_collapse_prevention_gates(gates);
+        }
         let evaluated = if term.streaming_plan()?.direct_logdet_admitted() {
             term.penalized_quasi_laplace_criterion_with_cache(
                 self.target.view(),
@@ -1021,6 +1035,9 @@ impl SaeManifoldOuterObjective {
                 ));
             }
         }
+        // The compacted state leaves this objective; its restart builds another
+        // objective, which chooses its own gates.
+        term.streaming_gates_frozen = false;
         Ok(Some(SaeVanishedStageState { term, rho, atoms }))
     }
 
@@ -1043,6 +1060,11 @@ impl SaeManifoldOuterObjective {
         term.dictionary_cocollapse_reseeds = 0;
         term.best_cocollapse_incumbent = None;
         term.structural_cocollapse_reseeds = 0;
+        // #2933 F05 — a term handed in with its collapse-prevention gates already
+        // frozen declares them; otherwise the first priced root chooses them.
+        let collapse_prevention_gates = term
+            .streaming_gates_frozen
+            .then(|| term.collapse_prevention_gates());
         let baseline_term = term.clone();
         let baseline_rho = init_rho.clone();
         let baseline_isometry_weights = registry
@@ -1079,6 +1101,29 @@ impl SaeManifoldOuterObjective {
             audit_installed_state: false,
             crosscoder_blocks: None,
             reactive_waypoint_checkpoint: None,
+            collapse_prevention_gates,
+        }
+    }
+
+    /// #2933 F05 — declare this objective's collapse-prevention gates on the term it
+    /// is about to drive. Every drive declares them, because a term restored from a
+    /// clone (a rejected probe, a basin member, `reset`) carries none. With none
+    /// declared yet, the drive re-derives them and its root chooses them.
+    fn declare_collapse_prevention_gates_on_term(&mut self) {
+        match self.collapse_prevention_gates.as_ref() {
+            Some(gates) => self.term.declare_collapse_prevention_gates(gates),
+            None => self.term.streaming_gates_frozen = false,
+        }
+    }
+
+    /// #2933 F05 — the first finite priced root of an objective with no declared
+    /// gates chooses them: the value it priced read exactly these gates, and every
+    /// later drive holds them.
+    fn adopt_collapse_prevention_gates_from_root(&mut self) {
+        if self.collapse_prevention_gates.is_none() {
+            let gates = self.term.collapse_prevention_gates();
+            self.term.declare_collapse_prevention_gates(&gates);
+            self.collapse_prevention_gates = Some(gates);
         }
     }
 
@@ -1092,6 +1137,7 @@ impl SaeManifoldOuterObjective {
         direct_logdet_admitted: bool,
         need_efs_inverse_probes: bool,
     ) -> Result<OuterCriterionEvaluation, SaeCriterionError> {
+        self.declare_collapse_prevention_gates_on_term();
         if direct_logdet_admitted {
             let (cost, loss, cache) = self.term.penalized_quasi_laplace_criterion_with_cache(
                 self.target.view(),
@@ -1102,6 +1148,9 @@ impl SaeManifoldOuterObjective {
                 self.ridge_ext_coord,
                 self.ridge_beta,
             )?;
+            if cost.is_finite() {
+                self.adopt_collapse_prevention_gates_from_root();
+            }
             return Ok(OuterCriterionEvaluation {
                 cost,
                 loss,
@@ -1129,6 +1178,9 @@ impl SaeManifoldOuterObjective {
                 lane,
                 need_efs_inverse_probes,
             )?;
+        if evaluated.cost.is_finite() {
+            self.adopt_collapse_prevention_gates_from_root();
+        }
         Ok(OuterCriterionEvaluation {
             cost: evaluated.cost,
             loss: evaluated.loss,
@@ -1666,6 +1718,10 @@ impl SaeManifoldOuterObjective {
         } = self;
         let mut fitted_rho = current_rho;
         let mut fitted = term;
+        // #2933 F05 — the declared gates belong to this objective's hyperparameter
+        // solve. The minted fit re-derives them at its next assembly, as every term
+        // outside an objective does.
+        fitted.streaming_gates_frozen = false;
         if last_loss.is_none() {
             return Err(
                 "SaeManifoldOuterObjective::into_fitted: certified state has no converged inner loss"
@@ -1770,6 +1826,7 @@ impl SaeManifoldOuterObjective {
         // Re-form the strict undamped joint factor at the settled ρ. A failure is
         // an inference failure; it is never replaced by a different covariance.
         let saved_term = self.term.clone();
+        self.declare_collapse_prevention_gates_on_term();
         let evaluated = self.term.penalized_quasi_laplace_criterion_with_cache(
             self.target.view(),
             &rho,
@@ -1926,6 +1983,7 @@ impl SaeManifoldOuterObjective {
                 .warm_start_latents_from_amortized_encoder(self.target.view(), &rho);
             self.record_warm_start(warm_start_outcome)?;
         }
+        self.declare_collapse_prevention_gates_on_term();
         let criterion = self
             .term
             .penalized_quasi_laplace_criterion_with_refine_policy_and_lane(
@@ -1978,6 +2036,9 @@ impl SaeManifoldOuterObjective {
             }
             Err(SaeCriterionError::Numerical(message)) => return Err(message),
         };
+        if penalized_quasi_laplace_cost.is_finite() {
+            self.adopt_collapse_prevention_gates_from_root();
+        }
         let beta_hat = self.term.flatten_beta();
         // ONE criterion everywhere. Every outer lane — BFGS/ARC descent, the
         // line-search value probes, cross-seed ranking, EFS backtracking, and
@@ -3719,6 +3780,9 @@ impl OuterObjective for SaeManifoldOuterObjective {
     fn reset(&mut self) {
         self.reactive_waypoint_checkpoint = None;
         self.fit_verdict = None;
+        // #2933 F05 — `collapse_prevention_gates` survive a reset: every seed of this
+        // objective is ranked on the same objective, and the next drive declares them
+        // on the restored term.
         self.term = self.baseline_term.clone();
         if let Some(registry) = self.registry.as_mut() {
             registry.set_isometry_scalar_weights(&self.baseline_isometry_weights);
@@ -4071,6 +4135,10 @@ impl OuterObjective for SaeManifoldOuterObjective {
         }
         self.probe_converged_handoff = None;
         self.basin_bundle.clear();
+        // #2933 F05 — a scalar waypoint installs another objective (another
+        // temperature and isometry weight), so its first priced root chooses its own
+        // collapse-prevention gates.
+        self.collapse_prevention_gates = None;
         self.probe_telemetry.reactive_scalar_installs += 1;
         if restoring_target {
             self.probe_telemetry.reactive_target_restores += 1;
@@ -4107,6 +4175,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
             termination: self.termination.clone(),
             fit_verdict: self.fit_verdict,
             crosscoder_blocks: self.crosscoder_blocks.clone(),
+            collapse_prevention_gates: self.collapse_prevention_gates.clone(),
         });
         Ok(())
     }
@@ -4190,6 +4259,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
         self.termination = checkpoint.termination;
         self.fit_verdict = checkpoint.fit_verdict;
         self.crosscoder_blocks = checkpoint.crosscoder_blocks;
+        self.collapse_prevention_gates = checkpoint.collapse_prevention_gates;
         Ok(())
     }
 }

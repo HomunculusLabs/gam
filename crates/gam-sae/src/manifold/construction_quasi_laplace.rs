@@ -465,6 +465,14 @@ impl SaeManifoldTerm {
             // value would depend on where the gates were frozen, not on the root.
             // Refresh them at the root and converge again until the root reproduces
             // its own gates.
+            //
+            // #2933 F05 — that fixed point is `w = W(θ̂(ρ))`, and the analytic outer
+            // gradient differentiates with `w` held constant, so it describes this
+            // value only at the ρ where the gates were chosen. The loop is how an
+            // evaluation with no declared gates CHOOSES them; it never runs under
+            // declared gates (`gates_were_frozen`). `SaeManifoldOuterObjective`
+            // declares the set its first priced root chooses and holds it for the
+            // whole hyperparameter solve (see `CollapsePreventionGates`).
             if inner_max_iter > 0
                 && !gates_were_frozen
                 && self.refresh_collapse_prevention_gates_at_root()

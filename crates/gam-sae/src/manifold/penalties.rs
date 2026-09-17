@@ -439,6 +439,50 @@ pub(crate) struct BarrierCoactivationGate {
     pub(crate) atom_neff: Vec<f64>,
 }
 
+/// #2933 F05 — the collapse-prevention weights one statistical objective holds
+/// fixed: the decoder-repulsion gate, the separation barrier's routing support and
+/// the amplitude barrier's turn-on radius.
+///
+/// Each is a function `W(θ)` of the fitted state, and every derivative of the
+/// criterion reads it as a constant `w`. That derivative is the derivative of the
+/// reported value only while `w` does not move with `ρ`. Refreshing the gates at
+/// each root until they reproduce themselves reports
+/// `V(ρ) = L(θ̂(ρ), ρ; W(θ̂(ρ))) + …`, whose root Jacobian is `L_θθ + L_θw·W_θ` and
+/// whose ρ-derivative carries `L_w·W_θ·θ̂_ρ`; the frozen-weight gradient has
+/// neither. On `L = ½(θ−ρ)² + ½wθ²`, `W(θ) = θ²` at `(θ, ρ) = (1, 2)` the root
+/// derivative is `1/4` against the frozen `1/2`, and the value derivative `5/4`
+/// against the envelope's `1`. An outer objective therefore declares ONE set for
+/// its whole hyperparameter solve ([`SaeManifoldTerm::declare_collapse_prevention_gates`]),
+/// so the value it reports is `V(ρ; w₀)` and the frozen-weight gradient is its
+/// exact derivative.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CollapsePreventionGates {
+    pub(crate) decoder_repulsion: Option<Vec<(usize, usize, f64)>>,
+    pub(crate) barrier_coactivation: Option<BarrierCoactivationGate>,
+    pub(crate) amplitude_barrier: Option<f64>,
+}
+
+impl SaeManifoldTerm {
+    /// The collapse-prevention gates currently installed on this term.
+    pub(crate) fn collapse_prevention_gates(&self) -> CollapsePreventionGates {
+        CollapsePreventionGates {
+            decoder_repulsion: self.decoder_repulsion_gate.clone(),
+            barrier_coactivation: self.barrier_coactivation_gate.clone(),
+            amplitude_barrier: self.amplitude_barrier_gate,
+        }
+    }
+
+    /// Install `gates` and hold them: every assembly, joint fit and criterion
+    /// evaluation on this term then reads them instead of re-deriving them from the
+    /// moving state (the `streaming_gates_frozen` contract).
+    pub(crate) fn declare_collapse_prevention_gates(&mut self, gates: &CollapsePreventionGates) {
+        self.decoder_repulsion_gate = gates.decoder_repulsion.clone();
+        self.barrier_coactivation_gate = gates.barrier_coactivation.clone();
+        self.amplitude_barrier_gate = gates.amplitude_barrier;
+        self.streaming_gates_frozen = true;
+    }
+}
+
 /// One co-firing edge of a [`BarrierComponent`].
 struct BarrierEdge {
     /// Global atom indices of the two endpoints (`j < k`).

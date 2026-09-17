@@ -246,6 +246,9 @@ mod tests_chart_evaluator_jets;
 mod tests_collapse_prevention;
 
 #[cfg(test)]
+mod tests_declared_collapse_gates_2933;
+
+#[cfg(test)]
 mod tests_pc_reseed_provenance_2023;
 
 #[cfg(test)]
@@ -522,6 +525,7 @@ pub(crate) use construction::realised_rank_charge_dof;
 // Jeffreys barrier routing support: the per-assembly frozen coactivation pairs
 // and per-atom effective sample sizes carried on `SaeManifoldTerm`.
 pub(crate) use penalties::BarrierCoactivationGate;
+pub(crate) use penalties::CollapsePreventionGates;
 
 /// Public single-currency surface for the realised rank-charge DOF: the SAME
 /// `realised_rank_charge_dof` the joint REML PROMOTE gate, the hybrid-split
