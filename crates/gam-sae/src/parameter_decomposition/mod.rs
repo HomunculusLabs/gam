@@ -104,7 +104,7 @@ pub mod moments;
 // [unlanded: occurrence]
 
 // Gauge-covariant group masks, structured parameter paths, Sum and Compose accounting.
-// [unlanded: operators]
+pub mod operators;
 
 // Declared-precision real codes and decode-then-evaluate distortion.
 pub mod precision;
