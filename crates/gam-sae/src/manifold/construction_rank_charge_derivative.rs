@@ -307,6 +307,7 @@ impl SaeManifoldTerm {
         let mut audits = Vec::with_capacity(self.k_atoms());
         for atom_idx in 0..self.k_atoms() {
             let atom = &self.atoms[atom_idx];
+            let coordinate = &self.assignment.coords[atom_idx];
             let gram = &grams[atom_idx];
             let decoder = atom.decoder_coefficients();
             let m = atom.basis_size();
@@ -365,7 +366,7 @@ impl SaeManifoldTerm {
                 basis_dim: m,
                 output_dim: p,
                 storage_dim: m * p,
-                intrinsic_dim: atom.latent_dim(),
+                intrinsic_dim: coordinate.manifold().intrinsic_dim(coordinate.latent_dim()),
                 dispersion,
                 lambda_smooth: lambda[atom_idx],
                 inverse_temperature,

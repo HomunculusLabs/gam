@@ -400,6 +400,109 @@ fn rank_charge_audit_fills_every_field_from_one_state_2933() {
 }
 
 #[test]
+fn rank_charge_audit_reports_the_tangent_dimension_of_an_ambient_sphere_2933() {
+    // Tangent dimensions written out from the geometry, not read from the
+    // implementation: S¹ is 1; S² and RP² are 2 whether stored as an ambient unit
+    // vector or a (lat, lon) chart; T², the cylinder and the Möbius cover are 2;
+    // a flat patch keeps its width.
+    for (kind, latent_dim, expected) in [
+        (SaeAtomBasisKind::Periodic, 1, 1),
+        (SaeAtomBasisKind::Sphere, 3, 2),
+        (SaeAtomBasisKind::ProjectivePlane, 3, 2),
+        (SaeAtomBasisKind::ProjectivePlane, 2, 2),
+        (SaeAtomBasisKind::Torus, 2, 2),
+        (SaeAtomBasisKind::Cylinder, 2, 2),
+        (SaeAtomBasisKind::Mobius, 2, 2),
+        (SaeAtomBasisKind::EuclideanPatch, 4, 4),
+    ] {
+        assert_eq!(
+            kind.latent_manifold(latent_dim).intrinsic_dim(latent_dim),
+            expected,
+            "{kind:?} at coordinate width {latent_dim}"
+        );
+    }
+
+    // One ambient S² atom on Fibonacci points: three stored coordinates per row,
+    // two dimensions.
+    let n = 40usize;
+    let golden_angle = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt());
+    let coords = Array2::from_shape_fn((n, 3), |(row, axis)| {
+        let z = 1.0 - (2.0 * row as f64 + 1.0) / n as f64;
+        let radius = (1.0 - z * z).sqrt();
+        let angle = golden_angle * row as f64;
+        match axis {
+            0 => radius * angle.cos(),
+            1 => radius * angle.sin(),
+            _ => z,
+        }
+    });
+    let evaluator: Arc<dyn SaeBasisSecondJet> =
+        Arc::new(AmbientSphereHarmonicEvaluator::new(1).expect("degree-one sphere basis"));
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("the sphere basis evaluates on unit vectors");
+    let width = phi.ncols();
+    let decoder = Array2::from_shape_fn((width, 2), |(basis, out)| {
+        0.6 * (0.37 * (7 * basis + 3 * out + 1) as f64).sin()
+    });
+    let mut target = phi.dot(&decoder);
+    for row in 0..n {
+        target[[row, 0]] += 1.0e-3 * (0.37 * row as f64).sin();
+        target[[row, 1]] += 1.0e-3 * (0.29 * row as f64).cos();
+    }
+    let atom = SaeManifoldAtom::new_with_provided_function_gram(
+        "sphere",
+        SaeAtomBasisKind::Sphere,
+        3,
+        phi,
+        jet,
+        decoder,
+        Array2::<f64>::eye(width),
+    )
+    .expect("the sphere fixture has matching basis, jet, decoder and Gram shapes")
+    .with_basis_second_jet(evaluator);
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        Array2::<f64>::zeros((n, 1)),
+        vec![coords],
+        vec![LatentManifold::Sphere { dim: 3 }],
+        AssignmentMode::softmax(1.0),
+    )
+    .expect("one softmax block over one ambient sphere coordinate is a valid assignment");
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("one atom with one matching assignment block is a valid term");
+    let rho = SaeManifoldRho::new(
+        0.0,
+        0.8_f64.ln(),
+        vec![array![250.0_f64.ln(), 250.0_f64.ln(), 250.0_f64.ln()]],
+    );
+    let loss = term
+        .loss(target.view(), &rho)
+        .expect("the sphere fixture loss is finite");
+    let sys = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .expect("the sphere fixture arrow system assembles");
+    let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
+    let (_delta_t, _delta_beta, cache) =
+        solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options)
+            .expect("the sphere fixture has a positive definite evidence factor");
+    let audits = term
+        .rank_charge_audit(target.view(), &rho, &loss, &cache)
+        .expect("the plain single-sphere state is auditable");
+    assert_eq!(audits.len(), 1);
+    let audit = &audits[0];
+    assert_eq!(term.atoms[0].latent_dim(), 3);
+    assert_eq!(
+        (
+            audit.basis_dim,
+            audit.output_dim,
+            audit.storage_dim,
+            audit.intrinsic_dim
+        ),
+        (4, 2, 8, 2)
+    );
+}
+
+#[test]
 fn mp_edge_false_rank_rate_under_a_fitted_noise_only_null_2933() {
     let n = 160usize;
     let m = 5usize;

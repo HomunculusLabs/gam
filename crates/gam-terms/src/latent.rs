@@ -349,6 +349,22 @@ impl LatentManifold {
         }
     }
 
+    /// Tangent dimension of the manifold, the degrees of freedom a point on it
+    /// has. It is [`Self::ambient_dim`] except on an embedded sphere, whose unit
+    /// vector in `R^dim` stores `dim` numbers for the `dim − 1` dimensions of
+    /// `S^(dim−1)`.
+    pub fn intrinsic_dim(&self, fallback_dim: usize) -> usize {
+        match self {
+            Self::Euclidean => fallback_dim,
+            Self::Circle { .. } | Self::Interval { .. } => 1,
+            Self::Sphere { dim } => dim.saturating_sub(1),
+            Self::Product(parts)
+            | Self::ProductWithMetric {
+                manifolds: parts, ..
+            } => parts.iter().map(|part| part.intrinsic_dim(1)).sum(),
+        }
+    }
+
     /// Per-axis weights for the Riemannian trust-region metric.
     ///
     /// Defaults use `1/scale²`: Circle scale is `2π`, Sphere scale is `π`,

@@ -579,7 +579,9 @@ pub struct AtomRankChargeAudit {
     pub output_dim: usize,
     /// Storage dimension of the decoder, `m · p`.
     pub storage_dim: usize,
-    /// Intrinsic manifold dimension of the atom's chart.
+    /// Tangent dimension of the atom's coordinate manifold. An ambient `S²` or
+    /// `RP²` coordinate stores three numbers for two dimensions, so this can be
+    /// smaller than the coordinate width.
     pub intrinsic_dim: usize,
     /// Reconstruction dispersion `R`, shared by the MP edge and the decoder
     /// likelihood.
