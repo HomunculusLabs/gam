@@ -336,3 +336,86 @@ fn threshold_gate_route_gradients_differentiate_the_reconverged_criterion_2933()
          and the arbiter cannot tell a gradient that drops a channel from a complete one"
     );
 }
+
+/// #2933 F03 — the outer-gradient assembler accepts only the two routes that
+/// differentiate the `½log|A|` value: the dense exact-A route (no bundle, no
+/// matrix-free system) and the streaming exact-A route (an
+/// `ExactObservedInformation` bundle together with its system). Every other pairing
+/// would contract `B` channels, or two operators' inverses, against an A-valued score,
+/// and has to be refused before any channel is produced. The legal dense pairing on the
+/// same converged state is the control: the refusals are not a blanket failure.
+#[test]
+fn threshold_gate_gradient_refuses_every_pairing_that_is_not_an_exact_a_route_2933() {
+    let (mut term, target, rho) = threshold_gate_tiny_fixture(false);
+    let (_, loss, cache) = term
+        .penalized_quasi_laplace_criterion_with_cache(
+            target.view(),
+            &rho,
+            None,
+            INNER_MAX_ITER,
+            LEARNING_RATE,
+            RIDGE,
+            RIDGE,
+        )
+        .expect("#2933 F03: the fixture prices a dense criterion at its own rho");
+    let system = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .expect("#2933 F03: the converged state assembles its majorizer system");
+    let lambda_smooth = rho
+        .lambda_smooth_vec()
+        .expect("#2933 F03: the fixture's smoothing strengths are finite");
+    let solver = term
+        .outer_gradient_arrow_solver(&cache, &lambda_smooth)
+        .expect("#2933 F03: the converged state's outer solver factors");
+    let bundle = |operator: EvidenceOperator| BundleEvidenceGeometry {
+        operator,
+        cache: &cache,
+        probes: &[],
+        sinv: &[],
+    };
+    let assemble = |evidence: Option<BundleEvidenceGeometry<'_>>,
+                    matrix_free_system: Option<&ArrowSchurSystem>| {
+        term.analytic_outer_rho_gradient_components_with_bundle(
+            target.view(),
+            &rho,
+            &loss,
+            &cache,
+            &solver,
+            evidence,
+            matrix_free_system,
+        )
+    };
+    let control = assemble(None, None);
+    assert!(
+        control.is_ok(),
+        "#2933 F03 control: the dense exact-A pairing must assemble a gradient: {:?}",
+        control.err()
+    );
+    let illegal = [
+        ("system without its bundle", assemble(None, Some(&system))),
+        (
+            "majorizer bundle with its system",
+            assemble(Some(bundle(EvidenceOperator::Majorizer)), Some(&system)),
+        ),
+        (
+            "exact-A bundle without its system",
+            assemble(Some(bundle(EvidenceOperator::ExactObservedInformation)), None),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (pairing, outcome) in illegal {
+        match outcome {
+            Err(err) if err.to_string().contains("pairs evidence operator") => {
+                println!("[#2933 F03] {pairing}: refused: {err}");
+            }
+            Err(err) => failures.push(format!("{pairing}: failed for another reason: {err}")),
+            Ok(_) => failures.push(format!("{pairing}: assembled a gradient")),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "#2933 F03: a derivative route that does not differentiate the A-valued criterion \
+         was not refused:\n{}",
+        failures.join("\n")
+    );
+}
