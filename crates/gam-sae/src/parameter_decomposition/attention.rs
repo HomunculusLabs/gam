@@ -60,7 +60,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use gam_linalg::roundoff::accumulation_growth;
+use gam_linalg::roundoff::{accumulation_growth, compensated_band};
+use gam_math::categorical::{CategoricalError, log_sum_exp};
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2};
 
 /// Largest position magnitude whose differences stay exact in `f64`:
@@ -85,6 +86,8 @@ pub enum AttentionProgramError {
     /// A kernel displacement beyond `2^53`, which is not exact in `f64`.
     DisplacementNotExact { displacement: i64 },
     HeadOutOfRange { head: usize, n_heads: usize },
+    /// A score row that names no categorical distribution.
+    Categorical(CategoricalError),
 }
 
 impl fmt::Display for AttentionProgramError {
@@ -113,6 +116,7 @@ impl fmt::Display for AttentionProgramError {
             Self::HeadOutOfRange { head, n_heads } => {
                 write!(f, "head {head} is out of range for {n_heads} heads")
             }
+            Self::Categorical(error) => write!(f, "attention score row: {error}"),
         }
     }
 }
@@ -192,30 +196,42 @@ fn inner_with_abs(row: ArrayView1<f64>, x: ArrayView1<f64>) -> (f64, f64) {
 
 /// The source's joint softmax over one query row, with a radius on each weight.
 ///
+/// The weights are `exp(ℓ_s − lse ℓ)`, with `lse` from gam-math's categorical
+/// owner: one max-shift, the exponentials, a twofold-compensated sum `S`, then
+/// `max ℓ + ln S`.
+///
 /// Logits within `r = max_s logit_radius[s]` of exact move each exact weight by
-/// at most the factor `e^{±2r}`, so `|w̃_s − w_s| ≤ w̃_s·expm1(2r)`. Evaluating
-/// `exp(ℓ_s − max ℓ) / Σ exp(ℓ − max ℓ)` rounds the shift by `γ_1|d_s|`, adds a
-/// libm ulp to each exponential, `γ_{n−1}` to the positive sum and `γ_1` to the
-/// division, which are relative errors on the weight.
-pub fn joint_softmax_with_radius(logits: &[f64], logit_radius: &[f64]) -> (Vec<f64>, Vec<f64>) {
+/// at most the factor `e^{±2r}`, so `|w̃_s − w_s| ≤ w̃_s·expm1(2r)`. Evaluation
+/// adds relative errors, to first order:
+/// - the shift, `γ_1 (max ℓ − min ℓ)`, and one libm ulp per exponential;
+/// - the compensated sum, `3u` (Higham §4.3, with the shift as one formation
+///   rounding);
+/// - one ulp on `ln S`, of size `ε|ln S|`;
+/// - `u|lse|` for adding the shift back and `u|ℓ_s − lse|` for the subtraction;
+/// - one libm ulp on the final exponential.
+pub fn joint_softmax_with_radius(
+    logits: &[f64],
+    logit_radius: &[f64],
+) -> Result<(Vec<f64>, Vec<f64>), CategoricalError> {
+    let normalizer = log_sum_exp(logits)?;
     let top = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let shifted: Vec<f64> = logits.iter().map(|&l| l - top).collect();
-    let exponentials: Vec<f64> = shifted.iter().map(|&d| d.exp()).collect();
-    let normalizer: f64 = exponentials.iter().sum();
-    let exponential_relative: Vec<f64> = shifted
-        .iter()
-        .map(|&d| accumulation_growth(1) * d.abs() + f64::EPSILON)
-        .collect();
-    let normalizer_relative = exponential_relative.iter().copied().fold(0.0, f64::max)
-        + accumulation_growth(logits.len().saturating_sub(1));
+    let bottom = logits.iter().copied().fold(f64::INFINITY, f64::min);
+    let unit = accumulation_growth(1);
+    let normalizer_relative = unit * (top - bottom)
+        + f64::EPSILON
+        + compensated_band(1, 1.0)
+        + f64::EPSILON * (normalizer - top).abs()
+        + unit * normalizer.abs();
     let logit_factor = (2.0 * logit_radius.iter().copied().fold(0.0, f64::max)).exp_m1();
-    let weights: Vec<f64> = exponentials.iter().map(|&e| e / normalizer).collect();
-    let radius = weights
-        .iter()
-        .zip(&exponential_relative)
-        .map(|(&w, &rel)| w * (logit_factor + rel + normalizer_relative + accumulation_growth(1)))
-        .collect();
-    (weights, radius)
+    let mut weights = Vec::with_capacity(logits.len());
+    let mut radius = Vec::with_capacity(logits.len());
+    for &logit in logits {
+        let log_weight = logit - normalizer;
+        let weight = log_weight.exp();
+        weights.push(weight);
+        radius.push(weight * (logit_factor + normalizer_relative + unit * log_weight.abs() + f64::EPSILON));
+    }
+    Ok((weights, radius))
 }
 
 /// The source's causal self-attention block on its original tensors.
@@ -379,7 +395,7 @@ impl NativeAttention {
                 }
             }
         }
-        Ok(self.attend(ScoredHeads { scores, radius }, x))
+        self.attend(ScoredHeads { scores, radius }, x)
     }
 
     /// The source's rotation of every head of `projected` at each token's absolute
@@ -416,7 +432,7 @@ impl NativeAttention {
 
     /// Causal mask, joint softmax per query row, the value read and the output
     /// projection, propagating the score radius.
-    fn attend(&self, scored: ScoredHeads, x: ArrayView2<f64>) -> AttentionExecution {
+    fn attend(&self, scored: ScoredHeads, x: ArrayView2<f64>) -> Result<AttentionExecution, AttentionProgramError> {
         let g = self.geometry;
         let (tokens, hd) = (x.nrows(), g.head_dim);
         let (values, value_abs) = project(self.value.view(), x);
@@ -430,7 +446,8 @@ impl NativeAttention {
             for t in 0..tokens {
                 let logits: Vec<f64> = (0..=t).map(|s| scored.scores[[head, t, s]]).collect();
                 let logit_radius: Vec<f64> = (0..=t).map(|s| scored.radius[[head, t, s]]).collect();
-                let (row, row_radius) = joint_softmax_with_radius(&logits, &logit_radius);
+                let (row, row_radius) =
+                    joint_softmax_with_radius(&logits, &logit_radius).map_err(AttentionProgramError::Categorical)?;
                 let mix_growth = accumulation_growth(t + 1);
                 for s in 0..=t {
                     weights[[head, t, s]] = row[s];
@@ -465,14 +482,14 @@ impl NativeAttention {
                 output_radius[[t, d]] = propagated + output_growth * abs;
             }
         }
-        AttentionExecution {
+        Ok(AttentionExecution {
             scores: scored.scores,
             score_radius: scored.radius,
             weights,
             weight_radius,
             output,
             output_radius,
-        }
+        })
     }
 }
 
@@ -648,7 +665,7 @@ impl ComponentAttention {
                 }
             }
         }
-        Ok(self.native.attend(ScoredHeads { scores, radius }, x))
+        self.native.attend(ScoredHeads { scores, radius }, x)
     }
 
     /// `C_ij(Δ) = σ u^Q_{h,i}ᵀ R_Δ u^K_{g(h),j}`, evaluated plane by plane:
@@ -1090,11 +1107,13 @@ mod tests {
                                 * (0..QUERY_COMPONENTS).map(|i| logits[i][s].abs()).sum::<f64>()
                     })
                     .collect();
-                let (joint, joint_radius) = joint_softmax_with_radius(&summed, &summed_radius);
+                let (joint, joint_radius) =
+                    joint_softmax_with_radius(&summed, &summed_radius).expect("finite summed logits");
                 let mut mixture = vec![0.0; t + 1];
                 let mut mixture_radius = vec![0.0; t + 1];
                 for i in 0..QUERY_COMPONENTS {
-                    let (weights, radius) = joint_softmax_with_radius(&logits[i], &logit_radius[i]);
+                    let (weights, radius) =
+                        joint_softmax_with_radius(&logits[i], &logit_radius[i]).expect("finite component logits");
                     for s in 0..=t {
                         mixture[s] += weights[s] / components;
                         mixture_radius[s] +=
