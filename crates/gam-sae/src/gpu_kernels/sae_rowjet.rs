@@ -1667,6 +1667,7 @@ fn cpu_tile(
 
 /// Direct centered-moment CUDA implementation. No per-primary jet arrays are
 /// materialized; each thread writes one packed output element.
+#[cfg(target_os = "linux")]
 pub(crate) const COMPLETE_SOFTMAX_KERNEL_SOURCE: &str = r#"
 extern "C" __global__ void sae_rowjet_first(
     const double* z, const int* active, const int* kind, const int* atom,

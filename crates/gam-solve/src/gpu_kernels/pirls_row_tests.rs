@@ -4,6 +4,7 @@
 #![cfg(all(test, target_os = "linux"))]
 
 use super::*;
+use gam_problem::EstimationError;
 
 #[test]
 fn refusal_replay_selects_the_smallest_bad_row_atomically() {
