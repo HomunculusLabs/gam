@@ -22,6 +22,64 @@ pub(crate) struct Cli {
     pub(crate) log_level: Option<log::LevelFilter>,
 }
 
+#[derive(Args, Debug)]
+pub(crate) struct JointEventsArgs {
+    #[command(subcommand)]
+    pub(crate) action: JointEventsAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum JointEventsAction {
+    /// Fit the model from subjects and events tables and write the saved model.
+    Fit(JointEventsFitArgs),
+    /// Condition a saved model on each history and forecast after its exit.
+    Forecast(JointEventsForecastArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct JointEventsFitArgs {
+    #[arg(long, value_name = "CSV", help = "Subjects table: columns id, entry, exit")]
+    pub(crate) subjects: PathBuf,
+    #[arg(
+        long,
+        value_name = "CSV",
+        help = "Events table: columns id, time, mark; an event at or before its subject's entry is prior history"
+    )]
+    pub(crate) events: PathBuf,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "NAME:KIND",
+        help = "The mark vocabulary with each mark's kind (recurrent, once or terminal), e.g. diagnosis:once,death:terminal; without it the observed marks, all recurrent"
+    )]
+    pub(crate) marks: Vec<String>,
+    #[arg(long, value_name = "MODEL.json", help = "Write the saved model here")]
+    pub(crate) out: PathBuf,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct JointEventsForecastArgs {
+    #[arg(long, value_name = "MODEL.json", help = "A model saved by `gam joint-events fit`")]
+    pub(crate) model: PathBuf,
+    #[arg(
+        long,
+        value_name = "CSV",
+        help = "Histories to condition on: columns id, entry, exit; each forecast opens at its history's exit"
+    )]
+    pub(crate) subjects: PathBuf,
+    #[arg(long, value_name = "CSV", help = "Their events: columns id, time, mark")]
+    pub(crate) events: PathBuf,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        required = true,
+        help = "Forecast horizons as offsets after each history's exit, comma separated"
+    )]
+    pub(crate) horizons: Vec<f64>,
+    #[arg(long, value_name = "JSON", help = "Write the forecasts here instead of stdout")]
+    pub(crate) out: Option<PathBuf>,
+}
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
     /// Fit a model from a dataset + formula and persist it to disk.
@@ -40,6 +98,9 @@ pub(crate) enum Command {
     Sample(SampleArgs),
     /// Draw synthetic responses from the fitted model for given covariates.
     Generate(GenerateArgs),
+    /// Fit the joint latent-signature event model and save it, or forecast
+    /// histories from a saved model.
+    JointEvents(JointEventsArgs),
     /// Fit an event-history model (marked counting process with a latent
     /// per-subject state) from subjects, events and covariate-segment tables.
     FitEvents(FitEventsArgs),

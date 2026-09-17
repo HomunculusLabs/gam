@@ -5092,6 +5092,7 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyInterventionCalibrationPlan>()?;
     module.add_function(wrap_pyfunction!(intervention_calibration_plan, module)?)?;
     inference_instruments::register(module)?;
+    crate::joint_event_ffi::register(module)?;
     crate::event_history_ffi::register(module)?;
     module.add_function(wrap_pyfunction!(gated_sae_decode, module)?)?;
     module.add_function(wrap_pyfunction!(interchange_decode_forward, module)?)?;
