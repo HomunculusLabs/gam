@@ -173,21 +173,53 @@ fn regularized_beta_lower_from_log_x(log_x: f64, a: f64, b: f64) -> f64 {
     if log_x == f64::NEG_INFINITY {
         return 0.0;
     }
-
-    let series_limit = (0.5_f64).ln() - b.max(1.0).ln();
-    if log_x <= series_limit {
-        let x = log_x.exp();
-        let Some((sum, _)) = beta_ascending_series(x, a, b) else {
-            return f64::NAN;
-        };
-        let log_beta = ln_beta(a, b);
-        if !(sum.is_finite() && sum > 0.0 && log_beta.is_finite()) {
-            return f64::NAN;
-        }
-        return (a * log_x - log_beta + sum.ln()).exp();
+    match ln_regularized_beta_series(log_x, a, b) {
+        Some(log_value) => log_value.exp(),
+        None => beta_reg(a, b, log_x.exp()),
     }
+}
 
-    beta_reg(a, b, log_x.exp())
+/// `ln I_x(a,b)` from `ln(x)`, representable wherever the logarithm is on the
+/// ascending-series branch.
+///
+/// The Bernoulli row geometry of a regularized-beta inverse link needs `ln μ` and
+/// `ln(1 − μ)` long after `μ` or `1 − μ` has left `f64` (#2902 row 34). On the
+/// series branch the result never leaves log space. Off it, `x ≥ ½/max(1,b)` and
+/// the result is the logarithm of the canonical evaluator's value, which can
+/// still underflow when `a` is large.
+pub fn ln_regularized_beta_lower_from_log_x(log_x: f64, a: f64, b: f64) -> f64 {
+    if !(a.is_finite() && a > 0.0 && b.is_finite() && b > 0.0) || log_x.is_nan() || log_x > 0.0 {
+        return f64::NAN;
+    }
+    if log_x == 0.0 {
+        return 0.0;
+    }
+    if log_x == f64::NEG_INFINITY {
+        return f64::NEG_INFINITY;
+    }
+    ln_regularized_beta_series(log_x, a, b).unwrap_or_else(|| beta_reg(a, b, log_x.exp()).ln())
+}
+
+/// `ln I_x(a,b) = a·ln(x) − ln B(a,b) + ln S(x)` on the ascending-series branch,
+/// `None` off it.
+///
+/// The branch boundary `x·max(1,b) ≤ ½` is the term-ratio proof used by
+/// [`lower_tail_beta_quantile`]. `Some(NaN)` reports a series or normalizer that
+/// did not form.
+fn ln_regularized_beta_series(log_x: f64, a: f64, b: f64) -> Option<f64> {
+    let series_limit = (0.5_f64).ln() - b.max(1.0).ln();
+    if log_x > series_limit {
+        return None;
+    }
+    let x = log_x.exp();
+    let Some((sum, _)) = beta_ascending_series(x, a, b) else {
+        return Some(f64::NAN);
+    };
+    let log_beta = ln_beta(a, b);
+    if !(sum.is_finite() && sum > 0.0 && log_beta.is_finite()) {
+        return Some(f64::NAN);
+    }
+    Some(a * log_x - log_beta + sum.ln())
 }
 
 /// `ln(1 / (1 + exp(log_ratio)))` without overflowing or rounding a

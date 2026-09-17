@@ -60,6 +60,37 @@ fn sas_binomial_geometry(y: f64, z: f64, dz: f64) -> (f64, f64, f64) {
     (log_mu, log_one_minus_mu, negative_score_z * dz)
 }
 
+/// Stable Bernoulli log-probabilities and negative-log-likelihood score for the
+/// beta-logistic link (#2902 row 34).
+///
+/// The link is a regularized incomplete beta of `logistic(η)`, and its mean
+/// route saturates the way SAS's did: at shapes `(0.01494, 0.00598)` and
+/// `η = 42.77`, `u` rounds to `1.0`, so `μ` is exactly `1.0` while `1 − μ` is
+/// `0.5532`. The pair comes from
+/// [`crate::mixture_link::beta_logistic_binomial_log_probabilities`], and the
+/// score is `μ′/μ` and `μ′/(1 − μ)` formed from `ln μ′`, as in
+/// [`probit_binomial_geometry`].
+#[inline]
+fn beta_logistic_binomial_geometry(
+    y: f64,
+    eta: f64,
+    log_shape_center: f64,
+    epsilon: f64,
+) -> (f64, f64, f64) {
+    let (log_mu, log_one_minus_mu, log_d1) =
+        crate::mixture_link::beta_logistic_binomial_log_probabilities(eta, log_shape_center, epsilon);
+    let dlog_mu = (log_d1 - log_mu).exp();
+    let dlog_survival = (log_d1 - log_one_minus_mu).exp();
+    let negative_score = if y == 1.0 {
+        -dlog_mu
+    } else if y == 0.0 {
+        dlog_survival
+    } else {
+        (1.0 - y) * dlog_survival - y * dlog_mu
+    };
+    (log_mu, log_one_minus_mu, negative_score)
+}
+
 #[inline]
 fn cloglog_binomial_geometry(y: f64, eta: f64) -> (f64, f64, f64) {
     let t = eta.exp();
@@ -883,6 +914,12 @@ pub fn deviance_eta_row_with_log_measure_scale(
                     )?;
                     Some(sas_binomial_geometry(y, z, dz))
                 }
+                InverseLink::BetaLogistic(state) => Some(beta_logistic_binomial_geometry(
+                    y,
+                    eta,
+                    state.log_delta,
+                    state.epsilon,
+                )),
                 _ => None,
             };
             let jet = if is_logit || log_space_geometry.is_some() {

@@ -2286,6 +2286,45 @@ fn beta_reg_logistic(a: f64, b: f64, logistic: LogisticU) -> f64 {
     }
 }
 
+/// `(ln μ, ln(1 − μ), ln μ′)` of the beta-logistic inverse link at shapes
+/// `(a, b)`, without forming `μ` (#2902 row 34).
+///
+/// `μ = I_u(a,b)` with `u = logistic(η)`, and by reflection `1 − μ = I_{1−u}(b,a)`.
+/// Both are evaluated in log space from `ln u` and `ln(1 − u)`, which
+/// [`logistic_uwith_derivatives`] carries exactly, so neither saturates when `u`
+/// rounds to `1.0` (η > 36.7) or when a tail probability leaves `f64`. The smaller
+/// of the two is the accurate one, and the larger is taken as its log-complement,
+/// so the pair always describes one probability. `ln μ′` is
+/// [`beta_logistic_log_d1`].
+pub(crate) fn beta_logistic_binomial_log_probabilities_at_shapes(
+    eta: f64,
+    a: f64,
+    b: f64,
+) -> (f64, f64, f64) {
+    let logistic = logistic_uwith_derivatives(eta);
+    let direct_mu =
+        gam_math::probability::ln_regularized_beta_lower_from_log_x(logistic.ln_u, a, b);
+    let direct_complement =
+        gam_math::probability::ln_regularized_beta_lower_from_log_x(logistic.ln_one_minus_u, b, a);
+    let (log_mu, log_one_minus_mu) = if direct_mu <= direct_complement {
+        (direct_mu, gam_math::special::log_abs_one_minus_exp(direct_mu))
+    } else {
+        (gam_math::special::log_abs_one_minus_exp(direct_complement), direct_complement)
+    };
+    (log_mu, log_one_minus_mu, beta_logistic_log_d1(a, b, logistic))
+}
+
+/// [`beta_logistic_binomial_log_probabilities_at_shapes`] at the link state's
+/// bounded shapes.
+pub(crate) fn beta_logistic_binomial_log_probabilities(
+    eta: f64,
+    log_shape_center: f64,
+    epsilon: f64,
+) -> (f64, f64, f64) {
+    let (a, b) = beta_logistic_shapes(log_shape_center, epsilon);
+    beta_logistic_binomial_log_probabilities_at_shapes(eta, a, b)
+}
+
 #[derive(Clone, Copy)]
 struct BetaShapePartials {
     value: f64,
