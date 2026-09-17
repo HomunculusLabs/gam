@@ -12,15 +12,19 @@
 //!
 //! F38. The removed charge scaled as `h(σ) = σ⁻¹·exp(−m²/2σ²)`, which increases
 //! for `σ < |m|`, so the single "monotone" fixed-point pass it justified was
-//! neither monotone nor a root. With no EDF term depending on `φ`, the dispersion
-//! at a fixed fitted state is homogeneous of degree one in the residual sum of
-//! squares, which makes it the root of its scale equation without a seed.
+//! neither monotone nor a root. Neither `ν = ‖I − R‖²_F` nor any other term of the
+//! dispersion depends on `φ`, so at a fixed fitted state the dispersion is linear in
+//! the residual sum of squares and equals `RSS/ν`, the root of its scale equation,
+//! without a seed.
 //!
 //! The production assertions compare the dispersion across states that differ
 //! only in what the removed charge read: the frozen-routing flag, a `0.9`
 //! assignment crossing, and the residual scale against fixed margins. At the
-//! parent commit each of them moves the dispersion. The fixtures have no row
-//! metric, so the raw and likelihood frames coincide and both scales are checked.
+//! parent commit each of them moves the dispersion. The root assertion reads `ν`
+//! from the fitted response itself, so a denominator other than `ν`, such as the
+//! historical `N − tr R`, fails it while staying linear in the RSS. The fixtures
+//! have no row metric, so the raw and likelihood frames coincide and both scales
+//! are checked.
 
 use super::tests::{TestPeriodicEvaluator, periodic_basis};
 use super::*;
@@ -267,9 +271,10 @@ fn saturated_softmax_dispersion_is_continuous_in_its_logits_2933_f37() {
 }
 
 /// F38. The removed charge's σ-derivative is positive below the margin, which
-/// refutes the monotone one-pass claim. The dispersion at a fixed fitted state must
-/// be the root of `φ·resid_dof = RSS` for every residual scale, with the margins
-/// held fixed, both far from and near the residual-DOF floor.
+/// refutes the monotone one-pass claim. At a fixed fitted state, with the margins
+/// held fixed, the dispersion must be linear in the RSS and must be the root of
+/// `φ·ν = RSS` with `ν = ‖I − R‖²_F` read from the fitted response, for every
+/// residual scale, with many and with few residual degrees of freedom.
 #[test]
 fn dispersion_is_the_explicit_root_of_its_scale_equation_2933_f38() {
     let margin = 2.0_f64;
@@ -291,7 +296,7 @@ fn dispersion_is_the_explicit_root_of_its_scale_equation_2933_f38() {
 
     let cases: [(&str, Vec<f64>, f64); 2] = [
         ("forty rows", symmetric_targets(40), 0.0),
-        ("three rows near the DOF floor", vec![-1.5, 0.75, 2.0], -4.0),
+        ("three rows with few residual dof", vec![-1.5, 0.75, 2.0], -4.0),
     ];
     for (case, targets, log_lambda_smooth) in cases {
         let (mut term, rho, target) = two_center_term(
@@ -304,26 +309,42 @@ fn dispersion_is_the_explicit_root_of_its_scale_equation_2933_f38() {
         let base = term
             .reconstruction_dispersion(&loss, &cache, &rho, residual.view())
             .expect("the TopK two-center dispersion is defined");
+        // The fixture has no decoder frames, so each frame's ν is the response's
+        // own residual dof, raw frame first as in `scales`.
+        let response = term
+            .fitted_response_divergence(target.view(), &rho, &cache)
+            .expect("the TopK two-center fitted response is defined");
+        let nus = [response.raw_residual_dof, response.likelihood_residual_dof];
         let rss = 2.0 * loss.data_fit;
-        for scale in [0.25_f64, 0.5, 2.0, 4.0] {
+        for scale in [1.0_f64, 0.25, 0.5, 2.0, 4.0] {
             let mut scaled = loss;
             scaled.data_fit *= scale * scale;
             let rescaled = term
                 .reconstruction_dispersion(&scaled, &cache, &rho, residual.view())
                 .expect("the rescaled dispersion is defined");
             let scaled_rss = scale * scale * rss;
-            for ((label, base_scale), (_, phi)) in scales(base).into_iter().zip(scales(rescaled)) {
-                let resid_dof = rss / base_scale;
-                let equation_residual = phi * resid_dof - scaled_rss;
+            for (((label, base_scale), (_, phi)), nu) in
+                scales(base).into_iter().zip(scales(rescaled)).zip(nus)
+            {
+                let linearity_residual = phi * (rss / base_scale) - scaled_rss;
+                let equation_residual = phi * nu - scaled_rss;
                 eprintln!(
-                    "[#2933 F38 {case}] {label}: resid_dof {resid_dof:.6} scale {scale}: phi \
-                     {phi:.12e} scale-equation residual {equation_residual:.3e}"
+                    "[#2933 F38 {case}] {label}: nu {nu:.6} (N = {}) scale {scale}: phi \
+                     {phi:.12e} linearity residual {linearity_residual:.3e} scale-equation \
+                     residual {equation_residual:.3e}",
+                    targets.len()
+                );
+                assert!(
+                    linearity_residual.abs() <= 1e-12 * scaled_rss,
+                    "{case}, {label}: at residual scale {scale} the dispersion {phi} is not linear \
+                     in the RSS at fixed margins: it misses base·scale² by {linearity_residual:e} \
+                     (RSS {scaled_rss})"
                 );
                 assert!(
                     equation_residual.abs() <= 1e-12 * scaled_rss,
                     "{case}, {label}: at residual scale {scale} the dispersion {phi} misses its \
-                     scale equation phi·resid_dof = RSS by {equation_residual:e} (resid_dof \
-                     {resid_dof}, RSS {scaled_rss})"
+                     scale equation phi·nu = RSS by {equation_residual:e} (nu {nu}, RSS \
+                     {scaled_rss})"
                 );
             }
         }

@@ -254,9 +254,21 @@ impl SaeManifoldTerm {
     /// ordered Beta--Bernoulli or threshold gate is a smooth map of its logits, so a
     /// saturated assignment is not a discontinuity and gets no boundary term.
     ///
-    /// No EDF term depends on `φ`, so each frame's scale equation
-    /// `φ·resid_dof = RSS` is explicit. Its root is returned in one evaluation, with
-    /// no seed, fixed-point pass or contraction argument (#2933 F38).
+    /// The omission does not make the scale conservative. With `Cov(y) = φ·I` in
+    /// the frame's norm, `E‖y − f̂‖² = E‖f̂ − μ‖² + N·φ − 2φ·df` for
+    /// `df = Σⱼ Cov(f̂ⱼ, yⱼ)/φ`, and a routing chosen on the same data adds its
+    /// search degrees of freedom to `df`. At a fixed risk `E‖f̂ − μ‖²` each one
+    /// lowers the expected RSS by `2φ`, so `φ̂` is biased low by what it omits, the
+    /// opposite sign to the non-negative bias above. Neither bias is bounded here.
+    ///
+    /// # The root is explicit (#2933 F38)
+    ///
+    /// `ν` and the frame charge are read from the data, the fitted state and `ρ`.
+    /// The inner objective carries no `φ`, so under `Vb = φ·H⁻¹` the prior precision
+    /// scales with `φ` together with the likelihood, and neither `R` nor `ν` moves
+    /// with `φ`. Each frame's scale equation `φ·ν = RSS` is therefore explicit. Its
+    /// root is returned in one evaluation, with no seed, fixed-point pass or
+    /// contraction argument.
     pub(crate) fn reconstruction_dispersion(
         &self,
         loss: &SaeManifoldLoss,
