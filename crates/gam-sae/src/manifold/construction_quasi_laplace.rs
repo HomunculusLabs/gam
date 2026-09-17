@@ -8421,8 +8421,14 @@ mod shape_covariance_observed_information_tests_2933_f33 {
             ArrowMetric::Joint(&cache),
         )
         .expect("spectral block of B");
+        // Only the model blocks are checked here; the row-sandwich meat is inert.
+        let meat = Array2::<f64>::zeros((cache.k, cache.k));
         let information = block
-            .border_selected_inverse_blocks(total_t, &term.shape_covariance_border_ranges())
+            .border_selected_inverse_blocks(
+                total_t,
+                &term.shape_covariance_border_ranges(),
+                meat.view(),
+            )
             .expect("selected inverse of B");
         let SaeShapeInformation::ObservedInformation(covariance) = information else {
             panic!("a positive definite operator must yield a covariance; got {information:?}");
