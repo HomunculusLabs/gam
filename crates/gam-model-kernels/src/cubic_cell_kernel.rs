@@ -1529,8 +1529,74 @@ pub fn cell_second_derivative_required_max_degree(
     second_degree.max(product_degree)
 }
 
+/// Whether the running x86_64 CPU executes FMAs as instructions.
+///
+/// Off an `fma` target, `f64::mul_add` lowers to a call into the runtime `fma`. The
+/// cell-derivative contractions and the non-affine moment rule are chains of `mul_add`,
+/// and those calls took 52% of the sampled CPU of the flex marginal-slope smoke fit
+/// (#979). Each kernel below therefore runs a copy compiled with the `fma` feature when
+/// the CPU has it. The copy is bit-identical: an FMA is correctly rounded whether an
+/// instruction or the runtime library computes it. `is_x86_feature_detected!` caches its
+/// probe in a process-wide static, so the check is a load and a bit test.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn fma_available() -> bool {
+    std::arch::is_x86_feature_detected!("fma")
+}
+
 #[inline]
 pub fn cell_second_derivative_from_moments(
+    cell: DenestedCubicCell,
+    first_coefficients_r: &[f64],
+    first_coefficients_s: &[f64],
+    second_coefficients_rs: &[f64],
+    moments: &[f64],
+) -> Result<f64, String> {
+    #[cfg(target_arch = "x86_64")]
+    if fma_available() {
+        // SAFETY: `fma_available` is the cached CPU probe for exactly the `fma` feature
+        // this variant enables.
+        return unsafe {
+            cell_second_derivative_from_moments_fma(
+                cell,
+                first_coefficients_r,
+                first_coefficients_s,
+                second_coefficients_rs,
+                moments,
+            )
+        };
+    }
+    cell_second_derivative_from_moments_body(
+        cell,
+        first_coefficients_r,
+        first_coefficients_s,
+        second_coefficients_rs,
+        moments,
+    )
+}
+
+/// [`cell_second_derivative_from_moments_body`] compiled with the `fma` target feature,
+/// so its `mul_add`s are instructions instead of calls.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+fn cell_second_derivative_from_moments_fma(
+    cell: DenestedCubicCell,
+    first_coefficients_r: &[f64],
+    first_coefficients_s: &[f64],
+    second_coefficients_rs: &[f64],
+    moments: &[f64],
+) -> Result<f64, String> {
+    cell_second_derivative_from_moments_body(
+        cell,
+        first_coefficients_r,
+        first_coefficients_s,
+        second_coefficients_rs,
+        moments,
+    )
+}
+
+#[inline(always)]
+fn cell_second_derivative_from_moments_body(
     cell: DenestedCubicCell,
     first_coefficients_r: &[f64],
     first_coefficients_s: &[f64],
@@ -1690,6 +1756,77 @@ pub fn cell_third_derivative_from_moments(
     third_coefficients_rst: &[f64],
     moments: &[f64],
 ) -> Result<f64, String> {
+    #[cfg(target_arch = "x86_64")]
+    if fma_available() {
+        // SAFETY: `fma_available` is the cached CPU probe for exactly the `fma` feature
+        // this variant enables.
+        return unsafe {
+            cell_third_derivative_from_moments_fma(
+                cell,
+                first_coefficients_r,
+                first_coefficients_s,
+                first_coefficients_t,
+                second_coefficients_rs,
+                second_coefficients_rt,
+                second_coefficients_st,
+                third_coefficients_rst,
+                moments,
+            )
+        };
+    }
+    cell_third_derivative_from_moments_body(
+        cell,
+        first_coefficients_r,
+        first_coefficients_s,
+        first_coefficients_t,
+        second_coefficients_rs,
+        second_coefficients_rt,
+        second_coefficients_st,
+        third_coefficients_rst,
+        moments,
+    )
+}
+
+/// [`cell_third_derivative_from_moments_body`] compiled with the `fma` target feature,
+/// so its `mul_add`s are instructions instead of calls.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+fn cell_third_derivative_from_moments_fma(
+    cell: DenestedCubicCell,
+    first_coefficients_r: &[f64],
+    first_coefficients_s: &[f64],
+    first_coefficients_t: &[f64],
+    second_coefficients_rs: &[f64],
+    second_coefficients_rt: &[f64],
+    second_coefficients_st: &[f64],
+    third_coefficients_rst: &[f64],
+    moments: &[f64],
+) -> Result<f64, String> {
+    cell_third_derivative_from_moments_body(
+        cell,
+        first_coefficients_r,
+        first_coefficients_s,
+        first_coefficients_t,
+        second_coefficients_rs,
+        second_coefficients_rt,
+        second_coefficients_st,
+        third_coefficients_rst,
+        moments,
+    )
+}
+
+#[inline(always)]
+fn cell_third_derivative_from_moments_body(
+    cell: DenestedCubicCell,
+    first_coefficients_r: &[f64],
+    first_coefficients_s: &[f64],
+    first_coefficients_t: &[f64],
+    second_coefficients_rs: &[f64],
+    second_coefficients_rt: &[f64],
+    second_coefficients_st: &[f64],
+    third_coefficients_rst: &[f64],
+    moments: &[f64],
+) -> Result<f64, String> {
     let eta = [cell.c0, cell.c1, cell.c2, cell.c3];
     let r_degree = first_coefficients_degree("r", first_coefficients_r)?;
     let s_degree = first_coefficients_degree("s", first_coefficients_s)?;
@@ -1808,6 +1945,117 @@ pub fn cell_third_derivative_from_moments(
 
 #[inline]
 pub fn cell_fourth_derivative_from_moments(
+    cell: DenestedCubicCell,
+    first_coefficients_r: &[f64],
+    first_coefficients_s: &[f64],
+    first_coefficients_t: &[f64],
+    first_coefficients_u: &[f64],
+    second_coefficients_rs: &[f64],
+    second_coefficients_rt: &[f64],
+    second_coefficients_ru: &[f64],
+    second_coefficients_st: &[f64],
+    second_coefficients_su: &[f64],
+    second_coefficients_tu: &[f64],
+    third_coefficients_rst: &[f64],
+    third_coefficients_rsu: &[f64],
+    third_coefficients_rtu: &[f64],
+    third_coefficients_stu: &[f64],
+    fourth_coefficients_rstu: &[f64],
+    moments: &[f64],
+) -> Result<f64, String> {
+    #[cfg(target_arch = "x86_64")]
+    if fma_available() {
+        // SAFETY: `fma_available` is the cached CPU probe for exactly the `fma` feature
+        // this variant enables.
+        return unsafe {
+            cell_fourth_derivative_from_moments_fma(
+                cell,
+                first_coefficients_r,
+                first_coefficients_s,
+                first_coefficients_t,
+                first_coefficients_u,
+                second_coefficients_rs,
+                second_coefficients_rt,
+                second_coefficients_ru,
+                second_coefficients_st,
+                second_coefficients_su,
+                second_coefficients_tu,
+                third_coefficients_rst,
+                third_coefficients_rsu,
+                third_coefficients_rtu,
+                third_coefficients_stu,
+                fourth_coefficients_rstu,
+                moments,
+            )
+        };
+    }
+    cell_fourth_derivative_from_moments_body(
+        cell,
+        first_coefficients_r,
+        first_coefficients_s,
+        first_coefficients_t,
+        first_coefficients_u,
+        second_coefficients_rs,
+        second_coefficients_rt,
+        second_coefficients_ru,
+        second_coefficients_st,
+        second_coefficients_su,
+        second_coefficients_tu,
+        third_coefficients_rst,
+        third_coefficients_rsu,
+        third_coefficients_rtu,
+        third_coefficients_stu,
+        fourth_coefficients_rstu,
+        moments,
+    )
+}
+
+/// [`cell_fourth_derivative_from_moments_body`] compiled with the `fma` target feature,
+/// so its `mul_add`s are instructions instead of calls.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+fn cell_fourth_derivative_from_moments_fma(
+    cell: DenestedCubicCell,
+    first_coefficients_r: &[f64],
+    first_coefficients_s: &[f64],
+    first_coefficients_t: &[f64],
+    first_coefficients_u: &[f64],
+    second_coefficients_rs: &[f64],
+    second_coefficients_rt: &[f64],
+    second_coefficients_ru: &[f64],
+    second_coefficients_st: &[f64],
+    second_coefficients_su: &[f64],
+    second_coefficients_tu: &[f64],
+    third_coefficients_rst: &[f64],
+    third_coefficients_rsu: &[f64],
+    third_coefficients_rtu: &[f64],
+    third_coefficients_stu: &[f64],
+    fourth_coefficients_rstu: &[f64],
+    moments: &[f64],
+) -> Result<f64, String> {
+    cell_fourth_derivative_from_moments_body(
+        cell,
+        first_coefficients_r,
+        first_coefficients_s,
+        first_coefficients_t,
+        first_coefficients_u,
+        second_coefficients_rs,
+        second_coefficients_rt,
+        second_coefficients_ru,
+        second_coefficients_st,
+        second_coefficients_su,
+        second_coefficients_tu,
+        third_coefficients_rst,
+        third_coefficients_rsu,
+        third_coefficients_rtu,
+        third_coefficients_stu,
+        fourth_coefficients_rstu,
+        moments,
+    )
+}
+
+#[inline(always)]
+fn cell_fourth_derivative_from_moments_body(
     cell: DenestedCubicCell,
     first_coefficients_r: &[f64],
     first_coefficients_s: &[f64],
@@ -3584,6 +3832,31 @@ fn evaluate_non_affine_cell_simd<const COMPUTE_VALUE: bool>(
     cell: DenestedCubicCell,
     max_degree: usize,
 ) -> (CellMomentVec, f64) {
+    #[cfg(target_arch = "x86_64")]
+    if fma_available() {
+        // SAFETY: `fma_available` is the cached CPU probe for exactly the `fma` feature
+        // this variant enables.
+        return unsafe { evaluate_non_affine_cell_simd_fma::<COMPUTE_VALUE>(cell, max_degree) };
+    }
+    evaluate_non_affine_cell_simd_body::<COMPUTE_VALUE>(cell, max_degree)
+}
+
+/// [`evaluate_non_affine_cell_simd_body`] compiled with the `fma` target feature, so the
+/// rule's `mul_add`s are instructions instead of calls.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+fn evaluate_non_affine_cell_simd_fma<const COMPUTE_VALUE: bool>(
+    cell: DenestedCubicCell,
+    max_degree: usize,
+) -> (CellMomentVec, f64) {
+    evaluate_non_affine_cell_simd_body::<COMPUTE_VALUE>(cell, max_degree)
+}
+
+#[inline(always)]
+fn evaluate_non_affine_cell_simd_body<const COMPUTE_VALUE: bool>(
+    cell: DenestedCubicCell,
+    max_degree: usize,
+) -> (CellMomentVec, f64) {
     let Some(cell) = representable_non_affine_interval(cell, max_degree) else {
         return (smallvec![0.0; max_degree + 1], 0.0);
     };
@@ -5238,6 +5511,122 @@ mod tests {
         });
 
         assert!((exact_fourth - numeric_fourth).abs() < 2e-7);
+    }
+
+    /// The cell kernels run a copy compiled with the `fma` feature when the CPU has it and
+    /// their portable bodies otherwise (#979). A CPU without `fma` runs only the portable
+    /// body, so the dispatch is correct only if both copies return the same bits on every
+    /// input. This compares each portable body, the public dispatcher and, where the CPU can
+    /// run it, the `fma` copy on non-affine cells at three operating points.
+    #[test]
+    fn fma_cell_kernel_copies_match_their_portable_bodies_bit_for_bit_979() {
+        let score_span = LocalSpanCubic {
+            left: -0.75,
+            right: 0.25,
+            c0: 0.08,
+            c1: -0.03,
+            c2: 0.02,
+            c3: -0.01,
+        };
+        let link_span = LocalSpanCubic {
+            left: -0.6,
+            right: 0.9,
+            c0: -0.05,
+            c1: 0.04,
+            c2: -0.02,
+            c3: 0.015,
+        };
+        let bits = |values: &[f64]| values.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+        for (a, b) in [(0.3, -0.7), (-1.1, 0.45), (0.05, 1.6)] {
+            let coeffs = denested_cell_coefficients(score_span, link_span, a, b);
+            let cell = DenestedCubicCell {
+                left: score_span.left,
+                right: score_span.right,
+                c0: coeffs[0],
+                c1: coeffs[1],
+                c2: coeffs[2],
+                c3: coeffs[3],
+            };
+            let moments = evaluate_cell_moments(cell, 24).expect("cell moments").moments;
+            let (dc_da, dc_db) = denested_cell_coefficient_partials(score_span, link_span, a, b);
+            let (dc_daa, dc_dab, dc_dbb) =
+                denested_cell_second_partials(score_span, link_span, a, b);
+            let (dc_daaa, dc_daab, dc_dabb, dc_dbbb) = denested_cell_third_partials(link_span);
+            let zero = [0.0; 4];
+
+            let second_portable =
+                cell_second_derivative_from_moments_body(cell, &dc_da, &dc_db, &dc_dab, &moments)
+                    .expect("portable second");
+            let second_dispatched =
+                cell_second_derivative_from_moments(cell, &dc_da, &dc_db, &dc_dab, &moments)
+                    .expect("dispatched second");
+            assert_eq!(second_dispatched.to_bits(), second_portable.to_bits(), "second at a={a}");
+
+            let third_portable = cell_third_derivative_from_moments_body(
+                cell, &dc_da, &dc_db, &dc_db, &dc_dab, &dc_dab, &dc_dbb, &dc_dabb, &moments,
+            )
+            .expect("portable third");
+            let third_dispatched = cell_third_derivative_from_moments(
+                cell, &dc_da, &dc_db, &dc_db, &dc_dab, &dc_dab, &dc_dbb, &dc_dabb, &moments,
+            )
+            .expect("dispatched third");
+            assert_eq!(third_dispatched.to_bits(), third_portable.to_bits(), "third at a={a}");
+
+            let fourth_portable = cell_fourth_derivative_from_moments_body(
+                cell, &dc_da, &dc_da, &dc_db, &dc_db, &dc_daa, &dc_dab, &dc_dab, &dc_dab,
+                &dc_dab, &dc_dbb, &dc_daaa, &dc_daab, &dc_dabb, &dc_dbbb, &zero, &moments,
+            )
+            .expect("portable fourth");
+            let fourth_dispatched = cell_fourth_derivative_from_moments(
+                cell, &dc_da, &dc_da, &dc_db, &dc_db, &dc_daa, &dc_dab, &dc_dab, &dc_dab,
+                &dc_dab, &dc_dbb, &dc_daaa, &dc_daab, &dc_dabb, &dc_dbbb, &zero, &moments,
+            )
+            .expect("dispatched fourth");
+            assert_eq!(fourth_dispatched.to_bits(), fourth_portable.to_bits(), "fourth at a={a}");
+            assert!(
+                second_portable.is_finite() && third_portable.is_finite() && fourth_portable.is_finite(),
+                "the operating point a={a}, b={b} gives finite contractions"
+            );
+
+            let (moments_portable, value_portable) =
+                evaluate_non_affine_cell_simd_body::<true>(cell, 24);
+            let (moments_dispatched, value_dispatched) =
+                evaluate_non_affine_cell_simd::<true>(cell, 24);
+            assert_eq!(
+                bits(&moments_dispatched[..]),
+                bits(&moments_portable[..]),
+                "rule moments at a={a}"
+            );
+            assert_eq!(value_dispatched.to_bits(), value_portable.to_bits(), "rule value at a={a}");
+
+            #[cfg(target_arch = "x86_64")]
+            if fma_available() {
+                // SAFETY: `fma_available` is the cached CPU probe for exactly the `fma`
+                // feature these copies enable.
+                let (second_fma, third_fma, fourth_fma, (moments_fma, value_fma)) = unsafe {
+                    (
+                        cell_second_derivative_from_moments_fma(
+                            cell, &dc_da, &dc_db, &dc_dab, &moments,
+                        ),
+                        cell_third_derivative_from_moments_fma(
+                            cell, &dc_da, &dc_db, &dc_db, &dc_dab, &dc_dab, &dc_dbb, &dc_dabb,
+                            &moments,
+                        ),
+                        cell_fourth_derivative_from_moments_fma(
+                            cell, &dc_da, &dc_da, &dc_db, &dc_db, &dc_daa, &dc_dab, &dc_dab,
+                            &dc_dab, &dc_dab, &dc_dbb, &dc_daaa, &dc_daab, &dc_dabb, &dc_dbbb,
+                            &zero, &moments,
+                        ),
+                        evaluate_non_affine_cell_simd_fma::<true>(cell, 24),
+                    )
+                };
+                assert_eq!(second_fma.expect("fma second").to_bits(), second_portable.to_bits());
+                assert_eq!(third_fma.expect("fma third").to_bits(), third_portable.to_bits());
+                assert_eq!(fourth_fma.expect("fma fourth").to_bits(), fourth_portable.to_bits());
+                assert_eq!(bits(&moments_fma[..]), bits(&moments_portable[..]), "fma rule moments");
+                assert_eq!(value_fma.to_bits(), value_portable.to_bits(), "fma rule value");
+            }
+        }
     }
 
     #[test]
