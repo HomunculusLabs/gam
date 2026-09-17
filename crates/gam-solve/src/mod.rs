@@ -13,6 +13,7 @@ pub mod evidence;
 pub mod gauge;
 pub mod gaussian_marginal;
 pub mod gaussian_reml;
+pub mod gaussian_reml_multi_penalty;
 pub mod glm_sufficient_lane;
 pub mod gpu;
 pub mod gpu_kernels;
