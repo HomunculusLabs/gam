@@ -41,7 +41,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::inference::steering::SteerPlan;
-use gam_math::probability::standard_normal_quantile;
+use gam_math::probability::standard_normal_from_uniform_bits;
 
 /// One shard of executed interventions. All per-record vectors share length
 /// `m`; `dose` is row-major `(m, d_dose)`.
@@ -61,8 +61,13 @@ pub struct InterventionShard {
     /// Rung-2 predicted nats (behavior decoder); `None` when the fit carried
     /// no y-block. When present it must be finite and non-negative.
     pub nu_hat_2: Option<Vec<f64>>,
-    /// Measured realized KL(clean ‖ patched), nats.
+    /// Measured realized KL(clean ‖ patched), nats, as computed. Roundoff can make
+    /// it negative by at most [`kl_evaluation_band_nats`].
     pub nu_measured: Vec<f64>,
+    /// Largest `|logit|` over each record's clean and patched logits.
+    pub logit_max_abs: Vec<f64>,
+    /// Largest `|patched − clean|` logit change of each record.
+    pub logit_max_abs_change: Vec<f64>,
     /// Document/question id — the G2 split unit.
     pub group: Vec<i64>,
     /// Whether the record is a Δt = 0 control splice.
@@ -71,6 +76,123 @@ pub struct InterventionShard {
     pub layer: i64,
     /// Seed of the sampling plan that produced the records.
     pub seed: u64,
+    /// Format of the logits every KL was measured from.
+    pub logit_format: LogitFormat,
+    /// Vocabulary size of those logits.
+    pub vocab_size: usize,
+}
+
+/// Floating-point format of the logits a KL was measured from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogitFormat {
+    Float16,
+    BFloat16,
+    Float32,
+    Float64,
+}
+
+impl LogitFormat {
+    /// Fraction bits `f`: values in `[2^e, 2^(e+1))` are spaced `2^(e − f)` apart.
+    pub const fn fraction_bits(self) -> i32 {
+        match self {
+            Self::Float16 => 10,
+            Self::BFloat16 => 7,
+            Self::Float32 => 23,
+            Self::Float64 => 52,
+        }
+    }
+
+    /// Exponent of the smallest normal value. Below it the spacing stays at the
+    /// subnormal spacing.
+    pub const fn min_normal_exponent(self) -> i32 {
+        match self {
+            Self::Float16 => -14,
+            Self::BFloat16 | Self::Float32 => -126,
+            Self::Float64 => -1022,
+        }
+    }
+
+    /// `ulp_F(m)`: the spacing of this format's representable values at magnitude
+    /// `m`. It is `2^(e − f)` for `|m| ∈ [2^e, 2^(e+1))`, and the subnormal spacing
+    /// below the smallest normal value. It is built from bits, so it is exact.
+    pub fn spacing_at(self, magnitude: f64) -> f64 {
+        let exponent = if magnitude.is_normal() {
+            ((magnitude.to_bits() >> 52) & 0x7ff) as i32 - 1023
+        } else {
+            self.min_normal_exponent()
+        };
+        let power = exponent.max(self.min_normal_exponent()) - self.fraction_bits();
+        if power >= -1022 {
+            f64::from_bits(((power + 1023) as u64) << 52)
+        } else {
+            f64::from_bits(1_u64 << (power + 1074))
+        }
+    }
+}
+
+impl std::str::FromStr for LogitFormat {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, String> {
+        match name {
+            "float16" => Ok(Self::Float16),
+            "bfloat16" => Ok(Self::BFloat16),
+            "float32" => Ok(Self::Float32),
+            "float64" => Ok(Self::Float64),
+            other => Err(format!(
+                "logit format must be float16, bfloat16, float32 or float64; got {other:?}"
+            )),
+        }
+    }
+}
+
+/// First-order bound on the float64 evaluation error of the runner's KL:
+/// `log_softmax` of both logit vectors, `exp` of the clean one, and one sum of
+/// `p_v·(log p_v − log q_v)` over `V` logits.
+///
+/// With `ε = 2⁻⁵²`, `M` the largest `|logit|` and `Δ` the largest `|patched − clean|`:
+/// - log-sum-exp (shift by the max, `V` exponentials, one sum, one `ln`, one add):
+///   `λ = ε(V + 3M + 2 ln V)`;
+/// - each log-probability: `η = λ + ε(2M + ln V)`;
+/// - the probabilities, differences, products and the `V`-term sum add
+///   `Σ_v p_v[2η + |d_v|(η + 3ε)] + (V − 1)ε·Σ_v p_v|d_v|`, where `d_v` is the
+///   log-probability difference and `Σ_v p_v|d_v| ≤ 2Δ`, because log-sum-exp is
+///   1-Lipschitz in the max norm.
+///
+/// Total: `E₆₄ = 2η + 2Δ(η + (V + 2)ε)`. A computed KL below `−E₆₄` is not roundoff.
+pub fn kl_evaluation_band_nats(
+    vocab_size: usize,
+    logit_max_abs: f64,
+    logit_max_abs_change: f64,
+) -> f64 {
+    let epsilon = f64::EPSILON;
+    let vocab = vocab_size as f64;
+    let ln_vocab = vocab.ln();
+    let log_sum_exp_error = epsilon * (vocab + 3.0 * logit_max_abs + 2.0 * ln_vocab);
+    let log_probability_error = log_sum_exp_error + epsilon * (2.0 * logit_max_abs + ln_vocab);
+    2.0 * log_probability_error
+        + 2.0 * logit_max_abs_change * (log_probability_error + (vocab + 2.0) * epsilon)
+}
+
+/// The KL a measurement cannot tell apart from its own arithmetic, in nats:
+/// `B = ½·ulp_F(M)² + E₆₄`.
+///
+/// Rounding in format `F` moves each logit difference by at most `u = ulp_F(M)`.
+/// For the logit difference `δ`, `KL(p‖q) = log E_p[e^δ] − E_p[δ]`, and Hoeffding's
+/// lemma with every `δ_v ∈ [−u, u]` gives `KL ≤ u²/2` exactly. A measured KL at or
+/// below `B` is therefore within what rounding of the logits and the float64
+/// evaluation ([`kl_evaluation_band_nats`]) can produce by themselves. The band
+/// covers the measurement from logits to KL, not an edit rounded away upstream
+/// inside the forward pass.
+pub fn kl_measurement_band_nats(
+    format: LogitFormat,
+    vocab_size: usize,
+    logit_max_abs: f64,
+    logit_max_abs_change: f64,
+) -> f64 {
+    let spacing = format.spacing_at(logit_max_abs);
+    0.5 * spacing * spacing
+        + kl_evaluation_band_nats(vocab_size, logit_max_abs, logit_max_abs_change)
 }
 
 /// The one production calibration model.  Keeping the model description next
@@ -93,7 +215,9 @@ pub enum PredictedNats {
 pub struct InterventionCalibrationSpec {
     pub prediction: PredictedNats,
     pub split_seed: u64,
-    /// Caller-selected one-sided evidence quantile for the G3 control floor.
+    /// Caller-selected one-sided evidence quantile of the train-control
+    /// measurements. Where controls are stochastic it raises each record's floor
+    /// above the record's derived measurement band.
     pub floor_quantile: f64,
 }
 
@@ -101,7 +225,8 @@ pub struct InterventionCalibrationSpec {
 /// reference/evaluation rows have already been decided by the Rust core.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InterventionCalibrationPlan {
-    /// Response for the calibration fit, `log(max(nu_measured, floor))`.
+    /// Response for the calibration fit, `log(max(nu_measured, floor))`, with
+    /// each record's own floor `max(B, control_quantile_nats)`.
     pub train_log_nu: Vec<f64>,
     /// Predictor for the calibration fit, `log(nu_hat)`.
     pub train_log_nu_hat: Vec<f64>,
@@ -116,7 +241,11 @@ pub struct InterventionCalibrationPlan {
     pub eval_atom: Vec<i64>,
     pub below_measurement_floor_atoms: Vec<i64>,
     pub no_training_intervention_atoms: Vec<i64>,
-    pub floor_nats: f64,
+    /// The `floor_quantile` of the train-control measurements. It is exactly 0 on
+    /// a deterministic model.
+    pub control_quantile_nats: f64,
+    /// The largest derived measurement band over the train interventions.
+    pub measurement_band_nats_max: f64,
 }
 
 /// Final chart-safe calibration output.  It deliberately contains only
@@ -127,7 +256,8 @@ pub struct InterventionCalibrationResult {
     pub respeed: Vec<(i64, f64)>,
     pub below_measurement_floor: Vec<i64>,
     pub no_training_intervention: Vec<i64>,
-    pub floor_nats: f64,
+    pub control_quantile_nats: f64,
+    pub measurement_band_nats_max: f64,
     pub heldout_rmse_lognats: Option<f64>,
     pub n_train: usize,
     pub n_eval: usize,
@@ -142,7 +272,6 @@ pub enum InterventionCalibrationError {
     Rung2Unavailable,
     InvalidFloorQuantile(f64),
     NoTrainingControls,
-    NonPositiveControlFloor(f64),
     NoUsableTrainingRecords,
     PredictionLengthMismatch {
         phase: &'static str,
@@ -176,11 +305,7 @@ impl fmt::Display for InterventionCalibrationError {
             ),
             Self::NoTrainingControls => write!(
                 f,
-                "intervention calibration: no control records occur in the train split; the G3 floor must be estimated from controls"
-            ),
-            Self::NonPositiveControlFloor(value) => write!(
-                f,
-                "intervention calibration: the train-control quantile is {value}; log-scale calibration requires a strictly positive measured resolution"
+                "intervention calibration: no control records occur in the train split; the G3 null and the control quantile are read from controls"
             ),
             Self::NoUsableTrainingRecords => write!(
                 f,
@@ -295,12 +420,29 @@ pub fn prepare_intervention_calibration(
     if train_controls.is_empty() {
         return Err(InterventionCalibrationError::NoTrainingControls);
     }
-    let floor_nats = inclusive_quantile(train_controls, spec.floor_quantile);
-    if !(floor_nats.is_finite() && floor_nats > 0.0) {
-        return Err(InterventionCalibrationError::NonPositiveControlFloor(
-            floor_nats,
-        ));
-    }
+    // A deterministic model's controls re-splice the unchanged row and measure
+    // exactly 0, so their quantile is no measurement floor. Each record's floor
+    // is its derived measurement band, raised by the control quantile where
+    // controls are stochastic. The band is strictly positive, so every floor is.
+    let control_quantile_nats = inclusive_quantile(train_controls, spec.floor_quantile);
+    let band: Vec<f64> = (0..n)
+        .map(|i| {
+            kl_measurement_band_nats(
+                shard.logit_format,
+                shard.vocab_size,
+                shard.logit_max_abs[i],
+                shard.logit_max_abs_change[i],
+            )
+        })
+        .collect();
+    let floor: Vec<f64> = band
+        .iter()
+        .map(|&record_band| record_band.max(control_quantile_nats))
+        .collect();
+    let measurement_band_nats_max = (0..n)
+        .filter(|&i| !eval[i] && !shard.is_control[i])
+        .map(|i| band[i])
+        .fold(0.0_f64, f64::max);
 
     // Sorted map makes both the Rust API and every binding deterministic.
     // Every atom with at least one train intervention is classified exactly
@@ -313,7 +455,7 @@ pub fn prepare_intervention_calibration(
         .collect();
     for i in 0..n {
         if !eval[i] && !shard.is_control[i] {
-            let measurable = shard.nu_measured[i] > floor_nats;
+            let measurable = shard.nu_measured[i] > floor[i];
             atom_is_measurable
                 .entry(shard.atom[i])
                 .and_modify(|seen| *seen = Some(seen.unwrap_or(false) || measurable))
@@ -346,7 +488,7 @@ pub fn prepare_intervention_calibration(
         {
             continue;
         }
-        let log_nu = shard.nu_measured[i].max(floor_nats).ln();
+        let log_nu = shard.nu_measured[i].max(floor[i]).ln();
         let log_nu_hat = nu_hat[i].ln();
         if eval[i] {
             eval_log_nu.push(log_nu);
@@ -374,7 +516,8 @@ pub fn prepare_intervention_calibration(
         eval_atom,
         below_measurement_floor_atoms,
         no_training_intervention_atoms,
-        floor_nats,
+        control_quantile_nats,
+        measurement_band_nats_max,
     })
 }
 
@@ -450,7 +593,8 @@ impl InterventionCalibrationPlan {
             respeed,
             below_measurement_floor: self.below_measurement_floor_atoms.clone(),
             no_training_intervention: self.no_training_intervention_atoms.clone(),
-            floor_nats: self.floor_nats,
+            control_quantile_nats: self.control_quantile_nats,
+            measurement_band_nats_max: self.measurement_band_nats_max,
             heldout_rmse_lognats,
             n_train: self.train_log_nu.len(),
             n_eval: self.eval_log_nu.len(),
@@ -464,8 +608,13 @@ impl InterventionShard {
     /// Invariants:
     /// * equal record counts across all per-record vectors, `dose` of shape
     ///   `(m, d_dose)`;
-    /// * every numeric entry finite; predictions and measurements
-    ///   non-negative (KL and quadratic forms are);
+    /// * every numeric entry finite; predictions non-negative (quadratic forms
+    ///   are);
+    /// * each measured KL at least `−E₆₄`, its derived float64 evaluation band
+    ///   ([`kl_evaluation_band_nats`]): a true KL is non-negative, and only
+    ///   roundoff within that band can make a computed one negative;
+    /// * logit extents non-negative, with the change at most twice the largest
+    ///   `|logit|` (the triangle inequality);
     /// * `is_control[i]` ⇔ `dose` row `i` is all-zero — the G3 null is defined
     ///   by the dose actually applied, so a mislabeled control is a hard error,
     ///   not a warning.
@@ -474,10 +623,15 @@ impl InterventionShard {
         if self.d_dose == 0 {
             return Err("InterventionShard: d_dose must be >= 1".to_string());
         }
-        let checks: [(&str, usize); 5] = [
+        if self.vocab_size == 0 {
+            return Err("InterventionShard: vocab_size must be >= 1".to_string());
+        }
+        let checks: [(&str, usize); 7] = [
             ("atom", self.atom.len()),
             ("nu_hat_1", self.nu_hat_1.len()),
             ("nu_measured", self.nu_measured.len()),
+            ("logit_max_abs", self.logit_max_abs.len()),
+            ("logit_max_abs_change", self.logit_max_abs_change.len()),
             ("group", self.group.len()),
             ("is_control", self.is_control.len()),
         ];
@@ -519,13 +673,30 @@ impl InterventionShard {
                     if zero_dose { "" } else { "non-" }
                 ));
             }
-            for (name, v) in [
-                ("nu_hat_1", self.nu_hat_1[i]),
-                ("nu_measured", self.nu_measured[i]),
+            let max_abs = self.logit_max_abs[i];
+            let change = self.logit_max_abs_change[i];
+            if !(max_abs.is_finite()
+                && max_abs >= 0.0
+                && change.is_finite()
+                && change >= 0.0
+                && change <= 2.0 * max_abs)
+            {
+                return Err(format!(
+                    "InterventionShard: record {i}: logit extents must be finite and non-negative \
+                     with change <= 2*max_abs; got max_abs {max_abs}, change {change}"
+                ));
+            }
+            for (name, v, lower) in [
+                ("nu_hat_1", self.nu_hat_1[i], 0.0),
+                (
+                    "nu_measured",
+                    self.nu_measured[i],
+                    -kl_evaluation_band_nats(self.vocab_size, max_abs, change),
+                ),
             ] {
-                if !(v.is_finite() && v >= 0.0) {
+                if !(v.is_finite() && v >= lower) {
                     return Err(format!(
-                        "InterventionShard: record {i}: {name} must be finite and >= 0; got {v}"
+                        "InterventionShard: record {i}: {name} must be finite and >= {lower}; got {v}"
                     ));
                 }
             }
@@ -572,9 +743,6 @@ pub struct DrawKey {
     pub stream: u64,
 }
 
-/// `2⁻⁵²`: the spacing of the uniform built from the top 52 bits of one stream word.
-const UNIFORM_52_BIT_SPACING: f64 = 1.0 / (1_u64 << 52) as f64;
-
 /// The #2946 declared law `h = h0 + L z` with `z ~ N(0, I_rank)`, drawn by this
 /// module. The fields are private, so [`GaussianLoadingLaw::draw`] is the only way
 /// to hold one: hand-picked or correlated `z` cannot pass as randomized.
@@ -591,11 +759,10 @@ impl GaussianLoadingLaw {
     /// Draw the law's rows at `positions` positions. `baseline` is `h0` (its length
     /// is the site width) and `loading` is `L`, row-major `(width, rank)`.
     ///
-    /// Each coordinate of `z` is the standard normal quantile of `u = (b + 1/2)·2⁻⁵²`,
-    /// where `b` is the top 52 bits of the SplitMix64 stream keyed by `key`. Every
-    /// `b + 1/2` with `b < 2⁵²` is representable, so `u` lies in `[2⁻⁵³, 1 − 2⁻⁵³]`
-    /// and never leaves the quantile's open domain. The stream reuses the split's
-    /// hash owner and the inversion reuses the pinned quantile owner.
+    /// Each coordinate of `z` is [`standard_normal_from_uniform_bits`], the one draw
+    /// owner, applied to successive words of the SplitMix64 stream keyed by `key`.
+    /// The draws are recorded in the law, so consumers read them and never re-derive
+    /// them: on another platform a re-derivation would match only to libm rounding.
     pub fn draw(
         baseline: Vec<f64>,
         loading: Vec<f64>,
@@ -618,8 +785,7 @@ impl GaussianLoadingLaw {
         }
         let mut state = splitmix64(key.seed ^ splitmix64(key.stream));
         let draws = std::iter::repeat_with(|| {
-            let bits = gam_linalg::utils::splitmix64(&mut state) >> 12;
-            standard_normal_quantile((bits as f64 + 0.5) * UNIFORM_52_BIT_SPACING)
+            standard_normal_from_uniform_bits(gam_linalg::utils::splitmix64(&mut state))
         })
         .take(positions * rank)
         .collect::<Result<Vec<f64>, String>>()
@@ -1577,10 +1743,14 @@ mod tests {
             nu_hat_1: vec![0.5, 0.0, 0.8, 0.0],
             nu_hat_2: None,
             nu_measured: vec![0.45, 1e-6, 0.7, 2e-6],
+            logit_max_abs: vec![12.0; 4],
+            logit_max_abs_change: vec![0.5, 0.0, 0.6, 0.0],
             group: vec![10, 10, 20, 20],
             is_control: vec![false, true, false, true],
             layer: 17,
             seed: 0,
+            logit_format: LogitFormat::Float32,
+            vocab_size: 32,
         }
     }
 
@@ -1638,6 +1808,8 @@ mod tests {
             nu_hat_1: vec![0.0, 0.0, 1.0, 4.0, 2.0, 3.0],
             nu_hat_2: None,
             nu_measured: vec![1.0, 3.0, 4.0, 1.0, 2.0, 8.0],
+            logit_max_abs: vec![10.0; 6],
+            logit_max_abs_change: vec![0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
             group: vec![
                 train_group,
                 train_group,
@@ -1649,6 +1821,8 @@ mod tests {
             is_control: vec![true, true, false, false, false, false],
             layer: 4,
             seed: 7,
+            logit_format: LogitFormat::Float32,
+            vocab_size: 16,
         };
         let spec = InterventionCalibrationSpec {
             prediction: PredictedNats::Rung1,
@@ -1662,7 +1836,7 @@ mod tests {
     fn calibration_plan_owns_split_floor_screen_and_log_transforms() {
         let (shard, spec) = calibration_shard_and_spec();
         let plan = prepare_intervention_calibration(&shard, spec).unwrap();
-        assert_eq!(plan.floor_nats, 2.0);
+        assert_eq!(plan.control_quantile_nats, 2.0);
         assert_eq!(plan.measurable_atoms, vec![10]);
         assert_eq!(plan.below_measurement_floor_atoms, vec![20]);
         assert_eq!(plan.no_training_intervention_atoms, Vec::<i64>::new());
@@ -1693,14 +1867,129 @@ mod tests {
     }
 
     #[test]
-    fn calibration_requires_positive_control_resolution_for_log_model() {
+    fn deterministic_controls_are_floored_by_the_derived_measurement_band() {
+        // Controls on a deterministic model re-splice the unchanged row and
+        // measure exactly 0. Before the fix their quantile was the floor, so this
+        // fixture was refused with NonPositiveControlFloor(0.0). Each record's
+        // floor is now its derived measurement band.
         let (mut shard, spec) = calibration_shard_and_spec();
         shard.nu_measured[0] = 0.0;
         shard.nu_measured[1] = 0.0;
-        assert_eq!(
-            prepare_intervention_calibration(&shard, spec).unwrap_err(),
-            InterventionCalibrationError::NonPositiveControlFloor(0.0)
+        let band = kl_measurement_band_nats(LogitFormat::Float32, 16, 10.0, 1.0);
+        let plan = prepare_intervention_calibration(&shard, spec).unwrap();
+        assert_eq!(plan.control_quantile_nats, 0.0);
+        assert_eq!(plan.measurement_band_nats_max, band);
+        assert!(band > 0.0 && band < 1.0e-12, "band={band}");
+        assert_eq!(plan.measurable_atoms, vec![10, 20]);
+        assert_eq!(plan.train_atom, vec![10, 20, 10]);
+        assert_eq!(plan.train_log_nu, vec![4.0_f64.ln(), 0.0, 2.0_f64.ln()]);
+
+        // A record whose KL does not clear its band is screened out.
+        shard.nu_measured[3] = 0.5 * band;
+        let screened = prepare_intervention_calibration(&shard, spec).unwrap();
+        assert_eq!(screened.measurable_atoms, vec![10]);
+        assert_eq!(screened.below_measurement_floor_atoms, vec![20]);
+    }
+
+    /// The runner's float64 KL: `log_softmax` of both vectors, `exp` of the
+    /// clean one, one sum.
+    fn float64_kl(clean: &[f64], patched: &[f64]) -> f64 {
+        let log_softmax = |logits: &[f64]| {
+            let shift = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let log_sum_exp = shift
+                + logits
+                    .iter()
+                    .map(|&logit| (logit - shift).exp())
+                    .sum::<f64>()
+                    .ln();
+            logits
+                .iter()
+                .map(|&logit| logit - log_sum_exp)
+                .collect::<Vec<f64>>()
+        };
+        log_softmax(clean)
+            .iter()
+            .zip(log_softmax(patched))
+            .map(|(&log_p, log_q)| log_p.exp() * (log_p - log_q))
+            .sum()
+    }
+
+    #[test]
+    fn one_spacing_of_logit_rounding_stays_within_the_band_and_a_real_change_exceeds_it() {
+        let vocab = 64;
+        let clean: Vec<f64> = (0..vocab)
+            .map(|v| f64::from((10.0 * (v as f64).sin()) as f32))
+            .collect();
+        let max_abs = clean.iter().fold(0.0_f64, |largest, &x| largest.max(x.abs()));
+        assert!((8.0..16.0).contains(&max_abs), "max_abs={max_abs}");
+        assert_eq!(LogitFormat::Float32.spacing_at(max_abs), 2.0_f64.powi(-20));
+        let band_of = |patched: &[f64]| {
+            let extent = clean
+                .iter()
+                .chain(patched)
+                .fold(0.0_f64, |largest, &x| largest.max(x.abs()));
+            let change = clean
+                .iter()
+                .zip(patched)
+                .fold(0.0_f64, |largest, (&a, &b)| largest.max((b - a).abs()));
+            kl_measurement_band_nats(LogitFormat::Float32, vocab, extent, change)
+        };
+
+        // Worst-case rounding: every logit moved by one f32 spacing, in
+        // alternating directions.
+        let rounded: Vec<f64> = clean
+            .iter()
+            .enumerate()
+            .map(|(v, &x)| {
+                let x32 = x as f32;
+                f64::from(if v % 2 == 0 { x32.next_up() } else { x32.next_down() })
+            })
+            .collect();
+        let rounding_kl = float64_kl(&clean, &rounded);
+        let rounding_band = band_of(&rounded);
+        assert!(
+            rounding_kl <= rounding_band,
+            "one-spacing rounding KL {rounding_kl} exceeds its band {rounding_band}"
         );
+
+        // Positive control: a real change of 40 spacings on the largest logit
+        // exceeds the band, so the band does not swallow real responses.
+        let top = (0..vocab).fold(0, |best, v| if clean[v] > clean[best] { v } else { best });
+        let mut changed = clean.clone();
+        changed[top] += 40.0 * 2.0_f64.powi(-20);
+        let real_kl = float64_kl(&clean, &changed);
+        let real_band = band_of(&changed);
+        assert!(
+            real_kl > real_band,
+            "a 40-spacing change KL {real_kl} is inside its band {real_band}"
+        );
+    }
+
+    #[test]
+    fn logit_formats_parse_by_torch_name_and_space_values_exactly() {
+        assert_eq!("bfloat16".parse::<LogitFormat>(), Ok(LogitFormat::BFloat16));
+        assert!("int8".parse::<LogitFormat>().is_err());
+        assert_eq!(LogitFormat::BFloat16.spacing_at(30.0), 0.125);
+        assert_eq!(LogitFormat::Float16.spacing_at(30.0), 2.0_f64.powi(-6));
+        assert_eq!(LogitFormat::Float64.spacing_at(1.0), f64::EPSILON);
+        assert_eq!(
+            LogitFormat::Float32.spacing_at(0.0),
+            f64::from(f32::from_bits(1))
+        );
+    }
+
+    #[test]
+    fn a_measured_kl_is_refused_only_below_its_evaluation_band() {
+        let mut shard = tiny_shard();
+        let evaluation_band = kl_evaluation_band_nats(32, 12.0, 0.5);
+        shard.nu_measured[0] = -0.5 * evaluation_band;
+        assert!(shard.validate().is_ok());
+        shard.nu_measured[0] = -2.0 * evaluation_band;
+        assert!(shard.validate().unwrap_err().contains("nu_measured"));
+        // Extents that break the triangle inequality are refused.
+        shard.nu_measured[0] = 0.45;
+        shard.logit_max_abs_change[0] = 30.0;
+        assert!(shard.validate().unwrap_err().contains("logit extents"));
     }
 
     #[test]

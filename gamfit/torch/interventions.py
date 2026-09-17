@@ -104,6 +104,12 @@ class InterventionShardData:
     ``is_control`` is derived from the *applied* ``delta_x`` (all-zero ⇒
     control), never trusted from the caller — a mislabeled control is the one
     error the G3 null cannot survive.
+
+    ``nu_measured`` is the raw float64 KL, never clamped. ``logit_format``,
+    ``vocab_size``, ``logit_max_abs`` and ``logit_max_abs_change`` are what
+    the Rust core needs to derive each record's measurement band: the KL that
+    rounding of the logits at their format, plus the float64 evaluation of
+    the KL, can produce by itself.
     """
 
     row_id: Any
@@ -112,19 +118,42 @@ class InterventionShardData:
     nu_hat_1: Any
     nu_hat_2: Any
     nu_measured: Any
+    logit_max_abs: Any
+    logit_max_abs_change: Any
     group: Any
     is_control: Any
     layer: int
     seed: int
+    logit_format: str
+    vocab_size: int
 
 
-def _kl_from_logits(clean: torch.Tensor, patched: torch.Tensor) -> float:
-    """``KL(softmax(clean) ‖ softmax(patched))`` in nats, computed stably in
-    log space (no explicit normalization subtraction dance)."""
-    logp = torch.log_softmax(clean.to(torch.float64), dim=-1)
-    logq = torch.log_softmax(patched.to(torch.float64), dim=-1)
-    p = logp.exp()
-    return float((p * (logp - logq)).sum().item())
+_LOGIT_FORMATS = {
+    torch.float16: "float16",
+    torch.bfloat16: "bfloat16",
+    torch.float32: "float32",
+    torch.float64: "float64",
+}
+
+
+def _kl_and_logit_extent(
+    clean: torch.Tensor, patched: torch.Tensor
+) -> tuple[float, float, float]:
+    """``KL(softmax(clean) ‖ softmax(patched))`` in nats, unclamped, with the
+    largest ``|logit|`` over both vectors and the largest ``|patched − clean|``.
+
+    The float64 ``log_softmax``, ``exp`` and single sum below are the
+    evaluation whose rounding the Rust measurement band bounds, so this
+    sequence of operations is part of the calibration contract.
+    """
+    clean64 = clean.to(torch.float64)
+    patched64 = patched.to(torch.float64)
+    logp = torch.log_softmax(clean64, dim=-1)
+    logq = torch.log_softmax(patched64, dim=-1)
+    kl = float((logp.exp() * (logp - logq)).sum().item())
+    max_abs = float(torch.maximum(clean64.abs().max(), patched64.abs().max()).item())
+    max_change = float((patched64 - clean64).abs().max().item())
+    return kl, max_abs, max_change
 
 
 def run_interventions(
@@ -141,10 +170,11 @@ def run_interventions(
     For each record: splice ``x_row + Δx`` at ``hook_module``'s output row
     ``row``, rerun the rest of the network through the same replace-one-row
     hook the downstream harvest uses, and record the realized same-position
-    ``KL(p_clean ‖ p_patched)`` in nats. ``Δx = 0`` records re-splice the
-    *unchanged* row — their measured KL is the G3 measurement null (exactly
-    zero for a deterministic model through this same-path splice; any nonzero
-    value is real measurement noise the floor should see).
+    ``KL(p_clean ‖ p_patched)`` in nats, unclamped. ``Δx = 0`` records re-splice
+    the *unchanged* row, so their measured KL is the G3 measurement null. On a
+    deterministic model that null is exactly zero, and the Rust core floors
+    each record at its derived measurement band instead. A nonzero control is
+    genuine nondeterminism, which the control quantile sees.
 
     ``layer`` and ``seed`` are stamped into the shard (provenance). One
     forward pass per record plus one clean capture — no gradients anywhere
@@ -164,8 +194,14 @@ def run_interventions(
                          f"[{row.min()}, {row.max()}]")
 
     m = row.shape[0]
+    if m == 0:
+        raise ValueError("plan has no records; a shard needs at least one executed intervention")
     nu_measured = np.empty((m,), dtype=np.float64)
+    logit_max_abs = np.empty((m,), dtype=np.float64)
+    logit_max_abs_change = np.empty((m,), dtype=np.float64)
     is_control = np.zeros((m,), dtype=bool)
+    logit_dtypes = set()
+    vocab_sizes = set()
 
     with torch.no_grad():
         for i in range(m):
@@ -174,8 +210,24 @@ def run_interventions(
             delta = torch.from_numpy(dx[i]).to(dtype=x_row.dtype, device=x_row.device)
             clean = logits_from_act(x_row, r)
             patched = logits_from_act(x_row + delta, r)
-            nu_measured[i] = max(_kl_from_logits(clean, patched), 0.0)
+            logit_dtypes.update((clean.dtype, patched.dtype))
+            vocab_sizes.update((int(clean.shape[-1]), int(patched.shape[-1])))
+            nu_measured[i], logit_max_abs[i], logit_max_abs_change[i] = _kl_and_logit_extent(
+                clean, patched
+            )
             is_control[i] = bool(np.all(dx[i] == 0.0))
+
+    if len(logit_dtypes) != 1 or len(vocab_sizes) != 1:
+        raise ValueError(
+            f"every record's logits must share one dtype and vocabulary size; got dtypes "
+            f"{sorted(map(str, logit_dtypes))} and sizes {sorted(vocab_sizes)}"
+        )
+    (logit_dtype,) = logit_dtypes
+    if logit_dtype not in _LOGIT_FORMATS:
+        raise ValueError(
+            f"logits must be float16, bfloat16, float32 or float64; got {logit_dtype}"
+        )
+    (vocab_size,) = vocab_sizes
 
     return InterventionShardData(
         row_id=row,
@@ -186,9 +238,13 @@ def run_interventions(
             None if plan.nu_hat_2 is None else np.asarray(plan.nu_hat_2, dtype=np.float64)
         ),
         nu_measured=nu_measured,
+        logit_max_abs=logit_max_abs,
+        logit_max_abs_change=logit_max_abs_change,
         group=np.asarray(plan.group, dtype=np.int64),
         is_control=is_control,
         layer=int(layer),
         seed=int(seed),
+        logit_format=_LOGIT_FORMATS[logit_dtype],
+        vocab_size=vocab_size,
     )
 

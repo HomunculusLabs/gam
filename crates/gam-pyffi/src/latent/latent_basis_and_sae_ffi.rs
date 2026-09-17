@@ -3639,7 +3639,11 @@ impl PyInterventionCalibrationPlan {
         out.set_item("respeed", respeed)?;
         out.set_item("below_measurement_floor", result.below_measurement_floor)?;
         out.set_item("no_training_intervention", result.no_training_intervention)?;
-        out.set_item("floor_nats", result.floor_nats)?;
+        out.set_item("control_quantile_nats", result.control_quantile_nats)?;
+        out.set_item(
+            "measurement_band_nats_max",
+            result.measurement_band_nats_max,
+        )?;
         out.set_item("heldout_rmse_lognats", result.heldout_rmse_lognats)?;
         out.set_item("n_train", result.n_train)?;
         out.set_item("n_eval", result.n_eval)?;
@@ -3658,18 +3662,26 @@ fn intervention_calibration_plan<'py>(
     nu_hat_1: PyReadonlyArray1<'py, f64>,
     nu_hat_2: Option<PyReadonlyArray1<'py, f64>>,
     nu_measured: PyReadonlyArray1<'py, f64>,
+    logit_max_abs: PyReadonlyArray1<'py, f64>,
+    logit_max_abs_change: PyReadonlyArray1<'py, f64>,
     group: PyReadonlyArray1<'py, i64>,
     is_control: PyReadonlyArray1<'py, bool>,
     layer: i64,
     seed: u64,
+    logit_format: &str,
+    vocab_size: usize,
     prediction: &str,
     split_seed: u64,
     floor_quantile: f64,
 ) -> PyResult<PyInterventionCalibrationPlan> {
     use gam::terms::sae::inference::intervention_shard::{
-        InterventionCalibrationSpec, InterventionShard, PredictedNats,
+        InterventionCalibrationSpec, InterventionShard, LogitFormat, PredictedNats,
         prepare_intervention_calibration,
     };
+
+    let logit_format = logit_format
+        .parse::<LogitFormat>()
+        .map_err(|message: String| py_value_error(message))?;
 
     let prediction = match prediction {
         "rung1" => PredictedNats::Rung1,
@@ -3689,10 +3701,14 @@ fn intervention_calibration_plan<'py>(
         nu_hat_1: nu_hat_1.as_array().iter().copied().collect(),
         nu_hat_2: nu_hat_2.map(|values| values.as_array().iter().copied().collect()),
         nu_measured: nu_measured.as_array().iter().copied().collect(),
+        logit_max_abs: logit_max_abs.as_array().iter().copied().collect(),
+        logit_max_abs_change: logit_max_abs_change.as_array().iter().copied().collect(),
         group: group.as_array().iter().copied().collect(),
         is_control: is_control.as_array().iter().copied().collect(),
         layer,
         seed,
+        logit_format,
+        vocab_size,
     };
     let spec = InterventionCalibrationSpec {
         prediction,

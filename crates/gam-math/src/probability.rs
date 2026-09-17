@@ -1683,6 +1683,26 @@ pub fn standard_normal_quantile(p: f64) -> Result<f64, String> {
     Ok(x)
 }
 
+/// `2⁻⁵²`: the spacing of the uniforms [`standard_normal_from_uniform_bits`] builds.
+const UNIFORM_52_BIT_SPACING: f64 = 1.0 / (1_u64 << 52) as f64;
+
+/// One standard normal draw from one 64-bit stream word: [`standard_normal_quantile`]
+/// of `u = (b + ½)·2⁻⁵²`, where `b` is the word's top 52 bits.
+///
+/// This is the one owner of standard-normal draws. The caller owns the stream,
+/// normally `gam_linalg::utils::splitmix64`, whose one state continues across calls.
+/// Every `b + ½` with `b < 2⁵²` is representable, so `u` lies in `[2⁻⁵³, 1 − 2⁻⁵³]`
+/// exactly and the quantile never refuses it. Keeping 53 bits would round
+/// `b = 2⁵³ − 1` up to `u = 1`.
+///
+/// Portability: the stream is bit-portable, but the quantile's tail branches evaluate
+/// `ln` through the platform libm. Recomputing a draw on another platform therefore
+/// matches only to libm rounding, so consumers record the draws they use and never
+/// re-derive them.
+pub fn standard_normal_from_uniform_bits(word: u64) -> Result<f64, String> {
+    standard_normal_quantile(((word >> 12) as f64 + 0.5) * UNIFORM_52_BIT_SPACING)
+}
+
 /// Standard normal quantile from `log_p = ln Φ(x)`.
 ///
 /// Unlike [`standard_normal_quantile`], this remains defined when `Φ(x)` is
@@ -3051,6 +3071,19 @@ mod tests {
     }
 
     // ── standard_normal_quantile ──────────────────────────────────────────────
+
+    #[test]
+    fn uniform_bits_draw_is_finite_at_both_extreme_words() {
+        let lowest = standard_normal_from_uniform_bits(0).unwrap();
+        let highest = standard_normal_from_uniform_bits(u64::MAX).unwrap();
+        assert!(lowest.is_finite() && lowest < -8.0, "lowest={lowest}");
+        assert!(highest.is_finite() && highest > 8.0, "highest={highest}");
+        // Positive control for the 52-bit construction: keeping 53 bits rounds
+        // `b + 1/2` up to 2^53 at the highest word, and the quantile refuses u = 1.
+        let fifty_three_bit = ((u64::MAX >> 11) as f64 + 0.5) / (1_u64 << 53) as f64;
+        assert_eq!(fifty_three_bit, 1.0);
+        assert!(standard_normal_quantile(fifty_three_bit).is_err());
+    }
 
     #[test]
     fn quantile_rejects_out_of_range() {
