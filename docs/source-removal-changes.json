@@ -3907,6 +3907,14 @@
     "evidence": "The item list is the refusal of scripts/source_removal_guard.py over probe commit 64250e7939 (the exact code tree, patch md5 ae59ce07) on base d6e0e0dd79 (MSI job 1174196, python3.12), re-keyed to the push parent. public_api_census.py over the same pair exited 0."
   },
   {
+    "base": "28f5da5e5033bea0dbc7469a255e4a048d928648",
+    "items": [
+      "crates/gam-inference/src/hmc_io.rs:fn:streaming_log_sum_exp"
+    ],
+    "reason": "#784: block_quadrature_marginal_correction streams its product Gauss-Hermite rule, so the self-normalising log-sum-exp is accumulated node by node across chunks instead of over a materialized iterator. The free function streaming_log_sum_exp is replaced by the StreamingLogSumExp accumulator (new, push, value) with the same operation order, which the value's normaliser, each paired lower rule's numerator and normaliser, and the materialized-rule test oracle use. Its only callers were the three log-sum-exp reductions inside block_quadrature_marginal_correction; git grep -n streaming_log_sum_exp over crates and tests at the base finds no other consumer.",
+    "evidence": "The item list is the refusal of scripts/source_removal_guard.py over the exact quad784 tree 1d384761 (patch md5 f3145d47) on base 679e808094 (direct lane dy1 run quad784-p1, python3.12), re-keyed to the push parent. public_api_census.py over the same pair exited 0."
+  },
+  {
     "base": "ad41db44910c5f12c7edee05dde1a6fd3f977b2c",
     "items": [
       "crates/gam-cli/src/main/run_crosscoder.rs:fn:transport_tolerance_requires_a_grid",

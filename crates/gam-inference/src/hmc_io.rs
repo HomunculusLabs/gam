@@ -2567,6 +2567,14 @@ mod tests {
         fn base_neg_score(&self) -> Result<Array1<f64>, String> {
             Ok(Array1::zeros(0))
         }
+        fn node_working_bytes(&self) -> Option<usize> {
+            // The default batch's result entry (with an empty score) and its shared
+            // displacement `t` (m); the excess allocates nothing.
+            Some(
+                std::mem::size_of::<(f64, Option<Array1<f64>>)>()
+                    + self.block_dim() * std::mem::size_of::<f64>(),
+            )
+        }
     }
 
     #[test]
@@ -2778,6 +2786,16 @@ mod tests {
                 .excess_and_ngs(&self.s_of(&Array1::zeros(self.block_dim())))
                 .1)
         }
+        fn node_working_bytes(&self) -> Option<usize> {
+            // Batched: the `Δ` column (p) and the `S` column (n), each at most twice
+            // on the small-shape product route, the owned `s` copy (n) and the score
+            // (n). Serial: `t` (m), `δ` (p), `s` (n) and the score (n). The larger.
+            let (n, p) = self.x.dim();
+            Some(
+                std::mem::size_of::<(f64, Option<Array1<f64>>)>()
+                    + (2 * p + 4 * n + self.block_dim()) * std::mem::size_of::<f64>(),
+            )
+        }
         fn excess_with_displaced_neg_score_batch(
             &self,
             draws: &Array2<f64>,
@@ -2887,6 +2905,489 @@ mod tests {
                 "e_t_neg_score {a} vs {b}"
             );
         }
+    }
+
+    /// The fine rule as it was evaluated before streaming (#784): every node enumerated
+    /// by the recursive product, all `N` draws in one matrix and one batch call, then
+    /// the same node-order accumulation of the value and the explicit gradient.
+    fn materialized_fine_rule<T: super::BlockExcessTarget>(
+        target: &T,
+        axis_orders: &[usize],
+    ) -> (f64, Array1<f64>) {
+        let m = target.block_dim();
+        let rules: Vec<Vec<(f64, f64)>> = axis_orders
+            .iter()
+            .map(|&order| crate::rho_posterior::standard_normal_gh_rule(order).expect("rule"))
+            .collect();
+        let mut nodes = Vec::new();
+        crate::rho_posterior::enumerate_gh_product(
+            &rules,
+            0,
+            &mut Array1::zeros(m),
+            0.0,
+            &mut nodes,
+        );
+        let inv_sqrt_lambda = target.block_curvatures().mapv(|l| 1.0 / l.sqrt());
+        let mut draws = Array2::<f64>::zeros((m, nodes.len()));
+        for (s, (z, _)) in nodes.iter().enumerate() {
+            for r in 0..m {
+                draws[(r, s)] = z[r] * inv_sqrt_lambda[r];
+            }
+        }
+        let mut max_lw = f64::NEG_INFINITY;
+        let mut sum_w = 0.0_f64;
+        let mut grad = Array1::<f64>::zeros(target.rho_dim());
+        let mut t = Array1::<f64>::zeros(m);
+        let batched = target.excess_with_displaced_neg_score_batch(&draws);
+        for (s, (excess, ngs)) in batched.into_iter().enumerate() {
+            t.assign(&draws.column(s));
+            if !excess.is_finite() || ngs.is_none() {
+                continue;
+            }
+            let lw = nodes[s].1 - excess;
+            if lw > max_lw {
+                let rescale = (max_lw - lw).exp();
+                sum_w *= rescale;
+                grad *= rescale;
+                max_lw = lw;
+            }
+            let w = (lw - max_lw).exp();
+            sum_w += w;
+            grad.scaled_add(-w, &target.excess_rho_gradient(&t));
+        }
+        let mut norm = super::StreamingLogSumExp::new();
+        for (_, log_w) in &nodes {
+            norm.push(*log_w);
+        }
+        ((max_lw + sum_w.ln()) - norm.value(), grad / sum_w)
+    }
+
+    fn moment_channels(moments: &super::BlockQuadratureMoments) -> [(&'static str, Vec<f64>); 4] {
+        [
+            ("e_t", moments.e_t.to_vec()),
+            ("e_tt", moments.e_tt.iter().copied().collect()),
+            ("e_neg_score", moments.e_neg_score.to_vec()),
+            ("e_t_neg_score", moments.e_t_neg_score.iter().copied().collect()),
+        ]
+    }
+
+    fn assert_bitwise_equal(label: &str, streamed: &[f64], reference: &[f64]) {
+        assert_eq!(streamed.len(), reference.len(), "{label}: length");
+        for (index, (a, b)) in streamed.iter().zip(reference).enumerate() {
+            assert!(
+                a.to_bits() == b.to_bits(),
+                "{label}[{index}]: streamed {a:e} differs from the reference {b:e}"
+            );
+        }
+    }
+
+    #[test]
+    fn streamed_block_quadrature_matches_the_materialized_rule_at_every_chunk_784() {
+        // The streamed rule hands the target one chunk of nodes at a time and
+        // accumulates node by node in the rule's order. On a target whose batch is
+        // column-independent, the value and gradient must be bit for bit those of the
+        // materialized rule, and every field must be bit for bit the one-chunk rule's,
+        // at a one-node chunk, at a chunk that leaves a partial last chunk, and at one
+        // chunk holding the whole rule.
+        let (n, p, m) = (24usize, 12usize, 3usize);
+        let mut x = Array2::<f64>::zeros((n, p));
+        for i in 0..n {
+            for j in 0..p {
+                x[(i, j)] = ((i * 7 + j * 13) % 11) as f64 * 0.05 - 0.25;
+            }
+        }
+        let mut v_b = Array2::<f64>::zeros((p, m));
+        for i in 0..p {
+            for r in 0..m {
+                v_b[(i, r)] = ((i * 3 + r * 5) % 7) as f64 * 0.1 - 0.3;
+            }
+        }
+        let matvec = MatvecBlock {
+            lambdas: array![2.0, 1.0, 0.5],
+            x,
+            v_b,
+            y: (0..n).map(|i| ((i % 5) as f64) * 0.2).collect(),
+            batched: false,
+        };
+        let anharmonic = AnharmonicBlock {
+            lambdas: array![2.0, 0.5],
+            a: 0.05,
+        };
+        let cases: [(&dyn Fn(usize) -> super::BlockQuadratureMarginal, (f64, Array1<f64>), usize, [usize; 3]); 2] = [
+            (
+                &|chunk| {
+                    super::block_quadrature_marginal_correction_in_chunks(&anharmonic, &[4, 5], chunk)
+                        .expect("anharmonic rule")
+                },
+                materialized_fine_rule(&anharmonic, &[4, 5]),
+                20,
+                [1, 3, 20],
+            ),
+            (
+                &|chunk| {
+                    super::block_quadrature_marginal_correction_in_chunks(&matvec, &[3, 4, 2], chunk)
+                        .expect("matvec rule")
+                },
+                materialized_fine_rule(&matvec, &[3, 4, 2]),
+                24,
+                [1, 5, 24],
+            ),
+        ];
+        for (evaluate, (reference_value, reference_gradient), node_count, chunks) in cases {
+            let one_chunk = evaluate(node_count);
+            let one_chunk_moments = one_chunk.moments.as_ref().expect("one-chunk moments");
+            for chunk in chunks {
+                let streamed = evaluate(chunk);
+                assert_eq!(streamed.node_count, node_count);
+                assert_eq!(streamed.chunk_nodes, chunk, "the governor must admit a {chunk}-node chunk");
+                let label = format!("{node_count}-node rule, chunk {chunk}");
+                assert_bitwise_equal(&format!("{label}: value"), &[streamed.value], &[reference_value]);
+                assert_bitwise_equal(
+                    &format!("{label}: rho gradient"),
+                    streamed.rho_gradient.as_slice().expect("contiguous"),
+                    reference_gradient.as_slice().expect("contiguous"),
+                );
+                assert_bitwise_equal(
+                    &format!("{label}: axis errors"),
+                    &streamed.axis_quadrature_errors,
+                    &one_chunk.axis_quadrature_errors,
+                );
+                let moments = streamed.moments.as_ref().expect("streamed moments");
+                for ((name, channel), (reference_name, reference)) in moment_channels(moments)
+                    .into_iter()
+                    .zip(moment_channels(one_chunk_moments))
+                {
+                    assert_eq!(name, reference_name);
+                    assert_bitwise_equal(&format!("{label}: {name}"), &channel, &reference);
+                }
+            }
+        }
+    }
+
+    /// A corrector that integrates with the standard rule and records every step the
+    /// order search publishes.
+    struct RecordingCorrector {
+        steps: std::sync::Mutex<Vec<gam_problem::laplace_sampler_contract::BlockQuadratureOrderStep>>,
+    }
+    impl gam_problem::laplace_sampler_contract::LaplaceMarginalCorrector for RecordingCorrector {
+        fn directional_cubic_diagnostic(
+            &self,
+            hessian: &Array2<f64>,
+            design: &DesignMatrix,
+            c_weights: &Array1<f64>,
+            refine_supremum: bool,
+        ) -> Result<(f64, Array1<f64>), String> {
+            laplace_directional_cubic_diagnostic(hessian, design, c_weights, refine_supremum)
+        }
+        fn block_quadrature_marginal_correction(
+            &self,
+            target: &dyn super::BlockExcessTarget,
+            axis_orders: &[usize],
+        ) -> Result<super::BlockQuadratureMarginal, super::BlockQuadratureRefusal> {
+            super::block_quadrature_marginal_correction(target, axis_orders)
+        }
+        fn publish_order_search_step(
+            &self,
+            step: &gam_problem::laplace_sampler_contract::BlockQuadratureOrderStep,
+        ) {
+            self.steps.lock().expect("step record").push(step.clone());
+        }
+        fn max_representable_order(&self) -> usize {
+            super::max_representable_gh_order()
+        }
+    }
+
+    #[test]
+    fn order_search_raises_one_axis_per_step_784() {
+        // Two quartic axes of different width, neither resolved at order four. Each
+        // step raises exactly one axis by one order, and that is the axis the step
+        // names. Before an axis has a measured contraction rate its projected raises
+        // are unbounded, so the first two steps raise the two unmeasured axes in
+        // index order (equal orders tie on node growth). The search ends resolved.
+        let target = AnharmonicBlock {
+            lambdas: array![3.0, 1.5],
+            a: 0.05,
+        };
+        let remainder = 1e-6;
+        let corrector = RecordingCorrector {
+            steps: std::sync::Mutex::new(Vec::new()),
+        };
+        let marginal = gam_problem::laplace_sampler_contract::select_block_quadrature_orders(
+            &corrector, &target, remainder,
+        )
+        .expect("two quartic axes resolve");
+        let steps = corrector.steps.into_inner().expect("step record");
+        assert!(steps.len() >= 2, "both axes start unresolved, got {} steps", steps.len());
+        assert_eq!(steps[0].raised_axis, 0, "first step: {}", steps[0]);
+        assert_eq!(steps[1].raised_axis, 1, "second step: {}", steps[1]);
+        let mut expected_orders = vec![4usize, 4];
+        for step in &steps {
+            assert_eq!(step.axis_orders, expected_orders, "step orders: {step}");
+            expected_orders[step.raised_axis] += 1;
+        }
+        assert_eq!(marginal.axis_orders, expected_orders);
+        let resolution_target = marginal.value.abs().min(remainder);
+        for (axis, &error) in marginal.axis_quadrature_errors.iter().enumerate() {
+            assert!(
+                error == 0.0 || error < resolution_target,
+                "axis {axis} unresolved at the returned orders: {error} against {resolution_target}"
+            );
+        }
+    }
+
+    /// A one-axis corrector whose paired differences follow a script instead of
+    /// integrating. At order `o` it reports `script[o − 4]` with `|Δ_b| = 1`, and it
+    /// records every order vector it is asked for. It evaluates no rule, so what a search
+    /// costs is the request count. A request past the script is refused as an integration
+    /// failure, which a pin that expects a typed stop reads as a search that went on
+    /// raising.
+    struct ScriptedCorrector {
+        script: Vec<f64>,
+        requests: std::sync::Mutex<Vec<Vec<usize>>>,
+    }
+    impl ScriptedCorrector {
+        fn new(script: Vec<f64>) -> Self {
+            Self {
+                script,
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn requests(self) -> Vec<Vec<usize>> {
+            self.requests.into_inner().expect("request record")
+        }
+    }
+    impl gam_problem::laplace_sampler_contract::LaplaceMarginalCorrector for ScriptedCorrector {
+        fn directional_cubic_diagnostic(
+            &self,
+            hessian: &Array2<f64>,
+            design: &DesignMatrix,
+            c_weights: &Array1<f64>,
+            refine_supremum: bool,
+        ) -> Result<(f64, Array1<f64>), String> {
+            Err(format!(
+                "the scripted corrector has no diagnostic ({}x{} Hessian, {} rows, {} weights, \
+                 refine={refine_supremum})",
+                hessian.nrows(),
+                hessian.ncols(),
+                design.nrows(),
+                c_weights.len()
+            ))
+        }
+        fn block_quadrature_marginal_correction(
+            &self,
+            target: &dyn super::BlockExcessTarget,
+            axis_orders: &[usize],
+        ) -> Result<super::BlockQuadratureMarginal, super::BlockQuadratureRefusal> {
+            self.requests
+                .lock()
+                .expect("request record")
+                .push(axis_orders.to_vec());
+            let errors = axis_orders
+                .iter()
+                .map(|&order| {
+                    order
+                        .checked_sub(4)
+                        .and_then(|index| self.script.get(index).copied())
+                        .ok_or_else(|| {
+                            super::BlockQuadratureRefusal::Integration(format!(
+                                "script exhausted at order {order}"
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<f64>, _>>()?;
+            let node_count = axis_orders.iter().product();
+            Ok(super::BlockQuadratureMarginal {
+                value: 1.0,
+                rho_gradient: Array1::zeros(target.rho_dim()),
+                axis_orders: axis_orders.to_vec(),
+                quadrature_error: errors.iter().copied().fold(0.0, f64::max),
+                axis_quadrature_errors: errors,
+                node_count,
+                chunk_nodes: node_count,
+                reservation_bytes: 0,
+                moments: None,
+            })
+        }
+        fn publish_order_search_step(
+            &self,
+            step: &gam_problem::laplace_sampler_contract::BlockQuadratureOrderStep,
+        ) {
+            assert_eq!(step.axis_orders.len(), 1, "the scripted corrector is one-axis");
+        }
+        fn max_representable_order(&self) -> usize {
+            super::max_representable_gh_order()
+        }
+    }
+
+    fn scripted_search(
+        script: Vec<f64>,
+        remainder: f64,
+    ) -> (
+        Result<
+            super::BlockQuadratureMarginal,
+            gam_problem::laplace_sampler_contract::BlockQuadratureOrderRefusal,
+        >,
+        Vec<Vec<usize>>,
+    ) {
+        let target = AnharmonicBlock {
+            lambdas: array![2.0],
+            a: 0.05,
+        };
+        let corrector = ScriptedCorrector::new(script);
+        let outcome = gam_problem::laplace_sampler_contract::select_block_quadrature_orders(
+            &corrector, &target, remainder,
+        );
+        (outcome, corrector.requests())
+    }
+
+    #[test]
+    fn an_axis_that_never_contracts_is_refused_typed_at_its_first_judged_order_784() {
+        // The paired difference stays at 1e-2 at every order. Order 5 ties the running
+        // minimum, so it is judged, and the minimum did not move: no representable order
+        // resolves the axis. The search refuses typed there, instead of raising the axis until
+        // its rule underflows. The corrector evaluates no rule, so the two requests are the
+        // whole cost, and requests past the script would be refused as exhausted.
+        let (outcome, requests) = scripted_search(vec![1e-2; 3], 1e-6);
+        assert_eq!(requests, vec![vec![4], vec![5]], "requests {requests:?}");
+        let refusal = outcome.expect_err("a non-contracting axis must be refused");
+        assert_eq!(refusal.axis, 0);
+        assert_eq!(refusal.axis_orders, vec![5]);
+        assert!(
+            matches!(
+                refusal.cause,
+                super::BlockQuadratureRefusal::UnresolvableAtRepresentableOrders {
+                    order: 5,
+                    contraction_rate,
+                    projected_resolving_order: None,
+                    ..
+                } if contraction_rate == 1.0
+            ),
+            "typed non-contracting refusal expected, got {refusal}"
+        );
+    }
+
+    #[test]
+    fn an_axis_that_contracts_too_slowly_to_resolve_is_refused_typed_784() {
+        // The paired difference contracts by 0.99 per order from 0.5, so resolving 1e-6
+        // needs about ln(0.495/1e-6)/ln(1/0.99) ≈ 1306 more raises. That is past the largest
+        // representable order, so the search refuses typed at order 5 with that projection.
+        let script = vec![0.5, 0.5 * 0.99, 0.5 * 0.99 * 0.99];
+        let (outcome, requests) = scripted_search(script, 1e-6);
+        assert_eq!(requests, vec![vec![4], vec![5]], "requests {requests:?}");
+        let refusal = outcome.expect_err("a too-slow axis must be refused");
+        let max_order = super::max_representable_gh_order();
+        assert!(
+            matches!(
+                refusal.cause,
+                super::BlockQuadratureRefusal::UnresolvableAtRepresentableOrders {
+                    order: 5,
+                    projected_resolving_order: Some(projected),
+                    max_representable_order,
+                    ..
+                } if projected > max_representable_order && max_representable_order == max_order
+            ),
+            "typed projection refusal past order {max_order} expected, got {refusal}"
+        );
+    }
+
+    #[test]
+    fn an_axis_that_rises_before_it_contracts_resolves_without_a_refusal_784() {
+        // A pre-asymptotic bump: the paired difference doubles for two orders (1e-2, 2e-2,
+        // 4e-2), then contracts by an order of magnitude per order to 5e-7 at order 10. A rise
+        // sets no running minimum, so orders 5 and 6 are not judged. A rule that refused on
+        // two raw ratios ≥ 1 would have refused at order 6. Order 7 sets the minimum at rate
+        // 5e-3/4e-2, and the search resolves 1e-6 at order 10.
+        let script = vec![1e-2, 2e-2, 4e-2, 5e-3, 5e-4, 5e-5, 5e-7];
+        let (outcome, requests) = scripted_search(script, 1e-6);
+        let marginal = outcome.expect("an axis that rises before it contracts resolves");
+        assert_eq!(marginal.axis_orders, vec![10]);
+        assert_eq!(requests.len(), 7, "requests {requests:?}");
+    }
+
+    #[test]
+    fn an_axis_that_rises_and_never_returns_is_refused_at_the_largest_representable_order_784() {
+        // The paired difference doubles once and stays there, so no order after 4 sets a new
+        // running minimum and the rate never judges the axis. The search raises it one order
+        // at a time to the largest representable order and refuses typed there, without
+        // asking for an order past it. The corrector evaluates no rule, so the requests cost
+        // nothing but their count.
+        let max_order = super::max_representable_gh_order();
+        let mut script = vec![1e-2];
+        script.resize(max_order - 3, 2e-2);
+        let (outcome, requests) = scripted_search(script, 1e-6);
+        assert_eq!(requests.len(), max_order - 3, "one request per order 4..={max_order}");
+        assert_eq!(requests.last(), Some(&vec![max_order]), "no request past the ceiling");
+        let refusal = outcome.expect_err("a plateau above the running minimum must be refused");
+        assert!(
+            matches!(
+                refusal.cause,
+                super::BlockQuadratureRefusal::NoNewMinimumThroughRepresentableOrders {
+                    order,
+                    running_minimum,
+                    max_representable_order,
+                } if order == max_order
+                    && running_minimum == 1e-2
+                    && max_representable_order == max_order
+            ),
+            "typed no-new-minimum refusal at order {max_order} expected, got {refusal}"
+        );
+    }
+
+    #[test]
+    fn a_fast_contracting_axis_resolves_without_a_refusal_784() {
+        // Positive control: 1e-2, 1e-4, 1e-7. The axis resolves 1e-6 at order 6, the first
+        // order it is judged at, so the stop never fires on a search that resolves.
+        let (outcome, requests) = scripted_search(vec![1e-2, 1e-4, 1e-7], 1e-6);
+        assert_eq!(requests, vec![vec![4], vec![5], vec![6]], "requests {requests:?}");
+        let marginal = outcome.expect("a fast-contracting axis resolves");
+        assert_eq!(marginal.axis_orders, vec![6]);
+    }
+
+    #[test]
+    fn an_alternating_but_contracting_axis_is_never_refused_784() {
+        // Every other step doubles the paired difference and the step after divides it by
+        // five, so the net contraction is 0.4 per two orders while every second measured
+        // ratio is 2. A rule judging the latest ratio alone would refuse at order 7. The
+        // doubling steps set no running minimum and are not judged, and each fresh minimum
+        // projects from 0.2, so the search keeps raising and resolves 1e-4 at order 16.
+        let script = vec![
+            1e-2, 2e-2, 4e-3, 8e-3, 1.6e-3, 3.2e-3, 6.4e-4, 1.28e-3, 2.56e-4, 5.12e-4, 1.024e-4,
+            2.048e-4, 4.096e-5,
+        ];
+        let (outcome, requests) = scripted_search(script, 1e-4);
+        let marginal = outcome.expect("an alternating contracting axis resolves");
+        assert_eq!(marginal.axis_orders, vec![16]);
+        assert_eq!(requests.len(), 13, "requests {requests:?}");
+    }
+
+    #[test]
+    fn the_largest_representable_order_is_where_the_rule_first_underflows_784() {
+        // The measured ceiling is the boundary block_quadrature_marginal_correction itself
+        // enforces: the rule at the ceiling integrates, and one order higher is refused
+        // before any node is evaluated.
+        let max_order = super::max_representable_gh_order();
+        assert!(max_order > 4, "the ceiling {max_order} must sit above the starting order");
+        let target = AnharmonicBlock {
+            lambdas: array![2.0],
+            a: 0.05,
+        };
+        let at_ceiling = super::block_quadrature_marginal_correction(&target, &[max_order]);
+        assert!(
+            at_ceiling.is_ok(),
+            "order {max_order} must integrate: {:?}",
+            at_ceiling.err()
+        );
+        let past_ceiling = super::block_quadrature_marginal_correction(&target, &[max_order + 1]);
+        assert!(
+            matches!(
+                past_ceiling,
+                Err(super::BlockQuadratureRefusal::UnrepresentableOrder { axis: 0, order })
+                    if order == max_order + 1
+            ) || matches!(past_ceiling, Err(super::BlockQuadratureRefusal::Integration(_))),
+            "order {} must be refused as unrepresentable, got {:?}",
+            max_order + 1,
+            past_ceiling.err()
+        );
     }
 
     #[test]
@@ -5474,13 +5975,50 @@ impl gam_problem::laplace_sampler_contract::LaplaceMarginalCorrector
     ) -> Result<BlockQuadratureMarginal, BlockQuadratureRefusal> {
         block_quadrature_marginal_correction(target, axis_orders)
     }
+
+    fn publish_order_search_step(
+        &self,
+        step: &gam_problem::laplace_sampler_contract::BlockQuadratureOrderStep,
+    ) {
+        log::info!("[#784] block quadrature order search: {step}");
+    }
+
+    fn max_representable_order(&self) -> usize {
+        max_representable_gh_order()
+    }
 }
 
-/// Streaming log-sum-exp of `log_terms` in the order given, accumulated
-/// against a running maximum exactly as the block-quadrature loop below
-/// accumulates its scalar weight (`sum_w *= exp(max_old − max_new)` on a new
-/// maximum, then `sum_w += exp(lw − max)`). Returns `−∞` for an empty
-/// sequence.
+/// The largest standard-normal Gauss–Hermite order whose rule builds with every weight
+/// positive, where every lower order does too (#784). `block_quadrature_marginal_correction`
+/// refuses the next order, as [`BlockQuadratureRefusal::UnrepresentableOrder`] or, if the
+/// rule cannot be built, as an integration refusal. The search raises one order at a time,
+/// so this is exactly where it would stop.
+///
+/// Measured once per process from this arithmetic and this rule builder, so no order
+/// ceiling is chosen. The scan ends because the extreme weight of an `n`-node rule decays
+/// like `e^{−2n}` and underflows at a few hundred nodes.
+fn max_representable_gh_order() -> usize {
+    static MAX_REPRESENTABLE_ORDER: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX_REPRESENTABLE_ORDER.get_or_init(|| {
+        let representable = |order: usize| {
+            crate::rho_posterior::standard_normal_gh_rule(order)
+                .is_ok_and(|rule| rule.iter().all(|&(_, weight)| weight > 0.0))
+        };
+        let mut order = 1usize;
+        while order
+            .checked_add(1)
+            .is_some_and(|next| representable(next))
+        {
+            order += 1;
+        }
+        order
+    })
+}
+
+/// Streaming log-sum-exp of log terms pushed in order, accumulated against a
+/// running maximum exactly as the block-quadrature loop below accumulates its
+/// scalar weight (`sum_w *= exp(max_old − max_new)` on a new maximum, then
+/// `sum_w += exp(lw − max)`). Its value is `−∞` when nothing was pushed.
 ///
 /// The operation order is the contract, not an implementation detail: the
 /// correction is the self-normalised `log Σ wᵢe^{−ΔFᵢ} − log Σ wᵢ`, and when
@@ -5490,17 +6028,113 @@ impl gam_problem::laplace_sampler_contract::LaplaceMarginalCorrector
 /// literal `1` the rule's weights sum to in exact arithmetic would instead
 /// report the rule's own weight-normalisation roundoff (≈1e-16, and different
 /// for the five-node and three-node rules) as a quadrature error.
-fn streaming_log_sum_exp(log_terms: impl IntoIterator<Item = f64>) -> f64 {
-    let mut max_lw = f64::NEG_INFINITY;
-    let mut sum_w = 0.0_f64;
-    for lw in log_terms {
-        if lw > max_lw {
-            sum_w *= (max_lw - lw).exp();
-            max_lw = lw;
+struct StreamingLogSumExp {
+    max_lw: f64,
+    sum_w: f64,
+}
+
+impl StreamingLogSumExp {
+    fn new() -> Self {
+        Self {
+            max_lw: f64::NEG_INFINITY,
+            sum_w: 0.0,
         }
-        sum_w += (lw - max_lw).exp();
     }
-    max_lw + sum_w.ln()
+
+    fn push(&mut self, lw: f64) {
+        if lw > self.max_lw {
+            self.sum_w *= (self.max_lw - lw).exp();
+            self.max_lw = lw;
+        }
+        self.sum_w += (lw - self.max_lw).exp();
+    }
+
+    fn value(&self) -> f64 {
+        self.max_lw + self.sum_w.ln()
+    }
+}
+
+/// A standard-normal Gauss–Hermite rule with each weight replaced by its log.
+fn log_weight_gh_rule(rule: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    rule.into_iter()
+        .map(|(node, weight)| (node, weight.ln()))
+        .collect()
+}
+
+/// A product Gauss–Hermite rule over per-axis `(node, ln weight)` tables, enumerated
+/// lazily in [`crate::rho_posterior::enumerate_gh_product`]'s order: axis 0 is the
+/// most significant digit and the last axis turns fastest, and a node's log weight
+/// is the left fold `((0 + ln w₀) + ln w₁) + …` in axis order. Every node and log
+/// weight is therefore bitwise the one the recursive enumeration produces, while
+/// only the chunk being evaluated is ever held (#784).
+struct ProductRuleCursor<'r> {
+    tables: Vec<&'r [(f64, f64)]>,
+    digits: Vec<usize>,
+}
+
+impl<'r> ProductRuleCursor<'r> {
+    fn new(tables: Vec<&'r [(f64, f64)]>) -> Self {
+        let digits = vec![0; tables.len()];
+        Self { tables, digits }
+    }
+
+    /// Write the next `log_weights.len()` nodes into the columns of `draws` as whitened
+    /// block displacements `z_r/√λ_r`, and their log weights into `log_weights`.
+    fn fill(
+        &mut self,
+        inv_sqrt_lambda: &Array1<f64>,
+        draws: &mut Array2<f64>,
+        log_weights: &mut [f64],
+    ) {
+        for (column, log_weight) in log_weights.iter_mut().enumerate() {
+            let mut lw = 0.0_f64;
+            for (r, table) in self.tables.iter().enumerate() {
+                let (node, ln_weight) = table[self.digits[r]];
+                draws[(r, column)] = node * inv_sqrt_lambda[r];
+                lw += ln_weight;
+            }
+            *log_weight = lw;
+            for r in (0..self.tables.len()).rev() {
+                self.digits[r] += 1;
+                if self.digits[r] < self.tables[r].len() {
+                    break;
+                }
+                self.digits[r] = 0;
+            }
+        }
+    }
+}
+
+/// Hand a product rule of `node_count` nodes to `visit` in chunks of at most `chunk`
+/// nodes, in the rule's node order. Each chunk's draws and log weights are dropped
+/// before the next chunk's are allocated.
+fn visit_product_rule_in_chunks(
+    tables: Vec<&[(f64, f64)]>,
+    node_count: usize,
+    chunk: usize,
+    inv_sqrt_lambda: &Array1<f64>,
+    mut visit: impl FnMut(&Array2<f64>, &[f64]) -> Result<(), BlockQuadratureRefusal>,
+) -> Result<(), BlockQuadratureRefusal> {
+    let m = tables.len();
+    let mut cursor = ProductRuleCursor::new(tables);
+    let mut evaluated = 0usize;
+    while evaluated < node_count {
+        let width = chunk.min(node_count - evaluated);
+        let mut draws = Array2::<f64>::zeros((m, width));
+        let mut log_weights = vec![0.0_f64; width];
+        cursor.fill(inv_sqrt_lambda, &mut draws, &mut log_weights);
+        visit(&draws, &log_weights)?;
+        evaluated += width;
+    }
+    Ok(())
+}
+
+/// A target batch that did not return one result per node.
+fn batch_length_refusal(returned: usize, nodes: usize) -> BlockQuadratureRefusal {
+    BlockQuadratureRefusal::Integration(format!(
+        "block_quadrature_marginal_correction: the target returned {returned} results for a \
+         {nodes}-node batch"
+    ))
 }
 
 /// Evaluate the block-local marginal correction `Δ_b` and its ρ-gradient by
@@ -5533,13 +6167,30 @@ fn streaming_log_sum_exp(log_terms: impl IntoIterator<Item = f64>) -> f64 {
 /// the orders so every axis's difference resolves `min(|Δ_b|, 1/n_eff²)`
 /// ([`gam_problem::laplace_sampler_contract::select_block_quadrature_orders`]).
 ///
-/// The product rule's working memory is reserved on the process memory governor
-/// before any node is evaluated, so the node ceiling is the budget. A rule with a
-/// weight that underflows to zero has passed the largest representable order and
-/// is refused rather than evaluated with nodes that carry no mass.
+/// The rule is streamed (#784): nodes are enumerated lazily and handed to the target
+/// in chunks, and every accumulator runs node by node in the rule's order, so no
+/// buffer grows with the node count. The chunk is the largest the process memory
+/// governor admits, and the ledger holds exactly the working set the evaluation
+/// allocates: the chunk times the target's declared per-node bytes plus each node's
+/// draw column and log weight, the accumulators, and the rule tables. A governor that
+/// does not admit a one-node chunk is a typed refusal. A rule with a weight that
+/// underflows to zero has passed the largest representable order and is refused
+/// rather than evaluated with nodes that carry no mass.
 pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
     target: &T,
     axis_orders: &[usize],
+) -> Result<BlockQuadratureMarginal, BlockQuadratureRefusal> {
+    block_quadrature_marginal_correction_in_chunks(target, axis_orders, usize::MAX)
+}
+
+/// [`block_quadrature_marginal_correction`] with at most `chunk_limit` nodes per
+/// target batch. The accumulators run node by node in the rule's order whatever the
+/// chunk, so the limit decides only how much of the rule is live at once. Production
+/// passes `usize::MAX` and lets the memory governor decide.
+fn block_quadrature_marginal_correction_in_chunks<T: BlockExcessTarget + ?Sized>(
+    target: &T,
+    axis_orders: &[usize],
+    chunk_limit: usize,
 ) -> Result<BlockQuadratureMarginal, BlockQuadratureRefusal> {
     use BlockQuadratureRefusal::Integration;
     let m = target.block_dim();
@@ -5558,6 +6209,8 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
             axis_quadrature_errors: Vec::new(),
             quadrature_error: 0.0,
             node_count: 0,
+            chunk_nodes: 0,
+            reservation_bytes: 0,
             moments: None,
         });
     }
@@ -5586,13 +6239,24 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
         ));
     }
 
-    let mut rules: Vec<Vec<(f64, f64)>> = Vec::with_capacity(m);
+    let mut log_rules: Vec<Vec<(f64, f64)>> = Vec::with_capacity(m);
     for (axis, &order) in axis_orders.iter().enumerate() {
         let rule = crate::rho_posterior::standard_normal_gh_rule(order).map_err(Integration)?;
         if rule.iter().any(|&(_, weight)| !(weight > 0.0)) {
             return Err(BlockQuadratureRefusal::UnrepresentableOrder { axis, order });
         }
-        rules.push(rule);
+        log_rules.push(log_weight_gh_rule(rule));
+    }
+    // Each axis's lower rules for its paired difference: one order lower, then two.
+    let mut lower_rules: Vec<Vec<(usize, Vec<(f64, f64)>)>> = Vec::with_capacity(m);
+    for &order in axis_orders {
+        let mut lower = Vec::new();
+        for lower_order in (order.saturating_sub(2).max(1)..order).rev() {
+            let rule =
+                crate::rho_posterior::standard_normal_gh_rule(lower_order).map_err(Integration)?;
+            lower.push((lower_order, log_weight_gh_rule(rule)));
+        }
+        lower_rules.push(lower);
     }
     let Some(node_count) = axis_orders
         .iter()
@@ -5605,24 +6269,67 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
         });
     };
     let n_obs = target.base_neg_score().map_err(Integration)?.len();
-    // The fine rule holds every node's displaced per-row score and its whitened
-    // displacement at once: `node_count × (n_obs + m)` doubles.
-    let working_memory = gam_runtime::resource::MemoryGovernor::global()
-        .try_reserve_dense_f64(node_count, n_obs + m, "#784 block Gauss–Hermite product rule")
-        .map_err(|error| BlockQuadratureRefusal::WorkingMemory {
-            axis_orders: axis_orders.to_vec(),
-            node_count: Some(node_count),
-            reason: error.to_string(),
-        })?;
 
-    let mut fine_nodes = Vec::new();
-    crate::rho_posterior::enumerate_gh_product(
-        &rules,
-        0,
-        &mut Array1::zeros(m),
-        0.0,
-        &mut fine_nodes,
-    );
+    // The working set. Per node of a chunk: the target's declared bytes plus the
+    // node's draw column (m) and log weight. For the whole evaluation: the
+    // accumulators `E_p[t ⊗ ngs]` (n·m), `E_p[ngs]` (n), `E_p[t tᵀ]` (m²), `E_p[t]` and
+    // the node `t` (m each), the explicit gradient and the target's per-node gradient
+    // (k each), the fine and lower rule tables, and the cursor's table slices and
+    // digits.
+    let f64_bytes = std::mem::size_of::<f64>();
+    let working_memory_refusal = |reason: &str| BlockQuadratureRefusal::WorkingMemory {
+        axis_orders: axis_orders.to_vec(),
+        node_count: Some(node_count),
+        reason: reason.to_string(),
+    };
+    let node_bytes = target
+        .node_working_bytes()
+        .and_then(|bytes| bytes.checked_add(m.checked_add(1)?.checked_mul(f64_bytes)?))
+        .ok_or_else(|| working_memory_refusal("one node's working bytes overflow usize"))?;
+    let rule_table_entries = log_rules.iter().map(Vec::len).sum::<usize>()
+        + lower_rules
+            .iter()
+            .flatten()
+            .map(|(_, rule)| rule.len())
+            .sum::<usize>();
+    let rule_table_count = m + lower_rules.iter().map(Vec::len).sum::<usize>();
+    let fixed_bytes = n_obs
+        .checked_mul(m + 1)
+        .and_then(|cells| cells.checked_add(m.checked_mul(m)?.checked_add(2 * (m + k))?))
+        .and_then(|cells| cells.checked_mul(f64_bytes))
+        .and_then(|bytes| {
+            bytes.checked_add(rule_table_entries.checked_mul(std::mem::size_of::<(f64, f64)>())?)
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(
+                rule_table_count.checked_mul(std::mem::size_of::<(usize, Vec<(f64, f64)>)>())?,
+            )
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(
+                m.checked_mul(std::mem::size_of::<&[(f64, f64)]>() + std::mem::size_of::<usize>())?,
+            )
+        })
+        .ok_or_else(|| working_memory_refusal("the accumulators' working bytes overflow usize"))?;
+    let governor = gam_runtime::resource::MemoryGovernor::global();
+    let mut chunk = chunk_limit.min(node_count);
+    let working_memory = loop {
+        let admitted = governor.remaining_bytes().saturating_sub(fixed_bytes) / node_bytes;
+        chunk = chunk.min(admitted).max(1);
+        let requested = node_bytes
+            .checked_mul(chunk)
+            .and_then(|bytes| bytes.checked_add(fixed_bytes))
+            .ok_or_else(|| working_memory_refusal("the chunk's working bytes overflow usize"))?;
+        match governor.try_reserve(requested, "#784 block Gauss–Hermite product rule chunk") {
+            Ok(reservation) => break reservation,
+            Err(error) if chunk == 1 => return Err(working_memory_refusal(&error.to_string())),
+            // Another reservation landed between reading the remaining budget and
+            // reserving; the next width is re-read against the new remainder and is
+            // strictly narrower, so this ends at a one-node chunk.
+            Err(_) => chunk -= 1,
+        }
+    };
+    let reservation_bytes = working_memory.bytes();
 
     // Streaming, numerically-stable accumulation of the weighted log-sum-exp value,
     // the explicit gradient channel `E_p[−∂ΔF/∂ρ]`, AND the gradient-channel
@@ -5640,75 +6347,80 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
     let mut e_tt_acc = Array2::<f64>::zeros((m, m));
     let mut e_ngs_acc = Array1::<f64>::zeros(n_obs);
     let mut e_t_ngs_acc = Array2::<f64>::zeros((n_obs, m));
-
-    // Materialize all transformed quadrature nodes into the columns of `draws`
-    // (`m × n_draws`). The per-node design matvec `s = X_t·(V_b·t_s)` is batched
-    // into two BLAS-3 products over all columns at once (the #1082 hot path),
-    // instead of separate BLAS-2 matvecs.
-    let mut draws = Array2::<f64>::zeros((m, node_count));
-    for (s, (z, _)) in fine_nodes.iter().enumerate() {
-        for r in 0..m {
-            draws[(r, s)] = z[r] * inv_sqrt_lambda[r];
-        }
-    }
-    let batched = target.excess_with_displaced_neg_score_batch(&draws);
-
+    // Self-normalised value `log Σ wᵢe^{−ΔFᵢ} − log Σ wᵢ`: the normaliser is
+    // the same streaming reduction over the same product log-weights, so the
+    // rule's weight-normalisation roundoff cancels rather than being reported
+    // as part of the correction (see `StreamingLogSumExp`).
+    let mut fine_norm = StreamingLogSumExp::new();
     let mut t = Array1::<f64>::zeros(m);
-    for (sidx, (excess, displaced_ngs)) in batched.into_iter().enumerate() {
-        t.assign(&draws.column(sidx));
-        if !excess.is_finite() {
-            continue;
-        }
-        let Some(ngs) = displaced_ngs else {
-            // A finite excess always carries a score; absence means infeasible.
-            continue;
-        };
-        let lw = fine_nodes[sidx].1 - excess;
-        if lw > max_lw {
-            // exp(−∞ − lw) = 0 zeroes the (empty) accumulators on the first
-            // feasible draw, so no special-casing is needed.
-            let rescale = (max_lw - lw).exp();
-            sum_w *= rescale;
-            grad_acc *= rescale;
-            e_t_acc *= rescale;
-            e_tt_acc *= rescale;
-            e_ngs_acc *= rescale;
-            e_t_ngs_acc *= rescale;
-            max_lw = lw;
-        }
-        let w = (lw - max_lw).exp();
-        sum_w += w;
-        // Explicit channel: −∂ΔF/∂ρ.
-        grad_acc.scaled_add(-w, &target.excess_rho_gradient(&t));
-        // Moment channels (score already computed in the fused call above).
-        if ngs.len() != n_obs {
-            return Err(Integration(format!(
-                "block_quadrature_marginal_correction: displaced_neg_score len {} != {n_obs}",
-                ngs.len()
-            )));
-        }
-        e_t_acc.scaled_add(w, &t);
-        e_ngs_acc.scaled_add(w, &ngs);
-        for r in 0..m {
-            let wt_r = w * t[r];
-            for q in 0..m {
-                e_tt_acc[(q, r)] += wt_r * t[q];
+    visit_product_rule_in_chunks(
+        log_rules.iter().map(Vec::as_slice).collect(),
+        node_count,
+        chunk,
+        &inv_sqrt_lambda,
+        |draws, log_weights| {
+            for &log_weight in log_weights {
+                fine_norm.push(log_weight);
             }
-            e_t_ngs_acc.column_mut(r).scaled_add(wt_r, &ngs);
-        }
-    }
+            // The per-node design matvec `s = X_t·(V_b·t_s)` is batched over the
+            // chunk's columns (the #1082 hot path).
+            let batched = target.excess_with_displaced_neg_score_batch(draws);
+            if batched.len() != log_weights.len() {
+                return Err(batch_length_refusal(batched.len(), log_weights.len()));
+            }
+            for (column, (excess, displaced_ngs)) in batched.into_iter().enumerate() {
+                t.assign(&draws.column(column));
+                if !excess.is_finite() {
+                    continue;
+                }
+                let Some(ngs) = displaced_ngs else {
+                    // A finite excess always carries a score; absence means infeasible.
+                    continue;
+                };
+                let lw = log_weights[column] - excess;
+                if lw > max_lw {
+                    // exp(−∞ − lw) = 0 zeroes the (empty) accumulators on the first
+                    // feasible draw, so no special-casing is needed.
+                    let rescale = (max_lw - lw).exp();
+                    sum_w *= rescale;
+                    grad_acc *= rescale;
+                    e_t_acc *= rescale;
+                    e_tt_acc *= rescale;
+                    e_ngs_acc *= rescale;
+                    e_t_ngs_acc *= rescale;
+                    max_lw = lw;
+                }
+                let w = (lw - max_lw).exp();
+                sum_w += w;
+                // Explicit channel: −∂ΔF/∂ρ.
+                grad_acc.scaled_add(-w, &target.excess_rho_gradient(&t));
+                // Moment channels (score already computed in the fused call above).
+                if ngs.len() != n_obs {
+                    return Err(Integration(format!(
+                        "block_quadrature_marginal_correction: displaced_neg_score len {} != {n_obs}",
+                        ngs.len()
+                    )));
+                }
+                e_t_acc.scaled_add(w, &t);
+                e_ngs_acc.scaled_add(w, &ngs);
+                for r in 0..m {
+                    let wt_r = w * t[r];
+                    for q in 0..m {
+                        e_tt_acc[(q, r)] += wt_r * t[q];
+                    }
+                    e_t_ngs_acc.column_mut(r).scaled_add(wt_r, &ngs);
+                }
+            }
+            Ok(())
+        },
+    )?;
     if !max_lw.is_finite() {
         return Err(Integration(
             "block_quadrature_marginal_correction: all fine quadrature nodes were infeasible"
                 .to_string(),
         ));
     }
-    // Self-normalised value `log Σ wᵢe^{−ΔFᵢ} − log Σ wᵢ`: the normaliser is
-    // the same streaming reduction over the same product log-weights, so the
-    // rule's weight-normalisation roundoff cancels rather than being reported
-    // as part of the correction (see `streaming_log_sum_exp`).
-    let fine_log_norm = streaming_log_sum_exp(fine_nodes.iter().map(|(_, log_w)| *log_w));
-    let value = (max_lw + sum_w.ln()) - fine_log_norm;
+    let value = (max_lw + sum_w.ln()) - fine_norm.value();
     // Self-normalized importance-weighted gradient E_p[−∂ΔF/∂ρ] and moments.
     let (rho_gradient, moments) = if sum_w > 0.0 {
         (
@@ -5733,53 +6445,50 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
     // difference is in the same log-marginal units as Δ_b and is deterministic
     // across rho. An axis at order one has no lower rule, so nothing certifies it.
     let mut axis_quadrature_errors = Vec::with_capacity(m);
-    for axis in 0..m {
+    for (axis, lower) in lower_rules.iter().enumerate() {
         let order = axis_orders[axis];
         if order < 2 {
             axis_quadrature_errors.push(f64::INFINITY);
             continue;
         }
         let mut paired_error = 0.0_f64;
-        for lower in (order.saturating_sub(2).max(1)..order).rev() {
-            let mut coarse_rules = rules.clone();
-            coarse_rules[axis] =
-                crate::rho_posterior::standard_normal_gh_rule(lower).map_err(Integration)?;
-            let mut coarse_nodes = Vec::new();
-            crate::rho_posterior::enumerate_gh_product(
-                &coarse_rules,
-                0,
-                &mut Array1::zeros(m),
-                0.0,
-                &mut coarse_nodes,
-            );
-            let mut coarse_draws = Array2::<f64>::zeros((m, coarse_nodes.len()));
-            for (s, (z, _)) in coarse_nodes.iter().enumerate() {
-                for r in 0..m {
-                    coarse_draws[(r, s)] = z[r] * inv_sqrt_lambda[r];
-                }
-            }
-            let coarse_values = target.excess_batch(&coarse_draws);
+        for (lower_order, lower_rule) in lower {
+            let mut tables: Vec<&[(f64, f64)]> = log_rules.iter().map(Vec::as_slice).collect();
+            tables[axis] = lower_rule.as_slice();
             // The coarse estimate is the same self-normalised reduction as the
             // fine one (infeasible nodes contribute zero weight to the numerator
             // and keep their weight in the normaliser, exactly as in the fine
             // loop).
-            let coarse_log_numerator = streaming_log_sum_exp(
-                coarse_values
-                    .iter()
-                    .zip(&coarse_nodes)
-                    .filter(|(excess, _)| excess.is_finite())
-                    .map(|(excess, (_, log_w))| log_w - excess),
-            );
+            let mut coarse_numerator = StreamingLogSumExp::new();
+            let mut coarse_norm = StreamingLogSumExp::new();
+            visit_product_rule_in_chunks(
+                tables,
+                node_count / order * lower_order,
+                chunk,
+                &inv_sqrt_lambda,
+                |draws, log_weights| {
+                    let values = target.excess_batch(draws);
+                    if values.len() != log_weights.len() {
+                        return Err(batch_length_refusal(values.len(), log_weights.len()));
+                    }
+                    for (&excess, &log_weight) in values.iter().zip(log_weights) {
+                        if excess.is_finite() {
+                            coarse_numerator.push(log_weight - excess);
+                        }
+                        coarse_norm.push(log_weight);
+                    }
+                    Ok(())
+                },
+            )?;
+            let coarse_log_numerator = coarse_numerator.value();
             if !coarse_log_numerator.is_finite() {
                 return Err(Integration(format!(
                     "block_quadrature_marginal_correction: every node of the rule with axis \
-                     {axis} at order {lower} was infeasible"
+                     {axis} at order {lower_order} was infeasible"
                 )));
             }
-            let coarse_log_norm =
-                streaming_log_sum_exp(coarse_nodes.iter().map(|(_, log_w)| *log_w));
             paired_error =
-                paired_error.max((value - (coarse_log_numerator - coarse_log_norm)).abs());
+                paired_error.max((value - (coarse_log_numerator - coarse_norm.value())).abs());
         }
         axis_quadrature_errors.push(paired_error);
     }
@@ -5814,6 +6523,8 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
         axis_quadrature_errors,
         quadrature_error,
         node_count,
+        chunk_nodes: chunk,
+        reservation_bytes,
         moments,
     })
 }

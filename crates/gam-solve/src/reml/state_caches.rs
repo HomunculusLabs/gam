@@ -1421,6 +1421,28 @@ impl BlockExcessTarget for Gam784BlockTarget<'_> {
         Ok(self.base_neg_score_at_mode.clone())
     }
 
+    /// One node of [`Self::excess_with_displaced_neg_score_batch`] (and of
+    /// [`Self::excess_batch`], which runs it) holds its columns of `Δ = V_b·T` (p) and
+    /// `S = X_t·Δ` (n), each at most twice because `fast_ab`'s small-shape route forms
+    /// the product before assigning it; its result entry, displaced score (n) and
+    /// excess-only result; and its draw transients: `η̂ + s` (n), the `δ` copy (p), the
+    /// row oracle's `Result` rows and the certified rows (n each) and the half-deviance
+    /// values (n). The transients count for every node, not per worker: the row sweep
+    /// is itself a parallel collect, so a worker blocked in it can start another node's
+    /// draw.
+    fn node_working_bytes(&self) -> Option<usize> {
+        let n = self.eta_hat.len();
+        let p = self.block_vecs.nrows();
+        let row_bytes = std::mem::size_of::<Result<crate::pirls::DevianceEtaRow, EstimationError>>()
+            + std::mem::size_of::<crate::pirls::DevianceEtaRow>();
+        p.checked_mul(3)?
+            .checked_add(n.checked_mul(5)?)?
+            .checked_add(1)?
+            .checked_mul(std::mem::size_of::<f64>())?
+            .checked_add(n.checked_mul(row_bytes)?)?
+            .checked_add(std::mem::size_of::<(f64, Option<Array1<f64>>)>())
+    }
+
     /// Fused excess + displaced score sharing one design matvec `s = X_t δ`
     /// and one atomic row-oracle sweep at `η̂ + s`. Each row's value and score
     /// are evaluated together on the same unprojected surface (#784, #1082).

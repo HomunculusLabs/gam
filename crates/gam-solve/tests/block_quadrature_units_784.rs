@@ -18,8 +18,8 @@ use std::sync::{Mutex, PoisonError};
 
 use gam_linalg::matrix::DesignMatrix;
 use gam_problem::laplace_sampler_contract::{
-    BlockExcessTarget, BlockQuadratureMarginal, BlockQuadratureMoments, BlockQuadratureRefusal,
-    LaplaceMarginalCorrector, set_laplace_marginal_corrector,
+    BlockExcessTarget, BlockQuadratureMarginal, BlockQuadratureMoments, BlockQuadratureOrderStep,
+    BlockQuadratureRefusal, LaplaceMarginalCorrector, set_laplace_marginal_corrector,
 };
 use gam_problem::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use gam_solve::estimate::{ExternalOptimOptions, evaluate_externalgradient};
@@ -30,6 +30,8 @@ use ndarray::{Array1, Array2};
 /// with the two parts of its band.
 struct AxisQuadratic {
     axis: usize,
+    /// The Gauss–Hermite order the order search asked the probe for along this axis.
+    axis_order: usize,
     curvature: f64,
     estimate: f64,
     rounding: f64,
@@ -103,6 +105,7 @@ impl LaplaceMarginalCorrector for QuadraticCoefficientProbe {
             let finer = (4.0 * q_quarter - q_half) / 6.0;
             records.push(AxisQuadratic {
                 axis,
+                axis_order: axis_orders[axis],
                 curvature: curvatures[axis],
                 estimate,
                 rounding: (4.0 * band_half + band_full) / 6.0
@@ -126,6 +129,8 @@ impl LaplaceMarginalCorrector for QuadraticCoefficientProbe {
             axis_quadrature_errors: vec![0.0; m],
             quadrature_error: 0.0,
             node_count: 1,
+            chunk_nodes: 1,
+            reservation_bytes: 0,
             moments: Some(BlockQuadratureMoments {
                 e_t: Array1::zeros(m),
                 e_tt: Array2::zeros((m, m)),
@@ -133,6 +138,24 @@ impl LaplaceMarginalCorrector for QuadraticCoefficientProbe {
                 e_t_neg_score: Array2::zeros((rows, m)),
             }),
         })
+    }
+
+    /// The probe reports every axis resolved at the first rule it is asked for, so the
+    /// order search never raises one, and a published step means it did.
+    fn publish_order_search_step(&self, step: &BlockQuadratureOrderStep) {
+        assert!(
+            step.axis_quadrature_errors.iter().all(|&error| error == 0.0),
+            "the probe resolves every axis at its first rule, so no axis is raised: {step}"
+        );
+    }
+
+    /// Never consulted. The probe reports every axis resolved at the first rule it is asked
+    /// for (order four), so the order search's stop predicate never judges an axis, and the
+    /// ceiling is only ever compared against, never reached. `usize::MAX` is the no-ceiling
+    /// sentinel. The pin asserts order four, so a change that makes the ceiling reachable
+    /// breaks the pin instead of comparing against this value.
+    fn max_representable_order(&self) -> usize {
+        usize::MAX
     }
 }
 
@@ -233,6 +256,12 @@ fn block_quadrature_remainder_has_no_quadratic_term_at_the_mode_784() {
         );
     }
     for record in records.iter() {
+        assert_eq!(
+            record.axis_order, 4,
+            "the probe resolves every axis at the first rule, so the order search must ask for \
+             order four along axis {} and never reach the representable ceiling",
+            record.axis
+        );
         assert!(
             record.estimate.abs() <= record.rounding + record.truncation,
             "the remainder has a quadratic term at the mode along axis {} (curvature {:.4e}): \
