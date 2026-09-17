@@ -31,3 +31,5 @@ mod jet_gamma_oracle_tests;
 #[cfg(test)]
 mod jet_poisson_oracle_tests;
 pub mod quantile;
+// SwiGLU/SiLU gate kernels for the finite-response calculation (#2946 R9).
+pub mod gaussian_gated;
