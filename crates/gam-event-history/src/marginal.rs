@@ -1353,7 +1353,7 @@ fn filter_nodes<S: JetField>(
     let atoms = inputs.rates.len();
     let gh = inputs.gh;
     let like = &inputs.eta0[0];
-    if atoms > 0 && inputs.rates.iter().all(|r| r.value() == 0.0) {
+    if crate::static_state::is_static(inputs.rates) {
         if derivatives { return Err(numerical("static frailties use derivatives of the integrated objective")); }
         let pass = crate::static_state::filter(inputs, None, &vec![true; marks])?;
         return Ok((0..n_nodes).map(|n| {
@@ -1443,7 +1443,7 @@ fn backward_smoother<S: JetField>(
     with_innovation_moments: bool,
 ) -> Result<Smoothed<S>, EventHistoryError> {
     let n_nodes = filtered.len();
-    if !inputs.rates.is_empty() && inputs.rates.iter().all(|r| r.value() == 0.0) {
+    if crate::static_state::is_static(inputs.rates) {
         if with_innovation_moments { return Err(numerical("static frailties have no innovation scores")); }
         return Ok(Smoothed { marginals: vec![filtered[n_nodes - 1].alpha.clone(); n_nodes],
             innovation_moments: Vec::new() });
@@ -1675,7 +1675,9 @@ pub(crate) fn latent_state_moments(
 /// One completed forward filter: per-node grids, filtered densities, the
 /// predicted (pre-update) densities, and the per-node log normalisers
 /// `ln c_n + m_n`, whose running sum is the log predictive probability of the
-/// observed counts.
+/// observed counts. A static frailty's pass shares one whole-history grid
+/// across the nodes (`super::static_state`): only its total and its final
+/// state are resolved, so chronological quantities come from [`spells`].
 pub(crate) struct ForwardPass<S> {
     pub grids: Vec<Grid<S>>,
     pub alpha: Vec<Vec<S>>,
@@ -1701,7 +1703,7 @@ pub(crate) fn forward_filter<S: JetField>(
             "forward filter needs nodes, marks and a compensator mask",
         ));
     }
-    if atoms > 0 && inputs.rates.iter().all(|r| r.value() == 0.0) {
+    if crate::static_state::is_static(inputs.rates) {
         return crate::static_state::filter(inputs, initial, compensated);
     }
     let like = &inputs.eta0[0];
@@ -1774,6 +1776,83 @@ pub(crate) fn forward_filter<S: JetField>(
         predicted,
         log_normalisers,
     })
+}
+
+/// One spell of a subject's follow-up as a chronological diagnostic reads it:
+/// from the previous event (or the entry) to the next event, or to the last
+/// node for the open tail.
+pub(crate) struct Spell {
+    /// The node that closes the spell.
+    pub node: usize,
+    /// `ln P(no event across the spell | the history before it)`.
+    pub log_survival: f64,
+    /// `E[λ_d(t) | the history before t]` for every mark when an event closes
+    /// the spell at `t`; `None` for the open tail.
+    pub intensities: Option<Vec<f64>>,
+}
+
+/// The spells of a subject's follow-up in time order: one per event node, and
+/// the open tail when exposure follows the last event.
+///
+/// Every value conditions on the history before the spell's end alone, so
+/// appending later nodes cannot change it. A dynamic factor's filter places
+/// every node's grid from the history before it, so its running normalisers
+/// and predicted densities are these quantities. A static factor's
+/// [`forward_filter`] resolves only the whole history, so its spells are
+/// ratios of prefix integrals (`super::static_state::spells`).
+pub(crate) fn spells(
+    inputs: &SubjectInputs<'_, f64>,
+    compensated: &[bool],
+) -> Result<Vec<Spell>, EventHistoryError> {
+    let nodes = inputs.nodes;
+    let n_nodes = nodes.len();
+    let marks = nodes.counts.ncols();
+    let atoms = inputs.rates.len();
+    if n_nodes == 0 || marks == 0 || compensated.len() != marks {
+        return Err(numerical(
+            "spells need nodes, marks and a compensator mask",
+        ));
+    }
+    if crate::static_state::is_static(inputs.rates) {
+        return crate::static_state::spells(inputs, compensated);
+    }
+    let pass = forward_filter(inputs, None, compensated)?;
+    let mut spells = Vec::new();
+    let mut log_survival = 0.0_f64;
+    let mut open = false;
+    for n in 0..n_nodes {
+        if !nodes.is_event(n) {
+            log_survival += pass.log_normalisers[n];
+            open = true;
+            continue;
+        }
+        let intensities = expected_intensities(
+            &pass.grids[n],
+            &pass.predicted[n],
+            &inputs.eta0[n * marks..(n + 1) * marks],
+            inputs.loadings,
+            inputs
+                .log_normaliser
+                .map(|m| &m[n * marks..(n + 1) * marks]),
+            marks,
+            atoms,
+        );
+        spells.push(Spell {
+            node: n,
+            log_survival,
+            intensities: Some(intensities),
+        });
+        log_survival = 0.0;
+        open = false;
+    }
+    if open {
+        spells.push(Spell {
+            node: n_nodes - 1,
+            log_survival,
+            intensities: None,
+        });
+    }
+    Ok(spells)
 }
 
 /// `E[λ_d(z)]` for every mark under a density on a grid: the expected

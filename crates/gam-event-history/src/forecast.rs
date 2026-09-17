@@ -30,8 +30,11 @@
 //!
 //! The predictive PIT of a spell — the follow-up from one event (or the
 //! entry) to the next event or to the exit — is `1 − P(no event of any mark
-//! in the spell | history)`, which the filter yields as the product of the
-//! normalisers of the zero-count nodes in the spell. Under the model, the
+//! in the spell | history before it)`. It conditions on nothing recorded after
+//! the spell, so appending later records cannot change it: a dynamic factor's
+//! filter yields it as the product of the normalisers of the zero-count nodes
+//! in the spell, and a static factor as a ratio of prefix integrals, each on
+//! its own grid (`super::static_state`). Under the model, the
 //! PIT of a spell that ends in an event is a uniform, and the sequence over
 //! a subject's spells is a Rosenblatt transform of its event times:
 //! independent uniforms across events and across subjects (the
@@ -72,7 +75,7 @@ use super::cohort::{
 };
 use super::family::EventHistoryFit;
 use super::marginal::{
-    ForwardPass, SubjectInputs, expected_intensities, forward_filter, latent_state_moments,
+    ForwardPass, SubjectInputs, expected_intensities, forward_filter, latent_state_moments, spells,
 };
 use gam_terms::smooth::build_term_collection_design;
 use ndarray::{Array2, ArrayView2};
@@ -927,14 +930,13 @@ pub fn predictive_pit(
     stratum: usize,
 ) -> Result<Vec<SpellPit>, EventHistoryError> {
     let marks = fit.marks();
-    let atoms = fit.rank();
     let kinds = &cohort.mark_kinds;
     let (loadings, rates) = latent_parameters(fit);
     let nodes = single_subject_nodes(fit, cohort, cohort.covariates.view(), history)?;
     let eta0 = node_eta0(fit, nodes.node_data.view())?;
     let subject = &nodes.subjects[0];
     let normaliser = forecast_normaliser(fit, stratum, &subject.times)?;
-    let pass = forward_filter(
+    let chronology = spells(
         &SubjectInputs {
             nodes: subject,
             eta0: &eta0,
@@ -946,7 +948,6 @@ pub fn predictive_pit(
             designs: None,
             log_normaliser: normaliser.as_deref(),
         },
-        None,
         &vec![true; marks],
     )?;
     let spell_pit = |log_survival: f64, t: f64| -> Result<f64, EventHistoryError> {
@@ -963,28 +964,26 @@ pub fn predictive_pit(
         }
         Ok(pit.clamp(0.0, 1.0))
     };
-    let mut pits = Vec::new();
-    let mut log_survival: f64 = 0.0;
-    let mut open = false;
-    for n in 0..subject.len() {
-        if !subject.is_event(n) {
-            log_survival += pass.log_normalisers[n];
-            open = true;
+    let mut pits = Vec::with_capacity(chronology.len());
+    for spell in chronology {
+        // The tail: exposure after the last event (or the whole follow-up of a
+        // subject without events) that ended at the exit without an event. Its
+        // PIT is a censored draw — the uniform the model assigns to the spell
+        // exceeds this value — and it is what makes the distance below a
+        // statement about the model rather than about the censoring.
+        let Some(intensities) = spell.intensities else {
+            pits.push(SpellPit {
+                time: history.exit,
+                observed: false,
+                pit: spell_pit(spell.log_survival, history.exit)?,
+                marks: Vec::new(),
+                mark_probabilities: vec![0.0; marks],
+            });
             continue;
-        }
+        };
+        let n = spell.node;
         let t = subject.times[n];
-        let pit = spell_pit(log_survival, t)?;
-        let intensities = expected_intensities(
-            &pass.grids[n],
-            &pass.predicted[n],
-            &eta0[n * marks..(n + 1) * marks],
-            &loadings,
-            normaliser
-                .as_deref()
-                .map(|m| &m[n * marks..(n + 1) * marks]),
-            marks,
-            atoms,
-        );
+        let pit = spell_pit(spell.log_survival, t)?;
         let at_risk: Vec<f64> = (0..marks)
             .map(|d| {
                 if history.at_risk(d, t, kinds) {
@@ -1011,22 +1010,6 @@ pub fn predictive_pit(
             pit,
             marks: fired,
             mark_probabilities,
-        });
-        log_survival = 0.0;
-        open = false;
-    }
-    // The tail: exposure after the last event (or the whole follow-up of a
-    // subject without events) that ended at the exit without an event. Its
-    // PIT is a censored draw — the uniform the model assigns to the spell
-    // exceeds this value — and it is what makes the distance below a
-    // statement about the model rather than about the censoring.
-    if open {
-        pits.push(SpellPit {
-            time: history.exit,
-            observed: false,
-            pit: spell_pit(log_survival, history.exit)?,
-            marks: Vec::new(),
-            mark_probabilities: vec![0.0; marks],
         });
     }
     Ok(pits)
