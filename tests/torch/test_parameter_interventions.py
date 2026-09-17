@@ -3,13 +3,14 @@
 A float64 fixture ties one ``Parameter`` under two names (``embed.weight`` and
 ``head.weight``) and runs one MLP body twice, so the embedding and every body
 tensor each have two use sites. References are hand-built forwards through the
-same torch ops, so every comparison is bitwise:
+same torch ops, so every comparison is bitwise unless a derived roundoff bound
+is named:
 
 * the registry names one id per tensor object and lists its aliases, and
   values leave as an exact float64 widening of every float format;
 * use sites are the tensor-returning reads in execution order, keyed
-  ``{tensor_id}#{ordinal}``, with a transposed flag, and a dtype query is not a
-  use;
+  ``{tensor_id}#{ordinal}``, oriented by the linear map that multiplies them,
+  and a dtype query is not a use;
 * a zero delta reproduces the native forward bitwise, and a nonzero one does not;
 * a global edit, dense or factored, equals ``torch.func.functional_call`` on
   ``W + ΔW`` with tied weights;
@@ -18,7 +19,12 @@ same torch ops, so every comparison is bitwise:
 * declared positions take only those rows from the edited run of the op, on
   the op's current intervened input, and declaring every row equals the
   every-position edit;
-* every refusal fires on an input built to trigger it.
+* a linear use's cotangent comes back as the rows its op multiplied and the
+  cotangent rows at what it wrote, restricted to declared rows, with cotangents
+  entering at declared readouts; the rows reconstruct torch's dense weight
+  gradient in the use site's orientation within the roundoff of two dot products;
+* every refusal fires on an input built to trigger it, next to a control that
+  executes.
 
 Fixed seeds throughout; no clock entropy.
 """
@@ -34,10 +40,15 @@ from torch.overrides import resolve_name
 from gamfit.torch.parameter_interventions import (
     FactoredDelta,
     GlobalParameterEdit,
+    OutputReadout,
     ParameterUseSite,
+    UseCotangent,
+    UseSiteInputReadout,
+    UseSiteOutputReadout,
     UseSiteParameterEdit,
     discover_parameter_use_sites,
     execute_native,
+    execute_parameter_cotangents,
     execute_parameter_edits,
     parameter_registry,
     parameter_values,
@@ -45,6 +56,7 @@ from gamfit.torch.parameter_interventions import (
 
 _TOKENS = torch.tensor([[3, 1, 4, 1, 5, 2]])
 _LEADING = (1, 6)
+_EVERY_ROW = tuple(range(_LEADING[1]))
 
 
 class _WeightScale(torch.nn.Module):
@@ -83,7 +95,7 @@ class _TiedSharedMlp(torch.nn.Module):
 
 class _TransposedTie(torch.nn.Module):
     """Tokens -> embedding, read out through the embedding's transpose in the
-    root forward."""
+    root forward: ``x @ W.t()``."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -91,6 +103,53 @@ class _TransposedTie(torch.nn.Module):
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         return self.embed(tokens) @ self.embed.weight.t()
+
+
+class _TransposedLinear(torch.nn.Module):
+    """``F.linear(x, W.t())`` with a stored ``(4, 5)`` tensor."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.embed = torch.nn.Embedding(7, 4, dtype=torch.float64)
+        self.weight = torch.nn.Parameter(torch.zeros(4, 5, dtype=torch.float64))
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        return F.linear(self.embed(tokens), self.weight.t())
+
+
+class _PlainMatmul(torch.nn.Module):
+    """``x @ W`` with a stored ``(4, 5)`` tensor."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.embed = torch.nn.Embedding(7, 4, dtype=torch.float64)
+        self.weight = torch.nn.Parameter(torch.zeros(4, 5, dtype=torch.float64))
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        return self.embed(tokens) @ self.weight
+
+
+class _TransposeCopied(torch.nn.Module):
+    """``x @ W.t().contiguous()``: the transpose view is consumed by a copy."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.embed = torch.nn.Embedding(7, 4, dtype=torch.float64)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        return self.embed(tokens) @ self.embed.weight.t().contiguous()
+
+
+class _WithUnusedParameter(torch.nn.Module):
+    """A linear map plus a registered parameter the forward never reads."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.used = torch.nn.Linear(2, 2, dtype=torch.float64)
+        self.unused = torch.nn.Parameter(torch.zeros(3, dtype=torch.float64))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.used(x)
 
 
 class _TwoViewsOfOneStorage(torch.nn.Module):
@@ -129,7 +188,7 @@ def _sites_of(sites: tuple[ParameterUseSite, ...], tensor_id: str) -> list[Param
 
 
 def _ramp(shape: tuple[int, ...]) -> np.ndarray:
-    """A deterministic dense delta that moves every element but the first by a
+    """A deterministic dense array that moves every element but the first by a
     clearly nonzero amount."""
     size = int(np.prod(shape))
     return 0.25 * np.arange(size, dtype=np.float64).reshape(shape) / size
@@ -144,6 +203,17 @@ def _splice(clean: torch.Tensor, moved: torch.Tensor, positions: tuple[int, ...]
     combined = clean.clone()
     combined[:, index] = moved[:, index]
     return combined
+
+
+def _reconstruction_bound(use: UseCotangent) -> np.ndarray:
+    """Each dense-gradient entry is one n-term dot product, so torch's entry and
+    the factored reconstruction each lie within γ_n · Σ_r |g_r h_r| of the exact
+    value (Higham, Accuracy and Stability, §3.1): they differ by at most twice
+    that. The bound is in the orientation of ``Σ_r g_r h_rᵀ``."""
+    n = use.outputs.shape[0]
+    eps = np.finfo(np.float64).eps
+    gamma = n * eps / (1.0 - n * eps)
+    return 2.0 * gamma * (np.abs(use.outputs).T @ np.abs(use.inputs))
 
 
 def test_registry_names_one_id_per_tensor_object_and_lists_its_aliases() -> None:
@@ -222,12 +292,14 @@ def test_use_sites_are_tensor_returning_reads_in_execution_order() -> None:
     assert [site.use_site_id for site in _sites_of(sites, "scale.weight")] == ["scale.weight#0"]
 
 
-def test_a_transposed_read_is_a_use_site_of_the_same_tensor() -> None:
+def test_a_transpose_view_multiplied_by_matmul_is_an_identity_use_of_the_same_tensor() -> None:
     model = _seeded(_TransposedTie())
     sites = discover_parameter_use_sites(model, _TOKENS)
+    # ``x @ W.t()`` applies ``A = W`` in ``y = x · Aᵀ``: the ``.t()`` call implements
+    # the read, and the matmul consuming the view decides the orientation.
     assert [(site.use_site_id, site.transposed, site.op, site.module) for site in sites] == [
         ("embed.weight#0", False, resolve_name(F.embedding), "embed"),
-        ("embed.weight#1", True, resolve_name(torch.Tensor.t), ""),
+        ("embed.weight#1", False, resolve_name(torch.Tensor.t), ""),
     ]
     original = _original(model, "embed.weight")
     delta = _ramp((7, 4))
@@ -236,8 +308,10 @@ def test_a_transposed_read_is_a_use_site_of_the_same_tensor() -> None:
     )
     reference = F.embedding(_TOKENS, original) @ (original + torch.from_numpy(delta)).t()
     assert np.array_equal(run.output.values, reference.numpy())
-    assert [site.use_site_id for site in run.substituted] == ["embed.weight#1"]
-    assert [site.transposed for site in run.substituted] == [True]
+    assert [(site.use_site_id, site.transposed) for site in run.substituted] == [
+        ("embed.weight#1", False)
+    ]
+    assert run.use_sites == sites
 
 
 def test_native_execution_is_the_plain_forward() -> None:
@@ -370,7 +444,7 @@ def test_declared_positions_read_the_edit_only_at_those_rows() -> None:
     all_rows = execute_parameter_edits(
         model,
         _TOKENS,
-        [GlobalParameterEdit("body.0.weight", delta, tuple(range(_LEADING[1])))],
+        [GlobalParameterEdit("body.0.weight", delta, _EVERY_ROW)],
         leading_shape=_LEADING,
     )
     assert np.array_equal(all_rows.output.values, every.output.values)
@@ -493,14 +567,37 @@ def test_edits_refuse_what_they_cannot_execute_faithfully() -> None:
         run(UseSiteParameterEdit("body.0.weight", 2, delta, None))
     with pytest.raises(ValueError, match="non-negative integer"):
         UseSiteParameterEdit("body.0.weight", -1, delta, None)
-    with pytest.raises(ValueError, match="overflows"):
-        execute_parameter_edits(
-            torch.nn.Linear(2, 2, dtype=torch.float32),
-            torch.ones(1, 2),
-            [GlobalParameterEdit("weight", np.full((2, 2), 1e39), None)],
-        )
     with pytest.raises(TypeError, match="floating-point tensor"):
         execute_native(_TupleOutput(), torch.ones(1, 2, dtype=torch.float64))
+
+
+def test_a_global_edit_of_a_tensor_the_forward_never_reads_refuses() -> None:
+    model = _WithUnusedParameter()
+    x = torch.ones(1, 2, dtype=torch.float64)
+    with pytest.raises(ValueError, match=r"global edits of \['unused'\] were never read"):
+        execute_parameter_edits(model, x, [GlobalParameterEdit("unused", np.zeros(3), None)])
+    # Control: a global edit of the tensor the forward does read executes.
+    run = execute_parameter_edits(model, x, [GlobalParameterEdit("used.weight", np.zeros((2, 2)), None)])
+    assert [site.use_site_id for site in run.substituted] == ["used.weight#0"]
+
+
+def test_an_edit_the_tensor_format_cannot_represent_refuses_instead_of_rounding() -> None:
+    single = _seeded(torch.nn.Linear(2, 2, dtype=torch.float32))
+    x = torch.ones(1, 2)
+    # A delta below the float32 spacing of every weight would vanish on narrowing.
+    with pytest.raises(ValueError, match="not exactly representable in the tensor's float32 format"):
+        execute_parameter_edits(single, x, [GlobalParameterEdit("weight", np.full((2, 2), 1e-12), None)])
+    with pytest.raises(ValueError, match="not exactly representable in the tensor's float32 format"):
+        execute_parameter_edits(single, x, [GlobalParameterEdit("weight", np.full((2, 2), 1e39), None)])
+    # Control: a delta the float32 format carries exactly executes.
+    run = execute_parameter_edits(single, x, [GlobalParameterEdit("weight", np.zeros((2, 2)), None)])
+    assert [site.use_site_id for site in run.substituted] == ["weight#0"]
+    # The same tiny delta on a float64 tensor is representable, so it executes.
+    double = _seeded(torch.nn.Linear(2, 2, dtype=torch.float64))
+    moved = execute_parameter_edits(
+        double, x.to(torch.float64), [GlobalParameterEdit("weight", np.full((2, 2), 1e-12), None)]
+    )
+    assert not np.array_equal(moved.output.values, execute_native(double, x.to(torch.float64)).values)
 
 
 def test_declared_positions_refuse_where_rows_are_not_positions() -> None:
@@ -549,4 +646,227 @@ def test_declared_positions_refuse_where_rows_are_not_positions() -> None:
                 GlobalParameterEdit("body.0.bias", _ramp((6,)), (2,)),
             ],
             leading_shape=_LEADING,
+        )
+
+
+def test_use_cotangents_are_the_rows_a_linear_use_multiplied_and_wrote() -> None:
+    model = _model()
+    native = execute_native(model, _TOKENS).values
+    cotangent = _ramp(native.shape) - 0.1
+    run = execute_parameter_cotangents(
+        model,
+        _TOKENS,
+        [],
+        [OutputReadout(_EVERY_ROW)],
+        [cotangent],
+        ["body.0.weight#0", "embed.weight#1"],
+    )
+    assert np.array_equal(run.execution.output.values, native)
+    assert np.array_equal(run.readouts[0], native)
+    assert run.execution.use_sites == discover_parameter_use_sites(model, _TOKENS)
+    assert [(use.site.use_site_id, use.site.transposed) for use in run.uses] == [
+        ("body.0.weight#0", False),
+        ("embed.weight#1", False),
+    ]
+    assert all(param.grad is None for param in model.parameters())
+
+    first_weight = _original(model, "body.0.weight").requires_grad_(True)
+    head_weight = _original(model, "embed.weight").requires_grad_(True)
+    first_in = model.embed(_TOKENS)
+    first_out = F.linear(first_in, first_weight, model.body[0].bias)
+    x = first_in + model.body[2](model.body[1](first_out))
+    x = x + model.body(x)
+    head_in = model.scale(x)
+    head_out = F.linear(head_in, head_weight)
+    objective = (head_out * torch.from_numpy(cotangent)).sum()
+    g_first, g_head, dense_first = torch.autograd.grad(
+        objective, [first_out, head_out, first_weight]
+    )
+    first, head = run.uses
+    assert np.array_equal(first.outputs, g_first.reshape(-1, 6).numpy())
+    assert np.array_equal(first.inputs, first_in.detach().reshape(-1, 4).numpy())
+    assert np.array_equal(head.outputs, g_head.reshape(-1, 7).numpy())
+    assert np.array_equal(head.inputs, head_in.detach().reshape(-1, 4).numpy())
+
+    bound = _reconstruction_bound(first)
+    assert np.all(np.abs(first.outputs.T @ first.inputs - dense_first.numpy()) <= bound)
+    # Positive control: pairing the written rows with the read rows in reverse order breaks it.
+    reversed_rows = first.inputs[::-1]
+    assert not np.all(np.abs(first.outputs.T @ reversed_rows - dense_first.numpy()) <= bound)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "use_site_id", "transposed"),
+    [
+        (_TransposedTie, "embed.weight#1", False),
+        (_TransposedLinear, "weight#0", True),
+        (_PlainMatmul, "weight#0", True),
+    ],
+)
+def test_use_site_orientation_follows_how_the_op_multiplies_the_tensor(
+    fixture: type[torch.nn.Module], use_site_id: str, transposed: bool
+) -> None:
+    model = _seeded(fixture())
+    discovered = {site.use_site_id: site for site in discover_parameter_use_sites(model, _TOKENS)}
+    assert discovered[use_site_id].transposed is transposed
+    native = execute_native(model, _TOKENS).values
+    cotangent = _ramp(native.shape) - 0.1
+    run = execute_parameter_cotangents(
+        model, _TOKENS, [], [OutputReadout(_EVERY_ROW)], [cotangent], [use_site_id]
+    )
+    (use,) = run.uses
+    assert use.site == discovered[use_site_id]
+
+    # The dense gradient of the stored tensor through the multiplied use only.
+    tensor_id = use_site_id.rpartition("#")[0]
+    weight = dict(model.named_parameters())[tensor_id]
+    # The tied fixture also reads the tensor through its lookup; hold that read fixed.
+    embedded = model.embed(_TOKENS).detach()
+    multiplied = embedded @ weight.t() if tensor_id == "embed.weight" else model(_TOKENS)
+    (dense,) = torch.autograd.grad((multiplied * torch.from_numpy(cotangent)).sum(), [weight])
+    # ``Σ_r g_r h_rᵀ`` is the gradient of ``A``; ``A = Wᵀ`` when the use is transposed.
+    rows_product = use.outputs.T @ use.inputs
+    bound = _reconstruction_bound(use)
+    stored = rows_product.T if transposed else rows_product
+    stored_bound = bound.T if transposed else bound
+    assert stored.shape == tuple(dense.shape)
+    assert np.all(np.abs(stored - dense.numpy()) <= stored_bound)
+    # Positive control: pairing the written rows with the read rows in reverse order breaks it.
+    reversed_product = use.outputs.T @ use.inputs[::-1]
+    reversed_stored = reversed_product.T if transposed else reversed_product
+    assert not np.all(np.abs(reversed_stored - dense.numpy()) <= stored_bound)
+
+
+def test_use_cotangent_rows_at_declared_positions_come_from_the_edited_run() -> None:
+    model = _model()
+    delta = _ramp((6, 4))
+    positions = (1, 4)
+    edits = [UseSiteParameterEdit("body.0.weight", 0, delta, positions)]
+    executed = execute_parameter_edits(model, _TOKENS, edits, leading_shape=_LEADING)
+    cotangent = _ramp(executed.output.values.shape) - 0.1
+    run = execute_parameter_cotangents(
+        model,
+        _TOKENS,
+        edits,
+        [OutputReadout(_EVERY_ROW)],
+        [cotangent],
+        ["body.0.weight#0"],
+        leading_shape=_LEADING,
+    )
+    assert np.array_equal(run.execution.output.values, executed.output.values)
+    assert run.execution.substituted == executed.substituted
+    (use,) = run.uses
+    assert (use.outputs.shape, use.inputs.shape, use.site.transposed) == ((2, 6), (2, 4), False)
+
+    original = _original(model, "body.0.weight")
+    edited_weight = (original + torch.from_numpy(delta)).requires_grad_(True)
+    bias = model.body[0].bias
+    first_in = model.embed(_TOKENS)
+    moved = F.linear(first_in, edited_weight, bias)
+    h = _splice(F.linear(first_in, original, bias), moved, positions)
+    x = first_in + model.body[2](model.body[1](h))
+    x = x + model.body(x)
+    objective = (model.head(model.scale(x)) * torch.from_numpy(cotangent)).sum()
+    (g_moved,) = torch.autograd.grad(objective, [moved])
+    index = torch.as_tensor(positions)
+    assert np.array_equal(use.outputs, g_moved[:, index].reshape(-1, 6).numpy())
+    assert np.array_equal(use.inputs, first_in.detach()[:, index].reshape(-1, 4).numpy())
+    # Positive control: the every-position edit returns every row.
+    every = execute_parameter_cotangents(
+        model,
+        _TOKENS,
+        [UseSiteParameterEdit("body.0.weight", 0, delta, None)],
+        [OutputReadout(_EVERY_ROW)],
+        [cotangent],
+        ["body.0.weight#0"],
+    )
+    assert (every.uses[0].outputs.shape, every.uses[0].inputs.shape) == ((6, 6), (6, 4))
+
+
+def test_readout_cotangents_enter_at_their_declared_blocks() -> None:
+    model = _model()
+    readouts = [
+        UseSiteOutputReadout("body.2.weight#1"),
+        UseSiteInputReadout("body.0.weight#1"),
+        OutputReadout((0, 5)),
+    ]
+    blocks = [_ramp((1, 6, 4)) - 0.2, _ramp((1, 6, 4)) - 0.3, _ramp((1, 2, 7)) - 0.1]
+    run = execute_parameter_cotangents(model, _TOKENS, [], readouts, blocks, ["body.0.weight#0"])
+
+    first_weight = _original(model, "body.0.weight").requires_grad_(True)
+    bias = model.body[0].bias
+    first_in = model.embed(_TOKENS)
+    first_out = F.linear(first_in, first_weight, bias)
+    middle = first_in + model.body[2](model.body[1](first_out))
+    second_out = model.body[2](model.body[1](model.body[0](middle)))
+    logits = model.head(model.scale(middle + second_out))
+    index = torch.as_tensor((0, 5))
+    objective = (
+        (second_out * torch.from_numpy(blocks[0])).sum()
+        + (middle * torch.from_numpy(blocks[1])).sum()
+        + (logits[:, index] * torch.from_numpy(blocks[2])).sum()
+    )
+    (g_first,) = torch.autograd.grad(objective, [first_out])
+    (use,) = run.uses
+    assert np.array_equal(use.outputs, g_first.reshape(-1, 6).numpy())
+    assert np.array_equal(use.inputs, first_in.detach().reshape(-1, 4).numpy())
+    assert np.array_equal(run.readouts[0], second_out.detach().numpy())
+    assert np.array_equal(run.readouts[1], middle.detach().numpy())
+    assert np.array_equal(run.readouts[2], logits.detach()[:, index].numpy())
+
+
+def test_use_cotangents_refuse_what_they_cannot_factor_or_pair() -> None:
+    model = _model()
+    good = np.ones(execute_native(model, _TOKENS).values.shape)
+
+    def run(
+        readouts: list = [OutputReadout(_EVERY_ROW)],
+        blocks: tuple = (good,),
+        sites: tuple = ("body.0.weight#0",),
+        target: torch.nn.Module = model,
+    ) -> None:
+        execute_parameter_cotangents(target, _TOKENS, [], readouts, blocks, sites)
+
+    with pytest.raises(ValueError, match="at least one readout"):
+        run(readouts=[], blocks=())
+    with pytest.raises(ValueError, match="2 cotangent blocks for 1 readouts"):
+        run(blocks=(good, good))
+    with pytest.raises(ValueError, match="at least one use site"):
+        run(sites=())
+    # An alias is not an id here either.
+    with pytest.raises(ValueError, match="unknown tensor id"):
+        run(sites=("head.weight#1",))
+    for malformed in ("body.0.weight", "body.0.weight#", "#0", "body.0.weight#01", "body.0.weight#-1"):
+        with pytest.raises(ValueError, match="a use site id is"):
+            run(sites=(malformed,))
+    with pytest.raises(ValueError, match="use sites must be distinct"):
+        run(sites=("body.0.weight#0", "body.0.weight#0"))
+    with pytest.raises(TypeError, match="must be OutputReadout, UseSiteInputReadout or"):
+        run(readouts=["logits"])
+    with pytest.raises(ValueError, match="an output readout declares its positions"):
+        OutputReadout(None)
+    with pytest.raises(ValueError, match="its readout block has shape"):
+        run(blocks=(good[..., :3],))
+    nonfinite = good.copy()
+    nonfinite.flat[0] = np.nan
+    with pytest.raises(ValueError, match="readout cotangents must be finite"):
+        run(blocks=(nonfinite,))
+    with pytest.raises(ValueError, match="were never multiplied"):
+        run(sites=("body.0.weight#2",))
+    with pytest.raises(ValueError, match="readout use site body.2.weight#5 was never reached"):
+        run(readouts=[UseSiteOutputReadout("body.2.weight#5")], blocks=(np.ones((1, 6, 4)),))
+    with pytest.raises(ValueError, match="lie outside axis 1"):
+        run(readouts=[OutputReadout((6,))], blocks=(np.ones((1, 1, 7)),))
+    # Reads with no factored rows: an embedding lookup and a bias.
+    with pytest.raises(ValueError, match="has factored cotangent rows"):
+        run(sites=("embed.weight#0",))
+    with pytest.raises(ValueError, match="has factored cotangent rows"):
+        run(sites=("body.0.bias#0",))
+    # A transpose view consumed by a copy is not multiplied by the use.
+    copied = _seeded(_TransposeCopied())
+    with pytest.raises(ValueError, match="reads a transpose view consumed by"):
+        run(
+            target=copied,
+            sites=("embed.weight#1",),
+            blocks=(np.ones(execute_native(copied, _TOKENS).values.shape),),
         )

@@ -14,11 +14,15 @@ This module only
   exact float64 widening;
 * discovers use sites: within one forward, every torch function call that
   reads a registered parameter and returns a tensor, keyed
-  ``{tensor_id}#{ordinal}`` in execution order;
+  ``{tensor_id}#{ordinal}`` in execution order, with the orientation of the
+  linear map that multiplies it;
 * executes a forward in which a tensor reads ``W + ΔW`` at every use (a global
   edit, which moves every tied use) or at exactly one use site (a use-specific
   edit), at every position or only at declared positions, and returns the
-  executed output with the forward's use sites.
+  executed output with the forward's use sites;
+* differentiates that executed forward for the teacher, by torch autograd:
+  for each requested linear use, the rows it multiplied and the cotangent rows
+  at what it wrote, given cotangents at declared readouts.
 
 ``ΔW`` arrives in the tensor's stored orientation, factored as
 ``left · rightᵀ`` (the canonical record) or dense for small blocks; applying it
@@ -31,7 +35,7 @@ unchanged afterwards.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable
 
 import numpy as np
@@ -39,19 +43,32 @@ import torch
 from torch.overrides import TorchFunctionMode, resolve_name
 
 __all__ = [
+    "EditedCotangents",
     "EditedExecution",
     "ExecutedOutput",
     "FactoredDelta",
     "GlobalParameterEdit",
+    "OutputReadout",
     "ParameterTensor",
     "ParameterUseSite",
+    "UseCotangent",
+    "UseSiteInputReadout",
+    "UseSiteOutputReadout",
     "UseSiteParameterEdit",
     "discover_parameter_use_sites",
     "execute_native",
+    "execute_parameter_cotangents",
     "execute_parameter_edits",
     "parameter_registry",
     "parameter_values",
 ]
+
+_LINEAR = resolve_name(torch.nn.functional.linear)
+_MATMUL = frozenset(
+    resolve_name(function)
+    for function in (torch.matmul, torch.Tensor.matmul, torch.Tensor.__matmul__)
+)
+_Planned = tuple[torch.Tensor, "tuple[int, ...] | None"]
 
 
 def _is_index(value: Any) -> bool:
@@ -61,6 +78,21 @@ def _is_index(value: Any) -> bool:
 def _require_ordinal(ordinal: Any) -> None:
     if not _is_index(ordinal) or ordinal < 0:
         raise ValueError(f"ordinal must be a non-negative integer; got {ordinal!r}")
+
+
+def _parse_use_site_id(use_site_id: Any) -> tuple[str, int]:
+    """``"{tensor_id}#{ordinal}"`` with a canonical decimal ordinal."""
+    if not isinstance(use_site_id, str):
+        raise TypeError(f"a use site id is a string; got {type(use_site_id).__name__}")
+    tensor_id, separator, ordinal = use_site_id.rpartition("#")
+    if (
+        not separator
+        or not tensor_id
+        or not (ordinal.isascii() and ordinal.isdigit())
+        or str(int(ordinal)) != ordinal
+    ):
+        raise ValueError(f"a use site id is '{{tensor_id}}#{{ordinal}}'; got {use_site_id!r}")
+    return tensor_id, int(ordinal)
 
 
 def _declared_positions(positions: Any) -> tuple[int, ...] | None:
@@ -120,8 +152,13 @@ class ParameterUseSite:
         read this tensor and returned a tensor. Calls that return no tensor,
         such as dtype or shape queries, are not uses.
     transposed
-        True when the read returned the tensor's transpose as a view (``W.t()``,
-        ``W.T``), so the op consuming that view sees ``Wᵀ``.
+        The orientation of the linear map that multiplies this read. Writing the
+        consuming op as ``y = x · Aᵀ``, True means ``A = Wᵀ`` (``x @ W``,
+        ``F.linear(x, W.t())``) and False means ``A = W`` (``F.linear(x, W)``,
+        ``x @ W.t()``). A transpose view such as ``W.t()`` is how a read is
+        implemented, not the map's orientation, so the op consuming the view
+        decides. A read that no ``F.linear`` or matmul multiplies (an embedding,
+        a bias, an element-wise use) applies no linear map and reports False.
     op
         :func:`torch.overrides.resolve_name` of the function that read it.
     module
@@ -189,6 +226,41 @@ class UseSiteParameterEdit:
 
 
 @dataclass(frozen=True)
+class OutputReadout:
+    """The model output's rows at the declared ``positions`` along axis 1."""
+
+    positions: Any
+
+    def __post_init__(self) -> None:
+        positions = _declared_positions(self.positions)
+        if positions is None:
+            raise ValueError("an output readout declares its positions")
+        object.__setattr__(self, "positions", positions)
+
+
+@dataclass(frozen=True)
+class UseSiteInputReadout:
+    """The rows use ``use_site_id`` multiplied: the first non-parameter tensor
+    argument of its op, or of the op consuming its transpose view."""
+
+    use_site_id: str
+
+    def __post_init__(self) -> None:
+        _parse_use_site_id(self.use_site_id)
+
+
+@dataclass(frozen=True)
+class UseSiteOutputReadout:
+    """What use ``use_site_id``'s op wrote (for a transpose view, what the
+    consuming op wrote), as the forward carried it."""
+
+    use_site_id: str
+
+    def __post_init__(self) -> None:
+        _parse_use_site_id(self.use_site_id)
+
+
+@dataclass(frozen=True)
 class ExecutedOutput:
     """The model's output, promoted exactly to float64, with its source
     dtype."""
@@ -208,8 +280,40 @@ class EditedExecution:
     substituted: tuple[ParameterUseSite, ...]
 
 
+@dataclass(frozen=True)
+class UseCotangent:
+    """One linear use's cotangent in factored rows.
+
+    ``outputs`` ``(rows, width written)`` are the cotangent at the rows the
+    consuming op wrote and ``inputs`` ``(rows, width read)`` are the rows it
+    multiplied. Writing the op as ``y = x · Aᵀ``, ``Σ_r outputs[r] · inputs[r]ᵀ``
+    is the gradient of ``A``, oriented by ``site.transposed``; it is never
+    formed. With declared positions only the rows at those positions appear.
+    """
+
+    site: ParameterUseSite
+    outputs: np.ndarray
+    inputs: np.ndarray
+
+
+@dataclass(frozen=True)
+class EditedCotangents:
+    """An executed forward, its declared readout blocks (float64, in readout
+    order), and each requested use's factored cotangent rows (in request
+    order). Rows are never summed across uses; tied accumulation belongs to
+    the caller."""
+
+    execution: EditedExecution
+    readouts: tuple[np.ndarray, ...]
+    uses: tuple[UseCotangent, ...]
+
+
 def _dtype_name(dtype: torch.dtype) -> str:
     return str(dtype).removeprefix("torch.")
+
+
+def _float64_copy(tensor: torch.Tensor) -> np.ndarray:
+    return tensor.detach().to(device="cpu", dtype=torch.float64, copy=True).numpy()
 
 
 def _registered_parameters(
@@ -259,7 +363,7 @@ def parameter_values(model: torch.nn.Module, tensor_id: str) -> np.ndarray:
     param = _lookup(_registered_parameters(model), tensor_id)
     if not param.is_floating_point():
         raise TypeError(f"parameter {tensor_id!r} has non-floating dtype {param.dtype}")
-    return param.detach().to(device="cpu", dtype=torch.float64, copy=True).numpy()
+    return _float64_copy(param)
 
 
 def _lookup(
@@ -280,44 +384,100 @@ def _finite_array(tensor_id: str, values: Any) -> np.ndarray:
 def _edited_tensor(
     table: dict[str, tuple[torch.nn.Parameter, list[str]]], tensor_id: str, delta: Any
 ) -> torch.Tensor:
-    """``W + delta`` in the tensor's own dtype and device."""
+    """``W + delta``, formed in float64 and handed over in the tensor's own
+    dtype and device only when that format represents it exactly."""
     param = _lookup(table, tensor_id)
     shape = tuple(param.shape)
 
-    def cast(array: np.ndarray) -> torch.Tensor:
-        return torch.from_numpy(array).to(device=param.device, dtype=param.dtype)
+    def widened(array: np.ndarray) -> torch.Tensor:
+        return torch.from_numpy(array).to(device=param.device)
 
-    if isinstance(delta, FactoredDelta):
-        left = _finite_array(tensor_id, delta.left)
-        right = _finite_array(tensor_id, delta.right)
-        if (
-            len(shape) != 2
-            or left.ndim != 2
-            or right.ndim != 2
-            or left.shape[0] != shape[0]
-            or right.shape[0] != shape[1]
-            or left.shape[1] != right.shape[1]
-        ):
+    with torch.no_grad():
+        base = param.detach().to(dtype=torch.float64)
+        if isinstance(delta, FactoredDelta):
+            left = _finite_array(tensor_id, delta.left)
+            right = _finite_array(tensor_id, delta.right)
+            if (
+                len(shape) != 2
+                or left.ndim != 2
+                or right.ndim != 2
+                or left.shape[0] != shape[0]
+                or right.shape[0] != shape[1]
+                or left.shape[1] != right.shape[1]
+            ):
+                raise ValueError(
+                    f"the factored delta for {tensor_id!r} has left {left.shape} and right "
+                    f"{right.shape}; a tensor of shape {shape} needs (d_out, rank) and (d_in, rank)"
+                )
+            edited = base + widened(left) @ widened(right).T
+        else:
+            dense = _finite_array(tensor_id, delta)
+            if dense.shape != shape:
+                raise ValueError(
+                    f"the dense delta for {tensor_id!r} has shape {dense.shape}; "
+                    f"the tensor has shape {shape}"
+                )
+            edited = base + widened(dense)
+        if not bool(torch.isfinite(edited).all()):
+            raise ValueError(f"the edited {tensor_id!r} is not finite")
+        narrowed = edited.to(dtype=param.dtype)
+        if not torch.equal(narrowed.to(dtype=torch.float64), edited):
             raise ValueError(
-                f"the factored delta for {tensor_id!r} has left {left.shape} and right "
-                f"{right.shape}; a tensor of shape {shape} needs (d_out, rank) and (d_in, rank)"
+                f"the edited {tensor_id!r} is not exactly representable in the tensor's "
+                f"{_dtype_name(param.dtype)} format, so narrowing would round the delta; "
+                "execute the model in float64"
             )
-        with torch.no_grad():
-            edited = param.detach() + cast(left) @ cast(right).T
-    else:
-        dense = _finite_array(tensor_id, delta)
-        if dense.shape != shape:
+    return narrowed
+
+
+def _plan_edits(
+    table: dict[str, tuple[torch.nn.Parameter, list[str]]],
+    edits: tuple[Any, ...],
+    leading_shape: Any,
+) -> tuple[dict[str, _Planned], dict[tuple[str, int], _Planned], tuple[int, int] | None]:
+    """Validate the edits and build each planned tensor once."""
+    if leading_shape is not None:
+        leading_shape = tuple(leading_shape)
+        if len(leading_shape) != 2 or not all(_is_index(size) and size > 0 for size in leading_shape):
             raise ValueError(
-                f"the dense delta for {tensor_id!r} has shape {dense.shape}; "
-                f"the tensor has shape {shape}"
+                f"leading_shape must be the unit's (batch, seq) as positive integers; got {leading_shape!r}"
             )
-        with torch.no_grad():
-            edited = param.detach() + cast(dense)
-    if not bool(torch.isfinite(edited).all()):
+        leading_shape = (int(leading_shape[0]), int(leading_shape[1]))
+    global_values: dict[str, _Planned] = {}
+    site_values: dict[tuple[str, int], _Planned] = {}
+    for edit in edits:
+        if not isinstance(edit, (GlobalParameterEdit, UseSiteParameterEdit)):
+            raise TypeError(
+                f"edits must be GlobalParameterEdit or UseSiteParameterEdit; got {type(edit).__name__}"
+            )
+        if edit.positions is not None:
+            if leading_shape is None:
+                raise ValueError(
+                    f"an edit of {edit.tensor_id!r} declares positions, which need the unit's "
+                    "leading_shape (batch, seq)"
+                )
+            if edit.positions[-1] >= leading_shape[1]:
+                raise ValueError(
+                    f"position {edit.positions[-1]} of an edit of {edit.tensor_id!r} lies outside "
+                    f"the unit length {leading_shape[1]}"
+                )
+        planned = (_edited_tensor(table, edit.tensor_id, edit.delta), edit.positions)
+        if isinstance(edit, GlobalParameterEdit):
+            if edit.tensor_id in global_values:
+                raise ValueError(f"more than one global edit of {edit.tensor_id!r}")
+            global_values[edit.tensor_id] = planned
+        else:
+            key = (edit.tensor_id, int(edit.ordinal))
+            if key in site_values:
+                raise ValueError(f"more than one edit at use site {edit.tensor_id}#{edit.ordinal}")
+            site_values[key] = planned
+    clash = sorted({tensor_id for tensor_id, ordinal in site_values} & global_values.keys())
+    if clash:
         raise ValueError(
-            f"the edited {tensor_id!r} overflows the tensor's {_dtype_name(param.dtype)} format"
+            f"tensors {clash} carry both a global edit and a use-site edit; "
+            "a global edit already reaches every use"
         )
-    return edited
+    return global_values, site_values, leading_shape
 
 
 def _collect_reads(
@@ -379,17 +539,34 @@ def _is_transpose_view(result: Any, read: torch.Tensor) -> bool:
     )
 
 
+def _map_transposes(op: str, args: Any, kwargs: Any, matrix: torch.Tensor) -> bool | None:
+    """Written ``y = x · Aᵀ``, whether ``op`` multiplies ``matrix`` as ``A``
+    (False: the weight of ``F.linear``) or as ``Aᵀ`` (True: the right operand of
+    a matmul); None when ``op`` applies no such map to it."""
+    if op == _LINEAR and (args[1] if len(args) > 1 else kwargs.get("weight")) is matrix:
+        return False
+    if op in _MATMUL and len(args) > 1 and args[1] is matrix and matrix.dim() == 2:
+        return True
+    return None
+
+
+_Capture = tuple[ParameterUseSite, "torch.Tensor | None", torch.Tensor, torch.Tensor, "tuple[int, ...] | None"]
+
+
 class _ParameterUseMode(TorchFunctionMode):
-    """Counts each tensor-returning read of a registered parameter and swaps in
-    edited tensors at the planned reads."""
+    """Counts each tensor-returning read of a registered parameter, swaps in
+    edited tensors at the planned reads, orients each read by the map that
+    multiplies it, and records what the tracked uses multiplied and wrote."""
 
     def __init__(
         self,
         parameters: dict[int, tuple[torch.nn.Parameter, str]],
         module_stack: list[str],
-        global_values: dict[str, tuple[torch.Tensor, tuple[int, ...] | None]],
-        site_values: dict[tuple[str, int], tuple[torch.Tensor, tuple[int, ...] | None]],
+        global_values: dict[str, _Planned],
+        site_values: dict[tuple[str, int], _Planned],
         leading_shape: tuple[int, int] | None,
+        requested: frozenset[tuple[str, int]],
+        read_out: frozenset[tuple[str, int]],
     ) -> None:
         super().__init__()
         self._parameters = parameters
@@ -397,9 +574,15 @@ class _ParameterUseMode(TorchFunctionMode):
         self._global_values = global_values
         self._site_values = site_values
         self._leading_shape = leading_shape
+        self._requested = requested
+        self._tracked = requested | read_out
         self._counts: dict[str, int] = {}
         self.use_sites: list[ParameterUseSite] = []
         self.substituted: list[ParameterUseSite] = []
+        # (site, rows multiplied, result as carried, what the use wrote, declared positions)
+        self.captured: dict[tuple[str, int], _Capture] = {}
+        # A transpose-view read waits for the op that multiplies the view: (use_sites index, view).
+        self.pending_views: dict[int, tuple[int, torch.Tensor]] = {}
 
     def __torch_function__(
         self, func: Callable[..., Any], types: Any, args: Any = (), kwargs: Any = None
@@ -407,10 +590,18 @@ class _ParameterUseMode(TorchFunctionMode):
         kwargs = {} if kwargs is None else kwargs
         found: dict[int, str] = {}
         _collect_reads((args, kwargs), self._parameters, found)
-        if not found:
+        views = [
+            entry
+            for tensor in (*args, *kwargs.values())
+            if isinstance(tensor, torch.Tensor)
+            for entry in (self.pending_views.get(id(tensor)),)
+            if entry is not None and entry[1] is tensor
+        ]
+        if not found and not views:
             return func(*args, **kwargs)
         replacements: dict[int, torch.Tensor] = {}
         declared: dict[int, tuple[int, ...]] = {}
+        edited_keys: set[int] = set()
         reads = []
         for key, tensor_id in found.items():
             ordinal = self._counts.get(tensor_id, 0)
@@ -419,32 +610,89 @@ class _ParameterUseMode(TorchFunctionMode):
             planned = self._global_values.get(tensor_id)
             if planned is None:
                 planned = self._site_values.get((tensor_id, ordinal))
+            read = self._parameters[key][0] if planned is None else planned[0]
             if planned is not None:
-                replacements[key] = planned[0]
+                edited_keys.add(key)
                 if planned[1] is not None:
                     declared[key] = planned[1]
+            if (tensor_id, ordinal) in self._requested:
+                # A storage-sharing view that requires grad makes this use's output
+                # differentiable without copying the weight.
+                read = read.detach().requires_grad_(True)
+            if read is not self._parameters[key][0]:
+                replacements[key] = read
             reads.append((key, tensor_id, ordinal))
         if not declared:
             result = func(*_substitute(args, replacements), **_substitute(kwargs, replacements))
+            written = result
         else:
-            result = self._select_declared_rows(func, args, kwargs, replacements, declared, reads)
+            result, written = self._select_declared_rows(
+                func, args, kwargs, replacements, declared, reads
+            )
         if not _holds_tensor(result):
             return result
         op = resolve_name(func) or getattr(func, "__qualname__", type(func).__name__)
         module = self._module_stack[-1] if self._module_stack else ""
+        inputs = _input_tensors((args, kwargs), self._parameters)
         for key, tensor_id, ordinal in reads:
-            read = replacements.get(key, self._parameters[key][0])
+            param = self._parameters[key][0]
+            is_view = _is_transpose_view(result, replacements.get(key, param))
+            transposes = None if is_view else _map_transposes(op, args, kwargs, param)
             site = ParameterUseSite(
                 tensor_id=tensor_id,
                 ordinal=ordinal,
-                transposed=_is_transpose_view(result, read),
+                transposed=bool(transposes),
                 op=op,
                 module=module,
             )
             self._counts[tensor_id] = ordinal + 1
             self.use_sites.append(site)
-            if key in replacements:
+            if key in edited_keys:
                 self.substituted.append(site)
+            if is_view:
+                # The map's orientation is set by whichever op multiplies this view.
+                self.pending_views[id(result)] = (len(self.use_sites) - 1, result)
+                continue
+            if (tensor_id, ordinal) not in self._tracked:
+                continue
+            if transposes is None and (tensor_id, ordinal) in self._requested:
+                raise ValueError(
+                    f"use site {site.use_site_id} is read by {op}; only {_LINEAR} or matmul "
+                    "multiplying the tensor, or its transpose view, has factored cotangent rows"
+                )
+            self.captured[(tensor_id, ordinal)] = (
+                site,
+                inputs[0] if inputs else None,
+                result,
+                written,
+                declared.get(key),
+            )
+        for index, view in views:
+            # A view passed twice to one call is consumed once.
+            if self.pending_views.pop(id(view), None) is None:
+                continue
+            transposes = _map_transposes(op, args, kwargs, view)
+            site = self.use_sites[index]
+            if transposes is not None:
+                # Multiplying the transpose view flips the orientation of the stored tensor.
+                updated = replace(site, transposed=not transposes)
+                self.use_sites[index] = updated
+                self.substituted = [updated if entry is site else entry for entry in self.substituted]
+                site = updated
+            if (site.tensor_id, site.ordinal) not in self._tracked:
+                continue
+            if transposes is None and (site.tensor_id, site.ordinal) in self._requested:
+                raise ValueError(
+                    f"use site {site.use_site_id} reads a transpose view consumed by {op}; only "
+                    f"{_LINEAR} or matmul consuming it has factored cotangent rows"
+                )
+            self.captured[(site.tensor_id, site.ordinal)] = (
+                site,
+                inputs[0] if inputs else None,
+                result,
+                result,
+                None,
+            )
         return result
 
     def _select_declared_rows(
@@ -455,9 +703,10 @@ class _ParameterUseMode(TorchFunctionMode):
         replacements: dict[int, torch.Tensor],
         declared: dict[int, tuple[int, ...]],
         reads: list[tuple[int, str, int]],
-    ) -> Any:
+    ) -> tuple[Any, Any]:
         """Run the op on the same inputs with ``W`` and with ``W + ΔW`` at the
-        declared reads, then take the declared rows from the edited result."""
+        declared reads, then take the declared rows from the edited result.
+        Returns the combined result and the edited run's result."""
         sites = [f"{tensor_id}#{ordinal}" for key, tensor_id, ordinal in reads if key in declared]
         position_sets = set(declared.values())
         if len(position_sets) > 1:
@@ -469,7 +718,7 @@ class _ParameterUseMode(TorchFunctionMode):
         clean = func(*_substitute(args, everywhere), **_substitute(kwargs, everywhere))
         edited = func(*_substitute(args, replacements), **_substitute(kwargs, replacements))
         if not _holds_tensor(clean):
-            return clean
+            return clean, edited
         leading = self._leading_shape
         views_a_read = isinstance(clean, torch.Tensor) and any(
             clean.data_ptr() == tensor.data_ptr()
@@ -495,7 +744,7 @@ class _ParameterUseMode(TorchFunctionMode):
         index = torch.as_tensor(positions, device=clean.device)
         combined = clean.clone()
         combined[:, index] = edited[:, index]
-        return combined
+        return combined, edited
 
 
 def _push_module(stack: list[str], name: str) -> Callable[..., None]:
@@ -515,20 +764,24 @@ def _pop_module(stack: list[str]) -> Callable[..., None]:
 def _run_under_mode(
     model: torch.nn.Module,
     inputs: Any,
-    global_values: dict[str, tuple[torch.Tensor, tuple[int, ...] | None]],
-    site_values: dict[tuple[str, int], tuple[torch.Tensor, tuple[int, ...] | None]],
+    global_values: dict[str, _Planned],
+    site_values: dict[tuple[str, int], _Planned],
     leading_shape: tuple[int, int] | None,
+    requested: frozenset[tuple[str, int]],
+    read_out: frozenset[tuple[str, int]],
 ) -> tuple[Any, _ParameterUseMode]:
     table = _registered_parameters(model)
     parameters = {id(param): (param, tensor_id) for tensor_id, (param, aliases) in table.items()}
     stack: list[str] = []
-    mode = _ParameterUseMode(parameters, stack, global_values, site_values, leading_shape)
+    mode = _ParameterUseMode(
+        parameters, stack, global_values, site_values, leading_shape, requested, read_out
+    )
     handles = []
     try:
         for name, module in model.named_modules():
             handles.append(module.register_forward_pre_hook(_push_module(stack, name)))
             handles.append(module.register_forward_hook(_pop_module(stack), always_call=True))
-        with torch.no_grad(), mode:
+        with torch.enable_grad() if requested else torch.no_grad(), mode:
             output = model(inputs)
     finally:
         for handle in handles:
@@ -541,9 +794,26 @@ def _executed_output(output: Any) -> ExecutedOutput:
         raise TypeError(
             f"the model must return a floating-point tensor; got {type(output).__name__}"
         )
-    return ExecutedOutput(
-        values=output.detach().to(device="cpu", dtype=torch.float64, copy=True).numpy(),
-        dtype=_dtype_name(output.dtype),
+    return ExecutedOutput(values=_float64_copy(output), dtype=_dtype_name(output.dtype))
+
+
+def _finished_execution(
+    output: Any,
+    mode: _ParameterUseMode,
+    global_values: dict[str, _Planned],
+    site_values: dict[tuple[str, int], _Planned],
+) -> EditedExecution:
+    reached = {(site.tensor_id, site.ordinal) for site in mode.substituted}
+    missed = sorted(f"{tensor_id}#{ordinal}" for tensor_id, ordinal in set(site_values) - reached)
+    if missed:
+        raise ValueError(f"use sites {missed} were never reached in this forward")
+    unread = sorted(set(global_values) - {site.tensor_id for site in mode.substituted})
+    if unread:
+        raise ValueError(f"global edits of {unread} were never read in this forward")
+    return EditedExecution(
+        output=_executed_output(output),
+        use_sites=tuple(mode.use_sites),
+        substituted=tuple(mode.substituted),
     )
 
 
@@ -558,7 +828,7 @@ def discover_parameter_use_sites(
     model: torch.nn.Module, inputs: Any
 ) -> tuple[ParameterUseSite, ...]:
     """Every use of every registered tensor in one unedited forward."""
-    output, mode = _run_under_mode(model, inputs, {}, {}, None)
+    output, mode = _run_under_mode(model, inputs, {}, {}, None, frozenset(), frozenset())
     return tuple(mode.use_sites)
 
 
@@ -570,9 +840,12 @@ def execute_parameter_edits(
 ) -> EditedExecution:
     """Run ``model(inputs)`` with every edit applied for this forward only.
 
-    A global edit makes every use read ``W + ΔW``. A use-site edit does so only
-    at ``{tensor_id}#{ordinal}``, which this forward must reach. A tensor
-    cannot carry both kinds, since a global edit already reaches every use.
+    A global edit makes every use read ``W + ΔW``, and refuses when this forward
+    reads the tensor nowhere. A use-site edit does so only at
+    ``{tensor_id}#{ordinal}``, which this forward must reach. A tensor cannot
+    carry both kinds, since a global edit already reaches every use. ``W + ΔW``
+    is formed in float64 and refuses unless the tensor's own format represents
+    it exactly, so an edit never runs rounded.
 
     An edit with declared positions needs ``leading_shape``, the unit's
     ``(batch, seq)``. At each of its uses the op runs twice on the same current
@@ -589,55 +862,142 @@ def execute_parameter_edits(
         raise ValueError(
             "execute_parameter_edits needs at least one edit; the all-on setting is execute_native"
         )
-    if leading_shape is not None:
-        leading_shape = tuple(leading_shape)
-        if len(leading_shape) != 2 or not all(_is_index(size) and size > 0 for size in leading_shape):
-            raise ValueError(
-                f"leading_shape must be the unit's (batch, seq) as positive integers; got {leading_shape!r}"
-            )
-        leading_shape = (int(leading_shape[0]), int(leading_shape[1]))
     table = _registered_parameters(model)
-    global_values: dict[str, tuple[torch.Tensor, tuple[int, ...] | None]] = {}
-    site_values: dict[tuple[str, int], tuple[torch.Tensor, tuple[int, ...] | None]] = {}
-    for edit in edits:
-        if not isinstance(edit, (GlobalParameterEdit, UseSiteParameterEdit)):
-            raise TypeError(
-                f"edits must be GlobalParameterEdit or UseSiteParameterEdit; got {type(edit).__name__}"
-            )
-        if edit.positions is not None:
-            if leading_shape is None:
-                raise ValueError(
-                    f"an edit of {edit.tensor_id!r} declares positions, which need the unit's "
-                    "leading_shape (batch, seq)"
-                )
-            if edit.positions[-1] >= leading_shape[1]:
-                raise ValueError(
-                    f"position {edit.positions[-1]} of an edit of {edit.tensor_id!r} lies outside "
-                    f"the unit length {leading_shape[1]}"
-                )
-        planned = (_edited_tensor(table, edit.tensor_id, edit.delta), edit.positions)
-        if isinstance(edit, GlobalParameterEdit):
-            if edit.tensor_id in global_values:
-                raise ValueError(f"more than one global edit of {edit.tensor_id!r}")
-            global_values[edit.tensor_id] = planned
-        else:
-            key = (edit.tensor_id, int(edit.ordinal))
-            if key in site_values:
-                raise ValueError(f"more than one edit at use site {edit.tensor_id}#{edit.ordinal}")
-            site_values[key] = planned
-    clash = sorted({tensor_id for tensor_id, ordinal in site_values} & global_values.keys())
-    if clash:
+    global_values, site_values, leading = _plan_edits(table, edits, leading_shape)
+    output, mode = _run_under_mode(
+        model, inputs, global_values, site_values, leading, frozenset(), frozenset()
+    )
+    return _finished_execution(output, mode, global_values, site_values)
+
+
+def execute_parameter_cotangents(
+    model: torch.nn.Module,
+    inputs: Any,
+    edits: Iterable[GlobalParameterEdit | UseSiteParameterEdit],
+    readouts: Iterable[OutputReadout | UseSiteInputReadout | UseSiteOutputReadout],
+    cotangents: Iterable[Any],
+    use_sites: Iterable[str],
+    leading_shape: tuple[int, int] | None = None,
+) -> EditedCotangents:
+    """Execute the edited forward (no edits is the all-on point) and return the
+    factored cotangent rows of each requested linear use.
+
+    ``cotangents`` holds one float64 block per declared readout, in the
+    readout's shape; the objective is the float64 sum of their inner products.
+    For each use in ``use_sites`` (``"{tensor_id}#{ordinal}"``), ``inputs`` are
+    the rows its op multiplied and ``outputs`` the cotangent rows at what that
+    op wrote, both at the executed state, oriented by the use site's
+    ``transposed``. A use read as a transpose view is multiplied by the op
+    consuming the view. At a use with declared positions both come from the
+    edited run, at the declared rows only. A use the objective does not depend
+    on gets exact zero output rows. Only ``torch.nn.functional.linear`` or
+    matmul multiplying the tensor or its transpose view has factored rows; any
+    other requested use refuses.
+    """
+    readouts = tuple(readouts)
+    blocks_in = tuple(cotangents)
+    requested = tuple(use_sites)
+    if not readouts:
+        raise ValueError("execute_parameter_cotangents needs at least one readout")
+    if len(blocks_in) != len(readouts):
         raise ValueError(
-            f"tensors {clash} carry both a global edit and a use-site edit; "
-            "a global edit already reaches every use"
+            f"{len(blocks_in)} cotangent blocks for {len(readouts)} readouts; each readout takes one"
         )
-    output, mode = _run_under_mode(model, inputs, global_values, site_values, leading_shape)
-    reached = {(site.tensor_id, site.ordinal) for site in mode.substituted}
-    missed = sorted(f"{tensor_id}#{ordinal}" for tensor_id, ordinal in set(site_values) - reached)
-    if missed:
-        raise ValueError(f"use sites {missed} were never reached in this forward")
-    return EditedExecution(
-        output=_executed_output(output),
-        use_sites=tuple(mode.use_sites),
-        substituted=tuple(mode.substituted),
+    if not requested:
+        raise ValueError("execute_parameter_cotangents needs at least one use site")
+    table = _registered_parameters(model)
+    keys = [_parse_use_site_id(use_site_id) for use_site_id in requested]
+    for tensor_id, ordinal in keys:
+        _lookup(table, tensor_id)
+    if len(set(keys)) != len(keys):
+        raise ValueError(f"use sites must be distinct; got {requested}")
+    read_out = set()
+    for readout in readouts:
+        if isinstance(readout, (UseSiteInputReadout, UseSiteOutputReadout)):
+            key = _parse_use_site_id(readout.use_site_id)
+            _lookup(table, key[0])
+            read_out.add(key)
+        elif not isinstance(readout, OutputReadout):
+            raise TypeError(
+                "readouts must be OutputReadout, UseSiteInputReadout or UseSiteOutputReadout; "
+                f"got {type(readout).__name__}"
+            )
+    global_values, site_values, leading = _plan_edits(table, tuple(edits), leading_shape)
+    output, mode = _run_under_mode(
+        model, inputs, global_values, site_values, leading, frozenset(keys), frozenset(read_out)
+    )
+    execution = _finished_execution(output, mode, global_values, site_values)
+    unreached = sorted(
+        f"{tensor_id}#{ordinal}"
+        for tensor_id, ordinal in keys
+        if (tensor_id, ordinal) not in mode.captured
+    )
+    if unreached:
+        unconsumed = sorted(mode.use_sites[index].use_site_id for index, view in mode.pending_views.values())
+        raise ValueError(
+            f"use sites {unreached} were never multiplied in this forward "
+            f"(transpose views never consumed: {unconsumed})"
+        )
+    blocks = []
+    for readout in readouts:
+        if isinstance(readout, OutputReadout):
+            if output.dim() < 2 or readout.positions[-1] >= output.shape[1]:
+                raise ValueError(
+                    f"output readout positions {readout.positions} lie outside axis 1 of the "
+                    f"output shape {tuple(output.shape)}"
+                )
+            block = output[:, torch.as_tensor(readout.positions, device=output.device)]
+        else:
+            record = mode.captured.get(_parse_use_site_id(readout.use_site_id))
+            if record is None:
+                raise ValueError(
+                    f"readout use site {readout.use_site_id} was never reached in this forward"
+                )
+            if isinstance(readout, UseSiteOutputReadout):
+                block = record[2]
+            elif record[1] is None:
+                raise ValueError(f"use site {readout.use_site_id} has no input tensor to read out")
+            else:
+                block = record[1]
+        blocks.append(block)
+    objective = None
+    for block, values in zip(blocks, blocks_in):
+        array = np.asarray(values, dtype=np.float64)
+        if array.shape != tuple(block.shape):
+            raise ValueError(
+                f"a readout cotangent has shape {array.shape}; its readout block has shape "
+                f"{tuple(block.shape)}"
+            )
+        if not np.all(np.isfinite(array)):
+            raise ValueError("readout cotangents must be finite")
+        term = (
+            block.to(torch.float64)
+            * torch.from_numpy(np.ascontiguousarray(array)).to(device=block.device)
+        ).sum()
+        objective = term if objective is None else objective + term
+    captured = [mode.captured[key] for key in keys]
+    written = [record[3] for record in captured]
+    if objective.requires_grad:
+        gradients = torch.autograd.grad(objective, written, allow_unused=True)
+    else:
+        gradients = (None,) * len(written)
+    uses = []
+    for (site, read, carried, wrote, positions), gradient in zip(captured, gradients):
+        rows_written = torch.zeros_like(wrote) if gradient is None else gradient
+        rows_read = read
+        if positions is not None:
+            index = torch.as_tensor(positions, device=wrote.device)
+            rows_written = rows_written[:, index]
+            rows_read = rows_read[:, index]
+        uses.append(
+            UseCotangent(
+                site=site,
+                outputs=_float64_copy(rows_written.reshape(-1, rows_written.shape[-1])),
+                inputs=_float64_copy(rows_read.reshape(-1, rows_read.shape[-1])),
+            )
+        )
+    return EditedCotangents(
+        execution=execution,
+        readouts=tuple(_float64_copy(block) for block in blocks),
+        uses=tuple(uses),
     )
