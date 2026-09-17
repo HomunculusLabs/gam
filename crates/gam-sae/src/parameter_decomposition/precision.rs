@@ -59,7 +59,29 @@
 //! error only through a derived Lipschitz constant. The measurement covers the inputs
 //! the evaluation executes and certifies nothing beyond them (#2946 fr-census
 //! overclaim audit, comment 5716123817).
+//!
+//! # Messages
+//!
+//! Each code is also one self-delimiting message through `codec`'s integer codes, so
+//! a library appends it and a decoder reads it back without a real-valued field:
+//!
+//! * [`LatticeCode::write`] sends the coordinate count as `count + 1`, the declared
+//!   precision `p` as `zigzag(p) + 1`, and each index `k` as `zigzag(k) + 1`, all in
+//!   the prefix integer code. `zigzag` maps `0, −1, 1, −2, …` onto `0, 1, 2, 3, …`.
+//! * [`QuotientCode::write`] sends the count as `count + 1` and the resolution as
+//!   `b + 1` in the prefix integer code, then each index as a fixed index into the
+//!   `2^b` cells: exactly [`QuotientCode::index_bits`] after the header. The period
+//!   is a declared convention of the decoder and is never written.
+//!
+//! A reader refuses a count that the bits remaining in the message cannot hold before
+//! it allocates anything: a lattice index takes at least one bit, and a quotient index
+//! exactly `b`. That bound needs `b ≥ 1`. A 0-bit quotient code would decode every class
+//! to the same representative and carry no coordinate, so it is refused.
 
+use super::codec::{
+    BitReader, BitString, decode_fixed_index, decode_prefix_integer, encode_fixed_index,
+    encode_prefix_integer,
+};
 use gam_linalg::roundoff::UNIT_ROUNDOFF;
 
 /// Largest `|p|` for which both `2^p` and `2^-p` are normal `f64` powers of two: the
@@ -225,9 +247,16 @@ impl PeriodicQuotient {
     }
 }
 
-/// Refuse a resolution whose cell half-width `2^-(b+1)`, in period units, does not
-/// exceed the `3u` rounding of the representative (see the module note).
+/// Refuse a resolution with no bits, or one whose cell half-width `2^-(b+1)`, in period
+/// units, does not exceed the `3u` rounding of the representative (see the module note).
+/// A 0-bit code decodes every class to one representative and carries no coordinate.
 fn check_resolution(resolution_bits: u32) -> Result<(), String> {
+    if resolution_bits == 0 {
+        return Err(
+            "QuotientCode: a 0-bit code carries no coordinate: every class decodes to 0"
+                .to_string(),
+        );
+    }
     let resolved = resolution_bits < f64::MANTISSA_DIGITS
         && power_of_two(-(resolution_bits as i32) - 1) > 3.0 * UNIT_ROUNDOFF;
     if !resolved {
@@ -338,6 +367,114 @@ impl DecodableArtifact for QuotientCode {
             .iter()
             .map(|&index| index as f64 * cell_width)
             .collect())
+    }
+}
+
+/// `k -> 2k` for `k >= 0` and `2|k| - 1` for `k < 0`: a bijection of the integers onto
+/// the naturals, so `zigzag(k) + 1` is a positive integer the prefix code sends. Every
+/// index and exponent here has magnitude at most `2^53`, whose image is at most `2^54`.
+fn zigzag(value: i64) -> u64 {
+    ((value << 1) ^ (value >> 63)) as u64
+}
+
+/// The inverse of [`zigzag`].
+fn unzigzag(value: u64) -> i64 {
+    ((value >> 1) as i64) ^ -((value & 1) as i64)
+}
+
+impl LatticeCode {
+    /// Append the code as one message in the prefix integer code: the count as
+    /// `count + 1`, the declared precision as `zigzag(p) + 1`, then each index as
+    /// `zigzag(k) + 1` (see the module note).
+    pub fn write(&self, out: &mut BitString) -> Result<(), String> {
+        encode_prefix_integer(out, self.indices.len() as u64 + 1)
+            .map_err(|error| format!("LatticeCode::write: count: {error}"))?;
+        encode_prefix_integer(out, zigzag(i64::from(self.precision.fraction_bits)) + 1)
+            .map_err(|error| format!("LatticeCode::write: precision: {error}"))?;
+        for (position, &index) in self.indices.iter().enumerate() {
+            encode_prefix_integer(out, zigzag(index) + 1)
+                .map_err(|error| format!("LatticeCode::write: index {position}: {error}"))?;
+        }
+        Ok(())
+    }
+
+    /// Read one message written by [`Self::write`]. Every index codeword takes at least
+    /// one bit, so a count above the bits that remain is refused before anything is
+    /// allocated. The indices then pass [`Self::from_indices`].
+    pub fn read(reader: &mut BitReader<'_>) -> Result<Self, String> {
+        let count = decode_prefix_integer(reader)
+            .map_err(|error| format!("LatticeCode::read: count: {error}"))?
+            - 1;
+        let exponent = unzigzag(
+            decode_prefix_integer(reader)
+                .map_err(|error| format!("LatticeCode::read: precision: {error}"))?
+                - 1,
+        );
+        let fraction_bits = i32::try_from(exponent).map_err(|error| {
+            format!("LatticeCode::read: precision exponent {exponent}: {error}")
+        })?;
+        let precision = DeclaredPrecision::new(fraction_bits)?;
+        let remaining = reader.remaining_bits();
+        if count > remaining {
+            return Err(format!(
+                "LatticeCode::read: {count} indices need at least {count} bits, {remaining} remain"
+            ));
+        }
+        let mut indices = Vec::with_capacity(count as usize);
+        for position in 0..count {
+            let value = decode_prefix_integer(reader)
+                .map_err(|error| format!("LatticeCode::read: index {position}: {error}"))?;
+            indices.push(unzigzag(value - 1));
+        }
+        Self::from_indices(precision, indices)
+    }
+}
+
+impl QuotientCode {
+    /// Append the code as one message: the count as `count + 1` and the resolution as
+    /// `b + 1` in the prefix integer code, then each index as a fixed index into the
+    /// `2^b` cells (see the module note). The period is not written.
+    pub fn write(&self, out: &mut BitString) -> Result<(), String> {
+        encode_prefix_integer(out, self.indices.len() as u64 + 1)
+            .map_err(|error| format!("QuotientCode::write: count: {error}"))?;
+        encode_prefix_integer(out, u64::from(self.resolution_bits) + 1)
+            .map_err(|error| format!("QuotientCode::write: resolution: {error}"))?;
+        let cells = 1_usize << self.resolution_bits;
+        for (position, &index) in self.indices.iter().enumerate() {
+            encode_fixed_index(out, index as usize, cells)
+                .map_err(|error| format!("QuotientCode::write: index {position}: {error}"))?;
+        }
+        Ok(())
+    }
+
+    /// Read one message written by [`Self::write`] for the declared `quotient`. Each index
+    /// takes exactly `b >= 1` bits, so a count above the remaining bits over `b` is refused
+    /// before anything is allocated. The indices then pass [`Self::from_indices`].
+    pub fn read(reader: &mut BitReader<'_>, quotient: PeriodicQuotient) -> Result<Self, String> {
+        let count = decode_prefix_integer(reader)
+            .map_err(|error| format!("QuotientCode::read: count: {error}"))?
+            - 1;
+        let resolution = decode_prefix_integer(reader)
+            .map_err(|error| format!("QuotientCode::read: resolution: {error}"))?
+            - 1;
+        let resolution_bits = u32::try_from(resolution)
+            .map_err(|error| format!("QuotientCode::read: resolution {resolution}: {error}"))?;
+        check_resolution(resolution_bits)?;
+        let remaining = reader.remaining_bits();
+        if count > remaining / u64::from(resolution_bits) {
+            return Err(format!(
+                "QuotientCode::read: {count} indices of {resolution_bits} bits exceed the \
+                 {remaining} bits that remain"
+            ));
+        }
+        let cells = 1_usize << resolution_bits;
+        let mut indices = Vec::with_capacity(count as usize);
+        for position in 0..count {
+            let index = decode_fixed_index(reader, cells)
+                .map_err(|error| format!("QuotientCode::read: index {position}: {error}"))?;
+            indices.push(index as u64);
+        }
+        Self::from_indices(quotient, resolution_bits, indices)
     }
 }
 
@@ -511,7 +648,7 @@ mod tests {
             1.0e-300,
         ];
         let measurement_band = 4.0 * UNIT_ROUNDOFF * PI;
-        for resolution_bits in [0, 1, 7, 30, 50] {
+        for resolution_bits in [1, 7, 30, 50] {
             let code = QuotientCode::encode(&values, quotient, resolution_bits)
                 .expect("finite values encode");
             let decoded = code.decode().expect("a quotient code decodes");
@@ -567,6 +704,10 @@ mod tests {
     #[test]
     fn quotient_code_refuses_cells_below_the_rounding_of_their_representative() {
         let quotient = PeriodicQuotient::new(PI).expect("the RP1 period is admissible");
+        // A 0-bit code carries no coordinate, while 1 bit is the smallest resolved code.
+        assert!(QuotientCode::encode(&[1.0], quotient, 0).is_err());
+        assert!(QuotientCode::encode(&[1.0], quotient, 1).is_ok());
+        assert!(QuotientCode::from_indices(quotient, 0, vec![0]).is_err());
         // Half-width 2^-51 = 4u exceeds the 3u floor; 2^-52 = 2u does not.
         assert!(QuotientCode::encode(&[1.0], quotient, 50).is_ok());
         assert!(QuotientCode::encode(&[1.0], quotient, 51).is_err());
@@ -658,5 +799,113 @@ mod tests {
             Err::<Vec<f64>, String>(format!("native execution refused {} values", decoded.len()))
         };
         assert!(decode_then_evaluate(&code, refused, &reference, squared_error, 0.0).is_err());
+    }
+
+    /// `L_int(value)` for a positive integer: the prefix code length a message pays.
+    fn prefix_bits(value: u64) -> u64 {
+        crate::parameter_decomposition::codec::prefix_integer_len_bits(value)
+            .expect("a positive integer has a prefix codeword")
+    }
+
+    #[test]
+    fn zigzag_maps_the_integers_onto_the_naturals_and_back() {
+        let limit = INDEX_LIMIT as i64;
+        for value in [-limit, -2, -1, 0, 1, 2, limit] {
+            assert_eq!(unzigzag(zigzag(value)), value);
+        }
+        assert_eq!(
+            [zigzag(0), zigzag(-1), zigzag(1), zigzag(-2), zigzag(2)],
+            [0_u64, 1, 2, 3, 4]
+        );
+        assert_eq!(zigzag(limit), 1_u64 << 54);
+    }
+
+    #[test]
+    fn lattice_message_reads_back_at_its_exact_prefix_code_length() {
+        let cases: [(i32, &[i64]); 4] = [
+            (3, &[0, -1, 1, 1 << 20, -(1 << 53)]),
+            (0, &[5, -5]),
+            (EXPONENT_LIMIT, &[0, -1, 1, 3]),
+            (-EXPONENT_LIMIT, &[0, -1, 1, 3]),
+        ];
+        for (fraction_bits, indices) in cases {
+            let precision = DeclaredPrecision::new(fraction_bits).expect("precision in range");
+            let code = LatticeCode::from_indices(precision, indices.to_vec())
+                .expect("indices decode exactly");
+            let mut message = BitString::new();
+            code.write(&mut message).expect("a lattice code writes");
+            let expected_bits = prefix_bits(indices.len() as u64 + 1)
+                + prefix_bits(zigzag(i64::from(fraction_bits)) + 1)
+                + indices
+                    .iter()
+                    .map(|&index| prefix_bits(zigzag(index) + 1))
+                    .sum::<u64>();
+            assert_eq!(message.len_bits(), expected_bits);
+            let mut reader = message.reader();
+            let decoded = LatticeCode::read(&mut reader).expect("the message reads back");
+            assert!(reader.finish().is_ok());
+            assert_eq!(decoded, code);
+        }
+    }
+
+    #[test]
+    fn a_lattice_message_cut_short_or_announcing_more_indices_than_bits_is_refused() {
+        let precision = DeclaredPrecision::new(2).expect("precision in range");
+        let code = LatticeCode::from_indices(precision, vec![3, -7, 11]).expect("indices decode");
+        let mut message = BitString::new();
+        code.write(&mut message).expect("a lattice code writes");
+        // Positive control: the whole message reads back.
+        assert!(LatticeCode::read(&mut message.reader()).is_ok());
+
+        let mut short = BitString::new();
+        let mut reader = message.reader();
+        for _ in 1..message.len_bits() {
+            short.push_bit(reader.read_bit().expect("inside the message"));
+        }
+        assert!(LatticeCode::read(&mut short.reader()).is_err());
+
+        // A header announcing 1000 indices followed by 8 bits is refused before allocating.
+        let mut hostile = BitString::new();
+        encode_prefix_integer(&mut hostile, 1000 + 1).expect("count codeword");
+        encode_prefix_integer(&mut hostile, zigzag(2) + 1).expect("precision codeword");
+        hostile.push_bits(0xFF, 8).expect("eight bits");
+        let refusal = LatticeCode::read(&mut hostile.reader()).expect_err("count beyond the message");
+        assert!(refusal.contains("remain"), "{refusal}");
+    }
+
+    #[test]
+    fn quotient_message_is_its_header_plus_exactly_its_index_bits() {
+        let quotient = PeriodicQuotient::new(PI).expect("the RP1 period is admissible");
+        let labels = [0.0, 1.0, 2.5, -1.0];
+        for resolution_bits in [1, 10, 50] {
+            let code = QuotientCode::encode(&labels, quotient, resolution_bits).expect("labels encode");
+            let mut message = BitString::new();
+            code.write(&mut message).expect("a quotient code writes");
+            let header =
+                prefix_bits(labels.len() as u64 + 1) + prefix_bits(u64::from(resolution_bits) + 1);
+            assert_eq!(message.len_bits(), header + code.index_bits());
+            let mut reader = message.reader();
+            let decoded = QuotientCode::read(&mut reader, quotient).expect("the message reads back");
+            assert!(reader.finish().is_ok());
+            assert_eq!(decoded, code);
+        }
+
+        // Count guard at b = 10: 30 payload bits hold three indices, 29 do not.
+        for (payload_bits, admitted) in [(30, true), (29, false)] {
+            let mut message = BitString::new();
+            encode_prefix_integer(&mut message, 3 + 1).expect("count codeword");
+            encode_prefix_integer(&mut message, 10 + 1).expect("resolution codeword");
+            message.push_bits(0, payload_bits).expect("payload bits");
+            assert_eq!(QuotientCode::read(&mut message.reader(), quotient).is_ok(), admitted);
+        }
+
+        // A 0-bit resolution header is refused, while the smallest resolved one reads.
+        for (resolution_bits, admitted) in [(0_u64, false), (1, true)] {
+            let mut message = BitString::new();
+            encode_prefix_integer(&mut message, 1 + 1).expect("count codeword");
+            encode_prefix_integer(&mut message, resolution_bits + 1).expect("resolution codeword");
+            message.push_bits(0, 1).expect("one payload bit");
+            assert_eq!(QuotientCode::read(&mut message.reader(), quotient).is_ok(), admitted);
+        }
     }
 }
