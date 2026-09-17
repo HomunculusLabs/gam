@@ -1262,7 +1262,7 @@ mod tests {
 /// lowering.
 #[cfg(test)]
 mod anchored_frame_tests {
-    use super::super::anchor::test_support::{gauss_hermite_probabilists, skewed_grid};
+    use super::super::test_support::{gauss_hermite_probabilists, skewed_grid};
     use super::*;
     use gam_math::jet_scalar::JetScalar;
 

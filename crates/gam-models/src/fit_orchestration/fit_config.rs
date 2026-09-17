@@ -124,13 +124,14 @@ impl FitConfig {
         if self.frozen_score {
             policy.latent_measure = crate::bms::LatentMeasureSpec::StandardNormal;
         }
-        if let Some(measure) = self.latent_measure.as_deref() {
-            // Validated by `resolve`; an unresolved config falls back to the
-            // gate rather than panicking on a spelling.
-            match parse_latent_measure_spec(measure) {
-                Ok(Some(spec)) => policy.latent_measure = spec,
-                Ok(None) | Err(_) => {}
-            }
+        // Validated by `resolve`; an unresolved config keeps the gate rather
+        // than failing on a spelling, and `"auto"` names the gate itself.
+        if let Some(Ok(Some(spec))) = self
+            .latent_measure
+            .as_deref()
+            .map(parse_latent_measure_spec)
+        {
+            policy.latent_measure = spec;
         }
         policy
     }

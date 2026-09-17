@@ -181,4 +181,6 @@ pub(crate) use slope_geometry::*;
 pub use spec::*;
 
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;
