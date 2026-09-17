@@ -77,7 +77,7 @@ pub mod receipts;
 pub mod attention;
 
 // KL oscillation bound, whole-set composition containment, conservation conditioning.
-// [unlanded: bounds]
+pub mod bounds;
 
 // Prefix, subset and graph codes for the global artifact and local packets.
 pub mod codec;
