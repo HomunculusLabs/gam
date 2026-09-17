@@ -1,21 +1,23 @@
 //! #2902 row 34: the beta-logistic binomial row geometry in log space.
 //!
-//! The beta-logistic link is `μ = I_u(a, b)` with `u = logistic(η)`. Its deviance
-//! row went through the mean, and the mean saturates while the row is an ordinary
-//! number:
-//! - At the #2685 fixture's certified shapes `(a, b) = (0.01494, 0.00598)` and
-//!   `η = 42.77`, `u` rounds to `1.0`, so `μ` is exactly `1.0` and the row was
-//!   refused ("inverse-link value/derivative … produced 1.0"), while
-//!   `1 − μ = 0.5532`.
-//! - The same collapse is reachable inside the current shape bound. At
-//!   `(ε, log δ) = (0.55, 0.6)` the shapes are `(1.0513, 3.1582)`; at `η = 20` the
-//!   mean rounds to `1.0` while `ln(1 − μ) = −63.07`, and at `η = 250` the
-//!   complement itself leaves `f64` while `ln(1 − μ) = −789.45`.
+//! The beta-logistic link is `μ = K(x)` with `K(x) = I_u(a, b)`, `u = logistic(x)`,
+//! at the standardized latent argument `x = E Z + s·η`. Its deviance row went
+//! through the mean, and the mean saturates while the row is an ordinary number:
+//! - The #2685 fixture's certified shapes are `(a, b) = (0.01494, 0.00598)`. There
+//!   the latent kernel at `x = 42.77` has `u` rounding to `1.0`, so `μ` is exactly
+//!   `1.0` and the row was refused ("inverse-link value/derivative … produced 1.0"),
+//!   while `1 − μ = 0.5532`.
+//! - The same collapse is reachable through a link state. At `(ε, log δ) =
+//!   (0.55, 0.6)` the shapes are `(1.0513, 3.1582)`, `E Z = −1.4793` and
+//!   `s = 0.7603`. At `η = 20` the mean rounds to `1.0` while `ln(1 − μ) = −43.26`.
+//!   At `η = 350` the complement itself leaves `f64` (`1.2e-363`) while
+//!   `ln(1 − μ) = −835.62`. The mirror state `(−0.55, 0.6)` underflows the mean to
+//!   exactly `0.0` at `η = −350`.
 //!
-//! References are mpmath at 60 digits (`mp.betainc(a, b, 0, x, regularized=True)`
-//! and `mp.loggamma`), not another call into this code. The positive control pins
-//! that the mean route really collapses at the reference points, so the reference
-//! tests cannot pass vacuously.
+//! References are mpmath at 60 digits (`mp.betainc(a, b, 0, x, regularized=True)`,
+//! `mp.digamma`, `mp.polygamma` and `mp.loggamma`), not another call into this code.
+//! The positive control pins that the mean route really collapses at the reference
+//! points, so the reference tests cannot pass vacuously.
 
 use super::*;
 use approx::assert_relative_eq;
@@ -41,43 +43,46 @@ const CERTIFIED: Reference = Reference {
 };
 const CERTIFIED_ONE_MINUS_MU: f64 = 0.55321907680603913;
 
-/// `(ε, log δ) = (0.55, 0.6)`: shapes `(1.0513, 3.1582)`, upper tail.
+/// `(ε, log δ) = (0.55, 0.6)`: shapes `(1.0513, 3.1582)`, `E Z = −1.4793`,
+/// `s = 0.7603`, upper tail.
 const UPPER: [Reference; 2] = [
     Reference {
         eta: 20.0,
-        log_mu: -4.0674618567977253e-28,
-        log_one_minus_mu: -63.069363421320532,
-        log_d1: -61.9193634234071,
+        log_mu: -1.6375112258083487e-19,
+        log_one_minus_mu: -43.255939222927616,
+        log_d1: -42.380005795446818,
     },
     Reference {
-        eta: 250.0,
+        eta: 350.0,
         log_mu: 0.0,
-        log_one_minus_mu: -789.4537326433773,
-        log_d1: -788.3037326433773,
+        log_one_minus_mu: -835.62493278338421,
+        log_d1: -834.74899824915706,
     },
 ];
 
-/// `(ε, log δ) = (−0.55, 0.6)`: shapes `(3.1582, 1.0513)`, lower tail.
+/// `(ε, log δ) = (−0.55, 0.6)`: shapes `(3.1582, 1.0513)`, `E Z = 1.4793`,
+/// `s = 0.7603`, lower tail.
 const LOWER: [Reference; 2] = [
     Reference {
         eta: -20.0,
-        log_mu: -63.069363421320532,
-        log_one_minus_mu: -4.0674618567977253e-28,
-        log_d1: -61.9193634234071,
+        log_mu: -43.255939222927616,
+        log_one_minus_mu: -1.6375112258083487e-19,
+        log_d1: -42.380005795446818,
     },
     Reference {
-        eta: -250.0,
-        log_mu: -789.4537326433773,
+        eta: -350.0,
+        log_mu: -835.62493278338421,
         log_one_minus_mu: 0.0,
-        log_d1: -788.3037326433773,
+        log_d1: -834.74899824915706,
     },
 ];
 
-/// Every value is a sum of log terms no larger than `|b·ln(1 − u)| ≈ 790`, each
-/// carrying a few ulps (statrs `ln_beta`, the ascending series, `softplus`), so the
-/// relative error stays below `790 · 64 · ε ≈ 1.1e-11` of the largest term and far
-/// below that of these results; `1e-12` leaves the measured agreement room while
-/// failing any wrong tail by many orders.
+/// Every value is a sum of log terms no larger than `|b·ln(1 − u)| ≈ 836`, each
+/// carrying a few ulps (statrs `ln_beta`, the ascending series, `softplus`, the
+/// polygamma stack behind `E Z` and `s`), so the relative error stays below
+/// `836 · 64 · ε ≈ 1.2e-11` of the largest term and far below that of these
+/// results; `1e-12` leaves the measured agreement room while failing any wrong
+/// tail by many orders.
 const REFERENCE_RELATIVE: f64 = 1.0e-12;
 
 fn beta_logistic(epsilon: f64, log_delta: f64) -> InverseLink {
@@ -137,12 +142,12 @@ fn the_mean_route_collapses_at_the_reference_points_2902() {
     let lower = beta_logistic(-0.55, 0.6);
     let (mu, _) = crate::mixture_link::inverse_link_mu_d1_for_inverse_link(&lower, LOWER[1].eta)
         .expect("finite beta-logistic eta");
-    assert_eq!(mu, 0.0, "the lower-tail mean must underflow to exactly 0.0 at eta=-250");
+    assert_eq!(mu, 0.0, "the lower-tail mean must underflow to exactly 0.0 at eta=-350");
 }
 
 #[test]
 fn log_probabilities_match_mpmath_in_both_saturating_tails_2902() {
-    let certified = crate::mixture_link::beta_logistic_binomial_log_probabilities_at_shapes(
+    let certified = crate::mixture_link::beta_logistic_latent_log_probabilities(
         CERTIFIED.eta,
         CERTIFIED_A,
         CERTIFIED_B,

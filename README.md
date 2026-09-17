@@ -180,7 +180,9 @@ Details: [docs/manifold-sae.md](docs/manifold-sae.md).
 
 Learnable link functions. A `flexible(base)` link adds a spline offset
 on top of a base link. `blended(l1, l2)` learns a mixture weight. `sas`
-and `beta-logistic` learn shape parameters.
+and `beta-logistic` learn shape parameters. The beta-logistic link is the
+CDF of `logit(U)`, `U ~ Beta(a, b)`, standardized to logit's location and
+scale, so its `(epsilon, log_delta)` move only skew and tails.
 
 ```python
 gamfit.fit(df, "case ~ s(age) + link(type=flexible(probit))"

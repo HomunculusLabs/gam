@@ -583,6 +583,18 @@
     "evidence": "Measured 2026-09-09 with scripts/source_removal_guard.py: e29e4da1b..8130620c7 = 426 guarded removals; 0ef82308d..8130620c7 = 68. Replacements named per family above; the tree compiles with cargo check --workspace --all-targets --locked at 87c355b12 and after."
   },
   {
+    "base": "7c6a32523b5eb310c48ee841cfed751d6087d935",
+    "items": [
+      "crates/gam-solve/src/mixture_link.rs:const:BETA_LOGISTIC_LOG_SHAPE_BOUND",
+      "crates/gam-solve/src/mixture_link.rs:fn:beta_logistic_binomial_log_probabilities_at_shapes",
+      "crates/gam-solve/src/mixture_link.rs:fn:beta_logistic_param_partials_matchfd_inside_the_shape_splice_2685",
+      "crates/gam-solve/src/mixture_link.rs:fn:beta_logistic_shape_jets",
+      "crates/gam-solve/src/mixture_link.rs:fn:beta_logistic_shapes_are_bounded_and_interior_exact_2685"
+    ],
+    "reason": "#2902 row 34, lead ruling (a). The beta-logistic link is now the CDF of Z = logit(U), U ~ Beta(a, b), standardized to logit's location and scale: mu(eta) = I_{logistic(x)}(a, b) with x = psi(a) - psi(b) + s*eta and s = sqrt((psi1(a) + psi1(b))/(2 psi1(1))). Unstandardized, the shapes and beta shared the scale of eta, and LAML's 1/2 log|H| lowered the criterion along that shared direction while the fit got worse. BETA_LOGISTIC_LOG_SHAPE_BOUND, a hand-set box (SPEC 20), held the drift in place. With the gauge removed by construction, the bound, its smooth-bound shape map beta_logistic_shape_jets and the two tests that pinned the bound are deleted. beta_logistic_binomial_log_probabilities_at_shapes is renamed beta_logistic_latent_log_probabilities, since it evaluates the latent kernel at x. The bound-support test keeps its SAS case.",
+    "evidence": "Job 1144648 (#2685 parametric fixture, arms A/B): with the bound lifted the criterion fell by 3.04 (604.7026 -> 601.6607) while the deviance rose by 0.82 (1198.880 -> 1199.699). Max eta went 12.8 -> 438.4, and delta log|H| = -14.35 against 4 ln(438.4/12.8) = 14.13. Job 1147546: the Bernoulli deviance profile along log delta has an interior minimum (joint 1198.780 at log delta -0.649), and the standardized link reproduces those deviances with max eta held at logit's scale. Job 1148666: with the log-space row geometry (d1045ce164) there are 0 row refusals. Gate job 1163019 at 40eec0304c on the same code: workspace all-targets check, guard and census 0; 26 gam-solve beta-logistic tests and 8 gam-models tests pass; a dropped chain term fails the central-difference pin and an unreachable named branch fails the v16 pin. Job 1163020: the #2685 fixture certifies with max|eta| below 36.7, and with the standardization made inert the same pin fails at max|eta| 436.68. Job 1163534: the R link-math reference at the standardized argument passes, and zeroing its location fails at the mu assert."
+  },
+  {
     "base": "952517d125a182c1601c276ae1b91052b64cd69b",
     "items": [
       "tests/glm/families/issue_2026_tweedie_estimated_power.rs:const:TOL",

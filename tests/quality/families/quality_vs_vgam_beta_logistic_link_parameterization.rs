@@ -18,13 +18,17 @@
 //!
 //!   (B) LINK-MATH CORRECTNESS vs MATHEMATICAL GROUND TRUTH — the beta-logistic
 //!       inverse link is, by definition, the regularized incomplete beta function
-//!       `mu(eta) = I_{logistic(eta)}(a,b)` with derivative `mu'(eta) =
-//!       dbeta(u,a,b)*u(1-u)`. Base-R `pbeta`/`dbeta` are the *exact analytic
-//!       definition* of those special functions (TOMS-708), so asserting gam's
-//!       link code reproduces them is a correctness-vs-ground-truth claim, NOT a
-//!       "same as a peer tool" claim. We KEEP this: gam's `mu` must equal `pbeta`,
-//!       gam's analytic `d1` must equal the link-scale density `dbeta*u(1-u)` AND
-//!       the finite difference of the CDF (catching a wrong-derivative link bug).
+//!       `mu(eta) = I_u(a,b)` at `u = logistic(x)`, `x = E Z + s*eta`, where
+//!       `Z = logit(U)`, `U ~ Beta(a,b)`, has `E Z = digamma(a) - digamma(b)` and
+//!       `s = sqrt((trigamma(a) + trigamma(b)) / (2*trigamma(1)))`, so `x` carries
+//!       logit's location and scale (#2902 row 34). Its derivative is `mu'(eta) =
+//!       s*dbeta(u,a,b)*u(1-u)`. Base-R `pbeta`/`dbeta`/`digamma`/`trigamma` are the
+//!       *exact analytic definition* of those special functions (TOMS-708), so
+//!       asserting gam's link code reproduces them is a correctness-vs-ground-truth
+//!       claim, NOT a "same as a peer tool" claim. We KEEP this: gam's `mu` must
+//!       equal `pbeta`, gam's analytic `d1` must equal the link-scale density
+//!       `s*dbeta*u(1-u)` AND the finite difference of the CDF (catching a
+//!       wrong-derivative link bug).
 //!
 //! VGAM's role: DEMOTED to a parameterization cross-check only. We confirm VGAM's
 //! `betabinomial(size=1)` success mass equals the Beta mean `a/(a+b)` so the shape
@@ -44,6 +48,7 @@
 
 use csv::StringRecord;
 use gam::smooth::build_term_collection_design;
+use gam::matrix::LinearOperator;
 use gam::test_support::reference::{Column, rmse, run_r};
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily};
 use gam::{
@@ -157,11 +162,14 @@ fn gam_beta_logistic_link_matches_vgam_beta_parameterization() {
         r#"
         library(VGAM)
         a <- 1.2*exp(-0.15); b <- 1.2*exp(0.15)
-        u <- plogis(df$eta)
-        emit('mu', pbeta(u, a, b))
-        emit('d1', dbeta(u, a, b)*u*(1-u))
+        location <- digamma(a) - digamma(b)
+        scale <- sqrt((trigamma(a) + trigamma(b)) / (2*trigamma(1)))
+        mu_at <- function(eta) pbeta(plogis(location + scale*eta), a, b)
+        u <- plogis(location + scale*df$eta)
+        emit('mu', mu_at(df$eta))
+        emit('d1', scale*dbeta(u, a, b)*u*(1-u))
         h <- 1e-5
-        emit('d1_fd', (pbeta(plogis(df$eta+h),a,b)-pbeta(plogis(df$eta-h),a,b))/(2*h))
+        emit('d1_fd', (mu_at(df$eta+h)-mu_at(df$eta-h))/(2*h))
         emit('beta_mean', VGAM::dbetabinom.ab(1, size=1, shape1=a, shape2=b))
     "#,
     );
@@ -172,4 +180,58 @@ fn gam_beta_logistic_link_matches_vgam_beta_parameterization() {
         assert!((jet.d1 - reference.vector("d1_fd")[i]).abs() < 1e-8);
     }
     assert!((reference.vector("beta_mean")[0] - a / (a + b)).abs() < 1e-9);
+}
+
+/// #2902 row 34 (ii): the scale gauge is gone on the committed #2685 parametric
+/// fixture.
+///
+/// Unstandardized, a flatter beta-logistic link let `β` grow while LAML's `½ log|H|`
+/// fell. With the old shape bound lifted (job 1144648 arm B), the certified point had
+/// max `|η|` 438.4, a worse deviance than the bounded fit (1199.699 against
+/// 1198.880), and an assembly that refused. Standardized, `η` keeps logit's scale.
+/// So the fitted linear predictor stays where `logistic(η)` is still resolvable in
+/// f64: below `−ln(ε/2) ≈ 36.7`, past which `logistic(η)` rounds to exactly `1.0`.
+/// For reference, the logit fit's max `|η|` on this fixture is 6.1, and the
+/// standardized joint Bernoulli maximum is 5.59 (job 1147546).
+#[test]
+fn beta_logistic_parametric_fit_keeps_logit_scale_2902() {
+    init_parallelism();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/gam-cli/tests/fixtures/bug_hunt_sas_link_cap_guard.csv");
+    let mut reader = csv::Reader::from_path(&path).expect("read the #2685 fixture");
+    let headers: Vec<String> = reader
+        .headers()
+        .expect("fixture headers")
+        .iter()
+        .map(|h| h.to_string())
+        .collect();
+    let rows: Vec<StringRecord> = reader.records().map(|r| r.expect("fixture row")).collect();
+    let ds = encode_recordswith_inferred_schema(headers, rows).expect("encode the #2685 fixture");
+    let result = fit_from_formula(
+        "y ~ x",
+        &ds,
+        &FitConfig {
+            family: Some("binomial".into()),
+            link: Some("beta-logistic".into()),
+            ..FitConfig::default()
+        },
+    )
+    .expect("the standardized beta-logistic fit certifies on the #2685 fixture");
+    let FitResult::Standard(fit) = result else {
+        panic!("expected a standard beta-logistic fit")
+    };
+    assert!(
+        matches!(fit.fit.fitted_link, FittedLinkState::BetaLogistic { .. }),
+        "the fit must retain its estimated beta-logistic shape"
+    );
+    let design = build_term_collection_design(ds.values.view(), &fit.resolvedspec)
+        .expect("frozen fixture design");
+    let eta = design.design.apply(&fit.fit.beta);
+    let max_eta = eta.iter().fold(0.0_f64, |largest, &value| largest.max(value.abs()));
+    let resolvable = -(f64::EPSILON / 2.0).ln();
+    assert!(
+        max_eta.is_finite() && max_eta < resolvable,
+        "the standardized fit's linear predictor left logit's scale: max|eta| = {max_eta} \
+         against the logistic resolution edge {resolvable} (the scale gauge reached 438.4)"
+    );
 }

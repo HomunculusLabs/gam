@@ -1769,18 +1769,18 @@ where
             // coordinate has no penalty spectrum, so it takes the range its own
             // chart resolves: a mixture free logit is a log-scale coordinate
             // (`precision_box`), SAS raw ε is a tanh chart (`sas_epsilon_domain`),
-            // and SAS raw log δ and the beta-logistic `[ε, log δ]` pass through
-            // `smooth_bound_jet`, which stops moving at the edge of its support
-            // (`smooth_bound_support`). Every beta-logistic shape-argument pair
-            // `(log δ − ε, log δ + ε)` inside that support is reached from inside
-            // the axis box, and a point outside repeats one reached inside.
+            // SAS raw log δ passes through `smooth_bound_jet`, which stops moving at
+            // the edge of its support (`smooth_bound_support`), and the standardized
+            // beta-logistic `[ε, log δ]` are log-shape coordinates like the mixture
+            // logit (#2902 row 34).
             let (link_lower, link_upper): (Vec<f64>, Vec<f64>) = if use_mixture {
                 let (lower, upper) = crate::estimate::rho_domain::precision_box();
                 (vec![lower; mixture_dim], vec![upper; mixture_dim])
             } else if use_beta_logistic {
-                let (lower, upper) = crate::mixture_link::smooth_bound_support(
-                    crate::mixture_link::BETA_LOGISTIC_LOG_SHAPE_BOUND,
-                );
+                // The standardized beta-logistic link's `[ε, log δ]` are log-shape
+                // coordinates with no penalty spectrum, so they take the precision
+                // box, as a mixture free logit does (#2902 row 34).
+                let (lower, upper) = crate::estimate::rho_domain::precision_box();
                 (vec![lower; sas_dim], vec![upper; sas_dim])
             } else {
                 let (epsilon_lower, epsilon_upper) =
@@ -1891,28 +1891,18 @@ where
             };
 
             // SAS ridge/barrier cost correction (shared between cost_fn, eval_fn, efs_fn).
-            // #2685: the beta-logistic block used to be excluded from this
-            // entirely, leaving `[ε, log δ]` with no counter-term at all — and
-            // with k = 0 penalty blocks the criterion carries no `log|S|` term
-            // either, so nothing opposed the measured monotone drift of `log δ`
-            // toward −∞. It now carries the same weak ridge as the SAS block, on
-            // BOTH coordinates (for beta-logistic they are symmetric: the shapes
-            // are `exp(log δ ∓ ε)`, so ε is a log-shape too, not the bounded
-            // skew SAS reparameterizes). The tanh edge barrier stays SAS-only:
-            // it is denominated in `sas_log_delta_bound()`, which is not the
-            // beta-logistic shape bound.
+            // SAS only.
+            //
+            // #2902 row 34: #2685 had given the beta-logistic block this weak ridge on
+            // both coordinates, because its shapes and `β` shared the scale of `η` and
+            // nothing opposed the drift of `log δ` toward −∞. The link now standardizes
+            // `logit(U)` to logit's location and scale, which removes that gauge, so
+            // `[ε, log δ]` carry no counter-term.
             let sas_ridge_cost = |theta: &Array1<f64>| -> f64 {
-                if use_sas && sasridgeweight > 0.0 {
+                if use_sas && !use_beta_logistic && sasridgeweight > 0.0 {
                     let log_delta = theta[k + 1];
-                    let mut extra = 0.5 * sasridgeweight * log_delta * log_delta;
-                    if use_beta_logistic {
-                        let eps = theta[k];
-                        extra += 0.5 * sasridgeweight * eps * eps;
-                    } else {
-                        let (barriercost, _) = sas_log_delta_edge_barriercostgrad(log_delta);
-                        extra += barriercost;
-                    }
-                    extra
+                    let (barriercost, _) = sas_log_delta_edge_barriercostgrad(log_delta);
+                    0.5 * sasridgeweight * log_delta * log_delta + barriercost
                 } else {
                     0.0
                 }
@@ -1976,19 +1966,14 @@ where
                 }
                 // Link-block ridge (+ the SAS-only edge barrier) gradient and
                 // Hessian, matching `sas_ridge_cost` term for term (#2685).
-                if use_sas && sasridgeweight > 0.0 {
+                if use_sas && !use_beta_logistic && sasridgeweight > 0.0 {
                     let log_delta = theta[k + 1];
                     grad[k + 1] += sasridgeweight * log_delta;
                     hessian[[k + 1, k + 1]] += sasridgeweight;
-                    if use_beta_logistic {
-                        grad[k] += sasridgeweight * theta[k];
-                        hessian[[k, k]] += sasridgeweight;
-                    } else {
-                        let (_, barriergrad, barrierhess) =
-                            sas_log_delta_edge_barriercostgradhess(log_delta);
-                        grad[k + 1] += barriergrad;
-                        hessian[[k + 1, k + 1]] += barrierhess;
-                    }
+                    let (_, barriergrad, barrierhess) =
+                        sas_log_delta_edge_barriercostgradhess(log_delta);
+                    grad[k + 1] += barriergrad;
+                    hessian[[k + 1, k + 1]] += barrierhess;
                 }
 
                 let cost_sec = tcost.elapsed().as_secs_f64();

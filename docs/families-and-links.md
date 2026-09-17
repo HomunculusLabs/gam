@@ -125,7 +125,9 @@ or with blended/mixture links.
 
 ### `beta-logistic`
 
-Bounded inverse link with two learned shape parameters. Cannot be
+Bounded inverse link with two learned shape parameters. The link is the
+CDF of `logit(U)`, `U ~ Beta(a, b)`, standardized to logit's location and
+scale, so its `(epsilon, log_delta)` move only skew and tails. Cannot be
 combined with `linkwiggle(...)` or with blended/mixture links.
 
 ### `blended(a, b, ...)` / `mixture(a, b, ...)`

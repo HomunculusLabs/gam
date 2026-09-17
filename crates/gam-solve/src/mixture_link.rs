@@ -30,35 +30,6 @@ pub(crate) const LOG_LINK_SOLVER_ETA_MAX: f64 = 700.0;
 /// previously had to hard-code the same `12.0` with a "must match" comment.
 pub(crate) const SAS_LOG_DELTA_BOUND: f64 = 12.0;
 
-/// Bound `B` on each beta-logistic log-shape: `a = exp(g(log δ − ε))` and
-/// `b = exp(g(log δ + ε))` with `g = smooth_bound_jet(·, B)`, so the two beta
-/// shapes are confined to `[e^−B, e^B]`.
-///
-/// # Why the beta-logistic shapes need a bound at all (#2685)
-///
-/// Every other parameterized inverse link already confines its state: SAS
-/// bounds `log_delta` inside the kernel with this same map
-/// ([`SAS_LOG_DELTA_BOUND`]) and bounds `epsilon` at the outer boundary
-/// (`sas_effective_epsilon`'s tanh box). The beta-logistic kernel exponentiated
-/// BOTH raw optimization parameters, and the outer arm turns the SAS ridge, the
-/// SAS edge barrier and the SAS epsilon box off for it — so the block
-/// `[ε, log δ]` had no bound and no counter-term anywhere.
-///
-/// Measured consequence on the committed parametric-only fixture (`y ~ x +
-/// link(type=beta-logistic)`, k = 0 penalty blocks, so the criterion carries no
-/// `log|S|` term either): the outer BFGS drives `log δ` monotonically down —
-/// `0 → −5.2 → −12.1` — because the criterion decreases the whole way. Beta
-/// shapes that small put essentially all mass at `u ∈ {0, 1}`, so `μ(η)` is
-/// nearly constant in `η`; the inner P-IRLS compensates by pushing `β` until
-/// `η` hits `1075·ln 2 = 745.1332191019412`, the first `f64` at which the
-/// logistic tail complement `exp(−η)` underflows to exactly `0.0`. That is a
-/// representability rail, not an optimum: it is bit-identical at every `θ` the
-/// search visits. The row geometry then (correctly) refuses the saturated row.
-///
-/// The map is the exact identity on `|x| ≤ 0.8·B`, so every fit whose shapes
-/// are in that range is bitwise unchanged.
-pub(crate) const BETA_LOGISTIC_LOG_SHAPE_BOUND: f64 = 1.5;
-
 /// The raw interval on which `smooth_bound_jet(·, bound)` still depends on its
 /// argument (#2902 row 8). At `|x| = a + 2·(B − a)`, `a = SPLICE_INTERIOR_FRAC·B`,
 /// the map reaches `±B` with every derivative exactly zero and stays there, so a
@@ -1614,17 +1585,19 @@ fn standard_link_complement(link: StandardLink, eta: f64, mu: f64) -> f64 {
 
 /// Cancellation-free `1 - mu(eta)` for the beta-logistic inverse link.
 ///
-/// `mu = I_x(a, b)` with `x = logistic(eta)`, so the exact complement is the
+/// `mu = I_u(a, b)` with `u = logistic(x)` at the standardized latent argument `x`
+/// (see [`beta_logistic_standardization`]). So the exact complement is the
 /// regularized incomplete beta's own reflection identity
-/// `1 - I_x(a, b) = I_{1-x}(b, a)`, and `1 - x = logistic(-eta)` is already
-/// carried alongside `x` by [`logistic_uwith_derivatives`]. On the saturated side
-/// (`use_upper_tail`) the forward map computes `mu` AS `1 - beta_reg(b, a, 1-x)`,
+/// `1 - I_u(a, b) = I_{1-u}(b, a)`, and `1 - u = logistic(-x)` is already carried
+/// alongside `u` by [`logistic_uwith_derivatives`]. On the saturated side
+/// (`use_upper_tail`) the forward map computes `mu` AS `1 - beta_reg(b, a, 1-u)`,
 /// so the complement is that `beta_reg` call with no subtraction at all — the
 /// tail mass the forward `1 - ...` throws away. On the other side `mu` is small
 /// and `1.0 - mu` loses nothing.
 #[inline]
-fn beta_logistic_link_complement(eta: f64, log_delta: f64, epsilon: f64, mu: f64) -> f64 {
-    let logistic = logistic_uwith_derivatives(eta);
+pub(crate) fn beta_logistic_link_complement(eta: f64, log_delta: f64, epsilon: f64, mu: f64) -> f64 {
+    let (a, b) = beta_logistic_shapes(log_delta, epsilon);
+    let logistic = logistic_uwith_derivatives(beta_logistic_latent_argument(eta, a, b).0);
     if logistic.ln_u.is_nan() || logistic.ln_one_minus_u.is_nan() {
         return f64::NAN;
     }
@@ -1634,7 +1607,6 @@ fn beta_logistic_link_complement(eta: f64, log_delta: f64, epsilon: f64, mu: f64
     if logistic.ln_one_minus_u == f64::NEG_INFINITY {
         return 0.0;
     }
-    let (a, b) = beta_logistic_shapes(log_delta, epsilon);
     if logistic.use_upper_tail {
         beta_reg(b, a, logistic.one_minus_u)
     } else {
@@ -1863,11 +1835,12 @@ fn sas_inverse_link_mu_d1(
 }
 
 fn beta_logistic_inverse_link_mu_d1(eta: f64, delta: f64, epsilon: f64) -> (f64, f64) {
-    let logistic = logistic_uwith_derivatives(eta);
     let (a, b) = beta_logistic_shapes(delta, epsilon);
+    let (x, s) = beta_logistic_latent_argument(eta, a, b);
+    let logistic = logistic_uwith_derivatives(x);
     let mu = beta_reg_logistic(a, b, logistic);
     let log_d1 = beta_logistic_log_d1(a, b, logistic);
-    (mu, log_d1.exp())
+    (mu, s * log_d1.exp())
 }
 
 fn mixture_inverse_link_mu_d1(state: &MixtureLinkState, eta: f64) -> (f64, f64) {
@@ -2286,22 +2259,17 @@ fn beta_reg_logistic(a: f64, b: f64, logistic: LogisticU) -> f64 {
     }
 }
 
-/// `(ln μ, ln(1 − μ), ln μ′)` of the beta-logistic inverse link at shapes
-/// `(a, b)`, without forming `μ` (#2902 row 34).
+/// `(ln K, ln(1 − K), ln K′)` of the latent kernel `K(x) = I_u(a, b)`,
+/// `u = logistic(x)`, without forming `K` (#2902 row 34).
 ///
-/// `μ = I_u(a,b)` with `u = logistic(η)`, and by reflection `1 − μ = I_{1−u}(b,a)`.
-/// Both are evaluated in log space from `ln u` and `ln(1 − u)`, which
-/// [`logistic_uwith_derivatives`] carries exactly, so neither saturates when `u`
-/// rounds to `1.0` (η > 36.7) or when a tail probability leaves `f64`. The smaller
-/// of the two is the accurate one, and the larger is taken as its log-complement,
-/// so the pair always describes one probability. `ln μ′` is
-/// [`beta_logistic_log_d1`].
-pub(crate) fn beta_logistic_binomial_log_probabilities_at_shapes(
-    eta: f64,
-    a: f64,
-    b: f64,
-) -> (f64, f64, f64) {
-    let logistic = logistic_uwith_derivatives(eta);
+/// By reflection `1 − K = I_{1−u}(b,a)`. Both are evaluated in log space from
+/// `ln u` and `ln(1 − u)`, which [`logistic_uwith_derivatives`] carries exactly, so
+/// neither saturates when `u` rounds to `1.0` (x > 36.7) or when a tail probability
+/// leaves `f64`. The smaller of the two is the accurate one, and the larger is
+/// taken as its log-complement, so the pair always describes one probability.
+/// `ln K′` is [`beta_logistic_log_d1`].
+pub(crate) fn beta_logistic_latent_log_probabilities(x: f64, a: f64, b: f64) -> (f64, f64, f64) {
+    let logistic = logistic_uwith_derivatives(x);
     let direct_mu =
         gam_math::probability::ln_regularized_beta_lower_from_log_x(logistic.ln_u, a, b);
     let direct_complement =
@@ -2314,15 +2282,18 @@ pub(crate) fn beta_logistic_binomial_log_probabilities_at_shapes(
     (log_mu, log_one_minus_mu, beta_logistic_log_d1(a, b, logistic))
 }
 
-/// [`beta_logistic_binomial_log_probabilities_at_shapes`] at the link state's
-/// bounded shapes.
+/// `(ln μ, ln(1 − μ), ln μ′)` of the beta-logistic inverse link at a link state:
+/// [`beta_logistic_latent_log_probabilities`] at the standardized latent argument,
+/// with `ln μ′ = ln s + ln K′`.
 pub(crate) fn beta_logistic_binomial_log_probabilities(
     eta: f64,
     log_shape_center: f64,
     epsilon: f64,
 ) -> (f64, f64, f64) {
     let (a, b) = beta_logistic_shapes(log_shape_center, epsilon);
-    beta_logistic_binomial_log_probabilities_at_shapes(eta, a, b)
+    let (x, s) = beta_logistic_latent_argument(eta, a, b);
+    let (log_mu, log_one_minus_mu, log_latent_d1) = beta_logistic_latent_log_probabilities(x, a, b);
+    (log_mu, log_one_minus_mu, s.ln() + log_latent_d1)
 }
 
 #[derive(Clone, Copy)]
@@ -2672,52 +2643,126 @@ fn beta_reg_with_shape_partials(a0: f64, b0: f64, x0: f64) -> BetaShapePartials 
 /// beta shape (so a·b = exp(2·log_shape_center)). Callers must pass the raw
 /// optimization parameter `SasLinkState::log_delta`, NOT the derived positive
 /// `SasLinkState::delta = exp(log_shape_center)`.
-/// Bounded beta shapes and the first two derivatives of each with respect to
-/// its own log-shape argument.
+/// The beta shapes `a = exp(log_shape_center − epsilon)` and
+/// `b = exp(log_shape_center + epsilon)`, the exact exponential.
 ///
-/// `log a = g(s)` with `s = log_shape_center − epsilon`, `log b = g(t)` with
-/// `t = log_shape_center + epsilon`, `g = smooth_bound_jet(·,
-/// BETA_LOGISTIC_LOG_SHAPE_BOUND)`. Returns `(a, b, ∂a/∂s, ∂b/∂t, ∂²a/∂s²,
-/// ∂²b/∂t²)`. Because `s` and `t` are affine in the two optimization
-/// parameters with unit coefficients, those are the only chain factors any
-/// caller needs — every existing `a`/`b` in a derivative expression becomes
-/// the corresponding derivative entry here.
-///
-/// On the interior `g` is the exact identity (`g′ = 1`, `g″ = 0`), so all six
-/// returned values are bitwise what the unbounded form produced.
-#[inline]
-fn beta_logistic_shape_jets(
-    log_shape_center: f64,
-    epsilon: f64,
-) -> (f64, f64, f64, f64, f64, f64) {
-    let gs = smooth_bound_jet(log_shape_center - epsilon, BETA_LOGISTIC_LOG_SHAPE_BOUND);
-    let gt = smooth_bound_jet(log_shape_center + epsilon, BETA_LOGISTIC_LOG_SHAPE_BOUND);
-    let a = gs.g.exp();
-    let b = gt.g.exp();
-    (
-        a,
-        b,
-        a * gs.d1,
-        b * gt.d1,
-        a * (gs.d1 * gs.d1 + gs.d2),
-        b * (gt.d1 * gt.d1 + gt.d2),
-    )
-}
-
-/// Value-only form of [`beta_logistic_shape_jets`].
+/// No bound: the standardization below removes the scale gauge a bound on the
+/// shapes used to hold in place (#2902 row 34).
 #[inline]
 fn beta_logistic_shapes(log_shape_center: f64, epsilon: f64) -> (f64, f64) {
-    let (a, b, ..) = beta_logistic_shape_jets(log_shape_center, epsilon);
-    (a, b)
+    ((log_shape_center - epsilon).exp(), (log_shape_center + epsilon).exp())
 }
 
-pub fn beta_logistic_inverse_link_jet(
-    eta: f64,
-    log_shape_center: f64,
-    epsilon: f64,
-) -> InverseLinkJet {
-    let logistic = logistic_uwith_derivatives(eta);
-    let (a, b) = beta_logistic_shapes(log_shape_center, epsilon);
+/// The standardization that holds the beta-logistic link at logit's location and
+/// scale (#2902 row 34).
+///
+/// The link is the CDF of `Z = logit(U)`, `U ~ Beta(a, b)`, read through an affine
+/// map of `η`: `μ(η) = K(x)` with `K(x) = I_{logistic(x)}(a, b)`, `x = E Z + s·η`,
+/// `E Z = ψ(a) − ψ(b)` and `s = √((ψ₁(a) + ψ₁(b))/(2ψ₁(1)))`. `2ψ₁(1) = π²/3` is
+/// logit's own variance, so `s = sd Z·√3/π` and `x` keeps logit's location and
+/// scale whatever the shapes.
+///
+/// Unstandardized, the shapes and `β` both carry the scale of `η`. A flatter link
+/// lets `β` grow while the observed information collapses, and LAML's `½ log|H|`
+/// lowers the criterion along that shared direction although the fit worsens. On
+/// the #2685 fixture with the old shape bound lifted (job 1144648), the criterion
+/// fell by 3.04 while the deviance rose by 0.82. Max η went from 12.8 to 438.4, and
+/// Δ log|H| = −14.35 against 4·ln(438.4/12.8) = 14.13. Standardized, `(ε, log δ)`
+/// move only skew and tails.
+///
+/// At `a = b = 1`, both polygamma stacks are evaluated at one argument, so `E Z`
+/// is exactly `0.0` and `s` exactly `1.0`. The standardization is inert there, and
+/// the link is the latent kernel itself.
+///
+/// `latent_first[j]`, `latent_second[j][k]` are `∂x/∂θ_j`, `∂²x/∂θ_j∂θ_k` at this
+/// `η`, and `scale_first`, `scale_second` the same for `s`. The parameter order is
+/// `(epsilon, log_shape_center)`, as in
+/// [`beta_logistic_inverse_link_jetwith_param_partials`].
+struct BetaLogisticStandardization {
+    latent: f64,
+    scale: f64,
+    latent_first: [f64; 2],
+    scale_first: [f64; 2],
+    latent_second: [[f64; 2]; 2],
+    scale_second: [[f64; 2]; 2],
+}
+
+fn beta_logistic_standardization(eta: f64, a: f64, b: f64) -> BetaLogisticStandardization {
+    let pa = [
+        gam_math::special::digamma(a),
+        gam_math::special::trigamma(a),
+        gam_math::special::tetragamma(a),
+        gam_math::special::pentagamma(a),
+    ];
+    let pb = [
+        gam_math::special::digamma(b),
+        gam_math::special::trigamma(b),
+        gam_math::special::tetragamma(b),
+        gam_math::special::pentagamma(b),
+    ];
+    let logit_variance = 2.0 * gam_math::special::trigamma(1.0);
+    let scale = ((pa[1] + pb[1]) / logit_variance).sqrt();
+    let location = pa[0] - pb[0];
+    // `a = exp(l − e)`, `b = exp(l + e)`, in the order `(e, l)`.
+    let a_first = [-a, a];
+    let b_first = [b, b];
+    let a_second = [[a, -a], [-a, a]];
+    let b_second = [[b, b], [b, b]];
+    // In the shapes: `∂E Z/∂a = ψ₁(a)`, `∂E Z/∂b = −ψ₁(b)`, `∂s/∂a = ψ₂(a)/(2·v₀·s)`,
+    // `∂²s/∂a² = ψ₃(a)/(2·v₀·s) − ψ₂(a)²/(4·v₀²·s³)`, and
+    // `∂²s/∂a∂b = −ψ₂(a)·ψ₂(b)/(4·v₀²·s³)`, with `v₀ = 2ψ₁(1)`.
+    let half_over = 1.0 / (2.0 * logit_variance * scale);
+    let quarter_over = 1.0 / (4.0 * logit_variance * logit_variance * scale * scale * scale);
+    let s_a = pa[2] * half_over;
+    let s_b = pb[2] * half_over;
+    let s_aa = pa[3] * half_over - pa[2] * pa[2] * quarter_over;
+    let s_bb = pb[3] * half_over - pb[2] * pb[2] * quarter_over;
+    let s_ab = -pa[2] * pb[2] * quarter_over;
+    let mut latent_first = [0.0; 2];
+    let mut scale_first = [0.0; 2];
+    let mut latent_second = [[0.0; 2]; 2];
+    let mut scale_second = [[0.0; 2]; 2];
+    for j in 0..2 {
+        scale_first[j] = s_a * a_first[j] + s_b * b_first[j];
+        latent_first[j] = pa[1] * a_first[j] - pb[1] * b_first[j] + scale_first[j] * eta;
+        for k in 0..2 {
+            let location_jk = pa[2] * a_first[j] * a_first[k] - pb[2] * b_first[j] * b_first[k]
+                + pa[1] * a_second[j][k]
+                - pb[1] * b_second[j][k];
+            scale_second[j][k] = s_aa * a_first[j] * a_first[k]
+                + s_ab * (a_first[j] * b_first[k] + b_first[j] * a_first[k])
+                + s_bb * b_first[j] * b_first[k]
+                + s_a * a_second[j][k]
+                + s_b * b_second[j][k];
+            latent_second[j][k] = location_jk + scale_second[j][k] * eta;
+        }
+    }
+    BetaLogisticStandardization {
+        latent: location + scale * eta,
+        scale,
+        latent_first,
+        scale_first,
+        latent_second,
+        scale_second,
+    }
+}
+
+/// `(x, s)` of [`beta_logistic_standardization`] without its partials, for the per-row
+/// callers that need only the latent argument and the scale. It evaluates the same
+/// scalars in the same order, so `x` and `s` are the same bits the full
+/// standardization produces.
+#[inline]
+fn beta_logistic_latent_argument(eta: f64, a: f64, b: f64) -> (f64, f64) {
+    let pa = [gam_math::special::digamma(a), gam_math::special::trigamma(a)];
+    let pb = [gam_math::special::digamma(b), gam_math::special::trigamma(b)];
+    let logit_variance = 2.0 * gam_math::special::trigamma(1.0);
+    let scale = ((pa[1] + pb[1]) / logit_variance).sqrt();
+    (pa[0] - pb[0] + scale * eta, scale)
+}
+
+/// Jet of the latent kernel `K(x) = I_{logistic(x)}(a, b)` in `x`.
+fn beta_logistic_latent_jet(x: f64, a: f64, b: f64) -> InverseLinkJet {
+    let logistic = logistic_uwith_derivatives(x);
     let mu = beta_reg_logistic(a, b, logistic);
     let log_d1 = beta_logistic_log_d1(a, b, logistic);
     let d1 = log_d1.exp();
@@ -2727,11 +2772,53 @@ pub fn beta_logistic_inverse_link_jet(
     InverseLinkJet { mu, d1, d2, d3 }
 }
 
+/// Beta-logistic inverse-link jet: `μ = K(x)` and `dᵏμ/dηᵏ = sᵏ·K⁽ᵏ⁾(x)` (see
+/// [`beta_logistic_standardization`]).
+pub fn beta_logistic_inverse_link_jet(
+    eta: f64,
+    log_shape_center: f64,
+    epsilon: f64,
+) -> InverseLinkJet {
+    let (a, b) = beta_logistic_shapes(log_shape_center, epsilon);
+    let standardization = beta_logistic_standardization(eta, a, b);
+    let s = standardization.scale;
+    let latent = beta_logistic_latent_jet(standardization.latent, a, b);
+    InverseLinkJet {
+        mu: latent.mu,
+        d1: s * latent.d1,
+        d2: s * s * latent.d2,
+        d3: s * s * s * latent.d3,
+    }
+}
+
+/// Fourth derivative of the beta-logistic link, `s⁴·K⁗(x)` with `x = E Z + s·η`
+/// (see [`beta_logistic_standardization`]).
 pub(crate) fn beta_logistic_inverse_link_pdfthird_derivative(
     eta: f64,
     log_shape_center: f64,
     epsilon: f64,
 ) -> f64 {
+    let (a, b) = beta_logistic_shapes(log_shape_center, epsilon);
+    let standardization = beta_logistic_standardization(eta, a, b);
+    standardization.scale.powi(4)
+        * beta_logistic_latent_pdfthird_derivative(standardization.latent, a, b)
+}
+
+/// Fifth derivative of the beta-logistic link, `s⁵·K⁽⁵⁾(x)`.
+pub(crate) fn beta_logistic_inverse_link_pdffourth_derivative(
+    eta: f64,
+    log_shape_center: f64,
+    epsilon: f64,
+) -> f64 {
+    let (a, b) = beta_logistic_shapes(log_shape_center, epsilon);
+    let standardization = beta_logistic_standardization(eta, a, b);
+    standardization.scale.powi(5)
+        * beta_logistic_latent_pdffourth_derivative(standardization.latent, a, b)
+}
+
+/// Fourth derivative of the latent kernel `K(x) = I_{logistic(x)}(a, b)`, the
+/// CDF of `Z = logit(U)`, `U ~ Beta(a, b)` (= third derivative of its density).
+fn beta_logistic_latent_pdfthird_derivative(x: f64, a: f64, b: f64) -> f64 {
     // Beta-logistic link:
     //
     //   u = logistic(eta),
@@ -2754,8 +2841,7 @@ pub(crate) fn beta_logistic_inverse_link_pdfthird_derivative(
     //      = d1 [ t³ - 3 c t u' - c u'' ],
     //
     // since `t' = -c u'`.
-    let logistic = logistic_uwith_derivatives(eta);
-    let (a, b) = beta_logistic_shapes(log_shape_center, epsilon);
+    let logistic = logistic_uwith_derivatives(x);
     let log_d1 = beta_logistic_log_d1(a, b, logistic);
     let d1 = log_d1.exp();
     let c = a + b;
@@ -2764,20 +2850,15 @@ pub(crate) fn beta_logistic_inverse_link_pdfthird_derivative(
     d1 * (t * t * t - 3.0 * c * t * logistic.du - c * u2)
 }
 
-/// Fifth derivative of the beta-logistic inverse-link CDF (= 4th deriv of PDF).
+/// Fifth derivative of the latent kernel `K(x)` (= 4th derivative of its density).
 ///
 /// With `P_4 = t^3 - 3ct*u' - c*u''` giving `d4 = d1 * P_4`, the next order is:
 ///
 ///   d5 = d1 * [t^4 - 6c*t^2*u' - 4c*t*u'' + 3c^2*u'^2 - c*u''']
 ///
 /// where u' = u(1-u), u'' = u'(1-2u), u''' = u''(1-2u) - 2*u'^2.
-pub(crate) fn beta_logistic_inverse_link_pdffourth_derivative(
-    eta: f64,
-    log_shape_center: f64,
-    epsilon: f64,
-) -> f64 {
-    let logistic = logistic_uwith_derivatives(eta);
-    let (a, b) = beta_logistic_shapes(log_shape_center, epsilon);
+fn beta_logistic_latent_pdffourth_derivative(x: f64, a: f64, b: f64) -> f64 {
+    let logistic = logistic_uwith_derivatives(x);
     let log_d1 = beta_logistic_log_d1(a, b, logistic);
     let d1 = log_d1.exp();
     let c = a + b;
@@ -2790,16 +2871,13 @@ pub(crate) fn beta_logistic_inverse_link_pdffourth_derivative(
         - c * u3)
 }
 
-pub fn beta_logistic_inverse_link_jetwith_param_partials(
-    eta: f64,
-    log_shape_center: f64,
-    epsilon: f64,
-) -> SasJetWithParamPartials {
-    let logistic = logistic_uwith_derivatives(eta);
-    // `da`/`db` are `∂a/∂s`, `∂b/∂t`; `daa`/`dbb` the second derivatives. On the
-    // interior they equal `a`, `b`, `a`, `b`, which is what the unbounded form
-    // used directly.
-    let (a, b, da, db, daa, dbb) = beta_logistic_shape_jets(log_shape_center, epsilon);
+/// Parameter partials of the latent kernel `K(x; a, b)` at a fixed latent `x`, in
+/// the order `(epsilon, log_shape_center)` with `a = exp(l − e)`, `b = exp(l + e)`.
+fn beta_logistic_latent_jet_with_param_partials(x: f64, a: f64, b: f64) -> SasJetWithParamPartials {
+    let logistic = logistic_uwith_derivatives(x);
+    // `da`/`db` are `∂a/∂s`, `∂b/∂t` for `s = l − e`, `t = l + e`, and `daa`/`dbb`
+    // the second derivatives; the exact exponential makes each equal its shape.
+    let (da, db, daa, dbb) = (a, b, a, b);
     let shape = beta_reg_with_shape_partials_logistic(a, b, logistic);
     let mu = shape.value;
     let dmu_dlog_shape_center = da * shape.da + db * shape.db;
@@ -2901,6 +2979,94 @@ pub fn beta_logistic_inverse_link_jetwith_param_partials(
     }
 }
 
+/// Beta-logistic inverse-link jet with its exact parameter partials, through the
+/// standardization `x = E Z + s·η` (see [`beta_logistic_standardization`]).
+///
+/// Notation: `K` is the latent kernel, `K_j` a partial at fixed `x`, and `x_j`, `s_j`
+/// the standardization's partials. The link's `μ = K(x)`, `d1 = s·K′`, `d2 = s²·K″`
+/// and `d3 = s³·K‴` then differentiate by the chain rule:
+/// - `μ_j = K_j + K′·x_j`
+/// - `d1_j = s_j·K′ + s·(K′_j + K″·x_j)`
+/// - `d2_j = 2s·s_j·K″ + s²·(K″_j + K‴·x_j)`
+/// - `d3_j = 3s²·s_j·K‴ + s³·(K‴_j + K⁗·x_j)`
+///
+/// The second partials apply the same rule once more.
+pub fn beta_logistic_inverse_link_jetwith_param_partials(
+    eta: f64,
+    log_shape_center: f64,
+    epsilon: f64,
+) -> SasJetWithParamPartials {
+    let (a, b) = beta_logistic_shapes(log_shape_center, epsilon);
+    let standardization = beta_logistic_standardization(eta, a, b);
+    let latent = beta_logistic_latent_jet_with_param_partials(standardization.latent, a, b);
+    let k = latent.jet;
+    let k4 = beta_logistic_latent_pdfthird_derivative(standardization.latent, a, b);
+    let kj = [latent.djet_depsilon, latent.djet_dlog_delta];
+    let s = standardization.scale;
+    let x1 = standardization.latent_first;
+    let s1 = standardization.scale_first;
+    let x2 = standardization.latent_second;
+    let s2 = standardization.scale_second;
+    let first = |j: usize| InverseLinkJet {
+        mu: kj[j].mu + k.d1 * x1[j],
+        d1: s1[j] * k.d1 + s * (kj[j].d1 + k.d2 * x1[j]),
+        d2: 2.0 * s * s1[j] * k.d2 + s * s * (kj[j].d2 + k.d3 * x1[j]),
+        d3: 3.0 * s * s * s1[j] * k.d3 + s * s * s * (kj[j].d3 + k4 * x1[j]),
+    };
+    let mut d2mu_dparams2 = Array2::<f64>::zeros((2, 2));
+    let mut d2d1_dparams2 = Array2::<f64>::zeros((2, 2));
+    let mut d2d2_dparams2 = Array2::<f64>::zeros((2, 2));
+    for j in 0..2 {
+        for i in j..2 {
+            let mu_ji = latent.d2mu_dparams2[[j, i]]
+                + kj[j].d1 * x1[i]
+                + kj[i].d1 * x1[j]
+                + k.d2 * x1[j] * x1[i]
+                + k.d1 * x2[j][i];
+            let d1_ji = s2[j][i] * k.d1
+                + s1[j] * (kj[i].d1 + k.d2 * x1[i])
+                + s1[i] * (kj[j].d1 + k.d2 * x1[j])
+                + s * (latent.d2d1_dparams2[[j, i]]
+                    + kj[j].d2 * x1[i]
+                    + kj[i].d2 * x1[j]
+                    + k.d3 * x1[j] * x1[i]
+                    + k.d2 * x2[j][i]);
+            // `d2 = q·K″` with `q = s²`, `q_j = 2s·s_j`, `q_ji = 2(s_j·s_i + s·s_ji)`.
+            let q = s * s;
+            let q_j = 2.0 * s * s1[j];
+            let q_i = 2.0 * s * s1[i];
+            let q_ji = 2.0 * (s1[j] * s1[i] + s * s2[j][i]);
+            let d2_ji = q_ji * k.d2
+                + q_j * (kj[i].d2 + k.d3 * x1[i])
+                + q_i * (kj[j].d2 + k.d3 * x1[j])
+                + q * (latent.d2d2_dparams2[[j, i]]
+                    + kj[j].d3 * x1[i]
+                    + kj[i].d3 * x1[j]
+                    + k4 * x1[j] * x1[i]
+                    + k.d3 * x2[j][i]);
+            d2mu_dparams2[[j, i]] = mu_ji;
+            d2mu_dparams2[[i, j]] = mu_ji;
+            d2d1_dparams2[[j, i]] = d1_ji;
+            d2d1_dparams2[[i, j]] = d1_ji;
+            d2d2_dparams2[[j, i]] = d2_ji;
+            d2d2_dparams2[[i, j]] = d2_ji;
+        }
+    }
+    SasJetWithParamPartials {
+        jet: InverseLinkJet {
+            mu: k.mu,
+            d1: s * k.d1,
+            d2: s * s * k.d2,
+            d3: s * s * s * k.d3,
+        },
+        djet_depsilon: first(0),
+        djet_dlog_delta: first(1),
+        d2mu_dparams2,
+        d2d1_dparams2,
+        d2d2_dparams2,
+    }
+}
+
 /// `(∂f‴/∂ε, ∂f‴/∂log_shape_center)` of the Beta-Logistic density's third
 /// derivative `f‴ = d1·P₄`, `P₄ = t³ − 3c·t·u′ − c·u″` (see
 /// `beta_logistic_inverse_link_pdfthird_derivative`), in the parameter order of
@@ -2912,8 +3078,27 @@ pub(crate) fn beta_logistic_inverse_link_pdfthird_derivative_param_partials(
     log_shape_center: f64,
     epsilon: f64,
 ) -> [f64; 2] {
-    let logistic = logistic_uwith_derivatives(eta);
-    let (a, b, da, db, ..) = beta_logistic_shape_jets(log_shape_center, epsilon);
+    // `f‴ = s⁴·K⁗(x)`, so `∂f‴/∂θ_j = 4s³·s_j·K⁗ + s⁴·(K⁗_j + K⁽⁵⁾·x_j)`.
+    let (a, b) = beta_logistic_shapes(log_shape_center, epsilon);
+    let standardization = beta_logistic_standardization(eta, a, b);
+    let x = standardization.latent;
+    let s = standardization.scale;
+    let k4 = beta_logistic_latent_pdfthird_derivative(x, a, b);
+    let k5 = beta_logistic_latent_pdffourth_derivative(x, a, b);
+    let k4_j = beta_logistic_latent_pdfthird_derivative_param_partials(x, a, b);
+    let s3 = s * s * s;
+    let partial = |j: usize| -> f64 {
+        4.0 * s3 * standardization.scale_first[j] * k4
+            + s3 * s * (k4_j[j] + k5 * standardization.latent_first[j])
+    };
+    [partial(0), partial(1)]
+}
+
+/// `(∂K⁗/∂ε, ∂K⁗/∂log_shape_center)` of the latent kernel at a fixed latent `x`,
+/// with the exact exponential shapes (`∂a/∂s = a`, `∂b/∂t = b`).
+fn beta_logistic_latent_pdfthird_derivative_param_partials(x: f64, a: f64, b: f64) -> [f64; 2] {
+    let logistic = logistic_uwith_derivatives(x);
+    let (da, db) = (a, b);
     let d1 = beta_logistic_log_d1(a, b, logistic).exp();
     let c = a + b;
     let t = a * logistic.one_minus_u - b * logistic.u;
@@ -4571,64 +4756,13 @@ mod tests {
         }
     }
 
-    /// #2685: the beta-logistic shapes must live in a compact set, and the
-    /// bound must be the interior-exact map — not a clamp bolted onto `eta`.
-    ///
-    /// The measured runaway point is the outer BFGS checkpoint the CLI reports
-    /// on the committed parametric fixture: `theta = [-0.4584861947563609,
-    /// -5.246934642530043]`. Unbounded, that is `a = 8.2e-3`, `b = 3.3e-3` —
-    /// shapes that put essentially all beta mass at `u in {0, 1}`, so `mu(eta)`
-    /// is nearly flat in the interior and the inner P-IRLS answers by pushing
-    /// `eta` to `1075*ln 2 = 745.1332191019412`, the smallest `f64` at which
-    /// `exp(-eta)` underflows to exactly `0.0`.
-    #[test]
-    fn beta_logistic_shapes_are_bounded_and_interior_exact_2685() {
-        // Interior: bitwise identity with the unbounded form it replaced.
-        for &(center, epsilon) in &[(0.0, 0.0), (0.5, -0.25), (-0.7, 0.3)] {
-            let (a, b) = beta_logistic_shapes(center, epsilon);
-            assert_eq!(a.to_bits(), (center - epsilon).exp().to_bits());
-            assert_eq!(b.to_bits(), (center + epsilon).exp().to_bits());
-        }
-
-        let floor = (-BETA_LOGISTIC_LOG_SHAPE_BOUND).exp();
-        let ceiling = BETA_LOGISTIC_LOG_SHAPE_BOUND.exp();
-        // The measured runaway theta, and its mirror image on the large-shape side.
-        for &(center, epsilon) in &[
-            (-5.246_934_642_530_043_f64, -0.458_486_194_756_360_9_f64),
-            (5.246_934_642_530_043, 0.458_486_194_756_360_9),
-            (-40.0, 12.0),
-            (40.0, -12.0),
-        ] {
-            let (a, b) = beta_logistic_shapes(center, epsilon);
-            assert!(
-                (floor..=ceiling).contains(&a) && (floor..=ceiling).contains(&b),
-                "beta-logistic shapes escaped [{floor:e}, {ceiling:e}] at                  (center={center}, epsilon={epsilon}): a={a:e} b={b:e}"
-            );
-        }
-
-        // The point of the bound is that the link keeps its sensitivity: at the
-        // runaway theta the unbounded link's slope at eta=0 was 2.4e-3 (a ~100x
-        // collapse from the canonical logit's 0.25), which is what forced the
-        // inner solve out to the eta rail. Bounded, it cannot collapse.
-        let jet = beta_logistic_inverse_link_jet(
-            0.0,
-            -5.246_934_642_530_043,
-            -0.458_486_194_756_360_9,
-        );
-        assert!(
-            jet.d1 > 1.0e-2,
-            "bounded beta-logistic link sensitivity collapsed at the runaway              theta: d1={} (canonical logit is 0.25)",
-            jet.d1
-        );
-    }
-
     /// #2902 row 8: the outer box on a coordinate charted by `smooth_bound_jet` is
     /// the map's own support. Just inside its edge the map still moves; at the
     /// edge and beyond it is exactly `±B` with a zero slope, so every point outside
     /// repeats a value the box already holds.
     #[test]
     fn a_bounded_map_support_ends_where_the_map_stops_moving_2902() {
-        for bound in [SAS_LOG_DELTA_BOUND, BETA_LOGISTIC_LOG_SHAPE_BOUND] {
+        for bound in [SAS_LOG_DELTA_BOUND] {
             let (lower, upper) = smooth_bound_support(bound);
             assert_eq!(lower, -upper);
             let inside = smooth_bound_jet(0.99 * upper, bound);
@@ -4648,62 +4782,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// #2685: the bounded map's chain rule reaches the analytic parameter
-    /// partials. Evaluated strictly inside the splice — where `g' != 1` and
-    /// `g'' != 0`, so a missing chain factor cannot cancel — unlike
-    /// `beta_logistic_param_partials_matchfd`, which sits on the interior where
-    /// the bound is the identity and the test is blind to it by construction.
-    #[test]
-    fn beta_logistic_param_partials_matchfd_inside_the_shape_splice_2685() {
-        let bound = BETA_LOGISTIC_LOG_SHAPE_BOUND;
-        let eta = -0.41;
-        // s = center - epsilon = 0.85*B and t = center + epsilon = 1.15*B, both
-        // strictly between the splice endpoints 0.8*B and 1.2*B.
-        let center = bound;
-        let epsilon = 0.15 * bound;
-        assert!((0.8 * bound..1.2 * bound).contains(&(center - epsilon)));
-        assert!((0.8 * bound..1.2 * bound).contains(&(center + epsilon)));
-
-        let out = beta_logistic_inverse_link_jetwith_param_partials(eta, center, epsilon);
-        let h = 1e-6;
-        let fd = |plus: InverseLinkJet, minus: InverseLinkJet| InverseLinkJet {
-            mu: (plus.mu - minus.mu) / (2.0 * h),
-            d1: (plus.d1 - minus.d1) / (2.0 * h),
-            d2: (plus.d2 - minus.d2) / (2.0 * h),
-            d3: (plus.d3 - minus.d3) / (2.0 * h),
-        };
-        let fd_center = fd(
-            beta_logistic_inverse_link_jet(eta, center + h, epsilon),
-            beta_logistic_inverse_link_jet(eta, center - h, epsilon),
-        );
-        let fd_epsilon = fd(
-            beta_logistic_inverse_link_jet(eta, center, epsilon + h),
-            beta_logistic_inverse_link_jet(eta, center, epsilon - h),
-        );
-        // The central difference of a C5 map at h=1e-6 resolves to ~1e-10
-        // absolute plus a 1e-10 relative rounding floor on each component.
-        let close = |analytic: f64, numeric: f64, what: &str| {
-            let tol = 1.0e-7 + 1.0e-5 * analytic.abs().max(numeric.abs());
-            assert!(
-                (analytic - numeric).abs() <= tol,
-                "{what}: analytic={analytic:e} fd={numeric:e} tol={tol:e}"
-            );
-        };
-        close(out.djet_dlog_delta.mu, fd_center.mu, "dmu/dcenter");
-        close(out.djet_dlog_delta.d1, fd_center.d1, "dd1/dcenter");
-        close(out.djet_dlog_delta.d2, fd_center.d2, "dd2/dcenter");
-        close(out.djet_dlog_delta.d3, fd_center.d3, "dd3/dcenter");
-        close(out.djet_depsilon.mu, fd_epsilon.mu, "dmu/depsilon");
-        close(out.djet_depsilon.d1, fd_epsilon.d1, "dd1/depsilon");
-        close(out.djet_depsilon.d2, fd_epsilon.d2, "dd2/depsilon");
-        close(out.djet_depsilon.d3, fd_epsilon.d3, "dd3/depsilon");
-
-        // And the derivatives are not trivially zero here, so the comparison
-        // above was free to disagree.
-        assert!(out.djet_dlog_delta.mu.abs() > 1.0e-6);
-        assert!(out.djet_depsilon.mu.abs() > 1.0e-6);
     }
 
     #[test]
@@ -4773,6 +4851,140 @@ mod tests {
                     (value - finite_difference).abs() <= 1e-5 * finite_difference.abs().max(1.0),
                     "{label} eta={eta} axis {axis}: analytic={value}, finite difference={finite_difference}"
                 );
+            }
+        }
+    }
+
+    /// #2902 row 34 (i): at the logit shapes `a = b = 1` the standardization is
+    /// exactly inert. `E Z` is exactly `0.0` and `s` exactly `1.0`, so the link's
+    /// jet and higher derivatives are the latent kernel's, bit for bit.
+    #[test]
+    fn beta_logistic_standardization_is_inert_at_the_logit_shapes_2902() {
+        let standardization = beta_logistic_standardization(0.7, 1.0, 1.0);
+        assert_eq!(standardization.scale.to_bits(), 1.0_f64.to_bits());
+        assert_eq!(standardization.latent.to_bits(), 0.7_f64.to_bits());
+        let (latent, scale) = beta_logistic_latent_argument(0.7, 1.0, 1.0);
+        assert_eq!(latent.to_bits(), standardization.latent.to_bits());
+        assert_eq!(scale.to_bits(), standardization.scale.to_bits());
+        for eta in [-40.0_f64, -5.0, -0.3, 0.42, 5.0, 40.0] {
+            let link = beta_logistic_inverse_link_jet(eta, 0.0, 0.0);
+            let kernel = beta_logistic_latent_jet(eta, 1.0, 1.0);
+            assert_eq!(link.mu.to_bits(), kernel.mu.to_bits(), "eta={eta}");
+            assert_eq!(link.d1.to_bits(), kernel.d1.to_bits(), "eta={eta}");
+            assert_eq!(link.d2.to_bits(), kernel.d2.to_bits(), "eta={eta}");
+            assert_eq!(link.d3.to_bits(), kernel.d3.to_bits(), "eta={eta}");
+            assert_eq!(
+                beta_logistic_inverse_link_pdfthird_derivative(eta, 0.0, 0.0).to_bits(),
+                beta_logistic_latent_pdfthird_derivative(eta, 1.0, 1.0).to_bits(),
+                "eta={eta}"
+            );
+            assert_eq!(
+                beta_logistic_inverse_link_pdffourth_derivative(eta, 0.0, 0.0).to_bits(),
+                beta_logistic_latent_pdffourth_derivative(eta, 1.0, 1.0).to_bits(),
+                "eta={eta}"
+            );
+        }
+    }
+
+    /// #2902 row 34 (iii): every derivative the outer search and its certificate read
+    /// matches central differences at shapes far from `a = b = 1`, where `E Z` and
+    /// `s` move with the parameters. That covers the η-jet through the density's
+    /// fourth derivative, the first and second parameter partials of `μ`, `d1`, `d2`
+    /// (and the first of `d3`), and the parameter partials of the density's third
+    /// derivative.
+    ///
+    /// At `h = 1e-5` a central difference carries `O(h²·f‴)` truncation and
+    /// `ε·|f|/h ≈ 2e-11·|f|` rounding, both below the `1e-6` relative (plus `1e-9`
+    /// absolute) band.
+    #[test]
+    fn standardized_beta_logistic_derivatives_match_central_differences_2902() {
+        let h = 1.0e-5;
+        let close = |analytic: f64, numeric: f64, what: &str| {
+            let band = 1.0e-9 + 1.0e-6 * analytic.abs().max(numeric.abs());
+            assert!(
+                (analytic - numeric).abs() <= band,
+                "{what}: analytic={analytic:e} central difference={numeric:e} band={band:e}"
+            );
+        };
+        for (log_shape_center, epsilon) in [(-2.5_f64, 0.8_f64), (3.0, -1.0), (0.6, 0.55)] {
+            for eta in [-3.0_f64, -0.4, 1.7] {
+                let label = format!("(l={log_shape_center}, e={epsilon}, eta={eta})");
+                let jet = |e: f64| beta_logistic_inverse_link_jet(e, log_shape_center, epsilon);
+                let (centre, plus, minus) = (jet(eta), jet(eta + h), jet(eta - h));
+                close(centre.d1, (plus.mu - minus.mu) / (2.0 * h), &format!("d1 {label}"));
+                close(centre.d2, (plus.d1 - minus.d1) / (2.0 * h), &format!("d2 {label}"));
+                close(centre.d3, (plus.d2 - minus.d2) / (2.0 * h), &format!("d3 {label}"));
+                let f4 = |e: f64| {
+                    beta_logistic_inverse_link_pdfthird_derivative(e, log_shape_center, epsilon)
+                };
+                close(f4(eta), (plus.d3 - minus.d3) / (2.0 * h), &format!("d4 {label}"));
+                close(
+                    beta_logistic_inverse_link_pdffourth_derivative(eta, log_shape_center, epsilon),
+                    (f4(eta + h) - f4(eta - h)) / (2.0 * h),
+                    &format!("d5 {label}"),
+                );
+
+                let out = beta_logistic_inverse_link_jetwith_param_partials(
+                    eta,
+                    log_shape_center,
+                    epsilon,
+                );
+                // Axis 0 is `epsilon`, axis 1 is `log_shape_center`.
+                let at = |axis: usize, step: f64| -> (f64, f64) {
+                    if axis == 0 {
+                        (log_shape_center, epsilon + step)
+                    } else {
+                        (log_shape_center + step, epsilon)
+                    }
+                };
+                let first = [out.djet_depsilon, out.djet_dlog_delta];
+                let f4_partials = beta_logistic_inverse_link_pdfthird_derivative_param_partials(
+                    eta,
+                    log_shape_center,
+                    epsilon,
+                );
+                for axis in 0..2 {
+                    let (lp, ep) = at(axis, h);
+                    let (lm, em) = at(axis, -h);
+                    let jp = beta_logistic_inverse_link_jet(eta, lp, ep);
+                    let jm = beta_logistic_inverse_link_jet(eta, lm, em);
+                    let what = |q: &str| format!("d{q}/dtheta{axis} {label}");
+                    close(first[axis].mu, (jp.mu - jm.mu) / (2.0 * h), &what("mu"));
+                    close(first[axis].d1, (jp.d1 - jm.d1) / (2.0 * h), &what("d1"));
+                    close(first[axis].d2, (jp.d2 - jm.d2) / (2.0 * h), &what("d2"));
+                    close(first[axis].d3, (jp.d3 - jm.d3) / (2.0 * h), &what("d3"));
+                    close(
+                        f4_partials[axis],
+                        (beta_logistic_inverse_link_pdfthird_derivative(eta, lp, ep)
+                            - beta_logistic_inverse_link_pdfthird_derivative(eta, lm, em))
+                            / (2.0 * h),
+                        &what("f4"),
+                    );
+                    let op = beta_logistic_inverse_link_jetwith_param_partials(eta, lp, ep);
+                    let om = beta_logistic_inverse_link_jetwith_param_partials(eta, lm, em);
+                    let (fp, fm) = (
+                        [op.djet_depsilon, op.djet_dlog_delta],
+                        [om.djet_depsilon, om.djet_dlog_delta],
+                    );
+                    for other in 0..2 {
+                        let pair = |q: &str| format!("d2{q}/dtheta{axis}dtheta{other} {label}");
+                        close(
+                            out.d2mu_dparams2[[other, axis]],
+                            (fp[other].mu - fm[other].mu) / (2.0 * h),
+                            &pair("mu"),
+                        );
+                        close(
+                            out.d2d1_dparams2[[other, axis]],
+                            (fp[other].d1 - fm[other].d1) / (2.0 * h),
+                            &pair("d1"),
+                        );
+                        close(
+                            out.d2d2_dparams2[[other, axis]],
+                            (fp[other].d2 - fm[other].d2) / (2.0 * h),
+                            &pair("d2"),
+                        );
+                    }
+                }
             }
         }
     }
@@ -4870,7 +5082,12 @@ mod tests {
         let epsilon = -0.1_f64;
         let a = (delta - epsilon).exp();
         let b = (delta + epsilon).exp();
-        let expected_mu = beta_reg(a, b, eta.exp());
+        // The link reads the latent kernel at the standardized `x = E Z + s·η`
+        // (#2902 row 34); at `x ≈ −34.9`, `exp(x)` is `logistic(x)` to one part in
+        // `e^{−34.9}`.
+        let (x, s) = beta_logistic_latent_argument(eta, a, b);
+        assert!(x < -30.0 && s > 0.0, "the fixture must sit deep in the left tail: x={x}");
+        let expected_mu = beta_reg(a, b, x.exp());
         let out = beta_logistic_inverse_link_jet(eta, delta, epsilon);
 
         assert!(

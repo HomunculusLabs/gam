@@ -3091,10 +3091,15 @@ impl<'a> RemlState<'a> {
             let yi = self.y[i];
             let wi = self.weights[i];
             // Stable complement `1 - mu` carried directly from `eta` so a
-            // saturating SAS row keeps the outer likelihood jet exact instead of
-            // being refused; beta-logistic has no closed form wired yet.
+            // saturating row keeps the outer likelihood jet exact instead of
+            // being refused.
             let omm = if is_beta_logistic {
-                1.0 - mu
+                crate::mixture_link::beta_logistic_link_complement(
+                    eta_i,
+                    sas_state.log_delta,
+                    sas_state.epsilon,
+                    mu,
+                )
             } else {
                 crate::mixture_link::sas_link_complement(
                     eta_i,
@@ -3624,7 +3629,12 @@ impl<'a> RemlState<'a> {
                 };
                 let mu = jets.jet.mu;
                 let omm = if is_beta_logistic {
-                    1.0 - mu
+                    crate::mixture_link::beta_logistic_link_complement(
+                        eta_i,
+                        sas_state.log_delta,
+                        sas_state.epsilon,
+                        mu,
+                    )
                 } else {
                     crate::mixture_link::sas_link_complement(
                         eta_i,

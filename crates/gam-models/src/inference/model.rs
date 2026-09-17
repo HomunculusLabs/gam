@@ -62,7 +62,11 @@ use std::path::Path;
 // exclusive fit representation (`UnifiedFitResult`, spline scan, residual
 // cascade). Readers must never guess it from optional working evidence or
 // prediction-time reconstruction grids.
-pub const MODEL_PAYLOAD_VERSION: u32 = 16;
+// v17 changes what a binomial beta-logistic link's `(epsilon, log_delta)` mean. The
+// link now standardizes `Z = logit(U)`, `U ~ Beta(a, b)`, to logit's location and
+// scale (#2902 row 34), so a v16 beta-logistic model would predict through a
+// different link; it is refused by name (`payload_version_mismatch`).
+pub const MODEL_PAYLOAD_VERSION: u32 = 17;
 
 /// Coefficient parameterization of a saved transformation-normal (CTN) fit.
 ///
@@ -1003,18 +1007,74 @@ impl FittedModelPayload {
 
     fn validate_payload_version(&self) -> Result<(), FittedModelError> {
         if self.version != MODEL_PAYLOAD_VERSION {
-            return Err(FittedModelError::SchemaMismatch {
-                reason: format!(
-                    "saved model payload schema mismatch: file has version={}, \
-                 this binary expects MODEL_PAYLOAD_VERSION={}. \
-                 Refit with the current CLI, or rebuild the reader at the same \
-                 version the model was written with.",
-                    self.version, MODEL_PAYLOAD_VERSION
-                ),
-            });
+            return Err(payload_version_mismatch(
+                self.version,
+                Some(&self.family_state.likelihood()),
+            ));
         }
         Ok(())
     }
+}
+
+/// The two fields a stale payload is judged by, and nothing else: the version, and
+/// the family's likelihood when it has one (#2902 row 34). Every other field of the
+/// saved model is ignored, so a schema change elsewhere cannot turn the typed
+/// refusal into a parse error.
+#[derive(Deserialize)]
+struct PayloadVersionProbe {
+    payload: PayloadVersionProbeFields,
+}
+
+#[derive(Deserialize)]
+struct PayloadVersionProbeFields {
+    version: u32,
+    family_state: PayloadFamilyProbe,
+}
+
+/// Two `FittedFamily` variants carry no likelihood, and a likelihood whose wire
+/// shape no longer converts keeps the generic reason, so it is read as raw JSON.
+#[derive(Deserialize)]
+struct PayloadFamilyProbe {
+    #[serde(default)]
+    likelihood: Option<serde_json::Value>,
+}
+
+/// The payload version at which a binomial beta-logistic link's `(epsilon,
+/// log_delta)` changed meaning: the link standardizes `Z = logit(U)`,
+/// `U ~ Beta(a, b)`, to logit's location and scale from here on (#2902 row 34).
+const BETA_LOGISTIC_STANDARDIZED_PAYLOAD_VERSION: u32 = 17;
+
+/// The typed refusal for a payload written at another schema version.
+///
+/// Every stale payload gets the generic reason. A binomial beta-logistic payload
+/// written before [`BETA_LOGISTIC_STANDARDIZED_PAYLOAD_VERSION`] also names the
+/// parameterization change: its saved shapes and coefficients describe the
+/// unstandardized link, so loading it would silently predict through a different
+/// link. `likelihood` is `None` when the family cannot be read, which keeps the
+/// generic reason.
+fn payload_version_mismatch(version: u32, likelihood: Option<&LikelihoodSpec>) -> FittedModelError {
+    let generic = format!(
+        "saved model payload schema mismatch: file has version={version}, \
+         this binary expects MODEL_PAYLOAD_VERSION={MODEL_PAYLOAD_VERSION}. \
+         Refit with the current CLI, or rebuild the reader at the same \
+         version the model was written with."
+    );
+    let reason = match likelihood {
+        Some(likelihood)
+            if version < BETA_LOGISTIC_STANDARDIZED_PAYLOAD_VERSION
+                && likelihood.is_binomial_beta_logistic() =>
+        {
+            format!(
+                "{generic} This is a binomial beta-logistic model written before payload \
+                 version {BETA_LOGISTIC_STANDARDIZED_PAYLOAD_VERSION}, where the link's \
+                 (epsilon, log_delta) changed meaning: the link now standardizes \
+                 Z = logit(U), U ~ Beta(a, b), to logit's location and scale, so the saved \
+                 shapes and coefficients describe a different link. Refit."
+            )
+        }
+        _ => generic,
+    };
+    FittedModelError::SchemaMismatch { reason }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -4547,6 +4607,22 @@ impl FittedModel {
         let payload = fs::read_to_string(path).map_err(|e| FittedModelError::PayloadCorrupt {
             reason: format!("failed to read model '{}': {e}", path.display()),
         })?;
+        // A stale payload is judged by its version and family alone, before the full
+        // parse, so a schema whose other fields no longer parse still gets the typed
+        // refusal instead of a parse error (#2902 row 34).
+        if let Ok(probe) = serde_json::from_str::<PayloadVersionProbe>(&payload)
+            && probe.payload.version != MODEL_PAYLOAD_VERSION
+        {
+            let likelihood = probe
+                .payload
+                .family_state
+                .likelihood
+                .and_then(|value| serde_json::from_value::<LikelihoodSpec>(value).ok());
+            return Err(payload_version_mismatch(
+                probe.payload.version,
+                likelihood.as_ref(),
+            ));
+        }
         let model: Self =
             serde_json::from_str(&payload).map_err(|e| FittedModelError::PayloadCorrupt {
                 reason: format!("failed to parse model '{}': {e}", path.display()),
@@ -7046,6 +7122,143 @@ mod tests {
             .saved_prediction_runtime()
             .expect_err("stale payload version should fail before runtime assembly");
         assert!(err.to_string().contains("payload schema mismatch"));
+    }
+
+    /// #2902 row 34: at payload version 17 a binomial beta-logistic link's
+    /// `(epsilon, log_delta)` changed meaning, because the link now standardizes
+    /// `Z = logit(U)` to logit's location and scale. A stale beta-logistic payload
+    /// is refused by that name; any other stale payload keeps the generic reason.
+    /// The refusal is chosen from the version and the family alone, so it survives
+    /// a stale field that no longer parses.
+    #[test]
+    fn a_stale_beta_logistic_payload_is_refused_by_the_standardized_link_2902() {
+        const NAMED: &str = "standardizes Z = logit(U)";
+        let state = SasLinkState {
+            epsilon: 0.1,
+            log_delta: -0.2,
+            delta: (-0.2_f64).exp(),
+        };
+        let beta_logistic = FittedModelPayload::new(
+            16,
+            "y ~ x".to_string(),
+            ModelKind::Standard,
+            FittedFamily::Standard {
+                likelihood: LikelihoodSpec::new(
+                    ResponseFamily::Binomial,
+                    InverseLink::BetaLogistic(state),
+                ),
+                link: None,
+                latent_cloglog_state: None,
+                mixture_state: None,
+                sas_state: Some(state),
+            },
+            "binomial".to_string(),
+        );
+        let mut gaussian = standard_gaussian_payload();
+        gaussian.version = 16;
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (name, payload, named) in [("beta-logistic", beta_logistic, true), ("gaussian", gaussian, false)]
+        {
+            let mut encoded =
+                serde_json::to_value(FittedModel::Standard { payload }).expect("serialize model");
+            let path = dir.path().join(format!("{name}.json"));
+            std::fs::write(&path, encoded.to_string()).expect("write model");
+            let Err(error) = FittedModel::load_from_path(&path) else {
+                panic!("{name}: a version-16 payload must refuse");
+            };
+            let reason = error.to_string();
+            assert!(reason.contains("payload schema mismatch"), "{name}: {reason}");
+            assert_eq!(reason.contains(NAMED), named, "{name}: {reason}");
+
+            encoded["payload"]["formula"] = serde_json::json!(42);
+            std::fs::write(&path, encoded.to_string()).expect("write stale-field model");
+            let Err(error) = FittedModel::load_from_path(&path) else {
+                panic!("{name}: a version-16 payload with a stale field must refuse");
+            };
+            let reason = error.to_string();
+            assert!(reason.contains("payload schema mismatch"), "{name}, stale field: {reason}");
+            assert_eq!(reason.contains(NAMED), named, "{name}, stale field: {reason}");
+        }
+    }
+
+    /// #2902 row 34: a v17 binomial beta-logistic model round-trips through the
+    /// saved-model wire format with its link state and coefficients bit for bit,
+    /// and the restored link evaluates identically, so a restored model predicts
+    /// through the same standardized link it was fitted with.
+    #[test]
+    fn a_beta_logistic_model_round_trips_its_standardized_link_2902() {
+        let state = SasLinkState {
+            epsilon: 0.1,
+            log_delta: -0.2,
+            delta: (-0.2_f64).exp(),
+        };
+        let fit = saved_fit(vec![FittedBlock {
+            beta: array![0.25],
+            role: BlockRole::Mean,
+            edf: 1.0,
+            lambdas: Array1::zeros(0),
+        }]);
+        let mut payload = FittedModelPayload::new(
+            MODEL_PAYLOAD_VERSION,
+            "y ~ 1".to_string(),
+            ModelKind::Standard,
+            FittedFamily::Standard {
+                likelihood: LikelihoodSpec::new(
+                    ResponseFamily::Binomial,
+                    InverseLink::BetaLogistic(state),
+                ),
+                link: None,
+                latent_cloglog_state: None,
+                mixture_state: None,
+                sas_state: Some(state),
+            },
+            "binomial".to_string(),
+        );
+        payload.fit_result = Some(fit.clone());
+        payload.unified = Some(fit);
+        let model = FittedModel::from_payload(payload);
+
+        let json = serde_json::to_string(&model).expect("serialize fitted model");
+        let restored: FittedModel = serde_json::from_str(&json).expect("restore fitted model");
+        restored
+            .payload()
+            .validate_payload_version()
+            .expect("a current-version beta-logistic payload loads");
+        let original_state = model
+            .saved_beta_logistic_state()
+            .expect("original link state")
+            .expect("the original model carries a beta-logistic state");
+        let restored_state = restored
+            .saved_beta_logistic_state()
+            .expect("restored link state")
+            .expect("the restored model carries a beta-logistic state");
+        assert_eq!(restored_state.epsilon.to_bits(), original_state.epsilon.to_bits());
+        assert_eq!(restored_state.log_delta.to_bits(), original_state.log_delta.to_bits());
+        let coefficients = |m: &FittedModel| -> Vec<u64> {
+            m.payload()
+                .fit_result
+                .as_ref()
+                .expect("saved fit")
+                .beta
+                .iter()
+                .map(|value| value.to_bits())
+                .collect()
+        };
+        assert_eq!(coefficients(&restored), coefficients(&model));
+        for eta in [-40.0_f64, -3.0, 0.0, 2.5, 40.0] {
+            let original = gam_solve::mixture_link::beta_logistic_inverse_link_jet(
+                eta,
+                original_state.log_delta,
+                original_state.epsilon,
+            );
+            let restored = gam_solve::mixture_link::beta_logistic_inverse_link_jet(
+                eta,
+                restored_state.log_delta,
+                restored_state.epsilon,
+            );
+            assert_eq!(original.mu.to_bits(), restored.mu.to_bits(), "eta={eta}");
+            assert_eq!(original.d1.to_bits(), restored.d1.to_bits(), "eta={eta}");
+        }
     }
 
     #[test]
