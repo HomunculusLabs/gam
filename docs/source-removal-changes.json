@@ -665,6 +665,14 @@
     "evidence": "Test source integrity run 34645675627 at d24ac727b named exactly these 31 identities. MSI lane c9, waves 1-5 applied cumulatively on 5ac3be42c: cargo check --workspace --all-targets after each wave, 0 errors and 0 warnings (root ban scanner included), so no caller of a removed item remains. gam-solve --lib -- reml pirls loop_guard stochastic_trace dispersion over the stack: 588 passed, 2 failed, the same two gaussian_reml::perfect_fit_refusal_tests names that fail on the unpatched base."
   },
   {
+    "base": "fa08fb6e1fb521ddace6421bff3f230433f46d91",
+    "items": [
+      "crates/gam-pyffi/src/manifold/geometry_ffi.rs:fn:model_partial_dependence_encoded_impl"
+    ],
+    "reason": "#2899 P8: gam_inference::partial_dependence builds the partial-dependence grid from the saved term specification, so pyffi no longer takes a caller's encoded reference table. model_partial_dependence_encoded_impl evaluated the curve on such a table. It is replaced by model_partial_dependence_impl, which evaluates it on the grid the saved specification defines.",
+    "evidence": "At the base, git grep -n finds model_partial_dependence_encoded_impl only in crates/gam-pyffi/src/manifold/geometry_ffi.rs: its definition and its one call, in the model_partial_dependence pyfunction this commit rewrites. No other Rust, Python or test source names it."
+  },
+  {
     "base": "d24ac727ba8e7c6ac642ec236c4008f46f8525b8",
     "items": [
       "crates/gam-custom-family/src/inner_blockwise_fit/exact_joint_fit.rs:const:JOINT_LOG_VERBOSE_PERIOD",

@@ -1154,172 +1154,73 @@ class Model:
     def partial_dependence(
         self,
         term: str,
-        data: Any,
         grid: Any | None = None,
         n_points: int = 100,
     ) -> dict[str, Any]:
-        """Per-term partial dependence with delta-method SE.
+        """A term's contribution to the linear predictor, with delta-method SE.
 
-        Analogue of mgcv's ``plot.gam()`` per-term plot: for ``term`` this
-        returns ``f_t(x) = X_t(x) β_t`` and the delta-method standard error
-        ``sqrt(diag(X_t V_t X_tᵀ))``. The evaluation ``f_t`` and its SE are
-        computed by the Rust core (``model_partial_dependence``); Python only
-        constructs the evaluation grid table.
+        For ``term`` this returns ``f_t(x) = X_t(x) β_t`` and the delta-method
+        standard error ``sqrt(diag(X_t V_t X_tᵀ))``. The Rust core
+        (``model_partial_dependence``) builds the grid from the saved term
+        specification and evaluates both. The term's axes sweep their training
+        range, or ``grid``. A factor ``by=`` block holds the level its
+        specification records. No other column enters ``X_t``, so the result
+        never depends on a reference table.
+
+        The curve is on the linear-predictor scale. For an additive predictor it
+        equals Friedman's partial dependence up to a constant. Under a nonlinear
+        link it is not an average on the response scale. For a numeric ``by=z``
+        smooth the curve is the coefficient function ``f(x)``, with ``z`` held at
+        one, and the term contributes ``z·f(x)`` to the predictor. mgcv's
+        ``plot.gam`` draws the same curve for such a term.
 
         Parameters
         ----------
         term:
             Term name as it appears in :attr:`term_blocks` (e.g. ``"s(x1)"``).
-        data:
-            Reference table; non-``term`` columns supply template values for
-            the constructed grid rows.
         grid:
-            Optional explicit grid (1-D for a single-axis smooth, or 2-D
-            ``(n_points, d)`` for a multi-axis smooth). When ``None`` a
-            1-D linspace over the term's training range is used.
+            Optional explicit grid: 1-D for a single-axis term, or 2-D
+            ``(n_points, d)`` with columns in the order of the returned ``axes``.
+            When ``None``, ``n_points`` values span the one axis's training range.
         n_points:
             Grid resolution when ``grid`` is ``None``.
 
         Returns
         -------
         dict
-            ``{"grid": array, "predicted": array, "standard_error": array,
-            "covariance_source": str}``. The standard errors are priced off
-            the covariance the fit publishes (the same one ``summary()``
-            reports), and ``covariance_source`` names it: ``"smoothing-corrected"``
-            whenever the fit carries that matrix, otherwise ``"conditional"``.
+            - ``grid``: 1-D for one axis, else ``(n, d)``.
+            - ``axes``: the term's axis columns, in grid-column order.
+            - ``predicted`` and ``standard_error``: the curve and its delta-method SE.
+            - ``covariance_source``: the covariance the SEs are priced off, the same
+              one ``summary()`` reports. It is ``"smoothing-corrected"`` whenever
+              the fit carries that matrix, otherwise ``"conditional"``.
+            - ``scale``: always ``"linear_predictor"``.
+            - ``quantity``: ``"term_contribution"``, or ``"coefficient_function"``
+              for a numeric ``by=`` smooth.
+            - ``contribution``: how the curve enters the predictor, e.g.
+              ``"z * f(x)"``.
+            - ``held``: the columns the term reads that every grid row fixes.
         """
         import numpy as np
 
-        block = next((b for b in self.term_blocks if b.name == term), None)
-        if block is None:
-            available = [b.name for b in self.term_blocks]
-            raise ValueError(
-                f"partial_dependence: term {term!r} not found; available: {available}"
-            )
-        state = self._coefficient_state()
-        schema_cols = list((state.get("schema") or {}).get("columns") or [])
-        ranges = state.get("training_feature_ranges") or []
-        names = [str(c.get("name")) for c in schema_cols]
-
-        template: dict[str, Any] = {}
-        # A partial-dependence template is user-facing table data, not an FFI
-        # payload.  Reading it back from ``normalize_table`` consumed the
-        # encoded representation: categorical cells retained the native
-        # sentinel/type encoding and were then encoded a second time below,
-        # producing a level the fitted schema had never seen (#2780).  Keep the
-        # raw cells until the completed grid crosses the native boundary once.
-        data_columns, _ = table_columns(data)
-        if not data_columns or not next(iter(data_columns.values()), []):
-            raise ValueError("table data cannot be empty")
-        template.update({name: values[0] for name, values in data_columns.items()})
-        for idx, col in enumerate(schema_cols):
-            name = str(col.get("name"))
-            if name in template:
-                continue
-            if col.get("kind") == "categorical":
-                levels = col.get("levels") or ["0"]
-                template[name] = str(levels[0])
-            elif idx < len(ranges):
-                lo, hi = map(float, ranges[idx])
-                template[name] = str(0.5 * (lo + hi))
-            else:
-                template[name] = "0"
-
-        # For a ``by=``-factor smooth block, the block name carries the factor
-        # level as a ``:by=<var>[<level>]`` suffix (e.g. ``s(x, by=g):by=g[a]``).
-        # Pin the grouping factor at the block's OWN level so that partial
-        # dependence reflects a fixed model property rather than the arbitrary
-        # value found in the first row of the passed frame (issue #2076).
-        by_marker = ":by="
-        by_pos = term.rfind(by_marker)
-        if by_pos != -1 and term.endswith("]"):
-            by_suffix = term[by_pos + len(by_marker) :]
-            bracket = by_suffix.find("[")
-            if bracket != -1:
-                by_var = by_suffix[:bracket]
-                by_level = by_suffix[bracket + 1 : -1]
-                if by_var in names:
-                    by_col = schema_cols[names.index(by_var)]
-                    by_levels = [str(lvl) for lvl in (by_col.get("levels") or [])]
-                    template[by_var] = next(
-                        (lvl for lvl in by_levels if lvl == by_level), by_level
-                    )
-
-        term_args: tuple[str, ...] = ()
-        if "(" in term and ")" in term:
-            inside = term[term.index("(") + 1 : term.rindex(")")]
-            term_args = tuple(
-                a.strip() for a in inside.split(",") if a.strip() and a.strip() in names
-            )
-
-        if grid is None:
-            if len(term_args) != 1:
-                raise ValueError(
-                    "partial_dependence: cannot infer a 1D sweep axis from term "
-                    f"{term!r} (axes inferred: {term_args!r}); pass an explicit "
-                    "`grid=` array. Multi-dimensional smooths always require an "
-                    "explicit grid."
-                )
-            term_argument = term_args[0]
-            col_idx = names.index(term_argument)
-            lo, hi = (map(float, ranges[col_idx]) if col_idx < len(ranges) else (0.0, 1.0))
-            lo, hi = float(lo), float(hi)
-            if not (np.isfinite(lo) and np.isfinite(hi)) or lo == hi:
-                lo, hi = 0.0, 1.0
-            grid_arr = np.linspace(lo, hi, int(n_points))
-            sweep_columns: tuple[str, ...] = (term_argument,)
-            grid_matrix = grid_arr.reshape(-1, 1)
-            grid_out: Any = grid_arr
-        else:
+        grid_matrix = None
+        if grid is not None:
             grid_matrix = np.asarray(grid, dtype=float)
             if grid_matrix.ndim == 1:
-                if len(term_args) != 1:
-                    raise ValueError(
-                        "partial_dependence: a 1-D grid requires a single-axis "
-                        f"term; {term!r} has axes {term_args!r}. Pass a 2-D grid."
-                    )
-                sweep_columns = (term_args[0],)
                 grid_matrix = grid_matrix.reshape(-1, 1)
-                grid_out = grid_matrix.reshape(-1)
-            elif grid_matrix.ndim == 2:
-                if len(term_args) != grid_matrix.shape[1]:
-                    raise ValueError(
-                        "partial_dependence: explicit grid shape "
-                        f"{grid_matrix.shape} does not match term axes {term_args!r}"
-                    )
-                sweep_columns = term_args
-                grid_out = grid_matrix
-            else:
+            elif grid_matrix.ndim != 2:
                 raise ValueError("partial_dependence: grid must be 1-D or 2-D")
-
-        # The FFI takes an encoded table (#2318 boundary hardening), so route
-        # the constructed grid through the same normalize_table encode path
-        # every other table-crossing call uses — a raw list of string rows is
-        # rejected at the boundary.
-        headers = list(template.keys())
-        categorical_names = {
-            str(col.get("name")) for col in schema_cols if col.get("kind") == "categorical"
-        }
-        columns: dict[str, list[Any]] = {h: [] for h in headers}
-        for row_vals in grid_matrix:
-            row = dict(template)
-            for col_name, value in zip(sweep_columns, row_vals, strict=False):
-                row[col_name] = str(float(value))
-            for h in headers:
-                columns[h].append(
-                    row[h] if h in categorical_names else float(row[h])
-                )
-        enc_headers, enc_rows, _ = normalize_table(columns)
-        predicted, se, covariance_source = rust_module().model_partial_dependence(
-            self._model_bytes, term, enc_headers, enc_rows
+            grid_matrix = np.ascontiguousarray(grid_matrix)
+        result = dict(
+            rust_module().model_partial_dependence(
+                self._model_bytes, term, grid_matrix, int(n_points)
+            )
         )
-        return {
-            "grid": grid_out,
-            "predicted": np.asarray(predicted, dtype=float),
-            "standard_error": np.asarray(se, dtype=float),
-            "covariance_source": str(covariance_source),
-        }
+        grid_out = np.asarray(result["grid"], dtype=float)
+        result["grid"] = grid_out.reshape(-1) if grid_out.shape[1] == 1 else grid_out
+        result["predicted"] = np.asarray(result["predicted"], dtype=float)
+        result["standard_error"] = np.asarray(result["standard_error"], dtype=float)
+        return result
 
     def variance_share(
         self,

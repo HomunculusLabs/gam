@@ -29,7 +29,6 @@ class _ModelTermDiagnostics(typing.Protocol):
     def partial_dependence(
         self,
         term: str,
-        data: typing.Any,
         *,
         n_points: int,
     ) -> dict[str, typing.Any]: ...
@@ -1920,12 +1919,17 @@ def test_partial_dependence_and_variance_share() -> None:
     assert "s(x2)" in block_names
 
     diagnostics = typing.cast(_ModelTermDiagnostics, model)
-    pd_out = diagnostics.partial_dependence("s(x1)", frame, n_points=40)
+    pd_out = diagnostics.partial_dependence("s(x1)", n_points=40)
     assert set(pd_out.keys()) == {
         "grid",
+        "axes",
         "predicted",
         "standard_error",
         "covariance_source",
+        "scale",
+        "quantity",
+        "contribution",
+        "held",
     }
     assert pd_out["covariance_source"] == "smoothing-corrected"
     assert pd_out["grid"].shape == (40,)
@@ -2363,12 +2367,17 @@ def test_model_partial_dependence_1d_shapes_and_finiteness() -> None:
     frame = pd.DataFrame({"y": y, "x1": x1})
     model = gamfit.fit(frame, "y ~ s(x1)")
     diagnostics = typing.cast(_ModelTermDiagnostics, model)
-    pd_out = diagnostics.partial_dependence("s(x1)", frame, n_points=25)
+    pd_out = diagnostics.partial_dependence("s(x1)", n_points=25)
     assert set(pd_out.keys()) == {
         "grid",
+        "axes",
         "predicted",
         "standard_error",
         "covariance_source",
+        "scale",
+        "quantity",
+        "contribution",
+        "held",
     }
     assert pd_out["covariance_source"] == "smoothing-corrected"
     assert np.asarray(pd_out["grid"]).shape == (25,)

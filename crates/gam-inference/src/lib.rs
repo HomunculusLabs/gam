@@ -29,6 +29,7 @@ pub use gam_sae::inference::layer_transport;
 pub use gam_terms::inference::lawley;
 pub use hmc_io as hmc;
 pub mod model_comparison;
+pub mod partial_dependence;
 // #1521: pg_gate_evidence/pg_moments descended into gam-solve (reached downward
 // by gam_sae::structure_harvest); re-exported here so `gam::inference::{
 // pg_gate_evidence, pg_moments}` resolves unchanged.

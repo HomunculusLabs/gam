@@ -93,7 +93,7 @@ def test_oracle_agrees_with_partial_dependence_without_a_factor() -> None:
     data = _data()
     model = gamfit.fit({"x": data["x"], "y": data["y"]}, "y ~ s(x)", family="gaussian")
 
-    result = model.partial_dependence("s(x)", {"x": data["x"], "y": data["y"]}, n_points=9)
+    result = model.partial_dependence("s(x)", n_points=9)
     grid = np.asarray(result["grid"], dtype=float)
     expected_fit, expected_se = _oracle(model, grid, {"x": grid})
 
@@ -108,7 +108,7 @@ def test_partial_dependence_with_a_string_factor(formula: str) -> None:
     data = _data()
     model = gamfit.fit(data, formula, family="gaussian")
 
-    result = model.partial_dependence("s(x)", data, n_points=9)
+    result = model.partial_dependence("s(x)", n_points=9)
 
     grid = np.asarray(result["grid"], dtype=float)
     frame = {"x": grid, "b": np.array(["b0"] * grid.size)}

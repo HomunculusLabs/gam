@@ -7858,17 +7858,50 @@ fn affine_design_array_impl(
     affine_design_for_dataset(&model, dataset)
 }
 
-/// Per-term partial dependence on a grid table, evaluated by
+struct PartialDependenceOutput {
+    table: gam::inference::partial_dependence::PartialDependenceTable,
+    predicted: Vec<f64>,
+    standard_error: Vec<f64>,
+    covariance_source: String,
+}
+
+/// A term's partial dependence on the grid its saved term specification defines
+/// (`gam::inference::partial_dependence`), evaluated by
 /// `gam_predict::term_diagnostics::term_partial_dependence` on the model's
 /// mean-block design at the grid rows, with the covariance the fit publishes.
-fn model_partial_dependence_encoded_impl(
+fn model_partial_dependence_impl(
     model_bytes: &[u8],
     term: &str,
-    source: EncodedDataset,
-) -> Result<(Vec<f64>, Vec<f64>, String), String> {
+    grid: gam::inference::partial_dependence::PartialDependenceGrid,
+) -> Result<PartialDependenceOutput, String> {
     let model = load_model_impl(model_bytes)?;
-    let dataset = dataset_with_model_schema_from_encoded(&model, &source)?;
-    let x = standard_mean_design_dense(&model, dataset)?;
+    let payload = model.payload();
+    let schema = payload
+        .data_schema
+        .as_ref()
+        .ok_or_else(|| "partial_dependence requires a saved model schema".to_string())?;
+    let training_feature_ranges = payload
+        .training_feature_ranges
+        .as_deref()
+        .ok_or_else(|| "partial_dependence requires saved training feature ranges".to_string())?;
+    let termspec = payload.resolved_termspec.as_ref().ok_or_else(|| {
+        "partial_dependence requires a saved resolved term specification".to_string()
+    })?;
+    let training_headers = model
+        .training_headers
+        .as_deref()
+        .ok_or_else(|| "partial_dependence requires saved training headers".to_string())?;
+    let table = gam::inference::partial_dependence::partial_dependence_table(
+        gam::inference::partial_dependence::PartialDependenceInputs {
+            schema,
+            training_headers,
+            training_feature_ranges,
+            termspec,
+        },
+        term,
+        grid,
+    )?;
+    let x = standard_mean_design_dense(&model, table.table.clone())?;
     let fit = fit_result_from_saved_model_for_prediction(&model)?;
     let beta = &fit.beta;
     // The partial-effect band prices its SEs off the covariance the fit
@@ -7894,13 +7927,18 @@ fn model_partial_dependence_encoded_impl(
             let available: Vec<&str> = blocks.iter().map(|(n, _, _, _)| n.as_str()).collect();
             format!("partial_dependence: term {term:?} not found; available: {available:?}")
         })?;
-    let (predicted, se) = gam_predict::term_diagnostics::term_partial_dependence(
+    let (predicted, standard_error) = gam_predict::term_diagnostics::term_partial_dependence(
         x.view(),
         beta.view(),
         cov.view(),
         start..end,
     )?;
-    Ok((predicted, se, covariance_source.as_str().to_string()))
+    Ok(PartialDependenceOutput {
+        table,
+        predicted,
+        standard_error,
+        covariance_source: covariance_source.as_str().to_string(),
+    })
 }
 
 /// Per-term variance share for each non-intercept term block (or the single
@@ -7927,24 +7965,43 @@ fn model_variance_share_encoded_impl(
 }
 
 #[pyfunction]
-fn model_partial_dependence(
-    py: Python<'_>,
+fn model_partial_dependence<'py>(
+    py: Python<'py>,
     model_bytes: Vec<u8>,
     term: String,
-    headers: Vec<String>,
-    rows: PyRef<'_, PyEncodedTable>,
-) -> PyResult<(Py<PyArray1<f64>>, Py<PyArray1<f64>>, String)> {
-    rows.require_headers(&headers).map_err(py_value_error)?;
-    let dataset = rows.dataset.clone();
-    let (predicted, se, covariance_source) =
-        detach_py_result(py, "model_partial_dependence", move || {
-            model_partial_dependence_encoded_impl(&model_bytes, &term, dataset)
-        })?;
-    Ok((
-        predicted.into_pyarray(py).unbind(),
-        se.into_pyarray(py).unbind(),
-        covariance_source,
-    ))
+    grid: Option<PyReadonlyArray2<'py, f64>>,
+    n_points: usize,
+) -> PyResult<Py<PyDict>> {
+    use gam::inference::partial_dependence::{
+        HeldValue, PARTIAL_DEPENDENCE_SCALE, PartialDependenceGrid,
+    };
+    let grid = match grid {
+        Some(points) => PartialDependenceGrid::Explicit(points.as_array().to_owned()),
+        None => PartialDependenceGrid::TrainingRange { n_points },
+    };
+    let output = detach_py_result(py, "model_partial_dependence", move || {
+        model_partial_dependence_impl(&model_bytes, &term, grid)
+    })?;
+    let contribution = output.table.contribution();
+    let table = output.table;
+    let out = PyDict::new(py);
+    out.set_item("grid", table.grid.into_pyarray(py))?;
+    out.set_item("axes", table.axes)?;
+    out.set_item("predicted", output.predicted.into_pyarray(py))?;
+    out.set_item("standard_error", output.standard_error.into_pyarray(py))?;
+    out.set_item("covariance_source", output.covariance_source)?;
+    out.set_item("scale", PARTIAL_DEPENDENCE_SCALE)?;
+    out.set_item("quantity", table.quantity.as_str())?;
+    out.set_item("contribution", contribution)?;
+    let held = PyDict::new(py);
+    for (column, value) in table.held {
+        match value {
+            HeldValue::Level(label) => held.set_item(column, label)?,
+            HeldValue::Number(number) => held.set_item(column, number)?,
+        }
+    }
+    out.set_item("held", held)?;
+    Ok(out.unbind())
 }
 
 #[pyfunction(signature = (model_bytes, headers, rows, term = None))]

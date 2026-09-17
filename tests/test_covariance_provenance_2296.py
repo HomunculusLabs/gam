@@ -120,7 +120,7 @@ def test_default_uncertainty_publishes_conditional_when_no_correction_exists() -
         "contain smoothing-corrected covariance"
     )
 
-    partial = model.partial_dependence("s(x, k=8)", {"x": x}, grid=grid["x"])
+    partial = model.partial_dependence("s(x, k=8)", grid=grid["x"])
     assert partial["covariance_source"] == "conditional"
     np.testing.assert_array_equal(
         np.asarray(partial["standard_error"], dtype=float), np.zeros(3)
