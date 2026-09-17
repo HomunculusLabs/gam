@@ -388,6 +388,9 @@ mod tests_streaming_outer_gradient_2026;
 mod tests_row_jet_and_outer_objective_780;
 
 #[cfg(test)]
+mod tests_support_code_scale_2933;
+
+#[cfg(test)]
 mod tests_deflation_traces_780;
 
 #[cfg(test)]

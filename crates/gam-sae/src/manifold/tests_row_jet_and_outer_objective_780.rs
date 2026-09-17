@@ -88,14 +88,17 @@ unsafe impl GlobalAlloc for SaeRowJetCountingAllocator {
 #[global_allocator]
 static SAE_ROW_JET_GLOBAL_ALLOCATOR: SaeRowJetCountingAllocator = SaeRowJetCountingAllocator;
 
-fn begin_row_jet_allocation_measurement() {
+// The ledger is the gam-sae lib-test binary's only global allocator, so a
+// sibling test module measuring a serial routine's allocations (the #2933 F43
+// support-code scale test, `tests_support_code_scale_2933`) reads these counters.
+pub(crate) fn begin_row_jet_allocation_measurement() {
     TRACK_ROW_JET_ALLOCATIONS.with(|tracking| tracking.set(false));
     ROW_JET_ALLOCATION_CALLS.with(|counter| counter.set(0));
     ROW_JET_ALLOCATED_BYTES.with(|counter| counter.set(0));
     TRACK_ROW_JET_ALLOCATIONS.with(|tracking| tracking.set(true));
 }
 
-fn end_row_jet_allocation_measurement() -> (u64, u64) {
+pub(crate) fn end_row_jet_allocation_measurement() -> (u64, u64) {
     TRACK_ROW_JET_ALLOCATIONS.with(|tracking| tracking.set(false));
     (
         ROW_JET_ALLOCATION_CALLS.with(Cell::get),
