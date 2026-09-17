@@ -6690,8 +6690,7 @@ impl SaeManifoldTerm {
         // atom (`base`/`step_2300`, `r_k == M_k`) is left untouched, so its
         // design, decoder, and penalized quasi-Laplace criterion are byte-for-byte the historical
         // full-`B` path.
-        self.reduce_atoms_to_data_supported_rank()?;
-        setup_marks.push(("reduce_atoms", joint_fit_entered.elapsed().as_secs_f64()));
+        //
         // #972 / #977 T1 — magic-by-default decoder-frame activation. Before the
         // outer loop, auto-derive and install the low-rank Grassmann frames
         // (each atom independently, only when the factorization materially
@@ -6700,9 +6699,13 @@ impl SaeManifoldTerm {
         // path, so the small-model fits are unchanged; large-ambient-`p`,
         // low-decoder-rank atoms collapse their border `M_k·p → M_k·r_k` and the
         // joint solve runs in the factored coordinate space.
-        self.ensure_decoder_frames_active_for_current_decoder()
+        //
+        // Both stages run through `prepare_entry_stages`, the one preparation point that the
+        // entries building a criterion over a supplied state also call, so a joint fit and
+        // those entries price the same prepared state.
+        self.prepare_entry_stages()
             .map_err(|err| format!("SaeManifoldTerm::run_joint_fit_arrow_schur: {err}"))?;
-        setup_marks.push(("decoder_frames", joint_fit_entered.elapsed().as_secs_f64()));
+        setup_marks.push(("entry_stages", joint_fit_entered.elapsed().as_secs_f64()));
         // #976 Layer-1 guard ledger is per joint fit for ORDINARY fits: each
         // standalone inner solve gets a fresh re-seed budget and reports only
         // its own breaches. EVIDENCE lanes (`allow_heuristic_termination ==

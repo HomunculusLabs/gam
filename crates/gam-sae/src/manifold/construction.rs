@@ -3074,6 +3074,18 @@ impl SaeManifoldTerm {
         Ok(activated)
     }
 
+    /// The joint fit's entry stages, derived from the installed state: the data-supported
+    /// basis reduction (#1117), then decoder-frame activation (#972). This is the one
+    /// preparation point. `run_joint_fit_arrow_schur` runs it before its outer loop, and every
+    /// entry that builds a criterion over a supplied state runs it first: the native stage
+    /// objectives, `run_sae_manifold_certify`, and the crosscoder fit. The zero-iteration freeze
+    /// skips it on the assumption that it already ran, so a route that bypassed it would price
+    /// the full-width border instead of the prepared one.
+    pub(crate) fn prepare_entry_stages(&mut self) -> Result<(), String> {
+        self.reduce_atoms_to_data_supported_rank()?;
+        self.ensure_decoder_frames_active_for_current_decoder()
+    }
+
     /// Reconcile decoder-frame activation before a fit entry point. The
     /// user-facing `auto_activate_decoder_frames` contract returns only newly
     /// installed frames; this helper enforces the stronger invariant the large-p

@@ -12,10 +12,10 @@ mod tests {
     use crate::inference::steering::steer_delta;
     use crate::manifold::{
         SaeCertifyRequest, SaeExternalCertificationOutcome, SaeFisherRowMetricRequest,
-        SaeFitAssignmentKind, SaeFitConfig, SaeFitSeedReport, SaeFitSeedRequest,
-        SaeManifoldOuterObjective, SaeManifoldRho, SaeManifoldTerm, SaeMinimalSeedReport,
-        SaeMinimalSeedRequest, SaeOuterVerdict, build_sae_fit_seed, build_sae_minimal_seed,
-        run_sae_manifold_certify,
+        SaeFitAssignmentKind, SaeFitConfig, SaeFitError, SaeFitRequest, SaeFitSeedReport,
+        SaeFitSeedRequest, SaeManifoldOuterObjective, SaeManifoldRho, SaeManifoldTerm,
+        SaeMinimalSeedReport, SaeMinimalSeedRequest, SaeOuterVerdict, build_sae_fit_seed,
+        build_sae_minimal_seed, run_sae_manifold_certify, run_sae_manifold_fit,
     };
     use gam_solve::rho_optimizer::{OuterProblem, OuterResult};
     use gam_terms::analytic_penalties::AnalyticPenaltyRegistry;
@@ -177,6 +177,43 @@ mod tests {
             isometry_pin_active,
             metric_provenance,
             run_structure_search: false,
+        }
+    }
+
+    /// #2822 — the native entry refuses a frozen fit and names this module's route instead.
+    /// `max_iter = 0` holds the inner state at the seed, so a native fit from it would not come
+    /// from a converged optimization. Pricing a supplied state is `run_sae_manifold_certify`'s job.
+    #[test]
+    fn native_entry_refuses_a_frozen_fit_and_names_certify_2822() {
+        let (target, term, rho, pin, provenance) = seeded_external_fixture();
+        let outcome = run_sae_manifold_fit(SaeFitRequest {
+            reconstruction_optimism_folds: None,
+            base_term: term,
+            target,
+            registry: AnalyticPenaltyRegistry::new(),
+            initial_rho: rho,
+            max_iter: 0,
+            learning_rate: 1.0,
+            ridge_ext_coord: 1.0e-6,
+            ridge_beta: 1.0e-6,
+            alpha: 1.0,
+            isometry_pin_active: pin,
+            metric_provenance: provenance,
+            promote_from_residual: false,
+            run_structure_search: false,
+            run_outer_rho_search: true,
+            structured_residual_passes: 0,
+            cancel: None,
+        });
+        match outcome {
+            Err(SaeFitError::InvalidRequest(message)) => assert!(
+                message.contains("run_sae_manifold_certify"),
+                "the refusal must name the certify entry, got: {message}"
+            ),
+            Err(other) => {
+                panic!("a frozen native fit must be refused as an invalid request, got: {other}")
+            }
+            Ok(_) => panic!("a frozen native fit (max_iter = 0) must not produce a fit"),
         }
     }
 

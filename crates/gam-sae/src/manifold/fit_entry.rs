@@ -65,6 +65,20 @@ fn validate_structured_residual_passes(passes: usize) -> Result<(), SaeFitError>
     Ok(())
 }
 
+/// A native fit comes only from a converged optimization. `max_iter == 0` holds the inner
+/// state at the seed (the #850 freeze), so it cannot mint one. Pricing a supplied state at a
+/// supplied ρ is [`run_sae_manifold_certify`]'s job.
+fn validate_inner_iterations(max_iter: usize) -> Result<(), SaeFitError> {
+    if max_iter == 0 {
+        return Err(SaeFitError::InvalidRequest(
+            "max_iter=0 freezes the inner solve at the seed, so it cannot produce a converged fit; \
+             price an installed state with run_sae_manifold_certify instead"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// #2071 residual-promotion alignment threshold under the random-direction
 /// null. Rank one has no informative angle, so its threshold is exactly one.
 /// Keeping this derivation in `gam-sae` makes the typed fit entry self-sufficient
@@ -674,6 +688,10 @@ fn fit_outer_stage_to_boundary(
     metric_provenance: &'static str,
 ) -> Result<SaeStageFit, SaeFitError> {
     loop {
+        // Each stage's objective prices the prepared state. The joint fit's entry stages run
+        // here, before the objective exists, so no criterion this entry evaluates sees the
+        // full-width border that the zero-iteration freeze assumes was already reduced.
+        term.prepare_entry_stages().map_err(SaeFitError::Fit)?;
         let mut objective = SaeManifoldOuterObjective::new(
             term,
             target.clone(),
@@ -846,6 +864,7 @@ pub struct SaeFitRequest {
 ///   it on interrupt so the abandoned worker's next outer eval bails.
 pub fn run_sae_manifold_fit(mut request: SaeFitRequest) -> Result<SaeFitOutcome, SaeFitError> {
     validate_structured_residual_passes(request.structured_residual_passes)?;
+    validate_inner_iterations(request.max_iter)?;
     // #2023 Increment 5 — Tier-0 shared-mean peel as the ONE entry's NATIVE
     // preprocessing (the "seed policy" tier of the tiered schedule, folded into the
     // single fit rather than a separate surface). The shared column mean μ is the
@@ -2005,8 +2024,7 @@ pub fn run_sae_manifold_certify(
     // width, and the frozen zero-iteration joint fit returns before those stages, so
     // without them the audit prices a different criterion than the fit it certifies
     // (#2263: job 631598 priced the native certificate on border 2 and the audit on 6).
-    term.reduce_atoms_to_data_supported_rank().map_err(SaeFitError::Fit)?;
-    term.ensure_decoder_frames_active_for_current_decoder().map_err(SaeFitError::Fit)?;
+    term.prepare_entry_stages().map_err(SaeFitError::Fit)?;
 
     let inner_audit = installed_inner_kkt_audit(&mut term, z.view(), &rho, &registry)?;
     if !inner_audit.certifies() {
