@@ -2524,16 +2524,14 @@ fn try_exact_joint_spatial_length_scale_optimization(
         (theta_star, joint_final_value)
     };
 
-    let selected_lambdas = Array1::from_vec(
-        gam_problem::checked_exp_log_strengths(
-            theta_star.slice(s![..rho_dim]).iter().copied(),
-        )
-        .map_err(|error| {
-            EstimationError::InvalidInput(format!(
-                "selected joint spatial smoothing coordinate is outside the canonical log-strength domain: {error}"
-            ))
-        })?,
-    );
+    // The refit reads its warm start in log λ (#1340); a physical λ there starts
+    // the search at the wrong point, clamped onto a domain face when λ is large.
+    let selected_log_lambdas = theta_star.slice(s![..rho_dim]).to_owned();
+    gam_problem::validate_log_strengths(selected_log_lambdas.iter().copied()).map_err(|error| {
+        EstimationError::InvalidInput(format!(
+            "selected joint spatial smoothing coordinate is outside the canonical log-strength domain: {error}"
+        ))
+    })?;
     let log_kappa_star =
         SpatialLogKappaCoords::from_theta_tail_with_dims(&theta_star, rho_dim, dims_per_term);
     // #1464 diagnostic (ban-clean): the joint solver's CONVERGED ψ-tail κ for each
@@ -2562,7 +2560,7 @@ fn try_exact_joint_spatial_length_scale_optimization(
         weights,
         offset,
         &optimized_spec,
-        selected_lambdas.as_slice(),
+        selected_log_lambdas.as_slice(),
         family.clone(),
         options,
     )?;
@@ -7374,18 +7372,15 @@ pub(crate) fn exact_joint_multistart_outer_problem(
             theta0.len(),
         );
     }
-    let mut seed_heuristic = theta0.to_vec();
-    let initial_lambdas = gam_problem::checked_exp_log_strengths(
-        theta0.iter().take(rho_dim).copied(),
-    )
-    .map_err(|error| {
+    gam_problem::validate_log_strengths(theta0.iter().take(rho_dim).copied()).map_err(|error| {
         EstimationError::InvalidInput(format!(
             "exact joint initial smoothing coordinate is outside the canonical log-strength domain: {error}"
         ))
     })?;
-    for (value, lambda) in seed_heuristic[..rho_dim].iter_mut().zip(initial_lambdas) {
-        *value = lambda;
-    }
+    // The seed lattice reads its anchor in the outer coordinate, log λ (#1340).
+    // An exp(ρ₀) anchor clamps to the domain's upper face, and every lattice point
+    // built around it inherits that face (#2902 row 9, #2765).
+    let seed_heuristic = theta0.to_vec();
     let mut problem = gam_solve::rho_optimizer::OuterProblem::new(n_params)
         .with_gradient(gradient)
         .with_hessian(hessian)
@@ -8576,16 +8571,12 @@ fn try_exact_joint_latent_coord_optimization(
     }
 
     let theta_star = result.rho;
-    let selected_lambdas = Array1::from_vec(
-        gam_problem::checked_exp_log_strengths(
-            theta_star.slice(s![..rho_dim]).iter().copied(),
-        )
-        .map_err(|error| {
-            EstimationError::InvalidInput(format!(
-                "selected latent-coordinate smoothing coordinate is outside the canonical log-strength domain: {error}"
-            ))
-        })?,
-    );
+    let selected_log_lambdas = theta_star.slice(s![..rho_dim]).to_owned();
+    gam_problem::validate_log_strengths(selected_log_lambdas.iter().copied()).map_err(|error| {
+        EstimationError::InvalidInput(format!(
+            "selected latent-coordinate smoothing coordinate is outside the canonical log-strength domain: {error}"
+        ))
+    })?;
     let mut final_data = data.to_owned();
     let flat_t = theta_star
         .slice(s![rho_dim..rho_dim + latent_flat_dim])
@@ -8605,7 +8596,7 @@ fn try_exact_joint_latent_coord_optimization(
         weights,
         offset,
         resolvedspec,
-        selected_lambdas.as_slice(),
+        selected_log_lambdas.as_slice(),
         family,
         options,
     )?;
@@ -8767,7 +8758,7 @@ fn select_isotropic_matern_range_basin(
             weights,
             offset,
             &endpoint_spec,
-            best.fit.lambdas.as_slice(),
+            best.fit.log_lambdas.as_slice(),
             family.clone(),
             options,
         )?;
@@ -8878,7 +8869,7 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
                 weights.view(),
                 offset.view(),
                 &resolvedspec,
-                best.fit.lambdas.as_slice(),
+                best.fit.log_lambdas.as_slice(),
                 family,
                 options,
             )?;
@@ -8931,7 +8922,7 @@ pub fn fit_term_collectionwith_spatial_length_scale_optimization(
         weights.view(),
         offset.view(),
         &resolvedspec,
-        best.fit.lambdas.as_slice(),
+        best.fit.log_lambdas.as_slice(),
         family,
         options,
     )?;
@@ -9168,7 +9159,7 @@ fn spatial_kappa_incumbent(
             weights.view(),
             offset.view(),
             &resolvedspec,
-            best.fit.lambdas.as_slice(),
+            best.fit.log_lambdas.as_slice(),
             family.clone(),
             options,
         )?;

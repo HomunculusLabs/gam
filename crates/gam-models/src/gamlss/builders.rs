@@ -4808,10 +4808,6 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
     // Spatial log-kappa coordinates are ψ (design-moving) dimensions because
     // they rebuild the spatial basis and penalties at each outer proposal.
     let analytic_outer_hessian_available = true;
-    let mut seed_heuristic = theta0.to_vec();
-    for value in &mut seed_heuristic[..rho_dim] {
-        *value = value.exp();
-    }
     let problem = gam_solve::rho_optimizer::OuterProblem::new(theta_dim)
         .with_gradient(Derivative::Analytic)
         .with_hessian(if analytic_outer_hessian_available {
@@ -4835,12 +4831,10 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
             ..Default::default()
         })
         .with_screening_cap(Arc::clone(&screening_cap))
-        // The saturation REFERENCE stays at the joint prior even where the box
-        // above widened a coordinate to `±RHO_BOUND`, exactly as the standard
-        // joint `[ρ, ψ]` route does: the box is the per-dimension `lower`/`upper`
-        // pair, and this scalar only feeds the seed grid and the bound-free
-        // fallback box.
-        .with_heuristic_lambdas(seed_heuristic);
+        // The seed lattice reads its anchor in the outer coordinate, log λ
+        // (#1340); an exp(ρ₀) anchor clamps to the domain's upper face (#2902
+        // row 9).
+        .with_heuristic_lambdas(theta0.to_vec());
 
     let eval_outer = |state: &mut MeanWiggleOuterState,
                       theta: &Array1<f64>,
