@@ -246,6 +246,9 @@ pub(crate) fn two_circle_whitened_k2_recovers_disjoint_signal_2027() {
         -6.0,
         vec![Array1::<f64>::zeros(1), Array1::<f64>::zeros(1)],
     );
+    // #2822 — the data least-squares decoders at the seeded charts; an entry refuses a zero decoder.
+    term.refit_decoder_least_squares_at_current_state(target.view(), Some(&rho))
+        .expect("the two planted circles span nonzero least-squares decoders");
     let loss = term
         .run_joint_fit_arrow_schur(target.view(), &mut rho, None, 60, 0.05, 1.0e-3, 1.0e-3)
         .expect("the joint arrow-Schur fit converges on this fixture");
@@ -334,6 +337,9 @@ pub(crate) fn two_circle_separates_at_narrow_and_wide_widths_2027() {
             -6.0,
             vec![Array1::<f64>::zeros(1), Array1::<f64>::zeros(1)],
         );
+        // #2822 — the data least-squares decoders at the seeded charts; an entry refuses a zero decoder.
+        term.refit_decoder_least_squares_at_current_state(target.view(), Some(&rho))
+            .expect("the two planted circles span nonzero least-squares decoders");
         let loss = term
             .run_joint_fit_arrow_schur(target.view(), &mut rho, None, 60, 0.05, 1.0e-3, 1.0e-3)
             .expect("the joint arrow-Schur fit converges on this fixture");

@@ -4749,12 +4749,15 @@ mod linear_parity_anchor_1026_tests {
             AssignmentMode::ordered_beta_bernoulli(0.5, 1.0, false),
         )
         .unwrap();
-        let term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+        let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
         let init_rho = SaeManifoldRho::new(
             (1.0e-4_f64).ln(),
             (1.0e-2_f64).ln(),
             vec![Array1::<f64>::zeros(1)],
         );
+        // #2822 — the data least-squares decoder at the fixture's chart; an entry refuses a zero decoder.
+        term.refit_decoder_least_squares_at_current_state(target.view(), Some(&init_rho))
+            .expect("the planted line spans a nonzero least-squares decoder");
         let mut obj =
             SaeManifoldOuterObjective::new(term, target, None, init_rho, 60, 0.5, 1e-4, 1e-4);
         let rho_flat = obj.baseline_rho.flat_coordinates();
