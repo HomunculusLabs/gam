@@ -686,6 +686,7 @@ fn quantized_decoder_is_never_free_for_constant_coordinates_2933_f14() {
             &[block.view()],
             &[coords.view()],
             assignments.view(),
+            None,
             2,
         )
         .unwrap();
@@ -709,6 +710,63 @@ fn quantized_decoder_is_never_free_for_constant_coordinates_2933_f14() {
     assert!(base.dictionary_header_bits > 0.0);
     // The codes are constant, so the decoder spends the whole budget.
     assert_relative(base.dictionary_distortion, 1.0e-3, 1e-9, "dictionary distortion");
+}
+
+#[test]
+fn quantized_decoder_is_priced_in_the_standardized_output_metric_2933_f14() {
+    // The fit's EV and the native code spectra live in the metric diag(σ⁻²).
+    // Rescaling one physical decoder column together with its tier0 scale leaves
+    // the standardized model unchanged, so the decoder message must not move.
+    let plan = SaeAtomGeometryPlan::new(
+        SaeAtomBasisKind::Periodic,
+        1,
+        SaeBasisResolution::PeriodicHarmonics { order: 1 },
+        SaeReferenceMetricPlan::UnitCircle,
+    )
+    .unwrap();
+    let basis_size = plan.basis_size().unwrap();
+    let n = 16;
+    let coords = Array2::from_shape_fn((n, 1), |(row, _)| row as f64 / n as f64);
+    let assignments = Array2::<f64>::ones((n, 1));
+    let mut codes = SparseAtomCodes::empty(n, 1);
+    for row in 0..n {
+        codes.row_mut(row).assign(0, 1.0);
+    }
+    let decoder =
+        Array2::from_shape_fn((basis_size, 2), |(m, c)| 0.3 * (m as f64 + 1.0) - 0.4 * c as f64);
+    let scale = ndarray::array![1.0, 0.5];
+    let mut physical = decoder.clone();
+    physical.column_mut(1).mapv_inplace(|value| 40.0 * value);
+    let compensated = ndarray::array![1.0, 20.0];
+    let price = |block: &Array2<f64>, tier0: &ndarray::Array1<f64>| {
+        let dictionary = persisted_decoder_dictionary_code(
+            std::slice::from_ref(&plan),
+            &[block.view()],
+            &[coords.view()],
+            assignments.view(),
+            Some(tier0.view()),
+            2,
+        )
+        .unwrap();
+        manifold_fit_description_length(&codes, &[vec![0.0]], 1.0e-3, 0.99, &dictionary).unwrap()
+    };
+    let base = price(&decoder, &scale);
+    let moved = price(&physical, &compensated);
+    assert_relative(moved.dict_bits, base.dict_bits, 1e-9, "compensated decoder bits");
+    assert_relative(
+        moved.dictionary_distortion,
+        base.dictionary_distortion,
+        1e-9,
+        "compensated decoder distortion",
+    );
+    // Control: the same physical rescaling without its scale is a different model.
+    let uncompensated = price(&physical, &scale);
+    assert!(
+        (uncompensated.dict_bits - base.dict_bits).abs() > 1.0,
+        "an uncompensated rescaling must change the decoder message: {} vs {}",
+        uncompensated.dict_bits,
+        base.dict_bits
+    );
 }
 
 #[test]

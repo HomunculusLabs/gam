@@ -5685,6 +5685,10 @@ impl ManifoldSaeCore {
                     &decoder_views,
                     &coord_views,
                     assignments.view(),
+                    self.inner
+                        .tier0_scale
+                        .as_deref()
+                        .map(ndarray::ArrayView1::from),
                     output_side_scalars,
                 )
                 .map_err(py_value_error)?

@@ -192,7 +192,7 @@ struct FiringRows<'a> {
     n_obs: usize,
 }
 
-fn output_metric_weights(
+pub(crate) fn output_metric_weights(
     tier0_scale: Option<ArrayView1<'_, f64>>,
     p_out: usize,
 ) -> Result<Vec<f64>, String> {

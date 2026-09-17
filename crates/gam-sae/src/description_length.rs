@@ -817,18 +817,23 @@ pub fn atom_occupancy(codes: &SparseAtomCodes) -> Vec<f64> {
 /// One stored decoder block `B_k ∈ R^{M_k×P}`, priced as a uniform
 /// scalar-quantizer message in the output distortion budget.
 ///
-/// Coefficient errors `E` perturb the output as `δf_i = a_ik φ_k(t_ik)ᵀE`. With
-/// independent zero-mean errors of variance `d_m` on basis row `m` (a dithered
-/// uniform quantizer), the expected per-token squared output error is
-/// `Σ_m g_m·P·d_m`, where `g_m = (1/N) Σ_i a_ik² φ_km(t_ik)²`. A uniform quantizer
-/// with cell width `Δ` on the block's coefficient support `R` spends `log₂(R/Δ)`
-/// bits and leaves error variance `Δ²/12`, so one coefficient costs
-/// `½log₂(v_m/d_out)` bits for output distortion `d_out = g_m Δ²/12`, with
+/// Distortion is measured in the output metric `M = diag(σ⁻²)` the fit's EV was
+/// measured under (the identity when the channels were not standardized), so the
+/// block is quantized in standardized units `B_mc/σ_c`. Errors `E` on those
+/// standardized coefficients perturb the standardized output as
+/// `δf_i = a_ik φ_k(t_ik)ᵀE`. With independent zero-mean errors of variance `d_m`
+/// on basis row `m` (a dithered uniform quantizer), the expected per-token squared
+/// output error is `Σ_m g_m·P·d_m`, where `g_m = (1/N) Σ_i a_ik² φ_km(t_ik)²`. A
+/// uniform quantizer with cell width `Δ` on the block's standardized support `R`
+/// spends `log₂(R/Δ)` bits and leaves error variance `Δ²/12`, so one coefficient
+/// costs `½log₂(v_m/d_out)` bits for output distortion `d_out = g_m Δ²/12`, with
 /// `v_m = g_m R²/12`. Sending no bits (the support midpoint) leaves `v_m`. Each
-/// coefficient is therefore a scalar source of variance `v_m` in output units.
+/// coefficient is therefore a scalar source of variance `v_m` in the metric of
+/// the budget.
 #[derive(Clone, Debug)]
 pub struct DecoderBlockCode {
-    /// Uniform quantizer support `max − min` over the block's coefficients.
+    /// Uniform quantizer support `max − min` over the block's standardized
+    /// coefficients `B_mc/σ_c`.
     pub coefficient_range: f64,
     /// Output channels `P` each basis row spans.
     pub p_out: usize,
@@ -880,16 +885,19 @@ impl DictionaryCodeKind {
 ///
 /// Row sensitivities evaluate each atom's analytic basis at its stored
 /// coordinates, weighted by the squared assignment masses: the same product
-/// [`crate::manifold::reconstruct_persisted_atom_set`] decodes. The header is
-/// the declared side information a receiver needs to rebuild the decoder: the
-/// geometry plans at their persisted JSON encoding, each block's quantizer
-/// support as two `f64`, and `output_side_scalars` persisted output mean/scale
-/// values as `f64`.
+/// [`crate::manifold::reconstruct_persisted_atom_set`] decodes. Each block is
+/// quantized in the standardized units `B_mc/σ_c` of `tier0_scale`, the metric
+/// the native code spectra and the EV budget are denominated in; `None` is the
+/// identity metric. The header is the declared side information a receiver needs
+/// to rebuild the decoder: the geometry plans at their persisted JSON encoding,
+/// each block's quantizer support as two `f64`, and `output_side_scalars`
+/// persisted output mean/scale values as `f64`.
 pub fn persisted_decoder_dictionary_code(
     geometry_plans: &[SaeAtomGeometryPlan],
     decoder_blocks: &[ArrayView2<'_, f64>],
     coords: &[ArrayView2<'_, f64>],
     assignments: ArrayView2<'_, f64>,
+    tier0_scale: Option<ArrayView1<'_, f64>>,
     output_side_scalars: usize,
 ) -> Result<DictionaryCode, String> {
     let k_atoms = geometry_plans.len();
@@ -907,10 +915,26 @@ pub fn persisted_decoder_dictionary_code(
     if n_rows == 0 {
         return Err("persisted decoder dictionary code requires at least one token".to_string());
     }
+    let p_out = decoder_blocks.first().map_or(0, |decoder| decoder.ncols());
+    // Standardizing weights √w_c = 1/σ_c of the output metric M = diag(σ⁻²).
+    let standardizing: Vec<f64> = if k_atoms == 0 {
+        Vec::new()
+    } else {
+        crate::native_code_source::output_metric_weights(tier0_scale, p_out)?
+            .into_iter()
+            .map(f64::sqrt)
+            .collect()
+    };
     let mut blocks = Vec::with_capacity(k_atoms);
     for atom in 0..k_atoms {
         let decoder = decoder_blocks[atom];
-        let (basis_width, p_out) = decoder.dim();
+        let basis_width = decoder.nrows();
+        if decoder.ncols() != p_out {
+            return Err(format!(
+                "persisted decoder dictionary code: decoder block {atom} has {} channels, expected {p_out}",
+                decoder.ncols()
+            ));
+        }
         if !decoder.iter().all(|value| value.is_finite()) {
             return Err(format!(
                 "persisted decoder dictionary code: decoder block {atom} must be finite"
@@ -952,11 +976,13 @@ pub fn persisted_decoder_dictionary_code(
         let coefficient_range = if decoder.is_empty() {
             0.0
         } else {
-            let (low, high) = decoder
-                .iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &value| {
-                    (low.min(value), high.max(value))
-                });
+            let (low, high) = decoder.indexed_iter().fold(
+                (f64::INFINITY, f64::NEG_INFINITY),
+                |(low, high), ((_, channel), &value)| {
+                    let standardized = value * standardizing[channel];
+                    (low.min(standardized), high.max(standardized))
+                },
+            );
             high - low
         };
         blocks.push(DecoderBlockCode {
