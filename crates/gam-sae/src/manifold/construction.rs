@@ -3810,6 +3810,29 @@ impl SaeManifoldTerm {
         }
         let linear_images = self.hybrid_linear_image_map();
         let full_curved = self.reconstruct_from_assignments(assignments, false)?;
+        // One `n × p` image per atom is the requested output (the out-of-sample
+        // report's per-atom images), so all `K` are admitted on the memory governor's
+        // ledger before any is allocated. A batch the process cannot hold is refused
+        // instead of exhausting memory (#2900).
+        let image_charge = if capture_atoms {
+            Some(
+                gam_runtime::resource::MemoryGovernor::global()
+                    .try_reserve_dense_f64_copies(
+                        n,
+                        p,
+                        k_atoms,
+                        "SaeManifoldTerm per-atom reconstruction images",
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "SaeManifoldTerm::reconstruct_with_atom_images_target_aware: refusing \
+                             {k_atoms} per-atom {n}x{p} images: {error}"
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
         let mut atom_images = capture_atoms.then(|| {
             (0..k_atoms)
                 .map(|_| Array2::<f64>::zeros((n, p)))
@@ -3835,6 +3858,7 @@ impl SaeManifoldTerm {
                     }
                 }
             }
+            drop(image_charge);
             return Ok((full_curved, atom_images, effective_coords));
         }
 
@@ -3884,6 +3908,7 @@ impl SaeManifoldTerm {
             }
         }
         self.add_tier0_mean_inplace(&mut out);
+        drop(image_charge);
         Ok((out, atom_images, effective_coords))
     }
 
