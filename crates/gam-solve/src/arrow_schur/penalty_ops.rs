@@ -591,50 +591,73 @@ impl CoupledCarrierPenaltyOp {
         self.scatter_carriers(&coefficients, y);
     }
 
-    /// Visit every `(global row, global column, value)` of `C[a,b]·v_a v_bᵀ`
-    /// restricted to the ambient window `[window.start, window.end)` on BOTH
-    /// axes. The window is the whole space for `to_dense` and one block range
-    /// for `block`; emitting through one walk keeps the two consistent.
-    fn for_each_windowed_entry<F: FnMut(usize, usize, f64)>(
+    /// Visit every entry of the carriers `touching[position]` that lies inside the
+    /// ambient window `[lo, lo + span)`, as `(position, offset into the window, value)`.
+    fn for_each_windowed_carrier_entry<F: FnMut(usize, usize, f64)>(
         &self,
-        window: Range<usize>,
+        touching: &[usize],
+        lo: usize,
+        span: usize,
         mut visit: F,
     ) {
-        let ne = self.carriers.len();
-        let (lo, hi) = (window.start, window.end);
-        let span = hi.saturating_sub(lo);
-        for a in 0..ne {
-            for b in 0..ne {
-                let coupling = self.coupling[[a, b]];
-                if coupling == 0.0 {
+        for (position, &a) in touching.iter().enumerate() {
+            for (start, values) in &self.carriers[a] {
+                let Some((skip, offset, len)) =
+                    coupled_run_overlap(*start, values.len(), lo, span)
+                else {
                     continue;
-                }
-                for (start_a, values_a) in &self.carriers[a] {
-                    let Some((skip_a, _, len_a)) =
-                        coupled_run_overlap(*start_a, values_a.len(), lo, span)
-                    else {
-                        continue;
-                    };
-                    for (start_b, values_b) in &self.carriers[b] {
-                        let Some((skip_b, _, len_b)) =
-                            coupled_run_overlap(*start_b, values_b.len(), lo, span)
-                        else {
-                            continue;
-                        };
-                        for i in 0..len_a {
-                            let row = start_a + skip_a + i;
-                            let scaled = coupling * values_a[skip_a + i];
-                            if scaled == 0.0 {
-                                continue;
-                            }
-                            for j in 0..len_b {
-                                visit(row, start_b + skip_b + j, scaled * values_b[skip_b + j]);
-                            }
-                        }
-                    }
+                };
+                for i in 0..len {
+                    visit(position, offset + i, values[skip + i]);
                 }
             }
         }
+    }
+
+    /// `out[r − window.start, s − window.start] += P[r, s]` for every `r, s` in
+    /// `window`. The window is the whole space for `to_dense` and one block range
+    /// for `block`; building both through this one routine keeps the two consistent.
+    ///
+    /// Only the carriers with an entry inside the window reach it, and `P` restricted
+    /// to the window is the factored product `V_w·C_w·V_wᵀ` over them: `V_w` holds
+    /// those carriers' in-window entries and `C_w` is their sub-coupling. It is built
+    /// in two sparse-by-dense passes, `W = V_w·C_w` (one coupling row added per
+    /// carrier entry) and then `out += W·V_wᵀ` (one column of `W` added per carrier
+    /// entry), at cost `nnz(V_w)·(ne_w + |window|)`. Walking the rank-1 terms pair by
+    /// pair costs `nnz(V_w)²` instead. On the K=64 SAE barrier, with 2016 fully
+    /// coupled edges of 18 entries each over a 576-wide border, that walk took 22–23 s
+    /// per `to_dense` (#2822, pool job 1110002), where the passes here are
+    /// `36288·(2016 + 576) ≈ 9.4·10⁷` flops. `W` is `|window| × ne_w`, which is never
+    /// larger than the larger of `C` and the output.
+    fn accumulate_windowed_dense(&self, window: Range<usize>, out: &mut Array2<f64>) {
+        let (lo, span) = (window.start, window.end.saturating_sub(window.start));
+        let touching: Vec<usize> = (0..self.carriers.len())
+            .filter(|&a| {
+                self.carriers[a].iter().any(|(start, values)| {
+                    coupled_run_overlap(*start, values.len(), lo, span).is_some()
+                })
+            })
+            .collect();
+        if touching.is_empty() {
+            return;
+        }
+        let selected;
+        let coupling = if touching.len() == self.carriers.len() {
+            self.coupling.view()
+        } else {
+            selected = self
+                .coupling
+                .select(ndarray::Axis(0), &touching)
+                .select(ndarray::Axis(1), &touching);
+            selected.view()
+        };
+        let mut w = Array2::<f64>::zeros((span, touching.len()));
+        self.for_each_windowed_carrier_entry(&touching, lo, span, |position, offset, value| {
+            w.row_mut(offset).scaled_add(value, &coupling.row(position));
+        });
+        self.for_each_windowed_carrier_entry(&touching, lo, span, |position, offset, value| {
+            out.column_mut(offset).scaled_add(value, &w.column(position));
+        });
     }
 }
 
@@ -691,18 +714,12 @@ impl BetaPenaltyOp for CoupledCarrierPenaltyOp {
         // Only the intra-block restriction reaches this block-Jacobi sub-block;
         // the cross-block coupling is invisible to the preconditioner, exactly
         // as for any operator with off-block entries.
-        let range = offsets[id.0].clone();
-        let start = range.start;
-        self.for_each_windowed_entry(range, |row, col, value| {
-            out[[row - start, col - start]] += value;
-        });
+        self.accumulate_windowed_dense(offsets[id.0].clone(), out);
     }
 
     fn to_dense(&self) -> Array2<f64> {
         let mut out = Array2::<f64>::zeros((self.k, self.k));
-        self.for_each_windowed_entry(0..self.k, |row, col, value| {
-            out[[row, col]] += value;
-        });
+        self.accumulate_windowed_dense(0..self.k, &mut out);
         out
     }
 

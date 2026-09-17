@@ -6053,20 +6053,24 @@ fn coupled_carrier_penalty_op_equals_its_rank_one_expansion_2731() {
         );
     }
 
-    // block: ranges chosen so one straddles two carriers' shared run.
-    let offsets = [0..6, 6..13, 13..18, 18..k];
-    for (id, range) in offsets.iter().enumerate() {
-        let b = range.end - range.start;
-        let mut blk = Array2::<f64>::zeros((b, b));
-        op.block(BetaBlockId(id), &offsets, &mut blk);
-        for i in 0..b {
-            for j in 0..b {
-                let reference = expansion[[range.start + i, range.start + j]];
-                assert!(
-                    (blk[[i, j]] - reference).abs() <= tolerance,
-                    "block {id} mismatch at ({i},{j}): {} vs {reference}",
-                    blk[[i, j]]
-                );
+    // block, over two partitions. In the first, one range holds two carriers'
+    // shared run. In the second, the boundaries cut THROUGH runs (7 splits 6..10,
+    // 14 splits 13..16, 19 splits 18..20), so clipping a run to its block window is
+    // exercised, not only whole runs.
+    for offsets in [[0..6, 6..13, 13..18, 18..k], [0..7, 7..14, 14..19, 19..k]] {
+        for (id, range) in offsets.iter().enumerate() {
+            let b = range.end - range.start;
+            let mut blk = Array2::<f64>::zeros((b, b));
+            op.block(BetaBlockId(id), &offsets, &mut blk);
+            for i in 0..b {
+                for j in 0..b {
+                    let reference = expansion[[range.start + i, range.start + j]];
+                    assert!(
+                        (blk[[i, j]] - reference).abs() <= tolerance,
+                        "block {id} of {offsets:?} mismatch at ({i},{j}): {} vs {reference}",
+                        blk[[i, j]]
+                    );
+                }
             }
         }
     }
