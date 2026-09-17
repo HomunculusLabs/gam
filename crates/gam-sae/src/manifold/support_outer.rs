@@ -18,8 +18,9 @@
 //!
 //! The dense SAE criterion is a different statistical objective. It keeps the
 //! coordinate block inside the observed information `log|A|` (#2668), scores the
-//! penalized loss at unit dispersion, adds a realised-rank charge, and drops the
-//! base pseudo-determinant and `2π`. A hard-TopK request that crosses `K = P`
+//! penalized loss at unit dispersion, adds a realised-rank charge, and has no
+//! `2π` constant. Both price the base pseudo-determinant (#2933 F26). A hard-TopK
+//! request that crosses `K = P`
 //! therefore changes criteria. The report carries a [`SaeCriterionScore`] of kind
 //! [`SaeCriterionKind::ProfiledGaussianLaml`], [`SaeCriterionScore::difference`]
 //! refuses a dense score, and [`SaeSupportLamlComponents`] names every term.
@@ -327,10 +328,10 @@ struct PenaltySpectrum {
 /// `2·cost = reduced_log_det − penalty_log_pdet
 ///   + residual_df·(1 + ln(2π·penalized_deviance/residual_df))`.
 ///
-/// Each term is where this criterion departs from the dense quasi-Laplace score:
-/// the curvature is the Gauss–Newton reduced Schur with the row block profiled
-/// out, the prior normalizer includes its base pseudo-determinant, and the scale
-/// is profiled out of the penalized deviance rather than held at one.
+/// The terms show where this criterion departs from the dense quasi-Laplace score.
+/// The curvature is the Gauss–Newton reduced Schur with the row block profiled
+/// out. The scale is profiled out of the penalized deviance rather than held at
+/// one, which brings `2π`. No realised-rank charge enters.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SaeSupportLamlComponents {
     /// `log|S|` of the Gauss–Newton reduced decoder Schur complement.
@@ -2028,5 +2029,339 @@ mod tests {
                 analytic[group]
             );
         }
+    }
+
+    /// #2933 F27 — force the dense and the support-sparse route on ONE hard-TopK
+    /// model at ONE fitted state and compare what each scores.
+    ///
+    /// The model is `N = 8`, `P = 2`, `K = 2` (so `K = P` and the dense lane admits
+    /// it), top-1 support: a periodic circle atom on rows 0..4 and a linear plane on
+    /// rows 4..8. The support route converges its inner fixed point. That state
+    /// (routing, coordinates, decoders) is transferred into a dense `SaeManifoldTerm`
+    /// and priced through the dense criterion's frozen lane (`inner_max_iter = 0`), so
+    /// both values are evaluated at the same θ̂.
+    ///
+    /// Two positive controls show the transfer is exact and the support value is
+    /// rebuilt from its production pieces: the dense `data_fit` equals ½·RSS of the
+    /// support term, and the frozen support value equals `evaluate`'s cost. If the
+    /// two routes were two factorizations of one scalar, the values and their
+    /// explicit hypergradients at this state would agree. They must disagree by more
+    /// than a floor, and the typed scores must refuse to compare.
+    #[test]
+    fn dense_and_support_topk_routes_score_different_criteria_at_one_state_2933_f27() {
+        let n = 8usize;
+        let p = 2usize;
+        let circle_decoder = array![[0.1, -0.2], [0.8, 0.3], [-0.5, 0.6], [0.2, 0.1], [-0.1, 0.25]];
+        let plane_decoder = array![[0.4, -0.3], [1.2, 0.2], [-0.3, 0.9]];
+        let circle_coords = [0.03, 0.10, -0.06, 0.14];
+        let plane_coords = [[0.3, -0.1], [-0.2, 0.4], [0.1, 0.2], [-0.4, -0.3]];
+        let circle_eval = PeriodicHarmonicEvaluator::new(5).expect("periodic");
+        let plane_eval = EuclideanPatchEvaluator::new(2, 1).expect("patch");
+
+        // Target: the seed decode plus a deterministic perturbation, so the
+        // residual, the penalty energy and the dispersion are all genuine.
+        let mut target = Array2::<f64>::zeros((n, p));
+        for row in 0..n {
+            let decoded = if row < 4 {
+                let coord = Array2::from_shape_vec((1, 1), vec![circle_coords[row]]).expect("c");
+                circle_eval.evaluate(coord.view()).expect("eval").0.dot(&circle_decoder)
+            } else {
+                let coord =
+                    Array2::from_shape_vec((1, 2), plane_coords[row - 4].to_vec()).expect("c");
+                plane_eval.evaluate(coord.view()).expect("eval").0.dot(&plane_decoder)
+            };
+            for column in 0..p {
+                target[[row, column]] = decoded[[0, column]]
+                    + 0.3 * ((1.7 * row as f64 + 0.9 * column as f64).sin());
+            }
+        }
+
+        let atoms = vec![
+            atom(
+                "circle",
+                SaeAtomBasisKind::Periodic,
+                1,
+                Arc::new(circle_eval.clone()),
+                &[circle_coords[0]],
+                circle_decoder.clone(),
+            ),
+            atom(
+                "plane",
+                SaeAtomBasisKind::Linear,
+                2,
+                Arc::new(plane_eval.clone()),
+                &plane_coords[0],
+                plane_decoder.clone(),
+            ),
+        ];
+        let specs = vec![
+            SaeAssignmentAtomSpec {
+                latent_dim: 1,
+                manifold: SaeAtomBasisKind::Periodic.latent_manifold(1),
+                retraction: gam_problem::LatentRetractionRegistry::all_euclidean(),
+            },
+            SaeAssignmentAtomSpec::euclidean(2),
+        ];
+        let indices = (0..n).map(|row| vec![u32::from(row >= 4)]).collect::<Vec<_>>();
+        let gates = vec![vec![1.0]; n];
+        let coords = (0..n)
+            .map(|row| {
+                if row < 4 {
+                    vec![circle_coords[row]]
+                } else {
+                    plane_coords[row - 4].to_vec()
+                }
+            })
+            .collect::<Vec<_>>();
+        let state = SaeAssignmentState::from_topk_support_heterogeneous(
+            n, 2, 1, specs, indices, gates, coords,
+        )
+        .expect("state");
+        let term = SaeSupportSparseTerm::new(atoms, state).expect("term");
+        let layout = SaeSupportSmoothingLayout::from_term(&term);
+        assert_eq!(layout.group_keys.len(), 2, "one smoothing group per atom");
+        let spectrum = penalty_spectrum(&term, &layout).expect("spectrum");
+        let initial_term = term.clone();
+        let mut objective = SaeSupportOuterObjective {
+            term,
+            initial_term,
+            target: target.clone(),
+            layout,
+            spectrum,
+            ard_precisions: vec![vec![1.0], vec![1.0, 1.0]],
+            max_inner_iter: 5000,
+            inner_tolerance: 1.0e-9,
+            trust_radius: 1.0,
+            random_state: 0xC0FF_EE00_D15E_A5E5,
+            last_evaluation: None,
+            state_revision: 0,
+            uncached_evaluations: 0,
+            logdet_surrogate: None,
+        };
+        let rho = array![0.4_f64.ln(), 2.2_f64.ln()];
+        let evaluation = objective.evaluate(&rho).expect("support route evaluates");
+        assert!(evaluation.fixed_point.recurred, "support inner state must recur");
+        let components = evaluation.components;
+
+        // Support value at the FROZEN state, rebuilt from production pieces.
+        let residual_df = components.residual_df;
+        let support_frozen = |objective: &mut SaeSupportOuterObjective, rho: &Array1<f64>| {
+            let lambda = objective.layout.expand(rho).expect("expand");
+            let system = objective
+                .term
+                .assemble_arrow_schur(objective.target.view(), &lambda, &objective.ard_precisions)
+                .expect("assemble");
+            let reduced_log_det = objective.evidence_log_det(&system).expect("evidence").0;
+            let penalty_log_pdet = (0..rho.len())
+                .map(|group| {
+                    objective.spectrum.log_pdet_base_by_group[group]
+                        + objective.spectrum.rank_by_group[group] as f64 * rho[group]
+                })
+                .sum::<f64>();
+            let penalized_deviance = 2.0
+                * objective
+                    .term
+                    .penalized_objective(
+                        objective.target.view(),
+                        &lambda,
+                        &objective.ard_precisions,
+                    )
+                    .expect("penalized objective");
+            SaeSupportLamlComponents {
+                reduced_log_det,
+                penalty_log_pdet,
+                residual_df,
+                penalized_deviance,
+            }
+            .value()
+        };
+        let support_rebuilt = support_frozen(&mut objective, &rho);
+
+        // Transfer the converged state into the dense engine.
+        let lambda = objective.layout.expand(&rho).expect("expand");
+        let support_term = &objective.term;
+        let mut dense_atoms = Vec::with_capacity(2);
+        let mut coord_blocks = Vec::with_capacity(2);
+        let mut manifolds = Vec::with_capacity(2);
+        let mut logits = Array2::<f64>::from_elem((n, 2), -6.0);
+        for row in 0..n {
+            logits[[row, support_term.assignment.support_indices(row)[0] as usize]] = 6.0;
+        }
+        for atom_idx in 0..2 {
+            let d = support_term.atoms[atom_idx].latent_dim();
+            let mut block = Array2::<f64>::zeros((n, d));
+            for row in 0..n {
+                if support_term.assignment.support_indices(row)[0] as usize == atom_idx {
+                    for (axis, &value) in
+                        support_term.assignment.coords_for_slot(row, 0).iter().enumerate()
+                    {
+                        block[[row, axis]] = value;
+                    }
+                }
+            }
+            let evaluator: Arc<dyn SaeBasisSecondJet> = if atom_idx == 0 {
+                Arc::new(circle_eval.clone())
+            } else {
+                Arc::new(plane_eval.clone())
+            };
+            let (phi, jet) = evaluator.evaluate(block.view()).expect("dense basis");
+            let m = phi.ncols();
+            let kind = support_term.atoms[atom_idx].basis_kind().clone();
+            manifolds.push(kind.latent_manifold(d));
+            dense_atoms.push(
+                SaeManifoldAtom::new_with_provided_function_gram(
+                    support_term.atoms[atom_idx].name.clone(),
+                    kind,
+                    d,
+                    phi,
+                    jet,
+                    support_term.atoms[atom_idx].decoder_coefficients().to_owned(),
+                    Array2::eye(m),
+                )
+                .expect("dense atom")
+                .with_basis_second_jet(evaluator),
+            );
+            coord_blocks.push(block);
+        }
+        let mode = AssignmentMode::top_k_support(1);
+        let assignment =
+            SaeAssignment::from_blocks_with_mode_and_manifolds(logits, coord_blocks, manifolds, mode)
+                .expect("dense assignment");
+        let dense_term = SaeManifoldTerm::new(dense_atoms, assignment).expect("dense term");
+        let dense_rho_at = |log_lambda: &[f64]| {
+            SaeManifoldRho::with_per_atom_smooth(
+                0.0,
+                log_lambda.to_vec(),
+                vec![Array1::zeros(1), Array1::zeros(2)],
+            )
+            .for_assignment(mode)
+        };
+        let log_lambda = lambda.iter().map(|value| value.ln()).collect::<Vec<_>>();
+        let dense_frozen = |log_lambda: &[f64]| {
+            let mut frozen = dense_term.clone();
+            frozen
+                .penalized_quasi_laplace_criterion_with_refine_policy(
+                    target.view(),
+                    &dense_rho_at(log_lambda),
+                    None,
+                    0,
+                    1.0,
+                    1.0e-6,
+                    1.0e-6,
+                    false,
+                )
+                .map_err(|error| format!("{error:?}"))
+        };
+        let dense_value = dense_frozen(&log_lambda);
+
+        let rss = support_term
+            .raw_residual(target.view())
+            .expect("raw residual")
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>();
+        let smooth_energy = objective.penalty_energy_by_group(&lambda).iter().sum::<f64>();
+
+        // Explicit fixed-state hypergradients of both values, per atom.
+        let h = 1.0e-4;
+        let mut support_gradient = [0.0_f64; 2];
+        let mut dense_gradient = [f64::NAN; 2];
+        for atom_idx in 0..2 {
+            let group = objective.layout.atom_group[atom_idx];
+            let mut plus = rho.clone();
+            let mut minus = rho.clone();
+            plus[group] += h;
+            minus[group] -= h;
+            support_gradient[atom_idx] = (support_frozen(&mut objective, &plus)
+                - support_frozen(&mut objective, &minus))
+                / (2.0 * h);
+            let mut dense_plus = log_lambda.clone();
+            let mut dense_minus = log_lambda.clone();
+            dense_plus[atom_idx] += h;
+            dense_minus[atom_idx] -= h;
+            if let (Ok((value_plus, _)), Ok((value_minus, _))) =
+                (dense_frozen(&dense_plus), dense_frozen(&dense_minus))
+            {
+                dense_gradient[atom_idx] = (value_plus - value_minus) / (2.0 * h);
+            }
+        }
+
+        eprintln!(
+            "[#2933 F27] support: cost={:.12e} rebuilt={support_rebuilt:.12e} \
+             reduced_log_det={:.9e} penalty_log_pdet={:.9e} base_pdet={:?} residual_df={} \
+             D_p={:.9e} profiled_dispersion_term={:.9e} rss={rss:.9e} smooth_energy={smooth_energy:.9e} \
+             explicit_gradient={support_gradient:?} profiled_gradient={:?}",
+            evaluation.cost,
+            components.reduced_log_det,
+            components.penalty_log_pdet,
+            objective.spectrum.log_pdet_base_by_group,
+            components.residual_df,
+            components.penalized_deviance,
+            components.profiled_dispersion_term(),
+            evaluation.gradient,
+        );
+        match &dense_value {
+            Ok((value, loss)) => eprintln!(
+                "[#2933 F27] dense: V={value:.12e} loss.total={:.9e} data_fit={:.9e} \
+                 smoothness={:.9e} ard={:.9e} complexity(V-loss)={:.9e} \
+                 explicit_gradient={dense_gradient:?}",
+                loss.total(),
+                loss.data_fit,
+                loss.smoothness,
+                loss.ard,
+                value - loss.total(),
+            ),
+            Err(error) => eprintln!("[#2933 F27] dense frozen lane refused: {error}"),
+        }
+
+        let (dense_value, dense_loss) = dense_value.expect("dense route prices the same state");
+        // Positive controls: one state, and a support value rebuilt from its pieces.
+        assert!(
+            (dense_loss.data_fit - 0.5 * rss).abs() <= 1.0e-10 * (1.0 + rss),
+            "state transfer is not exact: dense data_fit {:.12e} vs ½·RSS {:.12e}",
+            dense_loss.data_fit,
+            0.5 * rss
+        );
+        assert!(
+            (support_rebuilt - evaluation.cost).abs() <= 1.0e-10 * (1.0 + evaluation.cost.abs()),
+            "frozen support value {support_rebuilt:.12e} != evaluate cost {:.12e}",
+            evaluation.cost
+        );
+
+        // Disagreement limbs: two criteria, not two factorizations of one.
+        let value_gap = (dense_value - evaluation.cost).abs();
+        assert!(
+            value_gap > 1.0e-2 * (1.0 + dense_value.abs().max(evaluation.cost.abs())),
+            "dense {dense_value:.12e} and support {:.12e} values agree at one state",
+            evaluation.cost
+        );
+        let gradient_scale = support_gradient
+            .iter()
+            .chain(dense_gradient.iter())
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let gradient_gap = (0..2)
+            .map(|atom_idx| (dense_gradient[atom_idx] - support_gradient[atom_idx]).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            dense_gradient.iter().all(|value| value.is_finite()),
+            "dense explicit hypergradient must evaluate at the frozen state: {dense_gradient:?}"
+        );
+        assert!(
+            gradient_gap > 1.0e-2 * (1.0 + gradient_scale),
+            "explicit hypergradients agree at one state: dense {dense_gradient:?} support \
+             {support_gradient:?}"
+        );
+
+        // Typed identity: the admission names two kinds, and their scores refuse.
+        let dense_kind = crate::front_door::SaeFitLane::DenseCertification
+            .criterion_kind()
+            .expect("dense lane names its criterion");
+        let support_kind = crate::front_door::SaeFitLane::CurvedStreaming
+            .criterion_kind()
+            .expect("support lane names its criterion");
+        assert_ne!(dense_kind, support_kind);
+        let dense_score = SaeCriterionScore::new(dense_kind, dense_value);
+        let support_score = SaeCriterionScore::new(support_kind, evaluation.cost);
+        assert!(dense_score.difference(&support_score).is_err());
     }
 }

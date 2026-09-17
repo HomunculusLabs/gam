@@ -75,9 +75,15 @@ impl SaeFitLane {
 ///   − Σ_k ½·r_k·rank(S_k)·log λ_k`. The data term is the penalized loss at unit
 ///   dispersion. The curvature is the joint observed information with the
 ///   coordinate block integrated, alongside the ARD normalizer `loss.ard` carries.
+///   Both the dense and the streaming representation rank the exact observed
+///   information (`EvidenceOperator::ExactObservedInformation`), and the outer
+///   gradient refuses any other operator pairing (#2933 F03).
 ///   A realised-rank charge is added. Smoothing and ARD coordinates are per atom.
 ///   The penalty normalizer is the complete `½·Σ_k r_k·log|λ_k S_k|₊`, base
 ///   pseudo-determinant included (#2933 F26), and there is no `2π` constant.
+///   An outer objective declares its collapse-prevention weights once
+///   (#2933 F05), so two values of this kind compare only under one declared
+///   gate set.
 /// * [`Self::ProfiledGaussianLaml`]: the support-sparse grouped LAML
 ///   (`crate::manifold::run_sae_support_outer`),
 ///   `2V = log|S_red| − log|λS|₊ + df·(1 + ln(2π·D_p/df))`. `S_red` is the
