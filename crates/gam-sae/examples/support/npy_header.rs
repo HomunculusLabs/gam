@@ -1,16 +1,44 @@
-//! Shared `parse_npy_header` for the gam-sae examples.
+//! Shared `.npy` header parsers for the gam-sae examples.
 //!
 //! Lifted verbatim from the 4 byte-identical copies that used to
 //! live one per example binary. Not an example target itself: cargo only
 //! auto-discovers `examples/*.rs` and `examples/*/main.rs`, so a helper in
 //! `examples/support/` is compiled only where it is `#[path]`-included.
+//!
+//! [`parse_npy_float_header`] reads a little-endian, C-order `<f2`, `<f4` or `<f8`
+//! header of one or two axes. [`parse_npy_header`] keeps the original contract: a
+//! 2-D `<f4` or `<f2` array.
 
 use std::path::Path;
 
-pub fn parse_npy_header(
-    head: &[u8],
-    path: &Path,
-) -> Result<(usize, usize, usize, bool, usize), String> {
+/// The element type of a little-endian float `.npy`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NpyFloat {
+    F2,
+    F4,
+    F8,
+}
+
+impl NpyFloat {
+    /// Bytes per element.
+    pub fn bytes(self) -> usize {
+        match self {
+            Self::F2 => 2,
+            Self::F4 => 4,
+            Self::F8 => 8,
+        }
+    }
+}
+
+/// A little-endian, C-order float `.npy` header: the element type, the shape and the
+/// byte offset of the data.
+pub struct NpyFloatHeader {
+    pub float: NpyFloat,
+    pub shape: Vec<usize>,
+    pub data_off: usize,
+}
+
+pub fn parse_npy_float_header(head: &[u8], path: &Path) -> Result<NpyFloatHeader, String> {
     if head.len() <= 12 || &head[0..6] != b"\x93NUMPY" {
         return Err(format!("{}: not a .npy file", path.display()));
     }
@@ -30,14 +58,18 @@ pub fn parse_npy_header(
     }
     let header = std::str::from_utf8(&head[data_off - header_len..data_off])
         .map_err(|err| format!("{}: header is not utf8: {err}", path.display()))?;
-    let is_f4 = header.contains("'<f4'") || header.contains("\"<f4\"");
-    let is_f2 = header.contains("'<f2'") || header.contains("\"<f2\"");
-    if !(is_f4 || is_f2) {
+    let float = if header.contains("'<f4'") || header.contains("\"<f4\"") {
+        NpyFloat::F4
+    } else if header.contains("'<f2'") || header.contains("\"<f2\"") {
+        NpyFloat::F2
+    } else if header.contains("'<f8'") || header.contains("\"<f8\"") {
+        NpyFloat::F8
+    } else {
         return Err(format!(
-            "{}: expected little-endian <f4 or <f2; header: {header}",
+            "{}: expected little-endian <f8, <f4 or <f2; header: {header}",
             path.display()
         ));
-    }
+    };
     if !(header.contains("'fortran_order': False") || header.contains("\"fortran_order\": false")) {
         return Err(format!(
             "{}: expected C-order; header: {header}",
@@ -61,12 +93,42 @@ pub fn parse_npy_header(
         .split(',')
         .filter_map(|token| token.trim().parse::<usize>().ok())
         .collect();
-    if dims.len() != 2 {
+    if dims.is_empty() || dims.len() > 2 {
         return Err(format!(
-            "{}: expected a 2-D array, got {dims:?}",
+            "{}: expected a 1-D or 2-D array, got {dims:?}",
             path.display()
         ));
     }
-    let elem = if is_f4 { 4 } else { 2 };
-    Ok((dims[0], dims[1], elem, is_f4, data_off))
+    Ok(NpyFloatHeader {
+        float,
+        shape: dims,
+        data_off,
+    })
+}
+
+pub fn parse_npy_header(
+    head: &[u8],
+    path: &Path,
+) -> Result<(usize, usize, usize, bool, usize), String> {
+    let header = parse_npy_float_header(head, path)?;
+    if header.float == NpyFloat::F8 {
+        return Err(format!(
+            "{}: expected little-endian <f4 or <f2, got <f8",
+            path.display()
+        ));
+    }
+    let [rows, cols] = header.shape[..] else {
+        return Err(format!(
+            "{}: expected a 2-D array, got {:?}",
+            path.display(),
+            header.shape
+        ));
+    };
+    Ok((
+        rows,
+        cols,
+        header.float.bytes(),
+        header.float == NpyFloat::F4,
+        header.data_off,
+    ))
 }
