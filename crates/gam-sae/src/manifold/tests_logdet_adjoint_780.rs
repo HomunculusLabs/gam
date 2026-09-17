@@ -11,8 +11,8 @@ use super::*;
 use super::tests::gamma_fd_tiny_fixture;
 use super::tests_behavioral_fisher_rung1::pack_probe_factors;
 use super::tests_recovery_split_780::{
-    FdAnchorRegime, FdBranchRegime, certified_branch_stable_central_difference,
-    certified_central_logdet_difference, certified_fd_anchor, fixed_state_logdet_sample,
+    FdAnchorRegime, FdBranchRegime, FiniteDifferenceStratumCertificate, FixedStateLogdetSample,
+    certified_branch_stable_central_difference, certified_fd_anchor, fixed_state_logdet_sample,
     rho_ladder_family, rho_ladder_family_with_tolerance, sparse_lift_ladder,
 };
 
@@ -1079,6 +1079,107 @@ fn softmax_theta_adjoint_logit_legs_agree_across_towers_with_two_free_logits_233
     );
 }
 
+/// A fixed-state log-det sample at the anchor's collapse-prevention gates.
+///
+/// The θ-adjoint differentiates `log|H|` with the gates held: the outer objective declares one gate
+/// set for its whole solve, and every derivative reads it as a constant (#2933 F05). An endpoint that
+/// re-derives the gates at its own state differentiates their motion as well. On the ordered
+/// Beta--Bernoulli tiny fixtures the separation barrier's per-atom `N_eff,k = Σ_i a_ik²` moves with an
+/// interior gate, and on atom 1's logit that motion read 0.33 to 0.81, while the same endpoints at held
+/// gates matched `Γ` at the stencil's resolution (job 1163634, #2080). `SaeManifoldTerm::clone` drops a
+/// declaration, so the gates are declared on the clone that is evaluated, and the evaluated term must
+/// still carry them.
+fn held_gate_logdet_sample(
+    term: &SaeManifoldTerm,
+    gates: &super::penalties::CollapsePreventionGates,
+    target: &Array2<f64>,
+    rho: &SaeManifoldRho,
+    perturb: impl FnOnce(&mut SaeManifoldTerm),
+) -> FixedStateLogdetSample {
+    let mut state = term.clone();
+    state.declare_collapse_prevention_gates(gates);
+    perturb(&mut state);
+    let cache = state
+        .penalized_quasi_laplace_criterion_with_cache(target.view(), rho, None, 0, 0.4, 1.0e-6, 1.0e-6)
+        .expect("fixed-state cache at the anchor's gates")
+        .2;
+    assert!(
+        state.collapse_prevention_gates() == *gates,
+        "the endpoint must be evaluated at the anchor's declared gates, not re-derive them"
+    );
+    FixedStateLogdetSample {
+        value: cache
+            .arrow_log_det()
+            .expect("fixed-state authoritative joint logdet"),
+        stratum: FiniteDifferenceStratumCertificate::from_arrow_cache(&cache),
+    }
+}
+
+/// The central difference of a held-gate log-det at `h/2`, with the tolerance the #2933 F07 metric gate
+/// derives from its own stencil. `|fd(h) − fd(h/2)|` is three times `fd(h/2)`'s `O(h²)` truncation
+/// (`fd(h) − fd(h/2) = ¾·c·h²` against `c·h²/4`), and `dim·ε·max|log|H||/(h/2)` bounds the
+/// factorization's roundoff in the quotient. Every endpoint stays in the center's stratum.
+fn held_gate_central_difference(
+    label: &str,
+    center: &FiniteDifferenceStratumCertificate,
+    dim: usize,
+    h: f64,
+    sample: impl Fn(f64) -> FixedStateLogdetSample,
+) -> (f64, f64) {
+    let mut quotients = [0.0_f64; 2];
+    let mut roundoff_scale = 0.0_f64;
+    for (slot, step) in [h, 0.5 * h].into_iter().enumerate() {
+        let plus = sample(step);
+        let minus = sample(-step);
+        center.assert_same_stratum(&format!("{label} (+{step:e})"), &plus.stratum);
+        center.assert_same_stratum(&format!("{label} (-{step:e})"), &minus.stratum);
+        quotients[slot] = (plus.value - minus.value) / (2.0 * step);
+        roundoff_scale = plus.value.abs().max(minus.value.abs()) / step;
+    }
+    let tolerance =
+        (quotients[0] - quotients[1]).abs() + dim as f64 * f64::EPSILON * roundoff_scale;
+    (quotients[1], tolerance)
+}
+
+/// The ordered Beta--Bernoulli prior's logit leg in `Γ` at one probe, read off the production third
+/// channels: `E_rr·∂D_r/∂ℓ_r` at fixed active mass plus the column-mass channel
+/// `u_r·Σ_i E_ii·∂D_i/∂M`. Every term carries the gate slope `u = z(1 − z)/τ`, so at a saturated gate
+/// the leg falls below any finite-difference resolution and a logit probe verifies nothing: before
+/// 19ce8785f3 these fixtures settled atom 1 at `z ≈ 1e-8` (#2080). The tiny fixtures carry no row
+/// weights.
+fn obb_logit_prior_leg(
+    term: &SaeManifoldTerm,
+    rho: &SaeManifoldRho,
+    cache: &ArrowFactorCache,
+    row: usize,
+    atom: usize,
+) -> f64 {
+    let channels = crate::assignment::ordered_beta_bernoulli_psd_majorizer_third_channels_weighted(
+        &term.assignment,
+        rho,
+        None,
+    )
+    .expect("ordered Beta--Bernoulli third channels")
+    .expect("an ordered Beta--Bernoulli assignment");
+    let inverse = term
+        .materialize_joint_inverse(cache, &DeflatedArrowSolver::plain(cache))
+        .expect("dense joint inverse");
+    let site = |i: usize| {
+        term.row_vars_for_cache_row(i, cache)
+            .expect("row variables")
+            .iter()
+            .position(|var| matches!(var, SaeLocalRowVar::Logit { atom: slot } if *slot == atom))
+            .map(|position| cache.row_offsets[i] + position)
+    };
+    let k = channels.k_max;
+    let column_mass: f64 = (0..term.n_obs())
+        .filter_map(|i| site(i).map(|index| inverse[[index, index]] * channels.m_channel[i * k + atom]))
+        .sum();
+    let own = site(row).expect("the probed logit is a free slot");
+    inverse[[own, own]] * channels.local_logit_third[row * k + atom]
+        + channels.z_jac[row * k + atom] * column_mass
+}
+
 /// gam#2144 — the log-det row jets must be whitened whenever the metric
 /// `whitens_likelihood()` at ANY rank, not only when rank-deficient. The
 /// arrow-Schur assembly builds the likelihood Hessian from whitened Jacobians
@@ -1162,6 +1263,8 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_full_rank_whitening_2144
         .expect("Gamma");
     let h = 1.0e-5;
     let fd_stratum = anchor.stratum;
+    let gates = term.collapse_prevention_gates();
+    let dim = cache.delta_t_len() + cache.k;
     let probes_idx = [
         (0usize, 0usize, SaeLocalRowVar::Logit { atom: 0 }),
         (4usize, 1usize, SaeLocalRowVar::Logit { atom: 1 }),
@@ -1169,32 +1272,33 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_full_rank_whitening_2144
         (6usize, 3usize, SaeLocalRowVar::Coord { atom: 1, axis: 0 }),
     ];
     for (row, local_pos, var) in probes_idx {
-        let mut plus = term.clone();
-        let mut minus = term.clone();
-        match var {
-            SaeLocalRowVar::Logit { atom } => {
-                plus.assignment.logits[[row, atom]] += h;
-                minus.assignment.logits[[row, atom]] -= h;
-            }
-            SaeLocalRowVar::Coord { atom, axis } => {
-                let mut flat_p = plus.assignment.coords[atom].as_flat().clone();
-                let mut flat_m = minus.assignment.coords[atom].as_flat().clone();
-                let idx = row * plus.assignment.coords[atom].latent_dim() + axis;
-                flat_p[idx] += h;
-                flat_m[idx] -= h;
-                plus.assignment.coords[atom].set_flat(flat_p.view());
-                minus.assignment.coords[atom].set_flat(flat_m.view());
-            }
-        }
-        let fd = certified_central_logdet_difference(
-            &format!("full-rank whitened Gamma row={row} local_pos={local_pos}"),
-            &fd_stratum,
-            fixed_state_logdet_sample(plus, &target, &rho),
-            fixed_state_logdet_sample(minus, &target, &rho),
-            h,
-        );
+        let label = format!("full-rank whitened Gamma row={row} local_pos={local_pos}");
+        let (fd, tolerance) = held_gate_central_difference(&label, &fd_stratum, dim, h, |step| {
+            held_gate_logdet_sample(&term, &gates, &target, &rho, |state| match var {
+                SaeLocalRowVar::Logit { atom } => state.assignment.logits[[row, atom]] += step,
+                SaeLocalRowVar::Coord { atom, axis } => {
+                    let mut flat = state.assignment.coords[atom].as_flat().clone();
+                    let idx = row * state.assignment.coords[atom].latent_dim() + axis;
+                    flat[idx] += step;
+                    state.assignment.coords[atom].set_flat(flat.view());
+                }
+            })
+        });
         let analytic = gamma.t[cache.row_offsets[row] + local_pos];
-        let tol = 3.0e-3 * (1.0 + fd.abs().max(analytic.abs()));
+        if let SaeLocalRowVar::Logit { atom } = var {
+            let prior_leg = obb_logit_prior_leg(&term, &rho, &cache, row, atom);
+            assert!(
+                prior_leg.abs() > tolerance,
+                "{label}: regime: the ordered Beta--Bernoulli logit leg {prior_leg:.3e} is not \
+                 resolved by the finite difference (tolerance {tolerance:.3e}), so the gate is \
+                 saturated and this probe verifies nothing about the logit legs"
+            );
+            eprintln!("{label}: logit prior leg {prior_leg:.6e}");
+        }
+        eprintln!(
+            "{label}: fd={fd:.10e} analytic={analytic:.10e} gap={:.3e} tolerance={tolerance:.3e}",
+            fd - analytic
+        );
         // #2330: `local_pos` above is HARDCODED, i.e. this loop asserts every row is
         // packed `[Logit0, Logit1, Coord0, Coord1]`. If the whitened layout orders its
         // local block differently, `analytic` is a different variable's derivative and
@@ -1204,10 +1308,9 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_full_rank_whitening_2144
         // count alone says the logit probes are indexing coordinate slots.
         let block_width = cache.row_offsets[row + 1] - cache.row_offsets[row];
         assert!(
-            (fd - analytic).abs() <= tol,
-            "full-rank whitened Gamma row={row} local_pos={local_pos}: fd={fd:.8e}, \
-             analytic={analytic:.8e} (var={var:?}, row block width={block_width}, \
-             gamma.t len={}, row_offsets[{row}]={})",
+            (fd - analytic).abs() <= tolerance,
+            "{label}: fd={fd:.8e}, analytic={analytic:.8e}, tolerance={tolerance:.3e} \
+             (var={var:?}, row block width={block_width}, gamma.t len={}, row_offsets[{row}]={})",
             gamma.t.len(),
             cache.row_offsets[row],
         );
@@ -1225,7 +1328,7 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_full_rank_whitening_2144
 /// diagnosis driving the whole #1625 fix, the analytic
 /// `Γ = tr(H⁻¹ ∂H/∂θ)` equals the fixed-state central difference of `log|H|`
 /// only at a CONVERGED inner cache. A short inner budget (e.g. `iter = 5`) leaves
-/// (t, β) non-stationary, and `fixed_state_logdet_sample` (which re-solves with
+/// (t, β) non-stationary, and `held_gate_logdet_sample` (which re-solves with
 /// `iter = 0`) then differences `log|H|` about a different state, manufacturing a
 /// spurious O(several-%) mismatch that does NOT shrink with the FD step — the
 /// tell that it is a state desync, not truncation. Converging the inner solve
@@ -1272,6 +1375,8 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
         .expect("Gamma");
     let h = 1.0e-5;
     let fd_stratum = anchor.stratum;
+    let gates = term.collapse_prevention_gates();
+    let dim = cache.delta_t_len() + cache.k;
     // Probe both atoms across distinct rows so the shared-mass channel is
     // exercised on both columns under learnable alpha.
     let probes = [
@@ -1280,25 +1385,29 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
         (7usize, 0usize, 0usize),
     ];
     for (row, local_pos, atom) in probes {
-        let mut plus = term.clone();
-        let mut minus = term.clone();
-        plus.assignment.logits[[row, atom]] += h;
-        minus.assignment.logits[[row, atom]] -= h;
-        let fd = certified_central_logdet_difference(
-            &format!(
-                "learnable-alpha ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}"
-            ),
-            &fd_stratum,
-            fixed_state_logdet_sample(plus, &target, &rho),
-            fixed_state_logdet_sample(minus, &target, &rho),
-            h,
-        );
+        let label =
+            format!("learnable-α ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}");
+        let (fd, tolerance) = held_gate_central_difference(&label, &fd_stratum, dim, h, |step| {
+            held_gate_logdet_sample(&term, &gates, &target, &rho, |state| {
+                state.assignment.logits[[row, atom]] += step;
+            })
+        });
         let analytic = gamma.t[cache.row_offsets[row] + local_pos];
-        let tol = 3.0e-3 * (1.0 + fd.abs().max(analytic.abs()));
+        let prior_leg = obb_logit_prior_leg(&term, &rho, &cache, row, atom);
         assert!(
-            (fd - analytic).abs() <= tol,
-            "learnable-α ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}: \
-             fd={fd:.8e}, analytic={analytic:.8e}"
+            prior_leg.abs() > tolerance,
+            "{label}: regime: the ordered Beta--Bernoulli logit leg {prior_leg:.3e} is not \
+             resolved by the finite difference (tolerance {tolerance:.3e}), so the gate is \
+             saturated and this probe verifies nothing about the logit legs"
+        );
+        eprintln!(
+            "{label}: fd={fd:.10e} analytic={analytic:.10e} gap={:.3e} tolerance={tolerance:.3e} \
+             logit prior leg {prior_leg:.6e}",
+            fd - analytic
+        );
+        assert!(
+            (fd - analytic).abs() <= tolerance,
+            "{label}: fd={fd:.8e}, analytic={analytic:.8e}, tolerance={tolerance:.3e}"
         );
     }
 }
@@ -1309,8 +1418,8 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
 /// metric-first analogue of `..._ordered_beta_bernoulli`: install a rank-2 BehavioralFisher
 /// metric (`s = 2 < p = 3`, a genuinely rank-deficient whitening) on the ordered Beta--Bernoulli tiny
 /// fixture and check the analytic `Γ` matches the fixed-state dense FD of `log|H|`
-/// — both flow through the majorized assembly (`fixed_state_logdet_sample` rebuilds the
-/// SAME majorized `H`). This guards the majorized θ-adjoint channels against the
+/// — both flow through the majorized assembly (`held_gate_logdet_sample` rebuilds the
+/// SAME majorized `H` at the anchor's gates). This guards the majorized θ-adjoint channels against the
 /// majorized criterion log-det in the whitened+rank-deficient regime, where the
 /// whitened data curvature cannot dominate the raw indefinite prior pieces.
 #[test]
@@ -1375,6 +1484,8 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
         .expect("Gamma");
     let h = 1.0e-5;
     let fd_stratum = anchor.stratum;
+    let gates = term.collapse_prevention_gates();
+    let dim = cache.delta_t_len() + cache.k;
     let probes_idx = [
         (0usize, 0usize, SaeLocalRowVar::Logit { atom: 0 }),
         (4usize, 1usize, SaeLocalRowVar::Logit { atom: 1 }),
@@ -1382,35 +1493,36 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
         (6usize, 3usize, SaeLocalRowVar::Coord { atom: 1, axis: 0 }),
     ];
     for (row, local_pos, var) in probes_idx {
-        let mut plus = term.clone();
-        let mut minus = term.clone();
-        match var {
-            SaeLocalRowVar::Logit { atom } => {
-                plus.assignment.logits[[row, atom]] += h;
-                minus.assignment.logits[[row, atom]] -= h;
-            }
-            SaeLocalRowVar::Coord { atom, axis } => {
-                let mut flat_p = plus.assignment.coords[atom].as_flat().clone();
-                let mut flat_m = minus.assignment.coords[atom].as_flat().clone();
-                let idx = row * plus.assignment.coords[atom].latent_dim() + axis;
-                flat_p[idx] += h;
-                flat_m[idx] -= h;
-                plus.assignment.coords[atom].set_flat(flat_p.view());
-                minus.assignment.coords[atom].set_flat(flat_m.view());
-            }
-        }
-        let fd = certified_central_logdet_difference(
-            &format!("majorized ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}"),
-            &fd_stratum,
-            fixed_state_logdet_sample(plus, &target, &rho),
-            fixed_state_logdet_sample(minus, &target, &rho),
-            h,
-        );
+        let label = format!("majorized ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}");
+        let (fd, tolerance) = held_gate_central_difference(&label, &fd_stratum, dim, h, |step| {
+            held_gate_logdet_sample(&term, &gates, &target, &rho, |state| match var {
+                SaeLocalRowVar::Logit { atom } => state.assignment.logits[[row, atom]] += step,
+                SaeLocalRowVar::Coord { atom, axis } => {
+                    let mut flat = state.assignment.coords[atom].as_flat().clone();
+                    let idx = row * state.assignment.coords[atom].latent_dim() + axis;
+                    flat[idx] += step;
+                    state.assignment.coords[atom].set_flat(flat.view());
+                }
+            })
+        });
         let analytic = gamma.t[cache.row_offsets[row] + local_pos];
-        let tol = 3.0e-3 * (1.0 + fd.abs().max(analytic.abs()));
+        if let SaeLocalRowVar::Logit { atom } = var {
+            let prior_leg = obb_logit_prior_leg(&term, &rho, &cache, row, atom);
+            assert!(
+                prior_leg.abs() > tolerance,
+                "{label}: regime: the ordered Beta--Bernoulli logit leg {prior_leg:.3e} is not \
+                 resolved by the finite difference (tolerance {tolerance:.3e}), so the gate is \
+                 saturated and this probe verifies nothing about the logit legs"
+            );
+            eprintln!("{label}: logit prior leg {prior_leg:.6e}");
+        }
+        eprintln!(
+            "{label}: fd={fd:.10e} analytic={analytic:.10e} gap={:.3e} tolerance={tolerance:.3e}",
+            fd - analytic
+        );
         assert!(
-            (fd - analytic).abs() <= tol,
-            "majorized ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}: fd={fd:.8e}, analytic={analytic:.8e}"
+            (fd - analytic).abs() <= tolerance,
+            "{label}: fd={fd:.8e}, analytic={analytic:.8e}, tolerance={tolerance:.3e}"
         );
     }
 }
