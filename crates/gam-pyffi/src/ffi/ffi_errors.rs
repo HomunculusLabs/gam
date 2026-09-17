@@ -135,7 +135,9 @@ create_exception!(
      instance of `FitError` itself is a failure that reached the boundary as \
      prose, with no category to claim. Instances carry `variant` (str, the typed \
      engine variant, e.g. `EstimationError::StartupSeedsRefused`), `category` \
-     (str) and `causes` (list[str], the message chain, outermost first)."
+     (str), `causes` (list[str], the message chain, outermost first) and \
+     `fields` (dict, the typed evidence the variant exposes by field name; empty \
+     when it exposes none)."
 );
 
 create_exception!(
@@ -1047,6 +1049,10 @@ fn fit_failure_to_pyerr(py: Python<'_>, report: FitFailureReport<'_>) -> PyErr {
         bound.setattr("variant", variant)?;
         bound.setattr("category", category.label())?;
         bound.setattr("causes", causes)?;
+        // The typed evidence a variant exposes, by field name. No variant of
+        // this boundary exposes any yet, so the contract is an empty dict
+        // rather than a missing attribute.
+        bound.setattr("fields", pyo3::types::PyDict::new(py))?;
         Ok(())
     })();
     if let Err(attach_err) = attach_result {
@@ -1247,6 +1253,9 @@ mod fit_failure_dispatch_tests {
             assert_eq!(category, "startup_seeds");
             let causes: Vec<String> = value.getattr("causes").unwrap().extract().unwrap();
             assert_eq!(causes, vec!["CTN fold 1 failed".to_string(), engine_text]);
+            let fields = value.getattr("fields").unwrap();
+            let fields = fields.cast::<pyo3::types::PyDict>().unwrap();
+            assert!(fields.is_empty(), "this variant exposes no typed evidence");
         });
     }
 

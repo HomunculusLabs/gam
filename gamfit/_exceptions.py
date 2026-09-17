@@ -108,7 +108,7 @@ InvalidConfigurationError: type = _rust.InvalidConfigurationError
 MissingDependencyError: type = _rust.MissingDependencyError
 
 # Fit-failure categories (#2937). A failure of a fit's solve raises the class of
-# its category; instances carry `variant`, `category` and `causes`. `FitError`
+# its category; instances carry `variant`, `category`, `causes` and `fields`. `FitError`
 # itself is a failure with no category to claim. `PirlsConvergenceError` and
 # `RemlConvergenceError` are `FitConvergenceError` subclasses, and
 # `IntegrationError` is now raised only for genuine quadrature failures.

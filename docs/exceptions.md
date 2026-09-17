@@ -158,8 +158,8 @@ from the typed engine error that stopped the fit, never from its message:
 | `IntegrationError` | `integration` | A quadrature or numerical integration did not reach its tolerance. |
 | `FitError` itself | `unclassified` | The failure reached the Python boundary as prose, so no category can be claimed. |
 
-Every instance carries three attributes, and the message ends with the same
-facts after the unchanged engine message:
+Every instance carries four attributes, and the message ends with the variant
+and category after the unchanged engine message:
 
 - `variant`: the typed engine variant that decided the failure, e.g.
   `EstimationError::StartupSeedsRefused` or
@@ -167,6 +167,9 @@ facts after the unchanged engine message:
 - `category`: the label in the table above.
 - `causes`: the message chain, outermost first: each orchestration layer's
   context (such as `CTN fold 2 failed`), then the engine message.
+- `fields`: a dict of the typed evidence the variant exposes, by field name, so a
+  caller reads numbers without parsing the message. It is empty for a variant
+  that exposes none.
 
 ```python
 try:
