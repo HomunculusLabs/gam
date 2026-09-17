@@ -6979,9 +6979,11 @@ impl BlockSparseDictStream {
     /// `½·d_eff·ln(n_obs)`. The block is the certification unit (its `b` atoms
     /// share one jointly-fitted frame and one code Gram — atom ids for block
     /// `g` are `g*b .. (g+1)*b`). Returns parallel lists
-    /// `{block, n_eff, d_eff, delta_deviance, charge, margin, kept}`; `margin`
-    /// doubles as the `log_e_value` an e-BH certificate can consume. Errors if
-    /// no epoch has closed yet.
+    /// `{block, n_eff, d_eff, delta_deviance, charge, margin, kept}`. `margin`
+    /// is a descriptive BIC-shaped margin, not a log e-value: under a regular
+    /// null `delta_deviance` is asymptotically `χ²_d/2` and `E[exp(χ²_d/2)]`
+    /// diverges, so it must not be fed to an e-BH certificate. Errors if no
+    /// epoch has closed yet.
     fn block_rank_charges(&self, py: Python<'_>, n_obs: usize) -> PyResult<Py<PyDict>> {
         let charges = py
             .detach(|| self.inner.block_rank_charges(n_obs))

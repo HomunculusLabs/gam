@@ -1066,9 +1066,12 @@ class BlockSparseDictStream:
         claim; ``charge = 0.5 * d_eff * ln(n_obs)``; ``kept = margin > 0``. The
         block is the certification unit — its ``b`` atoms share one jointly
         fitted frame and one Gram, so atom ids for block ``g`` are
-        ``g*b .. (g+1)*b`` and inherit the block's verdict. ``margin`` doubles
-        as a ``log_e_value`` for :func:`e_bh_dictionary_certificate`. Call
-        after at least one :meth:`end_epoch`.
+        ``g*b .. (g+1)*b`` and inherit the block's verdict. ``margin`` is a
+        descriptive BIC-shaped model-selection margin, not a log e-value: under
+        a regular null ``delta_deviance`` is asymptotically ``chi2_d / 2`` and
+        ``E[exp(chi2_d / 2)]`` diverges, so ``margin`` must not be passed to
+        :func:`e_bh_dictionary_certificate`. Call after at least one
+        :meth:`end_epoch`.
 
         Returns parallel lists
         ``{block, n_eff, d_eff, delta_deviance, charge, margin, kept}``.
