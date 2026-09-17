@@ -75,6 +75,7 @@ def build_payload() -> dict[str, Any]:
             band_coords = _arange(g, d[k], step=0.2)
             band_mean = _arange(g, p, start=0.3, step=0.05)
             band_sd = _arange(g, p, start=0.01, step=0.002)
+            band_sd_robust = _arange(g, p, start=0.012, step=0.003)
             u_arc = _arange(N, start=0.0, step=0.19)
             func_ev = {
                 "average_value": 1.25,
@@ -82,7 +83,7 @@ def build_payload() -> dict[str, Any]:
                 "peak_contrast": 2.1,
             }
         else:
-            band_coords = band_mean = band_sd = u_arc = None
+            band_coords = band_mean = band_sd = band_sd_robust = u_arc = None
             func_ev = None
         atoms.append(
             {
@@ -98,6 +99,9 @@ def build_payload() -> dict[str, Any]:
                 ),
                 "shape_band_mean": None if band_mean is None else band_mean.tolist(),
                 "shape_band_sd": None if band_sd is None else band_sd.tolist(),
+                "shape_band_sd_robust": (
+                    None if band_sd_robust is None else band_sd_robust.tolist()
+                ),
                 "functional_evidence": func_ev,
             }
         )
@@ -149,7 +153,7 @@ def build_payload() -> dict[str, Any]:
     selected_log_ard = [np.array([0.1]), np.array([0.2, -0.3]), np.array([0.4, 0.5])]
 
     return {
-        "schema": "gamfit.ManifoldSAE/v6",
+        "schema": "gamfit.ManifoldSAE/v7",
         "atoms": atoms,
         "assignment": "topk",
         "assignment_label": "topk",

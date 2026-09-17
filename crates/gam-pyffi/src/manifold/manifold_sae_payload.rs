@@ -1,10 +1,11 @@
 //! Rust-owned serde schema for the fitted `ManifoldSAE` model artifact (#2091).
 //!
 //! The fitted SAE-manifold model is serialized to a JSON payload tagged
-//! `"gamfit.ManifoldSAE/v6"` schema. Version 6 is deliberately breaking: it
+//! `"gamfit.ManifoldSAE/v7"` schema. Version 6 was deliberately breaking: it
 //! persists each atom's constructor-validated geometry plan as the sole source
 //! of topology, chart dimension, analytic resolution, basis width, center set,
-//! and reference metric.
+//! and reference metric. Version 7 adds each atom's row-sandwich robust band
+//! `shape_band_sd_robust` beside the model-based `shape_band_sd` (#2933 F41).
 //! Historically the schema lived only in the Python dataclass
 //! `gamfit/_sae_manifold.py::ManifoldSAE`
 //! (`to_dict` / `from_dict`), so a field-name / default / None-handling change
@@ -34,7 +35,7 @@ use gam::terms::sae::manifold::SaeAtomGeometryPlan;
 
 /// The on-disk schema tag. `from_json` rejects any other value, matching the
 /// Python `from_dict` guard.
-pub(crate) const SCHEMA_TAG: &str = "gamfit.ManifoldSAE/v6";
+pub(crate) const SCHEMA_TAG: &str = "gamfit.ManifoldSAE/v7";
 
 /// Per-atom payload (`atoms[k]`), one per `SaeManifoldAtomFit`.
 ///
@@ -57,6 +58,10 @@ pub(crate) struct AtomPayload {
     pub(crate) shape_band_coords: Option<Vec<Vec<f64>>>,
     pub(crate) shape_band_mean: Option<Vec<Vec<f64>>>,
     pub(crate) shape_band_sd: Option<Vec<Vec<f64>>>,
+    /// Row-sandwich sampling sd on the same grid and channels as
+    /// `shape_band_sd`, present exactly when it is (see
+    /// `SaeAtomShapeUncertainty::band_sd_robust`).
+    pub(crate) shape_band_sd_robust: Option<Vec<Vec<f64>>>,
     pub(crate) functional_evidence: Option<Value>,
 }
 
@@ -159,7 +164,7 @@ pub(crate) struct ManifoldSaePayload {
     pub(crate) selected_log_lambda_smooth: Option<Vec<f64>>,
     pub(crate) selected_log_ard: Option<Vec<Vec<f64>>>,
 
-    // --- runtime diagnostics persisted by v6 -----------------------------
+    // --- runtime diagnostics persisted by v7 -----------------------------
     pub(crate) structured_residual_diagnostics: Vec<Value>,
     /// #2235 — the outer-ρ termination verdict/ledger the fit emitted
     /// (`{"verdict", "evals", "evals_since_improvement", "wall_seconds"}`). Like
@@ -235,10 +240,11 @@ impl ManifoldSaePayload {
         "shape_band_coords",
         "shape_band_mean",
         "shape_band_sd",
+        "shape_band_sd_robust",
         "functional_evidence",
     ];
 
-    /// Parse the exact v6 artifact schema. Missing optional-valued fields are
+    /// Parse the exact v7 artifact schema. Missing optional-valued fields are
     /// still errors: `null` is the explicit absence representation.
     pub(crate) fn from_json(json: &str) -> Result<Self, String> {
         let value: Value =
@@ -297,6 +303,16 @@ impl ManifoldSaePayload {
                 "ManifoldSAE.from_json: top_k is required exactly for assignment='topk'"
                     .to_string(),
             );
+        }
+        for (index, atom) in payload.atoms.iter().enumerate() {
+            let shape = |band: &Vec<Vec<f64>>| (band.len(), band.first().map_or(0, Vec::len));
+            if atom.shape_band_sd.as_ref().map(shape) != atom.shape_band_sd_robust.as_ref().map(shape)
+            {
+                return Err(format!(
+                    "ManifoldSAE.from_json: atoms[{index}].shape_band_sd_robust must accompany \
+                     shape_band_sd on the same grid"
+                ));
+            }
         }
         let k = payload.geometry_plans.len();
         if k == 0 {
@@ -462,8 +478,43 @@ mod manifold_sae_payload_serde_tests {
         );
     }
 
+    /// #2933 F41 — the robust band is persisted beside the model-based band and
+    /// may be neither dropped nor stored on another grid.
     #[test]
-    fn crosscoder_layout_and_reports_round_trip_in_v6() {
+    fn robust_shape_band_round_trips_and_accompanies_the_model_band() {
+        let golden = load_value("golden_full.json");
+        let periodic = &golden["atoms"][0];
+        assert!(
+            periodic["shape_band_sd"].is_array() && periodic["shape_band_sd_robust"].is_array(),
+            "the golden periodic atom carries both bands"
+        );
+        assert_ne!(
+            periodic["shape_band_sd"], periodic["shape_band_sd_robust"],
+            "the fixture must tell the two bands apart"
+        );
+        let payload = ManifoldSaePayload::from_json(&serde_json::to_string(&golden).unwrap())
+            .expect("golden payload");
+        assert_eq!(
+            serde_json::to_value(&payload.atoms[0].shape_band_sd_robust).unwrap(),
+            periodic["shape_band_sd_robust"]
+        );
+
+        let mut dropped = golden.clone();
+        dropped["atoms"][0]["shape_band_sd_robust"] = Value::Null;
+        let error = roundtrip_json(&serde_json::to_string(&dropped).unwrap()).unwrap_err();
+        assert!(error.contains("shape_band_sd_robust must accompany"), "{error}");
+
+        let mut regridded = golden;
+        regridded["atoms"][0]["shape_band_sd_robust"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        let error = roundtrip_json(&serde_json::to_string(&regridded).unwrap()).unwrap_err();
+        assert!(error.contains("shape_band_sd_robust must accompany"), "{error}");
+    }
+
+    #[test]
+    fn crosscoder_layout_and_reports_round_trip_in_v7() {
         let mut payload = load_value("golden_full.json");
         payload.as_object_mut().unwrap().insert(
             "crosscoder".to_string(),

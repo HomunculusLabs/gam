@@ -471,7 +471,7 @@ impl SupportSparseManifoldSaeCore {
         if schema != SUPPORT_SCHEMA_TAG {
             return Err(py_value_error(format!(
                 "ManifoldSAESupport.from_dict: schema {schema:?} is not {SUPPORT_SCHEMA_TAG:?}; \
-                 dense payloads tagged gamfit.ManifoldSAE/v6 load with ManifoldSAE.from_dict"
+                 dense payloads tagged gamfit.ManifoldSAE/v7 load with ManifoldSAE.from_dict"
             )));
         }
         let requested_k: usize = required_field(payload, "requested_k")?.extract()?;

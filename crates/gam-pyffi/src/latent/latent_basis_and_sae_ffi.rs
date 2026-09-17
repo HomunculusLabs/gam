@@ -2105,9 +2105,18 @@ fn sae_fit_report_into_dict<'py>(
             }
             match (&unc.band_coords, &unc.band_mean, &unc.band_sd) {
                 (Some(coords), Some(mean), Some(sd)) => {
+                    // #2933 F41 — the row-sandwich band accompanies every
+                    // model-based band; it is a covariance of the same decoder, so
+                    // the physical-frame lift scales it by the same `σ_c`.
+                    let robust = unc.band_sd_robust.as_ref().map_err(|reason| {
+                        py_value_error(format!(
+                            "atom {atom_idx} has a joint shape band but no robust band: {reason:?}"
+                        ))
+                    })?;
                     atom_dict.set_item("shape_band_coords", coords.clone().into_pyarray(py))?;
                     let mut band_mean = mean.clone();
                     let mut band_sd = sd.clone();
+                    let mut band_sd_robust = robust.clone();
                     if let Some(sigma) = tier0_scale.as_ref() {
                         for mut row in band_mean.rows_mut() {
                             row *= sigma;
@@ -2115,9 +2124,13 @@ fn sae_fit_report_into_dict<'py>(
                         for mut row in band_sd.rows_mut() {
                             row *= sigma;
                         }
+                        for mut row in band_sd_robust.rows_mut() {
+                            row *= sigma;
+                        }
                     }
                     atom_dict.set_item("shape_band_mean", band_mean.into_pyarray(py))?;
                     atom_dict.set_item("shape_band_sd", band_sd.into_pyarray(py))?;
+                    atom_dict.set_item("shape_band_sd_robust", band_sd_robust.into_pyarray(py))?;
                 }
                 (None, None, None) => {}
                 _ => {

@@ -95,6 +95,7 @@ def _analytic_topology_model(
     atom["shape_band_coords"] = None
     atom["shape_band_mean"] = None
     atom["shape_band_sd"] = None
+    atom["shape_band_sd_robust"] = None
     return ManifoldSAE.from_dict(payload)
 
 

@@ -5588,6 +5588,16 @@ impl AtomCore {
         }
     }
     #[getter]
+    fn shape_band_sd_robust<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, PyArray2<f64>>>> {
+        match &self.inner.shape_band_sd_robust {
+            None => Ok(None),
+            Some(v) => Ok(Some(manifold_sae_vec2(py, v)?)),
+        }
+    }
+    #[getter]
     fn functional_evidence(&self, py: Python<'_>) -> PyResult<PyObject> {
         manifold_sae_report(py, &self.inner.functional_evidence)
     }

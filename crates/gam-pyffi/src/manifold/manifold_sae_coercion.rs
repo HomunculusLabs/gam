@@ -168,25 +168,30 @@ pub(crate) fn sae_flat_block_assignment(gating: &str) -> PyResult<String> {
 ///
 ///   * `coords` is `(G, 1)` (one coordinate column, `d_k = 1` for a periodic
 ///     atom) — an error otherwise.
-///   * `mean` / `sd` are `(G, p)` (the ambient band value / per-channel sd on
-///     the `G`-point coordinate grid — not 1-D.
+///   * `mean` / `sd` / `sd_robust` are `(G, p)` (the ambient band value and the
+///     model-based and row-sandwich per-channel sds on the `G`-point coordinate
+///     grid — not 1-D.
 ///   * `order = argsort(coords[:, 0], kind="mergesort")` — a STABLE ascending
-///     sort; `coords` and the ROWS of `mean` / `sd` are all reindexed by it.
+///     sort; `coords` and the ROWS of `mean` / `sd` / `sd_robust` are all
+///     reindexed by it.
 ///   * When `coords` is absent OR `mean` is absent the band is dropped entirely
-///     (`(None, None, None)`) — a periodic band without its amplitude-correct
-///     Rust mean draws at the wrong radius, so an absent mean means no band.
+///     (`(None, None, None, None)`) — a periodic band without its
+///     amplitude-correct Rust mean draws at the wrong radius, so an absent mean
+///     means no band.
 ///
-/// `sd` follows `mean` (reindexed when present, `None` when absent), and both
-/// must share `coords`'s row count `G`. The sort key uses `f64::total_cmp` for a
-/// total, deterministic order (NaN sorts last, matching numpy's mergesort
-/// NaN-at-end); shape-band coordinates are finite in practice so this only fixes
-/// the degenerate tie/NaN ordering deterministically.
+/// `sd` and `sd_robust` follow `mean` (reindexed when present, `None` when
+/// absent), and all must share `coords`'s row count `G`. The sort key uses
+/// `f64::total_cmp` for a total, deterministic order (NaN sorts last, matching
+/// numpy's mergesort NaN-at-end); shape-band coordinates are finite in practice
+/// so this only fixes the degenerate tie/NaN ordering deterministically.
 pub(crate) fn periodic_shape_band_reorder(
     coords: Option<Array2<f64>>,
     mean: Option<Array2<f64>>,
     sd: Option<Array2<f64>>,
+    sd_robust: Option<Array2<f64>>,
 ) -> Result<
     (
+        Option<Array2<f64>>,
         Option<Array2<f64>>,
         Option<Array2<f64>>,
         Option<Array2<f64>>,
@@ -194,7 +199,7 @@ pub(crate) fn periodic_shape_band_reorder(
     String,
 > {
     let Some(coords) = coords else {
-        return Ok((None, None, None));
+        return Ok((None, None, None, None));
     };
     if coords.ncols() != 1 {
         return Err(format!(
@@ -205,7 +210,7 @@ pub(crate) fn periodic_shape_band_reorder(
         ));
     }
     let Some(mean) = mean else {
-        return Ok((None, None, None));
+        return Ok((None, None, None, None));
     };
     let n = coords.nrows();
     if mean.nrows() != n {
@@ -214,11 +219,13 @@ pub(crate) fn periodic_shape_band_reorder(
             mean.nrows()
         ));
     }
-    if let Some(sd) = sd.as_ref() {
-        if sd.nrows() != n {
+    for (name, band) in [("shape_band_sd", &sd), ("shape_band_sd_robust", &sd_robust)] {
+        if let Some(band) = band.as_ref()
+            && band.nrows() != n
+        {
             return Err(format!(
-                "periodic shape_band_sd rows ({}) must match shape_band_coords rows ({n})",
-                sd.nrows()
+                "periodic {name} rows ({}) must match shape_band_coords rows ({n})",
+                band.nrows()
             ));
         }
     }
@@ -234,7 +241,13 @@ pub(crate) fn periodic_shape_band_reorder(
     };
     let mean_sorted = reindex_rows(&mean);
     let sd_sorted = sd.map(|s| reindex_rows(&s));
-    Ok((Some(coords_sorted), Some(mean_sorted), sd_sorted))
+    let sd_robust_sorted = sd_robust.map(|s| reindex_rows(&s));
+    Ok((
+        Some(coords_sorted),
+        Some(mean_sorted),
+        sd_sorted,
+        sd_robust_sorted,
+    ))
 }
 
 /// Fit-time scalars and labels absent from the raw solver payload. Threaded into
@@ -352,8 +365,10 @@ fn shape_band_for_kind(
     coords: Option<Vec<Vec<f64>>>,
     mean: Option<Vec<Vec<f64>>>,
     sd: Option<Vec<Vec<f64>>>,
+    sd_robust: Option<Vec<Vec<f64>>>,
 ) -> Result<
     (
+        Option<Vec<Vec<f64>>>,
         Option<Vec<Vec<f64>>>,
         Option<Vec<Vec<f64>>>,
         Option<Vec<Vec<f64>>>,
@@ -361,16 +376,18 @@ fn shape_band_for_kind(
     String,
 > {
     if kind != "periodic" {
-        return Ok((coords, mean, sd));
+        return Ok((coords, mean, sd, sd_robust));
     }
     let coords = coords.map(|c| nested_to_array2(&c)).transpose()?;
     let mean = mean.map(|m| nested_to_array2(&m)).transpose()?;
     let sd = sd.map(|s| nested_to_array2(&s)).transpose()?;
-    let (c, m, s) = periodic_shape_band_reorder(coords, mean, sd)?;
+    let sd_robust = sd_robust.map(|s| nested_to_array2(&s)).transpose()?;
+    let (c, m, s, r) = periodic_shape_band_reorder(coords, mean, sd, sd_robust)?;
     Ok((
         c.map(|a| array2_to_nested(&a)),
         m.map(|a| array2_to_nested(&a)),
         s.map(|a| array2_to_nested(&a)),
+        r.map(|a| array2_to_nested(&a)),
     ))
 }
 
@@ -465,8 +482,9 @@ pub(crate) fn build_manifold_sae_payload(
         let sb_coords = vopt(a, "shape_band_coords").map(v_arr2).transpose()?;
         let sb_mean = vopt(a, "shape_band_mean").map(v_arr2).transpose()?;
         let sb_sd = vopt(a, "shape_band_sd").map(v_arr2).transpose()?;
-        let (sb_coords, sb_mean, sb_sd) =
-            shape_band_for_kind(&kinds[idx], sb_coords, sb_mean, sb_sd)?;
+        let sb_sd_robust = vopt(a, "shape_band_sd_robust").map(v_arr2).transpose()?;
+        let (sb_coords, sb_mean, sb_sd, sb_sd_robust) =
+            shape_band_for_kind(&kinds[idx], sb_coords, sb_mean, sb_sd, sb_sd_robust)?;
         atom_payloads.push(AtomPayload {
             decoder_coefficients,
             assignments: assignments_col,
@@ -478,6 +496,7 @@ pub(crate) fn build_manifold_sae_payload(
             shape_band_coords: sb_coords,
             shape_band_mean: sb_mean,
             shape_band_sd: sb_sd,
+            shape_band_sd_robust: sb_sd_robust,
             functional_evidence: vopt(a, "functional_evidence").cloned(),
         });
     }
@@ -575,7 +594,7 @@ pub(crate) fn build_manifold_sae_payload(
         selected_log_ard,
         structured_residual_diagnostics,
         // #2235 — termination ledger carried straight from the raw fit payload
-        // into the persisted v6 artifact.
+        // into the persisted v7 artifact.
         termination: report("termination"),
     })
 }
@@ -688,12 +707,14 @@ mod manifold_sae_coercion_tests {
 
     #[test]
     fn periodic_shape_band_reorder_stable_ascending_rows() {
-        // coords (G,1); mean/sd (G,p) — the ROWS reindex by the coord order.
+        // coords (G,1); mean/sd/sd_robust (G,p) — the ROWS reindex by the coord order.
         let coords = array![[0.9], [0.1], [0.5], [0.1]];
         let mean = array![[9.0, 90.0], [1.0, 10.0], [5.0, 50.0], [2.0, 20.0]];
         let sd = array![[0.9, 0.09], [0.1, 0.01], [0.5, 0.05], [0.2, 0.02]];
-        let (c, m, s) =
-            periodic_shape_band_reorder(Some(coords), Some(mean), Some(sd)).expect("reorder");
+        let sd_robust = array![[1.9, 0.19], [1.1, 0.11], [1.5, 0.15], [1.2, 0.12]];
+        let (c, m, s, r) =
+            periodic_shape_band_reorder(Some(coords), Some(mean), Some(sd), Some(sd_robust))
+                .expect("reorder");
         // Ascending by coord; the two 0.1 rows keep input order (stable): idx 1 then 3.
         assert_eq!(c.unwrap(), array![[0.1], [0.1], [0.5], [0.9]]);
         assert_eq!(
@@ -704,23 +725,29 @@ mod manifold_sae_coercion_tests {
             s.unwrap(),
             array![[0.1, 0.01], [0.2, 0.02], [0.5, 0.05], [0.9, 0.09]]
         );
+        assert_eq!(
+            r.unwrap(),
+            array![[1.1, 0.11], [1.2, 0.12], [1.5, 0.15], [1.9, 0.19]]
+        );
     }
 
     #[test]
     fn periodic_shape_band_reorder_drops_band_without_mean() {
         let coords = array![[0.1], [0.2]];
-        let (c, m, s) = periodic_shape_band_reorder(Some(coords), None, None).expect("ok");
-        assert!(c.is_none() && m.is_none() && s.is_none());
-        let (c2, m2, s2) =
-            periodic_shape_band_reorder(None, Some(array![[1.0, 2.0]]), None).expect("ok");
-        assert!(c2.is_none() && m2.is_none() && s2.is_none());
+        let (c, m, s, r) =
+            periodic_shape_band_reorder(Some(coords), None, None, None).expect("ok");
+        assert!(c.is_none() && m.is_none() && s.is_none() && r.is_none());
+        let (c2, m2, s2, r2) =
+            periodic_shape_band_reorder(None, Some(array![[1.0, 2.0]]), None, None).expect("ok");
+        assert!(c2.is_none() && m2.is_none() && s2.is_none() && r2.is_none());
     }
 
     #[test]
     fn periodic_shape_band_reorder_rejects_multicolumn_coords() {
         let coords = array![[0.1, 0.2], [0.3, 0.4]];
         assert!(
-            periodic_shape_band_reorder(Some(coords), Some(array![[1.0], [2.0]]), None).is_err()
+            periodic_shape_band_reorder(Some(coords), Some(array![[1.0], [2.0]]), None, None)
+                .is_err()
         );
     }
 
@@ -729,7 +756,23 @@ mod manifold_sae_coercion_tests {
         let coords = array![[0.1], [0.2], [0.3]];
         // mean has 2 rows but coords has 3 -> error (Python would index-error).
         assert!(
-            periodic_shape_band_reorder(Some(coords), Some(array![[1.0], [2.0]]), None).is_err()
+            periodic_shape_band_reorder(
+                Some(coords.clone()),
+                Some(array![[1.0], [2.0]]),
+                None,
+                None
+            )
+            .is_err()
+        );
+        let mean = array![[1.0], [2.0], [3.0]];
+        assert!(
+            periodic_shape_band_reorder(
+                Some(coords),
+                Some(mean),
+                None,
+                Some(array![[1.0], [2.0]])
+            )
+            .is_err()
         );
     }
 

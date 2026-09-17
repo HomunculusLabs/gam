@@ -328,9 +328,17 @@ atom.decoder_covariance   # (M_k*p, M_k*p), row-major (basis, channel) flat layo
 atom.shape_band_coords    # (G, d_k)
 atom.shape_band_mean      # (G, p)
 atom.shape_band_sd        # (G, p)
+atom.shape_band_sd_robust # (G, p), row-sandwich sampling sd on the same grid
 lower = atom.shape_band_mean - 1.96 * atom.shape_band_sd
 upper = atom.shape_band_mean + 1.96 * atom.shape_band_sd
 ```
+
+`shape_band_sd_robust` is the frequentist companion: the push-forward of the
+row sandwich `[A⁺ J A⁺]_ββ`, whose bread is the same observed information and
+whose meat is the per-row estimating functions (the data scores and, under the
+ordered Beta–Bernoulli gate prior, each atom's aggregate gate mass). It needs
+no correctly specified likelihood and carries no dispersion. Rows are treated
+as independent; the fit has no sequence clusters.
 
 This is an epistemic posterior on the manifold, not the per-observation data
 scatter: it shrinks as `~1/sqrt(N)` with more data, scales with the
@@ -348,9 +356,9 @@ model, so the reported band still reflects the joint covariance of the returned
 (possibly grown) dictionary, seed and born atoms alike.
 
 !!! note "Full fitted-state persistence"
-    `save` / `load` and `to_dict` / `from_dict` use the strict Rust-owned v3
+    `save` / `load` and `to_dict` / `from_dict` use the strict Rust-owned v7
     artifact schema. They retain each atom's decoder coefficients, fitted
-    per-token coordinates, resolved topology, shape-band grid/mean/sd, and a
+    per-token coordinates, resolved topology, shape-band grid/mean/sd/robust sd, and a
     compact per-output-channel covariance factor. Loading reconstructs the
     dense covariance and shape-band surfaces, so the curve and its uncertainty
     band can be rendered again without refitting. The on-disk

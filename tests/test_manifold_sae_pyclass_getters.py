@@ -123,9 +123,16 @@ def test_atoms_is_an_object_surface() -> None:
     # atom 0 (periodic, d=1) carries the arc coordinate + shape band.
     np.testing.assert_array_equal(a0.coords_u_arc, np.asarray(g0["coords_u_arc"]))
     np.testing.assert_array_equal(a0.shape_band_mean, np.asarray(g0["shape_band_mean"]))
+    np.testing.assert_array_equal(a0.shape_band_sd, np.asarray(g0["shape_band_sd"]))
+    # #2933 F41: the row-sandwich band persists beside the model-based band.
+    np.testing.assert_array_equal(
+        a0.shape_band_sd_robust, np.asarray(g0["shape_band_sd_robust"])
+    )
+    assert not np.array_equal(a0.shape_band_sd_robust, a0.shape_band_sd)
     # atom 1 (euclidean, d=2) carries neither.
     assert atoms[1].coords_u_arc is None
     assert atoms[1].shape_band_mean is None
+    assert atoms[1].shape_band_sd_robust is None
     # No atom in the fixture carries a covariance factor -> dense cov is None.
     assert all(a.decoder_covariance is None for a in atoms)
 

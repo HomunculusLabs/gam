@@ -229,6 +229,44 @@
           0.054,
           0.056
         ]
+      ],
+      "shape_band_sd_robust": [
+        [
+          0.012,
+          0.015,
+          0.018000000000000002,
+          0.021
+        ],
+        [
+          0.024,
+          0.027,
+          0.030000000000000002,
+          0.033
+        ],
+        [
+          0.036000000000000004,
+          0.039,
+          0.041999999999999996,
+          0.045
+        ],
+        [
+          0.048,
+          0.051000000000000004,
+          0.054000000000000006,
+          0.056999999999999995
+        ],
+        [
+          0.06,
+          0.063,
+          0.066,
+          0.069
+        ],
+        [
+          0.072,
+          0.075,
+          0.078,
+          0.081
+        ]
       ]
     },
     {
@@ -288,7 +326,8 @@
       "functional_evidence": null,
       "shape_band_coords": null,
       "shape_band_mean": null,
-      "shape_band_sd": null
+      "shape_band_sd": null,
+      "shape_band_sd_robust": null
     },
     {
       "active_dim": 2,
@@ -359,7 +398,8 @@
       "functional_evidence": null,
       "shape_band_coords": null,
       "shape_band_mean": null,
-      "shape_band_sd": null
+      "shape_band_sd": null,
+      "shape_band_sd_robust": null
     }
   ],
   "certificates": {
@@ -848,7 +888,7 @@
     "generators": [],
     "group_signature": "SO(2)"
   },
-  "schema": "gamfit.ManifoldSAE/v6",
+  "schema": "gamfit.ManifoldSAE/v7",
   "selected_log_ard": [
     [
       0.1
