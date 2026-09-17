@@ -49,6 +49,8 @@
 use std::cmp::Ordering;
 use std::fmt;
 
+use super::supports::CardinalityCode;
+
 /// Why a message could not be written or read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodecError {
@@ -848,10 +850,31 @@ pub fn code_saving_at_declared_fidelity(
     Ok(i128::from(reference.code_bits) - i128::from(candidate.code_bits))
 }
 
+/// The enumerative subset code `L(S) = L_int(k + 1) + ⌈log₂ C(n, k)⌉` as the support code the
+/// P12 minimum-code support search minimizes ([`super::supports::minimum_code_support`]).
+///
+/// The length is not monotone in `k`: near `k = n` the rank field vanishes and only the
+/// cardinality codeword remains, so the cheapest admissible size can be the full support.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnumerativeSubsetCode;
+
+impl CardinalityCode for EnumerativeSubsetCode {
+    type Error = CodecError;
+
+    fn support_bits(&self, components: usize, size: usize) -> Result<u64, CodecError> {
+        subset_code_len_bits(components, size)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::description_length::selection_bits;
+    use crate::parameter_decomposition::supports::{
+        CardinalityCode, ComponentSet, EvidenceStatus, EvidenceStatusError, ExactBasis,
+        FailureHypergraph, SeparationOracle, minimum_code_support,
+    };
+    use gam_linalg::roundoff::accumulation_growth;
 
     fn natural_to_u128(value: &Natural) -> u128 {
         assert!(value.limbs.len() <= 2, "value exceeds u128: {value:?}");
@@ -1224,12 +1247,6 @@ mod tests {
     const MASKED_SUM: usize = 3;
     const LABELS: usize = 4;
 
-    /// Higham's `γ_m = mε/(1 − mε)`.
-    fn gamma(operations: usize) -> f64 {
-        let scaled = operations as f64 * f64::EPSILON;
-        scaled / (1.0 - scaled)
-    }
-
     fn family_direction(instance: usize, instances: usize) -> [f64; 2] {
         let angle = std::f64::consts::PI * instance as f64 / instances as f64;
         [angle.cos(), angle.sin()]
@@ -1240,8 +1257,9 @@ mod tests {
     /// Every partial sum and the output stay within norm 2 (`‖P_S x‖ ≤ 2|S|/C ≤ 2`).
     /// Each output coordinate is at most `2|S| + 12` rounded operations from exact
     /// inputs (direction, dot product, scale, accumulate, subtract, norm), so its
-    /// relative error is at most `γ` of that count and the distortion, a norm of
-    /// magnitude at most 3, moves by at most `3·γ`.
+    /// relative error is at most Higham's `γ_m = m·u/(1 − m·u)` of that count
+    /// ([`accumulation_growth`], `u = ε/2`), and the distortion, a norm of magnitude at
+    /// most 3, moves by at most `3·γ_m`.
     fn projector_distortion(x: [f64; 2], support: &[usize], instances: usize) -> (f64, f64) {
         let mut output = [0.0_f64; 2];
         for &instance in support {
@@ -1251,7 +1269,7 @@ mod tests {
             output[1] += weight * direction[1];
         }
         let distortion = ((x[0] - output[0]).powi(2) + (x[1] - output[1]).powi(2)).sqrt();
-        (distortion, 3.0 * gamma(2 * support.len() + 12))
+        (distortion, 3.0 * accumulation_growth(2 * support.len() + 12))
     }
 
     #[test]
@@ -1415,5 +1433,106 @@ mod tests {
         };
         assert!(worst > tolerance, "single-instance distortion {worst} must miss {tolerance}");
         assert!(code_saving_at_declared_fidelity(tolerance, &unfaithful_score, &identity_score).is_err());
+    }
+
+    // The P12 fixture's declared fidelity tolerance: a certified risk of 0 meets it and a refuted
+    // risk of 1 does not.
+    const CORE_TOLERANCE: f64 = 0.5;
+
+    /// A separation oracle whose risk is zero exactly when every `core` component is kept. A
+    /// refuting witness turns off every component outside the candidate support.
+    struct CoreOracle {
+        components: usize,
+        core: Vec<usize>,
+    }
+
+    impl SeparationOracle for CoreOracle {
+        type Mask = Vec<f64>;
+        type Domain = &'static str;
+        type Error = EvidenceStatusError;
+
+        fn components(&self) -> usize {
+            self.components
+        }
+
+        fn perturbed_components(&self, mask: &Vec<f64>) -> Vec<usize> {
+            (0..mask.len())
+                .filter(|&component| mask[component] != 1.0)
+                .collect()
+        }
+
+        fn separate(
+            &mut self,
+            support: &ComponentSet,
+        ) -> Result<EvidenceStatus<Vec<f64>, &'static str>, EvidenceStatusError> {
+            let kept = |component: usize| support.members().binary_search(&component).is_ok();
+            if self.core.iter().all(|&component| kept(component)) {
+                EvidenceStatus::exact(0.0, 0.0, ExactBasis::Algebraic, None, "core kept")
+            } else {
+                let mask = (0..self.components)
+                    .map(|component| if kept(component) { 1.0 } else { 0.0 })
+                    .collect();
+                EvidenceStatus::counterexample(1.0, 0.0, CORE_TOLERANCE, mask)
+            }
+        }
+
+        fn evaluate(
+            &mut self,
+            mask: &Vec<f64>,
+        ) -> Result<EvidenceStatus<Vec<f64>, &'static str>, EvidenceStatusError> {
+            let violated = self.core.iter().any(|&component| mask[component] != 1.0);
+            EvidenceStatus::exact(
+                if violated { 1.0 } else { 0.0 },
+                0.0,
+                ExactBasis::Exhaustive { cardinality: 1 },
+                Some(mask.clone()),
+                "one mask",
+            )
+        }
+    }
+
+    #[test]
+    fn enumerative_subset_code_drives_the_p12_minimum_code_search() {
+        // Hand-derived from L_int(k + 1) = 1, 3, 3, 6, 6, 6, 6, 7, 7 and
+        // ⌈log₂ C(8, k)⌉ = 0, 3, 5, 6, 7, 6, 5, 3, 0 for k = 0..=8.
+        let lengths = [1_u64, 6, 8, 12, 13, 12, 11, 10, 7];
+        for (size, &bits) in lengths.iter().enumerate() {
+            assert_eq!(EnumerativeSubsetCode.support_bits(8, size), Ok(bits), "L(8, {size})");
+        }
+        assert!(matches!(
+            EnumerativeSubsetCode.support_bits(8, 9),
+            Err(CodecError::InvalidInput(_))
+        ));
+
+        let mut oracle = CoreOracle {
+            components: 8,
+            core: vec![0, 1, 2],
+        };
+        let search = minimum_code_support(
+            &mut oracle,
+            &EnumerativeSubsetCode,
+            CORE_TOLERANCE,
+            FailureHypergraph::new(8),
+        )
+        .expect("the full support keeps the core, so the search closes");
+        // The empty candidate (1 bit) is refuted. At hitting-set size 1 the cheapest admissible
+        // size is 1 (6 bits), and all 8 singletons miss the core. At size 2 the cheapest is the
+        // full support (7 bits, below L(8, 2) = 8), which is certified: 1 + 8 + 1 separations,
+        // whichever singleton the hitting-set solver picks first.
+        assert_eq!(search.code.upper_bound(), Some(7.0));
+        assert_eq!(search.code.lower_bound(), Some(7.0));
+        assert_eq!(search.separations, 10);
+        assert_eq!(
+            search.certified.map(|found| found.support),
+            Some(ComponentSet::all(8))
+        );
+        // The figure is the true minimum over sufficient supports: each holds the 3-member core,
+        // and the least code over sizes 3..=8 is the full support's.
+        let least_sufficient = (3..=8)
+            .map(|size| EnumerativeSubsetCode.support_bits(8, size).expect("length"))
+            .min();
+        assert_eq!(least_sufficient, Some(7));
+        // The size-minimal sufficient support, the core itself, costs 12 bits under this code.
+        assert_eq!(EnumerativeSubsetCode.support_bits(8, 3), Ok(12));
     }
 }
