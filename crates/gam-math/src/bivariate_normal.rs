@@ -55,6 +55,9 @@
 //! - **Truncation.** At most `ε/12` for `|ρ| ≤ ½`, and at most `ε/6` elsewhere.
 //! - **Rounding.** On top of that, rounding of a few ulps in `Φ`, the sum and the final combination.
 //! - **Exact branches.** Infinite bounds and `ρ ∈ {−1, 0, 1}` are exact special cases.
+//! - **Correlation input.** A caller who resolves `1 − ρ²` more finely than `ρ` passes it to the `_with_complement`
+//!   entry points. Every `1 ∓ ρ` is then derived from it, and the input conditioning `φ₂·δρ` of a rounded `ρ`
+//!   near `±1` never enters.
 //! - **Projection.** Every result is projected onto `[0, 1]`, which contains the truth, so the projection never
 //!   increases the error.
 //! - **Relative accuracy.** It is not claimed for `Φ₂ ≲ ε`. The sum `Φ(h)Φ(k) + T` cancels when `ρ < 0` in the
@@ -76,6 +79,8 @@ pub enum BivariateNormalError {
     CorrelationOutsideUnitInterval { rho: f64 },
     /// The density and the partials exist only for `|ρ| < 1`.
     SingularCorrelation { rho: f64 },
+    /// A caller-supplied `1 − ρ²` was `NaN` or outside `[0, 1]`.
+    ComplementOutsideUnitInterval { complement: f64 },
 }
 
 impl fmt::Display for BivariateNormalError {
@@ -91,6 +96,10 @@ impl fmt::Display for BivariateNormalError {
             Self::SingularCorrelation { rho } => write!(
                 formatter,
                 "bivariate normal density needs |rho| < 1, got {rho}"
+            ),
+            Self::ComplementOutsideUnitInterval { complement } => write!(
+                formatter,
+                "bivariate normal complement 1 - rho^2 must lie in [0, 1], got {complement}"
             ),
         }
     }
@@ -160,6 +169,65 @@ fn validate(bounds: &[(&'static str, f64)], rho: f64) -> Result<(), BivariateNor
     Ok(())
 }
 
+fn validate_complement(complement: f64) -> Result<(), BivariateNormalError> {
+    if !(0.0..=1.0).contains(&complement) {
+        return Err(BivariateNormalError::ComplementOutsideUnitInterval { complement });
+    }
+    Ok(())
+}
+
+/// A correlation with its singular factors `1 − ρ` and `1 + ρ`.
+///
+/// - From `ρ` alone, each factor is formed directly, and is exact near its own singular end.
+/// - From a caller's `1 − ρ²`, the vanishing factor is `(1 − ρ²)/(1 + |ρ|)`. So a correlation that rounds to `±1`
+///   still carries the complement the caller resolved.
+#[derive(Clone, Copy)]
+struct Correlation {
+    rho: f64,
+    one_minus: f64,
+    one_plus: f64,
+}
+
+impl Correlation {
+    fn from_rho(rho: f64) -> Self {
+        Self {
+            rho,
+            one_minus: 1.0 - rho,
+            one_plus: 1.0 + rho,
+        }
+    }
+
+    fn from_complement(rho: f64, complement: f64) -> Self {
+        let far = 1.0 + rho.abs();
+        let near = complement / far;
+        if rho >= 0.0 {
+            Self {
+                rho,
+                one_minus: near,
+                one_plus: far,
+            }
+        } else {
+            Self {
+                rho,
+                one_minus: far,
+                one_plus: near,
+            }
+        }
+    }
+
+    fn negated(self) -> Self {
+        Self {
+            rho: -self.rho,
+            one_minus: self.one_plus,
+            one_plus: self.one_minus,
+        }
+    }
+
+    fn complement(self) -> f64 {
+        self.one_minus * self.one_plus
+    }
+}
+
 /// `P(lower ≤ Z ≤ upper)` for standard normal `Z`, always as a difference of same-side tails. So a small
 /// interval deep in either tail keeps its relative digits.
 fn normal_interval_probability(lower: f64, upper: f64) -> f64 {
@@ -177,18 +245,18 @@ fn normal_interval_probability(lower: f64, upper: f64) -> f64 {
 }
 
 /// The exact value when a bound is infinite, or when `ρ` is singular or zero. Otherwise `None`.
-fn exact_branch(h: f64, k: f64, rho: f64) -> Option<f64> {
+fn exact_branch(h: f64, k: f64, correlation: Correlation) -> Option<f64> {
     if h == f64::NEG_INFINITY || k == f64::NEG_INFINITY {
         Some(0.0)
     } else if h == f64::INFINITY {
         Some(normal_cdf(k))
     } else if k == f64::INFINITY {
         Some(normal_cdf(h))
-    } else if rho == 1.0 {
+    } else if correlation.one_minus == 0.0 {
         Some(normal_cdf(h.min(k)))
-    } else if rho == -1.0 {
+    } else if correlation.one_plus == 0.0 {
         Some(normal_interval_probability(-k, h))
-    } else if rho == 0.0 {
+    } else if correlation.rho == 0.0 {
         Some(normal_cdf(h) * normal_cdf(k))
     } else {
         None
@@ -197,7 +265,7 @@ fn exact_branch(h: f64, k: f64, rho: f64) -> Option<f64> {
 
 /// Drezner-Wesolowsky on `rule` for `|ρ| ≤ ½` (see the module docs for the integrand).
 fn core_cdf(h: f64, k: f64, rho: f64, rule: &CoreRule) -> f64 {
-    if let Some(value) = exact_branch(h, k, rho) {
+    if let Some(value) = exact_branch(h, k, Correlation::from_rho(rho)) {
         return value;
     }
     let alpha = rho.asin();
@@ -214,16 +282,17 @@ fn core_cdf(h: f64, k: f64, rho: f64, rule: &CoreRule) -> f64 {
 }
 
 /// `Φ₂(h, k; ρ)` on `rule`, through the exact reductions onto the core domain.
-fn cdf_on_rule(h: f64, k: f64, rho: f64, rule: &CoreRule) -> f64 {
-    if let Some(value) = exact_branch(h, k, rho) {
+fn cdf_on_rule(h: f64, k: f64, correlation: Correlation, rule: &CoreRule) -> f64 {
+    if let Some(value) = exact_branch(h, k, correlation) {
         return value;
     }
+    let rho = correlation.rho;
     if rho > 0.5 {
-        let c = (0.5 * (1.0 - rho)).sqrt();
+        let c = (0.5 * correlation.one_minus).sqrt();
         let split = (h - k) / (2.0 * c);
         (core_cdf(split, k, -c, rule) + core_cdf(-split, h, -c, rule)).min(1.0)
     } else if rho < -0.5 {
-        let c = (0.5 * (1.0 + rho)).sqrt();
+        let c = (0.5 * correlation.one_plus).sqrt();
         let split = (h + k) / (2.0 * c);
         // Taking `h ≤ k` centres the conditional interval of `U` at or below zero. So the two pieces are
         // never both near one.
@@ -238,7 +307,29 @@ fn cdf_on_rule(h: f64, k: f64, rho: f64, rule: &CoreRule) -> f64 {
 /// module docs.
 pub fn bivariate_normal_cdf(h: f64, k: f64, rho: f64) -> Result<f64, BivariateNormalError> {
     validate(&[("h", h), ("k", k)], rho)?;
-    Ok(cdf_on_rule(h, k, rho, &CORE_RULE))
+    Ok(cdf_on_rule(h, k, Correlation::from_rho(rho), &CORE_RULE))
+}
+
+/// `Φ₂(h, k; ρ)` for a caller who resolves `1 − ρ²` more finely than `ρ` itself, such as `Δ/(AB)` with
+/// `Δ = AB − r²` formed by fma.
+///
+/// Every `1 ∓ ρ` is derived from `complement`, so a correlation rounded to `±1` keeps the complement's digits.
+/// `complement == 0` selects the singular branch by the sign of `ρ`. `complement` must be `1 − ρ²` of the same
+/// correlation, to rounding.
+pub fn bivariate_normal_cdf_with_complement(
+    h: f64,
+    k: f64,
+    rho: f64,
+    complement: f64,
+) -> Result<f64, BivariateNormalError> {
+    validate(&[("h", h), ("k", k)], rho)?;
+    validate_complement(complement)?;
+    Ok(cdf_on_rule(
+        h,
+        k,
+        Correlation::from_complement(rho, complement),
+        &CORE_RULE,
+    ))
 }
 
 /// `P(X ≤ h, lower ≤ Y ≤ upper)`.
@@ -256,35 +347,36 @@ pub fn bivariate_normal_interval_probability(
     if !(lower < upper) {
         return Ok(0.0);
     }
-    let rule = &*CORE_RULE;
+    let (rule, correlation) = (&*CORE_RULE, Correlation::from_rho(rho));
+    let reflected = correlation.negated();
     let probability = if lower == f64::NEG_INFINITY {
-        cdf_on_rule(h, upper, rho, rule)
+        cdf_on_rule(h, upper, correlation, rule)
     } else if upper == f64::INFINITY {
-        cdf_on_rule(h, -lower, -rho, rule)
+        cdf_on_rule(h, -lower, reflected, rule)
     } else if lower >= 0.0 {
-        cdf_on_rule(h, -lower, -rho, rule) - cdf_on_rule(h, -upper, -rho, rule)
+        cdf_on_rule(h, -lower, reflected, rule) - cdf_on_rule(h, -upper, reflected, rule)
     } else {
-        cdf_on_rule(h, upper, rho, rule) - cdf_on_rule(h, lower, rho, rule)
+        cdf_on_rule(h, upper, correlation, rule) - cdf_on_rule(h, lower, correlation, rule)
     };
     Ok(probability.clamp(0.0, 1.0))
 }
 
-/// `(1 − ρ)(1 + ρ)`, each factor exact in binary64 near its own singular end.
-fn one_minus_rho_squared(rho: f64) -> f64 {
-    (1.0 - rho) * (1.0 + rho)
-}
-
 /// `φ₂(h, k; ρ)` for `|ρ| < 1`. The quadratic form is carried with non-negative terms, as in the core rule
 /// with `sin θ = ρ`.
-fn density(h: f64, k: f64, rho: f64) -> f64 {
+fn density(h: f64, k: f64, correlation: Correlation) -> f64 {
     if h.is_infinite() || k.is_infinite() {
         return 0.0;
     }
-    let determinant = one_minus_rho_squared(rho);
+    let determinant = correlation.complement();
     let a = 0.5 * (h.abs() - k.abs()).powi(2);
     let b = (h * k).abs();
-    let signed_rho = if h * k < 0.0 { -rho } else { rho };
-    (-(a / determinant + b / (1.0 + signed_rho))).exp() / (2.0 * PI * determinant.sqrt())
+    // `1 + σρ` is the factor `1 + ρ` when `hk ≥ 0` and the factor `1 − ρ` when `hk < 0`.
+    let signed_factor = if h * k < 0.0 {
+        correlation.one_minus
+    } else {
+        correlation.one_plus
+    };
+    (-(a / determinant + b / signed_factor)).exp() / (2.0 * PI * determinant.sqrt())
 }
 
 /// `φ₂(h, k; ρ)`, the bivariate standard normal density, for `|ρ| < 1`.
@@ -293,22 +385,30 @@ pub fn bivariate_normal_pdf(h: f64, k: f64, rho: f64) -> Result<f64, BivariateNo
     if rho.abs() == 1.0 {
         return Err(BivariateNormalError::SingularCorrelation { rho });
     }
-    Ok(density(h, k, rho))
+    Ok(density(h, k, Correlation::from_rho(rho)))
 }
 
 /// `φ(x) Φ((y − ρx)/√(1 − ρ²))`. The numerator is `(y − x) + x(1 − ρ)` for `ρ ≥ 0` and `(y + x) − x(1 + ρ)`
 /// for `ρ < 0`, so it keeps its digits as `|ρ| → 1`.
-fn conditional_partial(x: f64, y: f64, rho: f64) -> f64 {
+fn conditional_partial(x: f64, y: f64, correlation: Correlation) -> f64 {
     let weight = normal_pdf(x);
     if weight == 0.0 {
         return 0.0;
     }
-    let numerator = if rho >= 0.0 {
-        (y - x) + x * (1.0 - rho)
+    let numerator = if correlation.rho >= 0.0 {
+        (y - x) + x * correlation.one_minus
     } else {
-        (y + x) - x * (1.0 + rho)
+        (y + x) - x * correlation.one_plus
     };
-    weight * normal_cdf(numerator / one_minus_rho_squared(rho).sqrt())
+    weight * normal_cdf(numerator / correlation.complement().sqrt())
+}
+
+fn partials_of(h: f64, k: f64, correlation: Correlation) -> BivariateNormalPartials {
+    BivariateNormalPartials {
+        d_h: conditional_partial(h, k, correlation),
+        d_k: conditional_partial(k, h, correlation),
+        d_rho: density(h, k, correlation),
+    }
 }
 
 /// The analytic partials `(∂_h, ∂_k, ∂_ρ)` of `Φ₂(h, k; ρ)`, for `|ρ| < 1`.
@@ -321,11 +421,23 @@ pub fn bivariate_normal_cdf_partials(
     if rho.abs() == 1.0 {
         return Err(BivariateNormalError::SingularCorrelation { rho });
     }
-    Ok(BivariateNormalPartials {
-        d_h: conditional_partial(h, k, rho),
-        d_k: conditional_partial(k, h, rho),
-        d_rho: density(h, k, rho),
-    })
+    Ok(partials_of(h, k, Correlation::from_rho(rho)))
+}
+
+/// The analytic partials of `Φ₂(h, k; ρ)` from a caller-resolved `1 − ρ²`, as in
+/// [`bivariate_normal_cdf_with_complement`]. They exist for `complement > 0`.
+pub fn bivariate_normal_cdf_partials_with_complement(
+    h: f64,
+    k: f64,
+    rho: f64,
+    complement: f64,
+) -> Result<BivariateNormalPartials, BivariateNormalError> {
+    validate(&[("h", h), ("k", k)], rho)?;
+    validate_complement(complement)?;
+    if complement == 0.0 {
+        return Err(BivariateNormalError::SingularCorrelation { rho });
+    }
+    Ok(partials_of(h, k, Correlation::from_complement(rho, complement)))
 }
 
 #[cfg(test)]
@@ -389,7 +501,7 @@ mod tests {
         if upper <= lower {
             return (0.0, 0.0);
         }
-        let s = one_minus_rho_squared(rho).sqrt();
+        let s = Correlation::from_rho(rho).complement().sqrt();
         let mut breaks = vec![lower, upper];
         let mut unit = lower + 1.0;
         while unit < upper {
@@ -585,7 +697,7 @@ mod tests {
         }
         // Positive control: the conditional partial with the correlation's sign flipped must fail.
         let (h0, h1, k, rho) = (-3.0, 1.0, 0.4, 0.3);
-        let wrong = |h: f64| conditional_partial(h, k, -rho);
+        let wrong = |h: f64| conditional_partial(h, k, Correlation::from_rho(-rho));
         assert!(!agree(cdf(h1, k, rho) - cdf(h0, k, rho), &wrong, &panels(h0, h1)));
     }
 
@@ -651,5 +763,75 @@ mod tests {
             let difference = bivariate_normal_cdf(h, upper, rho).unwrap() - bivariate_normal_cdf(h, lower, rho).unwrap();
             assert!((actual - difference).abs() <= 2.0 * contract(), "h={h} [{lower}, {upper}] rho={rho}");
         }
+    }
+
+    #[test]
+    fn complement_route_agrees_with_the_plain_route() {
+        let bounds = [-3.0_f64, -0.6, 0.0, 0.9, 2.5];
+        let rhos = [-0.99_f64, -0.6, -0.2, 0.3, 0.7, 0.999];
+        for &h in &bounds {
+            for &k in &bounds {
+                for &rho in &rhos {
+                    let complement = Correlation::from_rho(rho).complement();
+                    let plain = bivariate_normal_cdf(h, k, rho).unwrap();
+                    let carried = bivariate_normal_cdf_with_complement(h, k, rho, complement).unwrap();
+                    // Re-forming the vanishing factor by one division moves the rotation constant by ≤ ε relative.
+                    // That moves the value by at most `(φ(u*)|u*| + φ₂·c)ε < ε`, on top of both calls' rounding.
+                    assert!(
+                        (plain - carried).abs() <= 2.0 * contract() + f64::EPSILON,
+                        "h={h} k={k} rho={rho}"
+                    );
+                    let p = bivariate_normal_cdf_partials(h, k, rho).unwrap();
+                    let q = bivariate_normal_cdf_partials_with_complement(h, k, rho, complement).unwrap();
+                    // The exponent Q carries ≤ 3ε relative from the re-formed factor, and the arguments of Φ ≤ 2ε
+                    // per unit of |x|. Each side also has its own few ulps.
+                    let exponent = (h * h - 2.0 * rho * h * k + k * k) / (2.0 * complement);
+                    let density_allowance = (8.0 + 6.0 * exponent) * f64::EPSILON * p.d_rho.max(q.d_rho);
+                    assert!((p.d_rho - q.d_rho).abs() <= density_allowance, "d_rho h={h} k={k} rho={rho}");
+                    assert!((p.d_h - q.d_h).abs() <= 4.0 * (1.0 + h.abs()) * f64::EPSILON, "d_h h={h} k={k} rho={rho}");
+                    assert!((p.d_k - q.d_k).abs() <= 4.0 * (1.0 + k.abs()) * f64::EPSILON, "d_k h={h} k={k} rho={rho}");
+                }
+            }
+        }
+        assert!(matches!(
+            bivariate_normal_cdf_with_complement(0.0, 0.0, 0.5, -1.0e-3),
+            Err(BivariateNormalError::ComplementOutsideUnitInterval { .. })
+        ));
+        assert!(bivariate_normal_cdf_partials_with_complement(0.0, 0.0, 1.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn complement_keeps_the_digits_a_rounded_correlation_loses() {
+        // The caller's correlation rounds to 1, while its complement is resolved.
+        let (rho, complement) = (1.0_f64, 2.0e-17_f64);
+        // Sheppard at the origin, through the half angle: Φ₂(0,0;ρ) = ½ − asin(√((1 − ρ)/2))/π, with 1 − ρ = c/2.
+        let expected = 0.5 - (0.5 * complement.sqrt()).asin() / PI;
+        let carried = bivariate_normal_cdf_with_complement(0.0, 0.0, rho, complement).unwrap();
+        assert!((carried - expected).abs() <= contract(), "carried={carried:e} expected={expected:e}");
+        let plain = bivariate_normal_cdf(0.0, 0.0, rho).unwrap();
+        assert!((plain - expected).abs() > contract(), "the rounded correlation must lose these digits");
+
+        // Partials at a nearly equal pair, against an independent route: ρ = √(1 − c), so
+        // 1 − ρ = −expm1(½ log1p(−c)), and φ₂ = φ(h)·φ(t)/√c with t = (k − ρh)/√c.
+        let (h, k) = (0.3_f64, 0.3 + 2.0e-9);
+        let one_minus_rho = -libm::expm1(0.5 * libm::log1p(-complement));
+        let t = ((k - h) + h * one_minus_rho) / complement.sqrt();
+        let expected_d_h = normal_pdf(h) * normal_cdf(t);
+        let expected_d_rho = normal_pdf(h) * normal_pdf(t) / complement.sqrt();
+        let partials = bivariate_normal_cdf_partials_with_complement(h, k, rho, complement).unwrap();
+        assert!(
+            (partials.d_h - expected_d_h).abs() <= 4.0 * f64::EPSILON * normal_pdf(h),
+            "d_h={:e} expected={expected_d_h:e}",
+            partials.d_h
+        );
+        assert!(
+            (partials.d_rho / expected_d_rho - 1.0).abs() <= 16.0 * f64::EPSILON,
+            "d_rho={:e} expected={expected_d_rho:e}",
+            partials.d_rho
+        );
+        assert!(bivariate_normal_cdf_partials(h, k, rho).is_err());
+        // Positive control: the nearest double below 1 forms 1 − ρ² = 2.2e−16 instead of 2e−17, and misses d_h.
+        let rounded = bivariate_normal_cdf_partials(h, k, 1.0 - 0.5 * f64::EPSILON).unwrap();
+        assert!((rounded.d_h - expected_d_h).abs() > 4.0 * f64::EPSILON * normal_pdf(h));
     }
 }
