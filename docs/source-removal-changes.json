@@ -9345,5 +9345,14 @@
     ],
     "reason": "#2899 public API sweep of gam-models (prune-api-d): LogLognormalKernelBundle::len had no caller and is deleted, together with the unconstructed ResponseGeometryModelError::Serialization variant and the unread ProbitFrailtyScaleJet::alpha field, which are not guarded items.",
     "evidence": "At the base, only gam-models calls log_kernel_bundle, and no LogLognormalKernelBundle value calls len(); it is the file's one fn len declaration. Receipt: guarded job 657442 (agsmall, lane sw0m, node acn04) at 814808c53 with\nHEAD==PIN, dirty=0 and the 13 files of the s36 and s37 slices overlaid:\ncargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0\n(75 s) and cargo check -p gam-pyffi --lib exited 0 (40 s), with no error line.\nLog /scratch.global/sauer354/pool/prune-api-d/s36s37.657442.log. The first pass\non the s36 overlay (655090) stopped at the gam_custom_family import in\ngenerative.rs that only the deleted trait read, which this change removes."
+  },
+  {
+    "base": "1545c84dcdfa2e6c5447945e5a1f5b876529d470",
+    "items": [
+      "crates/gam-sae/src/manifold/construction_ard.rs:const:SOFTMAX_HARD_SELECTION_MIN_TOP_WEIGHT",
+      "crates/gam-sae/src/manifold/construction_ard.rs:fn:basin_selection_deflation_correction"
+    ],
+    "reason": "#2933 F37/F38. basin_selection_deflation_correction added an observed-margin plug-in as an exact Stein boundary term to the reconstruction dispersion. For fixed candidates +-a and y ~ N(mu, sigma^2) the search dof of a·sign(y) is (2a/sigma)·phi(mu/sigma), while the plug-in's mean is (2a/sigma)·phi(mu/(sqrt2 sigma))/sqrt2, 1/sqrt2 of it at the boundary and larger once |mu| > sigma·sqrt(2 ln 2). No single-draw statistic is unbiased for the boundary term, and the production selection (seeded TopK routing logits, softmax basins) has no closed-form boundary. SOFTMAX_HARD_SELECTION_MIN_TOP_WEIGHT treated a softmax winner weight of 0.9 as a discontinuity of a smooth map. The dispersion is now conditional on the fitted routing, and no EDF term depends on phi, so its scale equation is explicit (the one-pass fixed-point claim is gone with the charge).",
+    "evidence": "At the base, git grep -n for both names finds only their declarations and doc comments in construction_ard.rs and the single call in reconstruction_dispersion (construction_reconstruction.rs), which this commit removes. No test, bench, example, Python or FFI source names either. The new tests in crates/gam-sae/src/manifold/tests_selection_boundary_dispersion_2933.rs pin the conditional contract, the smooth softmax, and the explicit scale equation."
   }
 ]

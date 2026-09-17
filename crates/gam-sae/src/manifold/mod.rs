@@ -355,6 +355,11 @@ mod tests_persistence_engine_2757;
 #[cfg(test)]
 mod tests_sure_dispersion_2133;
 
+/// #2933 F37/F38 — the dispersion is conditional on the fitted routing and its
+/// scale equation is explicit.
+#[cfg(test)]
+mod tests_selection_boundary_dispersion_2933;
+
 #[cfg(test)]
 mod tests_behavioral_fisher_rung1;
 

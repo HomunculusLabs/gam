@@ -523,6 +523,30 @@ impl SaeManifoldTerm {
     /// incidental-parameters under-dispersion of the per-row coordinate MAP.
     /// `None` reproduces the historical Gauss-Newton dispersion exactly (used by
     /// callers with no residual in hand — the correction is then simply absent).
+    ///
+    /// # Selection is conditioned on, not charged
+    ///
+    /// Both scales are conditional on the fitted routing. They hold the selected
+    /// TopK support or the basin the inner solve converged to fixed, as frozen
+    /// routing already does, and add no search degrees of freedom for the
+    /// selection itself (#2933 F37). An observed-margin boundary charge used to be
+    /// added here, but no single-draw statistic estimates that boundary term. For
+    /// fixed candidates `±a` and `y ~ N(μ, σ²)`, the selection `ŷ = a·sign(y)` has
+    /// `df_search = (2a/σ)·φ(μ/σ)`, which is a function of the unknown mean. Any
+    /// statistic has `E T(y) = (T ∗ N(0, σ²))(μ)`, and `φ(·/σ)` is itself an
+    /// `N(0, σ²)` kernel, so an unbiased `T` would have to be a point mass. The
+    /// removed plug-in `(2a/σ)·φ(y/σ)` has expectation `(2a/σ)·φ(μ/(√2σ))/√2`. That
+    /// is `1/√2` of the truth at the boundary and more than the truth once
+    /// `|μ| > σ·√(2 ln 2)`, and no rescaling corrects a bias that changes sign. The
+    /// production selection is not an argmin over two fixed candidates either.
+    /// Supports come from seeded routing logits and basins are local minima of the
+    /// inner solve, so neither has decision boundaries in closed form. A softmax,
+    /// ordered Beta--Bernoulli or threshold gate is a smooth map of its logits, so a
+    /// saturated assignment is not a discontinuity and gets no boundary term.
+    ///
+    /// No EDF term depends on `φ`, so each frame's scale equation
+    /// `φ·resid_dof = RSS` is explicit. Its root is returned in one evaluation, with
+    /// no seed, fixed-point pass or contraction argument (#2933 F38).
     pub(crate) fn reconstruction_dispersion(
         &self,
         loss: &SaeManifoldLoss,
@@ -610,16 +634,6 @@ impl SaeManifoldTerm {
         if let Some(residual) = residual {
             coord_edf = (coord_edf + self.coordinate_sure_deflation_correction(residual, rho)?)
                 .clamp(0.0, n_scalar);
-            // #2133 — the basin-SELECTION (search) deflation dof: the boundary
-            // Stein term the within-basin correction above omits. The per-row charge
-            // depends on σ̂ = √φ̂, so seed it with the within-basin-corrected but
-            // search-UNcorrected φ̂ and take ONE monotone fixed-point pass (the charge
-            // is decreasing in σ̂ through the margin z, so one pass contracts). It is
-            // identically 0 for single-basin / hard-frozen / genuinely-soft rows, so
-            // w=None + non-selecting fits are bit-for-bit today's φ̂.
-            let phi_seed = raw_rss / (n_scalar - beta_edf - coord_edf).max(1.0);
-            let df_search = self.basin_selection_deflation_correction(residual, phi_seed)?;
-            coord_edf = (coord_edf + df_search).clamp(0.0, n_scalar);
         }
         let resid_dof = (n_scalar - beta_edf - coord_edf).max(1.0);
         let raw_output_noise_variance = raw_rss / resid_dof;
