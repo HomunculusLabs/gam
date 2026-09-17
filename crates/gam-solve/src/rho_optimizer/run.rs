@@ -1169,8 +1169,28 @@ impl OuterProblem {
 pub(crate) enum PlanRunOutcome {
     Converged(OuterResult),
     Exhausted(OuterResult),
+    DominatedPlateau(DominatedPlateau),
     FirstOrderFallbackRequested(FirstOrderFallbackRequest),
     FixedPointContinuationRequested(FixedPointContinuationRequest),
+}
+
+/// A certified candidate that an evaluated but uncertified state of the same
+/// attempt beats by more than the criterion's rounding envelope (#2596, #2627).
+///
+/// A certificate says the candidate is stationary, not that it is the best point
+/// the search measured. On a face of the declared domain the criterion is flat
+/// and `|Pg|` is negligible whatever it scores, so a face seed certifies in zero
+/// iterations while the interior searches that reached far lower values fail to
+/// certify. Such a candidate is not published. The incumbent is the resume
+/// checkpoint, so the search continues from it.
+pub(crate) struct DominatedPlateau {
+    /// The certified candidate the attempt declined to publish.
+    pub(crate) plateau: OuterResult,
+    /// The lowest evaluated state of the attempt, re-evaluated at its own ρ.
+    pub(crate) incumbent: OuterResult,
+    /// `outer_value_agreement_bound(plateau, incumbent)`, the resolution the gap
+    /// was judged against.
+    pub(crate) band: f64,
 }
 
 /// Which certificate concluded a CONVERGED outer run (#2235/#2241).
@@ -8099,6 +8119,20 @@ pub(crate) fn run_outer_uncertified(
                     spent_iterations.saturating_add(request.checkpoint.iterations);
                 fixed_point_continuation = Some(request.checkpoint);
                 continue 'plan_attempts;
+            }
+            Ok(PlanRunOutcome::DominatedPlateau(dominated)) => {
+                log::warn!(
+                    "[OUTER] {context}: attempt {} (plan={the_plan}) declined a certified \
+                     winner at cost {:.6e}, dominated by an evaluated state at cost {:.6e} \
+                     (gap {:.3e} > rounding envelope {:.3e}); that state is the resume \
+                     checkpoint (#2596, #2627)",
+                    attempt_idx + 1,
+                    dominated.plateau.final_value,
+                    dominated.incumbent.final_value,
+                    dominated.plateau.final_value - dominated.incumbent.final_value,
+                    dominated.band,
+                );
+                Ok(dominated.incumbent)
             }
             Ok(PlanRunOutcome::Exhausted(result)) => {
                 // `Exhausted` is a proof-bearing outcome: every solver

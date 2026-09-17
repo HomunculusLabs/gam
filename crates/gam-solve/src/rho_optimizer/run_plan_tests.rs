@@ -5349,6 +5349,12 @@ fn lower_model_rail_singleton_search_preserves_derivative_in_screening_and_mint_
                 request.refusal
             )
         }
+        PlanRunOutcome::DominatedPlateau(dominated) => {
+            panic!(
+                "ARC singleton unexpectedly declined a dominated certified winner at cost {:.6e}",
+                dominated.plateau.final_value
+            )
+        }
     };
     assert!(
         objective.state.calls.iter().any(|call| {
@@ -5454,6 +5460,12 @@ fn model_upper_rail_masks_derivative_in_screening_and_mint_2514() {
             panic!(
                 "ARC singleton unexpectedly requested fixed-point continuation: {}",
                 request.refusal
+            )
+        }
+        PlanRunOutcome::DominatedPlateau(dominated) => {
+            panic!(
+                "ARC singleton unexpectedly declined a dominated certified winner at cost {:.6e}",
+                dominated.plateau.final_value
             )
         }
     };
