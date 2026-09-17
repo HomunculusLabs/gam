@@ -15,13 +15,15 @@ payload is mocked or edited.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
 import gamfit
 
 
-def test_default_uncertainty_uses_and_reports_smoothing_corrected_covariance() -> None:
+def test_default_uncertainty_uses_and_reports_smoothing_corrected_covariance(tmp_path) -> None:
     """Default uncertainty resolves to corrected covariance, not conditional."""
     x = np.linspace(-1.0, 1.0, 96)
     y = (
@@ -61,11 +63,23 @@ def test_default_uncertainty_uses_and_reports_smoothing_corrected_covariance() -
     smoothing_se = np.asarray(smoothing.posterior_mean_standard_error, dtype=float)
     conditional_se = np.asarray(conditional.posterior_mean_standard_error, dtype=float)
     np.testing.assert_array_equal(default_se, smoothing_se)
-    assert np.all(default_se >= conditional_se - 1e-12)
     assert np.any(default_se > conditional_se + 1e-10), (
         "the default interval is numerically indistinguishable from conditional "
         "covariance despite reporting smoothing-corrected provenance"
     )
+
+    # The published corrected covariance is the sigma-point cubature estimand
+    # E_rho[phi H(rho)^-1] + Cov_rho[beta_hat(rho)] over the smoothing posterior
+    # (`UnifiedFitResult::beta_covariance_corrected`). Its difference from the
+    # conditional covariance at rho_hat can take either sign, so no pointwise
+    # ordering against `conditional_se` holds. Only the first-order method,
+    # V_beta + J V_rho J^T, guarantees one. Pin the method the fit publishes, so a
+    # change of method reopens that question instead of passing silently (#2627).
+    path = tmp_path / "model.gam"
+    model.save(path)
+    saved = json.loads(path.read_text())
+    method = saved["payload"]["fit_result"]["inference"]["smoothing_correction_method"]
+    assert set(method) == {"SigmaPointCubature"}, method
 
 
 def test_default_uncertainty_publishes_conditional_when_no_correction_exists() -> None:
