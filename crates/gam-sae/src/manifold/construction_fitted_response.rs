@@ -392,6 +392,9 @@ impl SaeManifoldTerm {
             apply_raw_cached_arrow_hessian(cache, vector.t.view(), vector.beta.view())
         };
         let weights = self.row_loss_weights.as_deref();
+        // #2933 F36 — `R = J·P·A⁺·P·JᵀΩ` on sphere blocks: the probe's contraction
+        // and the solve's read-out both pass through the tangent projector.
+        let sphere_tangents = self.sphere_tangent_blocks(&cache.row_dims)?;
         let probes = probes.max(1);
         let mut accumulated = 0.0_f64;
         for probe in 0..probes {
@@ -466,7 +469,14 @@ impl SaeManifoldTerm {
                 }
                 row_probes.push(z);
             }
-            let solved = solve_exact_stationarity_krylov(&rhs, &apply_a, &apply_b, &apply_b_raw)?;
+            project_sphere_tangent_slots(&sphere_tangents, &cache.row_offsets, &mut rhs.t.view_mut());
+            let mut solved =
+                solve_exact_stationarity_krylov(&rhs, &apply_a, &apply_b, &apply_b_raw)?;
+            project_sphere_tangent_slots(
+                &sphere_tangents,
+                &cache.row_offsets,
+                &mut solved.t.view_mut(),
+            );
             let mut window: std::collections::VecDeque<SaeRowJets> =
                 std::collections::VecDeque::new();
             let mut next = 0usize;
@@ -630,6 +640,23 @@ impl SaeManifoldTerm {
             ));
         }
         let metric = self.data_curvature_metric()?;
+        // #2933 F36 — a sphere coordinate's jets carry the radial component off the
+        // sphere, and the fit moves only along the tangent space, so `G` enters as
+        // `P·G·P` on every sphere block (see [`SphereTangentBlock`]).
+        let sphere_tangents = self.sphere_tangent_blocks(&cache.row_dims)?;
+        let tangent_direction;
+        let v = if sphere_tangents.is_empty() {
+            v
+        } else {
+            let mut projected = v.clone();
+            project_sphere_tangent_slots(
+                &sphere_tangents,
+                &cache.row_offsets,
+                &mut projected.t.view_mut(),
+            );
+            tangent_direction = projected;
+            &tangent_direction
+        };
         let mut out = SaeArrowVector {
             t: Array1::<f64>::zeros(total_t),
             beta: Array1::<f64>::zeros(cache.k),
@@ -680,6 +707,7 @@ impl SaeManifoldTerm {
                 out.beta[channel.index] += sae_dot(jets.beta(position), &metric_response);
             }
         }
+        project_sphere_tangent_slots(&sphere_tangents, &cache.row_offsets, &mut out.t.view_mut());
         Ok(out)
     }
 
@@ -814,6 +842,17 @@ impl SaeManifoldTerm {
                         * scalars[right]
                         * omega[left_class * n_classes + class_of[right]];
                 }
+            }
+        }
+        // #2933 F36 — `P·G·P` on every sphere block, as in `apply_data_gauss_newton`:
+        // project each column's coordinate slots, then each row's.
+        let sphere_tangents = self.sphere_tangent_blocks(&cache.row_dims)?;
+        if !sphere_tangents.is_empty() {
+            for mut column in g.axis_iter_mut(ndarray::Axis(1)) {
+                project_sphere_tangent_slots(&sphere_tangents, &cache.row_offsets, &mut column);
+            }
+            for mut g_row in g.axis_iter_mut(ndarray::Axis(0)) {
+                project_sphere_tangent_slots(&sphere_tangents, &cache.row_offsets, &mut g_row);
             }
         }
         Ok(g)

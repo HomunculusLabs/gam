@@ -927,6 +927,10 @@ pub(crate) struct PreparedResidualCurvatureRows {
     border_indices: Vec<usize>,
     /// #2822 — the softmax gate's resident row-jet plan; `None` for every other gate.
     softmax: Option<PreparedSoftmaxRowJets>,
+    /// #2933 F36 — every embedded-sphere coordinate block of this state, so an
+    /// apply sandwiches the raw-ambient legs in the tangent projector `B` was
+    /// assembled in. Empty when no atom lives on a sphere.
+    sphere_tangents: Vec<SphereTangentBlock>,
 }
 
 /// #2822 — the state-only inputs of the softmax residual-curvature HVP
@@ -953,6 +957,116 @@ struct PreparedResidualCurvatureRow {
     residual_tbeta: Vec<f64>,
 }
 
+/// #2933 F36 — one embedded-sphere coordinate block of one row: the row-local
+/// slot of its first ambient axis and the point it is stored at.
+///
+/// The arrow assembly writes a sphere block of `B` on its tangent space:
+/// `H_tt = P·H·P − ⟨g, t⟩·P + t tᵀ` and `H_tβ = P·H_tβ` with `P = I − t tᵀ`
+/// ([`LatentManifold::riemannian_hessian_matrix`]). The residual-curvature legs of
+/// `ΔC` contract the raw ambient jets, which carry a radial component off the
+/// sphere (`AmbientSphereHarmonicEvaluator`), and the prior legs are written per
+/// ambient axis. Added unprojected, they give `A = B + ΔC` a normal row and column
+/// that the retraction never moves. Every consumer of `A` would then price a
+/// direction that is not a coordinate: `½log|A|`, the IFT solve, the shape
+/// covariance, and the fitted-response divergence. The exact information on the
+/// sphere is `P·(H + ΔC)·P − ⟨g, t⟩·P`, with the normal pinned at unit curvature
+/// as in `B`. So `ΔC` enters sandwiched in the same `P`, and the normal direction
+/// keeps exactly the pin.
+pub(crate) struct SphereTangentBlock {
+    row: usize,
+    local: usize,
+    point: Vec<f64>,
+}
+
+impl SphereTangentBlock {
+    /// `P·v` on this block's slots of one row's local vector, `P = I − t tᵀ`, through
+    /// `LatentManifold::project_to_tangent`, the projector the assembly converts
+    /// `B`'s row with, so the two cannot drift.
+    fn project_local(&self, values: &mut ndarray::ArrayViewMut1<'_, f64>) {
+        let slots = self.local..self.local + self.point.len();
+        let projected = LatentManifold::Sphere {
+            dim: self.point.len(),
+        }
+        .project_to_tangent(
+            ndarray::ArrayView1::from(self.point.as_slice()),
+            values.slice(s![slots.clone()]),
+        );
+        values.slice_mut(s![slots]).assign(&projected);
+    }
+}
+
+/// `P·v` on every sphere block of a joint vector in the cache layout. The blocks
+/// name coordinate slots only, so a `(t, β)` vector's border is untouched.
+fn project_sphere_tangent_slots(
+    blocks: &[SphereTangentBlock],
+    row_offsets: &[usize],
+    t: &mut ndarray::ArrayViewMut1<'_, f64>,
+) {
+    for block in blocks {
+        let start = row_offsets[block.row];
+        let end = row_offsets[block.row + 1];
+        block.project_local(&mut t.slice_mut(s![start..end]));
+    }
+}
+
+impl SaeManifoldTerm {
+    /// Every embedded-sphere coordinate block of this state in the row layout
+    /// `row_dims`, in row order. The factors come from
+    /// [`Self::all_ard_embedded_sphere_factors`], the one walk of the coordinate
+    /// manifolds. The slots come from the same [`Self::row_vars_for_row_dim`] map the
+    /// assembly's ext-coord manifold is built in, so the projector names the
+    /// coordinates `B` projected.
+    pub(crate) fn sphere_tangent_blocks(
+        &self,
+        row_dims: &[usize],
+    ) -> Result<Vec<SphereTangentBlock>, String> {
+        let spans = self.all_ard_embedded_sphere_factors();
+        if spans.iter().all(Vec::is_empty) {
+            return Ok(Vec::new());
+        }
+        if row_dims.len() != self.n_obs() {
+            return Err(format!(
+                "sphere_tangent_blocks: {} row dimensions for {} observations",
+                row_dims.len(),
+                self.n_obs()
+            ));
+        }
+        let mut blocks = Vec::new();
+        for (row, &q_row) in row_dims.iter().enumerate() {
+            let vars = self.row_vars_for_row_dim(row, q_row)?;
+            for (local, var) in vars.iter().enumerate() {
+                let SaeLocalRowVar::Coord { atom, axis } = *var else {
+                    continue;
+                };
+                let Some(&(_, dim)) = spans[atom].iter().find(|&&(first, _)| first == axis) else {
+                    continue;
+                };
+                let contiguous = (0..dim).all(|offset| {
+                    matches!(
+                        vars.get(local + offset),
+                        Some(&SaeLocalRowVar::Coord { atom: other, axis: other_axis })
+                            if other == atom && other_axis == axis + offset
+                    )
+                });
+                if !contiguous {
+                    return Err(format!(
+                        "sphere_tangent_blocks: row {row} does not hold atom {atom}'s sphere axes \
+                         {axis}..{} in contiguous slots from {local}",
+                        axis + dim
+                    ));
+                }
+                let point = self.assignment.coords[atom].row(row);
+                blocks.push(SphereTangentBlock {
+                    row,
+                    local,
+                    point: (0..dim).map(|offset| point[axis + offset]).collect(),
+                });
+            }
+        }
+        Ok(blocks)
+    }
+}
+
 impl SaeManifoldTerm {
     /// Contract the residual-curvature legs of `ΔC` at this state. The row
     /// residual and the row program's jets are read exactly as the per-apply
@@ -968,6 +1082,7 @@ impl SaeManifoldTerm {
                 rows: Vec::new(),
                 border_indices: Vec::new(),
                 softmax: Some(self.prepare_softmax_row_jets(target, cache)?),
+                sphere_tangents: self.sphere_tangent_blocks(&cache.row_dims)?,
             });
         }
         let p = self.output_dim();
@@ -1066,6 +1181,7 @@ impl SaeManifoldTerm {
             rows,
             border_indices: border.iter().map(|channel| channel.index).collect(),
             softmax: None,
+            sphere_tangents: self.sphere_tangent_blocks(&cache.row_dims)?,
         })
     }
 }
@@ -1192,7 +1308,38 @@ impl SaeManifoldTerm {
     /// #2731 — the residual-curvature legs are the same kind of object and take
     /// the same treatment: `residual` is
     /// [`Self::prepare_residual_curvature_rows`] at this state.
+    ///
+    /// #2933 F36 — on a sphere coordinate block the legs enter as `P·ΔC·P`, the
+    /// tangent projector `B` was assembled in (see [`SphereTangentBlock`]). Legs
+    /// (4) and (5) live on logit and border slots, where `P` is the identity.
     fn apply_exact_hessian_minus_b_prepared_before_beta_prior_leg(
+        &self,
+        rho: &SaeManifoldRho,
+        cache: &ArrowFactorCache,
+        v: &SaeArrowVector,
+        residual: &PreparedResidualCurvatureRows,
+    ) -> Result<SaeArrowVector, String> {
+        if residual.sphere_tangents.is_empty() {
+            return self.apply_exact_hessian_minus_b_ambient_legs(rho, cache, v, residual);
+        }
+        let mut tangent = v.clone();
+        project_sphere_tangent_slots(
+            &residual.sphere_tangents,
+            &cache.row_offsets,
+            &mut tangent.t.view_mut(),
+        );
+        let mut out = self.apply_exact_hessian_minus_b_ambient_legs(rho, cache, &tangent, residual)?;
+        project_sphere_tangent_slots(
+            &residual.sphere_tangents,
+            &cache.row_offsets,
+            &mut out.t.view_mut(),
+        );
+        Ok(out)
+    }
+
+    /// Legs (1)–(4) of `ΔC·v` in the ambient coordinates the jets and priors are
+    /// written in, before any sphere tangent projection.
+    fn apply_exact_hessian_minus_b_ambient_legs(
         &self,
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
@@ -3586,13 +3733,18 @@ impl SaeManifoldTerm {
     /// Exact-A evidence value, with one coherent basin matrix on each resolved
     /// negative spectral subspace. The same owner supplies the differential
     /// consumed by the outer gradient.
+    ///
+    /// The eigensystem the value was priced on is returned beside it: it is
+    /// [`Self::materialize_exact_stationarity_geometry`] at `cache`, so the dense
+    /// criterion hands it to the dispersion's fitted-response divergence instead
+    /// of materializing and decomposing `A` a second time (#2933 F36).
     pub(crate) fn exact_observed_information_log_dets_with_saddle_directions(
         &self,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
         cache: &ArrowFactorCache,
         saddle_directions: &mut Vec<(Array1<f64>, f64)>,
-    ) -> Result<f64, SaeCriterionError> {
+    ) -> Result<(f64, ExactHessianSpectralBlock), SaeCriterionError> {
         let total_t = cache.delta_t_len();
         // #2828 — the border half of `E = B − A`, read off the same border probes
         // that build `A` (#2731).
@@ -3662,7 +3814,7 @@ impl SaeManifoldTerm {
             min_retained_over_floor,
             max_band_over_floor,
         );
-        Ok(joint_pricing.log_det)
+        Ok((joint_pricing.log_det, joint))
     }
 
     /// Build a cluster-stable eigensystem and the shared absolute null floor for
@@ -4927,6 +5079,8 @@ impl SaeManifoldTerm {
         let mut error = Array1::<f64>::zeros(p);
         let mut assignments = Array1::<f64>::zeros(k_atoms);
 
+        let sphere_tangents = self.sphere_tangent_blocks(row_dims)?;
+        let mut next_sphere_block = 0usize;
         let mut rows_out: Vec<ExactHessianDeltaRow> = Vec::with_capacity(n);
         let mut jet_window: std::collections::VecDeque<SaeRowJets> =
             std::collections::VecDeque::new();
@@ -5058,6 +5212,23 @@ impl SaeManifoldTerm {
                         tt[[a, a]] += neg;
                     }
                 }
+            }
+            // #2933 F36 — a sphere block's `ΔC_tt` is `P·ΔC_tt·P` and its `ΔC_tβ` is
+            // `P·ΔC_tβ`, in the tangent projector `B`'s row was assembled in.
+            while let Some(block) = sphere_tangents
+                .get(next_sphere_block)
+                .filter(|block| block.row == row)
+            {
+                for mut column in tt.axis_iter_mut(ndarray::Axis(1)) {
+                    block.project_local(&mut column);
+                }
+                for mut tt_row in tt.axis_iter_mut(ndarray::Axis(0)) {
+                    block.project_local(&mut tt_row);
+                }
+                for mut column in tbeta.axis_iter_mut(ndarray::Axis(1)) {
+                    block.project_local(&mut column);
+                }
+                next_sphere_block += 1;
             }
 
             rows_out.push(ExactHessianDeltaRow { tt, tbeta });
@@ -6784,6 +6955,7 @@ mod tests_exact_observed_information_names_2267 {
                 cache,
                 &mut saddle_directions,
             )
+            .map(|(log_det, _)| log_det)
         }
     }
 }

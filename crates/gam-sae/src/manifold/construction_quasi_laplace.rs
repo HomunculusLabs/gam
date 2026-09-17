@@ -510,7 +510,7 @@ impl SaeManifoldTerm {
                 &cache,
                 &mut saddle_directions,
             ) {
-                Ok(log_det) => break Ok((cache, log_det)),
+                Ok((log_det, geometry)) => break Ok((cache, log_det, geometry)),
                 Err(err @ SaeCriterionError::IndefiniteObservedInformation { .. })
                     if inner_max_iter > 0 =>
                 {
@@ -530,7 +530,7 @@ impl SaeManifoldTerm {
             }
         };
         self.streaming_gates_frozen = gates_were_frozen;
-        let (cache, log_det) = evidence_root?;
+        let (cache, log_det, geometry) = evidence_root?;
 
         // 3. Smoothing-prior normalizer `−½·Σ_k log|λ_k S_k ⊗ I_{r_k}|_+`
         //    (issue #972, #2933 F26): the `r_k·rank(S_k)·log λ_smooth` Occam term plus
@@ -586,8 +586,17 @@ impl SaeManifoldTerm {
                     )));
                 }
             }
+            // #2933 F36 — the divergence reads the eigensystem ½log|A| was priced on:
+            // the same materialization at the same cache and target, so the dense
+            // criterion decomposes `A` once per evaluation, not twice.
             let disp = self
-                .reconstruction_dispersion(&loss, &cache, rho, residual.view())
+                .reconstruction_dispersion_with_geometry(
+                    &loss,
+                    &cache,
+                    rho,
+                    residual.view(),
+                    Some(&geometry),
+                )
                 .map_err(|e| {
                     format!(
                         "SaeManifoldTerm::penalized_quasi_laplace_criterion: rank-charge dispersion is required: {e}"
