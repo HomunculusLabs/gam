@@ -5,9 +5,10 @@ use crate::scalar::Mixed;
 impl EventHistoryFamily {
     fn reference_values<S: JetField>(
         &self, beta: &[S], loadings: &[S], rates: &[S],
-    ) -> Result<crate::preserve::Normalisers<S>, String> {
-        let tables = self.reference.as_ref()
-            .ok_or_else(|| "this family has no reference population".to_string())?;
+    ) -> Result<crate::preserve::Normalisers<S>, EventHistoryError> {
+        let tables = self.reference.as_ref().ok_or_else(|| EventHistoryError::InvalidInput {
+            reason: "this family has no reference population".to_string(),
+        })?;
         let marks = self.marks();
         let nodes = tables.grid.len();
         let offsets = self.block_offsets();
@@ -27,8 +28,7 @@ impl EventHistoryFamily {
                 }
             }
             let out = stratum_normalisers(&tables.grid, &eta0, loadings, rates,
-                self.time_scale, &self.gh, &tables.kinds, self.atoms)
-                .map_err(|error| error.to_string())?;
+                self.time_scale, &self.gh, &tables.kinds, self.atoms)?;
             masks = out.masks;
             normalisers.extend(out.log_normaliser);
             risk_mass.extend(out.log_risk_mass);
@@ -59,7 +59,7 @@ impl EventHistoryFamily {
     /// likelihood, before interpolation. Grid adaptation is differentiated too.
     pub(super) fn path_value<S: JetField + Send + Sync>(
         &self, states: &[ParameterBlockState], beta: &[S],
-    ) -> Result<S, String> {
+    ) -> Result<S, EventHistoryError> {
         let marks = self.marks();
         let offsets = self.block_offsets();
         let latent_offset = offsets[marks];
@@ -73,10 +73,9 @@ impl EventHistoryFamily {
         }).collect();
         let normalisers = if let (Some(tables), true) = (self.reference.as_ref(), self.atoms > 0) {
             let values = self.reference_values(beta, loadings, &rates)?;
-            Some(tables.carry_to_nodes(&values.log_normaliser, marks, self.nodes.total_nodes)
-                .map_err(|error| error.to_string())?)
+            Some(tables.carry_to_nodes(&values.log_normaliser, marks, self.nodes.total_nodes)?)
         } else { None };
-        let results: Result<Vec<S>, String> = self.nodes.subjects.par_iter().map(|subject| {
+        let results: Result<Vec<S>, EventHistoryError> = self.nodes.subjects.par_iter().map(|subject| {
             let first = subject.first_row;
             let mut eta0 = Vec::with_capacity(subject.len() * marks);
             for row in first..first + subject.len() {
@@ -96,7 +95,6 @@ impl EventHistoryFamily {
                     &values[first * marks..(first + subject.len()) * marks]),
             };
             subject_marginal(&inputs, false).map(|result| result.loglik)
-                .map_err(|error| error.to_string())
         }).collect();
         Ok(pairwise_sum(&results?, &beta[0].constant_like(0.0)))
     }
@@ -303,16 +301,118 @@ mod tests {
             eprintln!("event {event_time}: AD={curvature}, finite={finite}, target={expected}");
             assert!((curvature - finite).abs() < 2e-5);
             assert!((curvature - expected).abs() < 1e-4, "{curvature} vs {expected}");
-            assert!(checked_loading_curvature(&family, &states).is_ok());
+            assert!(added_factor_curvature_pair(&family, &states, EventHistorySpec::new(Vec::new()).quadrature_tolerance)
+                .unwrap()
+                .is_some());
             curvatures.push(curvature);
         }
         assert!(curvatures.iter().all(|c| (c - curvatures[0]).abs() < 1e-12));
     }
 
+    /// The added-factor curvature of an in-band dynamic rate is read at its
+    /// order and one ladder rung up (`2·order − 1`) while that order is
+    /// certifiable, up to the ladder's top certifiable rung, and is not formed
+    /// above it: that is where the rank search stops with growth unresolved.
+    ///
+    /// This replaces `unresolved_near_static_curvature_is_rejected`, whose rates
+    /// of `1e-10` sit below `ν_min`: there the OU kernel is one to double
+    /// precision, so the fixture is the static model evaluated through the
+    /// dynamic interpolant. Its `is_err()` passed on the positivity loss inside
+    /// the curvature, not on the gap check it named. A rate below `ν_min` belongs
+    /// to the static face.
     #[test]
-    fn unresolved_near_static_curvature_is_rejected() {
-        let (family, states) = recurrent_family(0.1, vec![Some(1e-10), Some(1e-10)], 17);
-        assert!(checked_loading_curvature(&family, &states).is_err());
+    fn added_factor_curvature_is_checked_up_to_the_top_certifiable_rung() {
+        let tolerance = EventHistorySpec::new(Vec::new()).quadrature_tolerance;
+        let rates = vec![Some(0.5), Some(0.7)];
+        let (base, _) = recurrent_family(0.1, rates.clone(), 9);
+        let nodes = base.nodes.max_subject_nodes();
+        let mut top = 9;
+        while let Some(next) = positivity_raise(top, nodes, tolerance) {
+            top = next;
+        }
+        assert!(top > 9, "a certifiable rung must remain above order 9 over {nodes} nodes");
+        assert!(certifiable(top, nodes, tolerance) && !certifiable(2 * top - 1, nodes, tolerance));
+        let (family, states) = recurrent_family(0.1, rates.clone(), top);
+        let pair = added_factor_curvature_pair(&family, &states, tolerance)
+            .unwrap()
+            .expect("the top certifiable rung checks its curvature");
+        assert_eq!(pair.next_order, 2 * top - 1);
+        assert!(pair.coarse.iter().chain(pair.refined.iter()).all(|x| x.is_finite()));
+        let (above, above_states) = recurrent_family(0.1, rates, 2 * top - 1);
+        assert!(
+            added_factor_curvature_pair(&above, &above_states, tolerance).unwrap().is_none(),
+            "order {} is above the top certifiable rung {top}, so its curvature cannot be checked",
+            2 * top - 1
+        );
+    }
+
+    /// One predicate decides every rung: at 449 nodes order 11 is certifiable,
+    /// order 21 is not, so the raise from 11 refuses rather than landing on a
+    /// rung whose own certificate cannot be checked (job 1150580 raised to 21
+    /// and then refused at order 41, Lebesgue constant 1.154e13).
+    #[test]
+    fn at_449_nodes_order_11_is_the_top_certifiable_rung() {
+        let tolerance = EventHistorySpec::new(Vec::new()).quadrature_tolerance;
+        assert!(certifiable(11, 449, tolerance));
+        assert!(!certifiable(21, 449, tolerance));
+        assert_eq!(positivity_raise(11, 449, tolerance), None);
+    }
+
+    /// The start shift is the one-unit bar's numerator: each term against its
+    /// closed form, sign-aligned eigenvectors moving nothing, a refused
+    /// proposal moving nothing, and a spread that cannot price anything
+    /// refusing rather than passing.
+    #[test]
+    fn proposal_start_shift_prices_the_rung_in_posterior_sd() {
+        let values = array![3.0, 1.0];
+        let identity = array![[1.0, 0.0], [0.0, 1.0]];
+        let spreads = [0.1, 0.5];
+        let mode_scale = 2.0;
+        let flipped = array![[-1.0, 0.0], [0.0, 1.0]];
+        assert_eq!(proposal_start_shift((&values, &identity), (&values, &flipped), mode_scale, &spreads), 0.0);
+
+        let raised = array![3.5, 1.0];
+        let shift = proposal_start_shift((&values, &identity), (&raised, &identity), mode_scale, &spreads);
+        assert!((shift - 0.5 * mode_scale * spreads[0]).abs() < 1e-15, "{shift}");
+
+        let theta = 0.01_f64;
+        let rotated = array![[theta.cos(), -theta.sin()], [theta.sin(), theta.cos()]];
+        let shift = proposal_start_shift((&values, &identity), (&values, &rotated), mode_scale, &spreads);
+        let along_second = mode_scale * theta.sin() / spreads[1];
+        let along_top = mode_scale * (1.0 - theta.cos()) / spreads[0];
+        assert!(along_top < along_second);
+        assert!((shift - along_second).abs() < 1e-15, "{shift} vs {along_second}");
+
+        assert_eq!(proposal_start_shift((&values, &identity), (&raised, &rotated), 0.0, &spreads), 0.0);
+        assert_eq!(
+            proposal_start_shift((&values, &identity), (&values, &identity), mode_scale, &[0.1, f64::NAN]),
+            f64::INFINITY
+        );
+        assert_eq!(
+            proposal_start_shift((&values, &identity), (&values, &identity), mode_scale, &[0.1]),
+            f64::INFINITY
+        );
+    }
+
+    /// `mode_spread` against the Gaussian it must reproduce: `1/√(a + λ)` about
+    /// a maximiser at zero, and the same about a maximiser six sd out, where
+    /// the reflection's location is not spread.
+    #[test]
+    fn mode_spread_is_the_posterior_sd_about_the_mode() {
+        let profile = |slope0: f64, curvature: f64| {
+            let points: Vec<f64> = (0..=400).map(|i| 0.025 * i as f64).collect();
+            DirectionProfile {
+                values: points.iter().map(|t| slope0 * t - 0.5 * curvature * t * t).collect(),
+                slopes: points.iter().map(|t| slope0 - curvature * t).collect(),
+                points,
+            }
+        };
+        let (curvature, lambda) = (3.0_f64, 1.0_f64);
+        let sd = 1.0 / (curvature + lambda).sqrt();
+        let centred = profile(0.0, curvature).mode_spread(lambda);
+        assert!((centred - sd).abs() < 1e-6 * sd, "{centred} vs {sd}");
+        let shifted = profile(12.0, curvature).mode_spread(lambda);
+        assert!((shifted - sd).abs() < 1e-4 * sd, "{shifted} vs {sd}");
     }
 
     #[test]

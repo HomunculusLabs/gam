@@ -351,10 +351,9 @@ impl DirectionProfile {
             + h11 * h * self.slopes[i + 1]
     }
 
-    /// `ln ∫ exp(g(t) − ½λt²) dt` over the whole line and the moments
-    /// `E[t²]`, `E[t⁴]` of `t` under that density, by the trapezoidal rule on
-    /// the interpolant, plus the maximiser of `g(t) − ½λt²`.
-    fn moments(&self, lambda: f64) -> (f64, f64, f64, f64) {
+    /// The penalised log integrand `g(t) − ½λt²` sampled on the interpolant's
+    /// subpoints, with its maximum, its maximiser and the sample spacing.
+    fn penalised_samples(&self, lambda: f64) -> (Vec<(f64, f64)>, f64, f64, f64) {
         let last = self.points[self.points.len() - 1];
         let steps = (self.points.len() - 1) * PROFILE_SUBPOINTS;
         let spacing = last / steps as f64;
@@ -376,6 +375,33 @@ impl DirectionProfile {
             }
             samples.push((t, value));
         }
+        (samples, shift, mode, spacing)
+    }
+
+    /// The posterior standard deviation of the loading about the maximiser
+    /// `t*` of `g(t) − ½λt²`, `√E[(|t| − t*)²]` under that density on the
+    /// reflected line, by the same trapezoidal rule as [`Self::moments`]. About
+    /// a maximiser at zero it is `√E[t²]`; about one away from zero it leaves
+    /// out the reflection's `t*²`, which is location, not spread.
+    pub(crate) fn mode_spread(&self, lambda: f64) -> f64 {
+        let (samples, shift, mode, _) = self.penalised_samples(lambda);
+        let steps = samples.len() - 1;
+        let mut mass = 0.0;
+        let mut spread = 0.0;
+        for (k, &(t, value)) in samples.iter().enumerate() {
+            let weight = (value - shift).exp() * if k == 0 || k == steps { 1.0 } else { 2.0 };
+            mass += weight;
+            spread += weight * (t - mode) * (t - mode);
+        }
+        (spread / mass).sqrt()
+    }
+
+    /// `ln ∫ exp(g(t) − ½λt²) dt` over the whole line and the moments
+    /// `E[t²]`, `E[t⁴]` of `t` under that density, by the trapezoidal rule on
+    /// the interpolant, plus the maximiser of `g(t) − ½λt²`.
+    fn moments(&self, lambda: f64) -> (f64, f64, f64, f64) {
+        let (samples, shift, mode, spacing) = self.penalised_samples(lambda);
+        let steps = samples.len() - 1;
         let mut mass = 0.0;
         let mut second = 0.0;
         let mut fourth = 0.0;

@@ -29,8 +29,8 @@ pub use cohort::{
 };
 pub use covariance::{effective_rank, temporal_covariance};
 pub use family::{
-    EventHistoryFamily, EventHistoryFit, QuadratureCertificate, RankStep, RefinementCheck,
-    RiskSetCentring, fit_event_history_formulas,
+    DecisionIntegral, EventHistoryFamily, EventHistoryFit, QuadratureCertificate, RankStep,
+    RefinementCheck, RiskSetCentring, UnresolvedGrowth, fit_event_history_formulas,
 };
 pub use forecast::{
     Forecast, ForecastRequest, FutureSegment, HistoryForecastRequest, PopulationForecastRequest,

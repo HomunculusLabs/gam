@@ -482,11 +482,19 @@ fn posterior_moments<S: JetField>(
             let centred = square(&grid.coordinate(i, k).sub(&mean));
             variance = variance.add(&grid.weights[i].mul(&alpha[i]).mul(&centred));
         }
-        if !(variance.value() > 0.0) || !variance.value().is_finite() {
+        if !variance.value().is_finite() {
             return Err(numerical(format!(
-                "{label}: posterior variance of atom {k} is {} on the grid; {LOST_POSITIVITY}",
+                "{label}: posterior variance of atom {k} is {} on the grid",
                 variance.value()
             )));
+        }
+        if !(variance.value() > 0.0) {
+            return Err(EventHistoryError::LostPositivity {
+                reason: format!(
+                    "{label}: posterior variance of atom {k} is {} on the grid; {LOST_POSITIVITY}",
+                    variance.value()
+                ),
+            });
         }
         means.push(mean);
         variances.push(variance);
@@ -510,11 +518,22 @@ pub(crate) fn condition<S: JetField>(
         .map(|(p, e)| p.mul(&exp(&add_real(e, -shift))))
         .collect();
     let c = weighted_sum(&grid.weights, &raw);
-    if !(c.value() > 0.0) || !c.value().is_finite() {
+    if !c.value().is_finite() {
         return Err(numerical(format!(
-            "{label}: normaliser is not positive ({})",
+            "{label}: normaliser is not finite ({})",
             c.value()
         )));
+    }
+    // The exact normaliser is an integral of a non-negative density against a
+    // non-negative factor, so a non-positive one is the interpolant's negative
+    // mass, not the model.
+    if !(c.value() > 0.0) {
+        return Err(EventHistoryError::LostPositivity {
+            reason: format!(
+                "{label}: normaliser is not positive ({}); {LOST_POSITIVITY}",
+                c.value()
+            ),
+        });
     }
     let inverse = recip(&c);
     for v in raw.iter_mut() {

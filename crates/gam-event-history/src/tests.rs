@@ -10,8 +10,8 @@ use super::covariance::{
     DirectionEvidence, DirectionProfile, empirical_bayes_ridge, quartic_moments,
 };
 use super::family::{
-    Directional, EventHistoryFamily, EventHistoryFit, EventHistorySpec, RankStart,
-    fit_event_history, fit_event_history_formulas,
+    DecisionIntegral, Directional, EventHistoryFamily, EventHistoryFit, EventHistorySpec,
+    RankStart, RankStep, UnresolvedGrowth, fit_event_history, fit_event_history_formulas,
 };
 use super::forecast::{
     ForecastRequest, FutureSegment, HistoryForecastRequest, PopulationForecastRequest, SpellPit,
@@ -32,6 +32,123 @@ use std::sync::Arc;
 
 fn gaussian(x: f64, mean: f64, variance: f64) -> f64 {
     (-(x - mean).powi(2) / (2.0 * variance)).exp() / (2.0 * std::f64::consts::PI * variance).sqrt()
+}
+
+/// Why the rank path stopped, checked rather than assumed. Either:
+/// - no proposal remained (an empty path, or a last step the evidence accepted);
+/// - the evidence refused growth (a converged step it did not accept); or
+/// - growth is recorded as unresolved at the order the model is certified at,
+///   with no certifiable rung above it.
+/// A step that is neither accepted nor converged and carries no verdict is a
+/// dropped verdict, and so is a verdict that names any other rung.
+fn rank_stop_explanation(
+    path: &[RankStep],
+    certified_order: usize,
+    max_nodes: usize,
+    tolerance: f64,
+) -> Result<String, String> {
+    let Some(last) = path.last() else {
+        return Ok("no proposal at rank 0".to_string());
+    };
+    match &last.growth_unresolved {
+        Some(growth) => {
+            if last.accepted || last.converged {
+                return Err(format!(
+                    "step {} carries an unresolved-growth verdict but is accepted={} converged={}",
+                    last.rank, last.accepted, last.converged
+                ));
+            }
+            if growth.gauss_hermite_order != certified_order {
+                return Err(format!(
+                    "the verdict names order {} but the model is certified at order {certified_order}",
+                    growth.gauss_hermite_order
+                ));
+            }
+            // The raised rung `2·order − 1` is certifiable iff its own check,
+            // `2·(2·order − 1) − 1`, keeps the interpolant's roundoff within the
+            // tolerance over the longest subject.
+            let raised = 2 * certified_order - 1;
+            let checkable = GaussHermite::new(2 * raised - 1).is_ok_and(|rule| {
+                rule.lebesgue_constant * f64::EPSILON * max_nodes as f64 <= tolerance
+            });
+            if checkable {
+                return Err(format!(
+                    "order {raised} is certifiable over {max_nodes} nodes, so growth did not stop at the top rung"
+                ));
+            }
+            Ok(format!(
+                "growth unresolved at Gauss-Hermite order {certified_order}: {} ({})",
+                growth.integral.name(),
+                growth.reason
+            ))
+        }
+        None if last.accepted => Ok(format!(
+            "rank {} accepted and no proposal remained",
+            last.rank + 1
+        )),
+        None if last.converged => Ok(format!(
+            "the evidence refused growth beyond rank {}",
+            last.rank
+        )),
+        None => Err(format!(
+            "step {} is neither accepted nor converged and carries no verdict",
+            last.rank
+        )),
+    }
+}
+
+/// The fit's stop is explained, and the fit-level accessor agrees with its path.
+fn assert_rank_stop_explained(fit: &EventHistoryFit, spec: &EventHistorySpec) -> String {
+    let stop = rank_stop_explanation(
+        &fit.rank_path,
+        fit.quadrature.gauss_hermite_order,
+        fit.nodes.max_subject_nodes(),
+        spec.quadrature_tolerance,
+    )
+    .expect("the rank path's stop must be explained");
+    assert_eq!(
+        fit.unresolved_growth().is_some(),
+        fit.rank_path.last().is_some_and(|step| step.growth_unresolved.is_some())
+    );
+    emit(&format!("[rank-stop] rank {}: {stop}", fit.rank()));
+    stop
+}
+
+/// The mutant control for [`rank_stop_explanation`]: a stop at the top
+/// certifiable rung with its verdict is explained, and the same step with the
+/// verdict dropped is not. At 449 nodes order 11 is the top certifiable rung
+/// (job 1150580: its check at order 21 held, and order 21's check at order 41,
+/// Lebesgue constant 1.154e13, did not).
+#[test]
+fn a_rank_stop_with_its_verdict_dropped_is_unexplained() {
+    let tolerance = EventHistorySpec::new(Vec::new()).quadrature_tolerance;
+    let step = RankStep {
+        rank: 1,
+        score_eigenvalue: 2.9636,
+        standardised_gain: 0.0,
+        proposed_rate: 1.0,
+        at_resolution_limit: false,
+        rate_held: false,
+        ridge_log_lambda: 0.0,
+        evidence_gain: 0.0,
+        log_likelihood_gain: 0.0,
+        accepted: false,
+        converged: false,
+        growth_unresolved: Some(UnresolvedGrowth {
+            gauss_hermite_order: 11,
+            integral: DecisionIntegral::DirectionalProfile,
+            reason: "the density representation lost positivity".to_string(),
+        }),
+    };
+    assert!(rank_stop_explanation(std::slice::from_ref(&step), 11, 449, tolerance).is_ok());
+    let mut dropped = step.clone();
+    dropped.growth_unresolved = None;
+    assert!(rank_stop_explanation(&[dropped], 11, 449, tolerance).is_err());
+    let mut wrong_rung = step;
+    if let Some(growth) = wrong_rung.growth_unresolved.as_mut() {
+        growth.gauss_hermite_order = 9;
+    }
+    assert!(rank_stop_explanation(&[wrong_rung], 9, 449, tolerance).is_err());
 }
 
 fn subject(times: &[f64], exposures: &[f64], counts: &[Vec<f64>]) -> SubjectNodes {
@@ -981,6 +1098,7 @@ fn fit_recovers_the_covariate_effect_and_a_positive_shared_risk_loading() {
     let mut spec = EventHistorySpec::new(vec![linear_spec()]);
     spec.gauss_hermite_order = 11;
     let fit = fit_event_history(&mut cohort, &spec).expect("fit");
+    assert_rank_stop_explained(&fit, &spec);
     let beta = fit.mark_coefficients(0);
     println!(
         "[fit] {:.1}s outer_iterations={} gh_order={} beta={:?} loading={} rate={} log_lambda={:?}",
@@ -1322,6 +1440,7 @@ fn the_smoothed_latent_state_tracks_the_simulated_path() {
     let mut spec = EventHistorySpec::new(vec![linear_spec()]);
     spec.gauss_hermite_order = 11;
     let fit = fit_event_history(&mut cohort, &spec).expect("fit");
+    assert_rank_stop_explained(&fit, &spec);
     assert!(
         fit.rank() >= 1,
         "the shared risk was not grown: {:?}",
@@ -2663,6 +2782,7 @@ fn forecast_tiers_population_score_and_history_are_one_model_conditioned_on_more
     spec.gauss_hermite_order = 11;
     let started = std::time::Instant::now();
     let fit = fit_event_history(&mut cohort, &spec).expect("fit");
+    assert_rank_stop_explained(&fit, &spec);
     let beta = fit.mark_coefficients(0);
     emit(&format!(
         "[tiers] {:.1}s beta={:?} loading={} rate={}",

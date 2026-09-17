@@ -276,6 +276,16 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
         },
     );
     summary.insert("rank".to_string(), json!(fit.rank()));
+    // Whether the rank is the one the evidence selected, or the certified
+    // incumbent a decision the quadrature could not resolve stopped at.
+    summary.insert(
+        "rank_verdict".to_string(),
+        json!(if fit.unresolved_growth().is_some() {
+            "growth_unresolved_at_lebesgue_bound"
+        } else {
+            "evidence"
+        }),
+    );
     if has_reference {
         // Reference-grid discrepancies evaluated at fixed coefficients.
         summary.insert(
@@ -307,6 +317,11 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
                         "log_likelihood_gain": step.log_likelihood_gain,
                         "accepted": step.accepted,
                         "converged": step.converged,
+                        "growth_unresolved": step.growth_unresolved.as_ref().map(|growth| json!({
+                            "gauss_hermite_order": growth.gauss_hermite_order,
+                            "integral": growth.integral.name(),
+                            "reason": growth.reason,
+                        })),
                     })
                 })
                 .collect::<Vec<_>>()

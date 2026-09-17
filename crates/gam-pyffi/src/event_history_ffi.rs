@@ -153,6 +153,17 @@ impl PyEventHistoryModel {
             item.set_item("log_likelihood_gain", step.log_likelihood_gain)?;
             item.set_item("accepted", step.accepted)?;
             item.set_item("converged", step.converged)?;
+            let growth_unresolved = match &step.growth_unresolved {
+                Some(growth) => {
+                    let entry = PyDict::new(py);
+                    entry.set_item("gauss_hermite_order", growth.gauss_hermite_order)?;
+                    entry.set_item("integral", growth.integral.name())?;
+                    entry.set_item("reason", &growth.reason)?;
+                    Some(entry)
+                }
+                None => None,
+            };
+            item.set_item("growth_unresolved", growth_unresolved)?;
             out.append(item)?;
         }
         Ok(out)
