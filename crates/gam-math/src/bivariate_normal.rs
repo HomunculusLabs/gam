@@ -53,7 +53,9 @@
 //! # Contract
 //!
 //! - **Truncation.** At most `ε/12` for `|ρ| ≤ ½`, and at most `ε/6` elsewhere.
-//! - **Rounding.** On top of that, rounding of a few ulps in `Φ`, the sum and the final combination.
+//! - **Error bound.** [`BIVARIATE_NORMAL_CDF_ERROR_BOUND`] bounds truncation plus rounding of one evaluation at
+//!   the computed arguments. [`BivariateNormalPartials`] carries a per-evaluation rounding bound next to each
+//!   partial. Neither includes the caller's own argument error.
 //! - **Exact branches.** Infinite bounds and `ρ ∈ {−1, 0, 1}` are exact special cases.
 //! - **Correlation input.** A caller who resolves `1 − ρ²` more finely than `ρ` passes it to the `_with_complement`
 //!   entry points. Every `1 ∓ ρ` is then derived from it, and the input conditioning `φ₂·δρ` of a rounded `ρ`
@@ -66,7 +68,7 @@
 use crate::probability::{normal_cdf, normal_pdf};
 use crate::special::gauss_legendre;
 use libm::{erf, erfc};
-use std::f64::consts::{FRAC_PI_6, PI, SQRT_2};
+use std::f64::consts::{E, FRAC_PI_6, PI, SQRT_2};
 use std::fmt;
 use std::sync::LazyLock;
 
@@ -113,18 +115,97 @@ impl From<BivariateNormalError> for String {
     }
 }
 
-/// The analytic partials of `Φ₂(h, k; ρ)`:
-/// - `∂_h Φ₂ = φ(h) Φ((k − ρh)/√(1 − ρ²))`, and symmetrically for `k`;
-/// - `∂_ρ Φ₂ = φ₂(h, k; ρ)` (Plackett).
+/// The analytic partials of `Φ₂(h, k; ρ)`, each with a first-order bound on its absolute rounding at the computed
+/// arguments. The model is the one at [`BIVARIATE_NORMAL_CDF_ERROR_BOUND`], and the caller's argument error is not
+/// included.
+/// - `∂_h Φ₂ = φ(h) Φ(t)`, with `t = (k − ρh)/√(1 − ρ²)`, and symmetrically for `k`.
+///   - The numerator `(k − h) + h(1 − ρ)` errs by `u|num| + u|k − h| + 3u|h(1 − ρ)|`, and `√(1 − ρ²)` by `3u`. So `t`
+///     errs by at most `6u|t| + 4u|h|√((1 − ρ)/(1 + ρ)) ≤ 6u|t| + 4u|h|` (mirrored for `ρ < 0`).
+///   - `Φ(t)` adds `2uΦ + 2u|t|φ(t)`, `φ(h)` adds `5u` of itself and the product `u`.
+///   - With `|t|φ(t) ≤ 1/√(2πe)` and `φ(t) ≤ 1/√(2π)`, the bound is `u·(8 ∂_hΦ₂ + φ(h)·(8·0.2420 + 4·0.3990·|h|))`.
+/// - `∂_ρ Φ₂ = φ₂(h, k; ρ) = exp(−E)/(2π√(1 − ρ²))` (Plackett).
+///   - The exponent `E = a/(1 − ρ²) + b/(1 ± ρ)` errs by `8uE`: `a` by `3u`, `b` by `u`, `1 − ρ²` by `3u`, the factor
+///     by `2u`, the quotients and the addition.
+///   - `exp` adds `2u`, the scale `4.5u` and the division `u`, so the bound is `u·φ₂·(8 + 8E)`.
+/// - Gradual underflow quantizes a result by at most the smallest subnormal `2^−1074`, and a vanished `exp(−E)` by that
+///   over the scale. Each bound adds it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BivariateNormalPartials {
     pub d_h: f64,
     pub d_k: f64,
     pub d_rho: f64,
+    pub d_h_rounding: f64,
+    pub d_k_rounding: f64,
+    pub d_rho_rounding: f64,
 }
 
 /// The largest `|asin ρ|` the core rule evaluates: `asin ½`.
 const CORE_MAX_ANGLE: f64 = FRAC_PI_6;
+
+/// `u = ε/2`. Under round-to-nearest every `+ − × ÷ √` errs by at most `u` of its result. The model adds one ulp,
+/// `2u`, per libm `exp`, `sin`, `asin` or `erfc`: the contract `gaussian_activation` states for its own bounds.
+const UNIT_ROUNDOFF: f64 = f64::EPSILON / 2.0;
+
+/// The smallest positive subnormal. It bounds any result that gradual underflow quantizes or rounds to zero, where the
+/// relative model no longer applies.
+const SMALLEST_SUBNORMAL: f64 = f64::from_bits(1);
+
+/// `sup |x| φ(x) = 1/√(2πe) = 0.241970…`, rounded up.
+const ARGUMENT_SENSITIVITY: f64 = 0.2420;
+
+/// `sup φ(x) = 1/√(2π) = 0.398942…`, rounded up.
+const DENSITY_MAXIMUM: f64 = 0.3990;
+
+/// `sup φ₂(x, y; ρ) = 1/(2π√(1 − ρ²))` over `|ρ| ≤ ½`, which is `1/(π√3) = 0.183776…`, rounded up.
+const CORE_DENSITY_MAXIMUM: f64 = 0.1838;
+
+/// `gauss_legendre`'s node contract: within `4e-16` absolute. Its owner pins it at 8 and 16 nodes against a 50-digit
+/// reference, and `core_rule_meets_the_gauss_legendre_contract_at_the_core_order` pins it at the core order.
+const CORE_RULE_NODE_ERROR: f64 = 4.0e-16;
+
+/// `gauss_legendre`'s weight contract: within `1e-14` of themselves, pinned as the node contract is.
+const CORE_RULE_WEIGHT_ERROR: f64 = 1.0e-14;
+
+/// One weighted node's value `f = exp(−E)` at `|ρ| ≤ ½`, first order.
+/// - The angle `θ = α(1 + x)/2` errs by `4u|θ| + |α|ν/2` (the node, `1 + x`, `asin` and the product).
+/// - `s = sin θ` errs by `2u|s| + δθ ≤ u + δθ`.
+/// - `E = a/(1 − s²) + b/(1 + s)` errs by `E·(19u/3 + 2δs)`: `a` by `3u`, `b` by `u`, `1 − s² ≥ ¾`, `1 + s ≥ ½`, the
+///   quotients and the addition.
+/// - `f` errs by `2uf + f·δE ≤ 2u + (19u/3 + 2δs)/e`, since `f ≤ 1` and `fE ≤ 1/e`.
+const NODE_VALUE_ERROR: f64 = {
+    let angle = 4.0 * UNIT_ROUNDOFF * CORE_MAX_ANGLE + CORE_MAX_ANGLE * CORE_RULE_NODE_ERROR / 2.0;
+    let sine = UNIT_ROUNDOFF + angle;
+    2.0 * UNIT_ROUNDOFF + (19.0 * UNIT_ROUNDOFF / 3.0 + 2.0 * sine) / E
+};
+
+/// One core evaluation at computed `(h, k, ρ)` with `|ρ| ≤ ½`.
+/// - `Φ(h)Φ(k)`: each factor errs by `2uΦ + 2u|x|φ(x)`, and the product adds `u`: at most `5u + 4u·sup|x|φ`.
+/// - The node sum `S = Σ wᵢ fᵢ` has positive terms, `Σ wᵢ = 2` and `S ≤ 2`. It errs by `2·NODE_VALUE_ERROR` from the
+///   values, `(ω + u)S` from the weights and products, and `8uS` from its partial sums.
+/// - `α·S/(4π)` is at most `1/12`. `asin`, the product, `π` and the division add `5u` of it, and `|α|/4π ≤ 1/24`
+///   multiplies the sum's error.
+/// - The truncation adds at most `u/6`, and the final addition `u`.
+const CORE_EVALUATION_ERROR: f64 = {
+    let product = UNIT_ROUNDOFF * (5.0 + 4.0 * ARGUMENT_SENSITIVITY);
+    let sum = 2.0 * NODE_VALUE_ERROR + 2.0 * (CORE_RULE_WEIGHT_ERROR + 9.0 * UNIT_ROUNDOFF);
+    let integral = 5.0 * UNIT_ROUNDOFF / 12.0 + sum / 24.0;
+    product + integral + UNIT_ROUNDOFF / 6.0 + UNIT_ROUNDOFF
+};
+
+/// The absolute error of one [`bivariate_normal_cdf`] or [`bivariate_normal_cdf_with_complement`] evaluation at its
+/// computed arguments, `|computed − Φ₂(h, k; ρ)|`: truncation plus rounding, first order. It is about `4.0e-15`.
+///
+/// A reduction adds two core evaluations, and their arguments round inside it.
+/// - `c = √((1 ∓ ρ)/2)` errs by `2uc ≤ u` (the factor, the halving and `√`). A core value moves by at most
+///   `sup φ₂` per unit of correlation.
+/// - The split `(h ∓ k)/(2c)` errs by `4u` of itself, which moves a core value by at most `4u·sup|x|φ`.
+/// - The combination adds `u`.
+///
+/// The exact branches err by less. The projection onto `[0, 1]` never increases the error. The caller's own argument
+/// error is not included.
+pub const BIVARIATE_NORMAL_CDF_ERROR_BOUND: f64 = 2.0
+    * (CORE_EVALUATION_ERROR + UNIT_ROUNDOFF * (4.0 * ARGUMENT_SENSITIVITY + CORE_DENSITY_MAXIMUM))
+    + UNIT_ROUNDOFF;
 
 /// A Gauss-Legendre rule stored on `[0, 1]`: nodes `(1 + x)/2` and the weights of `[−1, 1]`.
 struct CoreRule {
@@ -336,7 +417,7 @@ pub fn bivariate_normal_cdf_with_complement(
 ///
 /// A finite interval is a difference of two distribution functions taken on the tail side of zero: the
 /// reflection `Y → −Y` when `lower ≥ 0`. So a small interval in the upper tail keeps its mass instead of
-/// being subtracted from `Φ(h)`.
+/// being subtracted from `Φ(h)`. It errs by at most `2·BIVARIATE_NORMAL_CDF_ERROR_BOUND + ε/2`.
 pub fn bivariate_normal_interval_probability(
     h: f64,
     lower: f64,
@@ -361,11 +442,11 @@ pub fn bivariate_normal_interval_probability(
     Ok(probability.clamp(0.0, 1.0))
 }
 
-/// `φ₂(h, k; ρ)` for `|ρ| < 1`. The quadratic form is carried with non-negative terms, as in the core rule
-/// with `sin θ = ρ`.
-fn density(h: f64, k: f64, correlation: Correlation) -> f64 {
+/// `φ₂(h, k; ρ)` for `|ρ| < 1`, with its rounding bound (derived at [`BivariateNormalPartials`]). The quadratic
+/// form is carried with non-negative terms, as in the core rule with `sin θ = ρ`.
+fn density(h: f64, k: f64, correlation: Correlation) -> (f64, f64) {
     if h.is_infinite() || k.is_infinite() {
-        return 0.0;
+        return (0.0, 0.0);
     }
     let determinant = correlation.complement();
     let a = 0.5 * (h.abs() - k.abs()).powi(2);
@@ -376,7 +457,16 @@ fn density(h: f64, k: f64, correlation: Correlation) -> f64 {
     } else {
         correlation.one_plus
     };
-    (-(a / determinant + b / signed_factor)).exp() / (2.0 * PI * determinant.sqrt())
+    let exponent = a / determinant + b / signed_factor;
+    let scale = 2.0 * PI * determinant.sqrt();
+    let value = (-exponent).exp() / scale;
+    // A positive value has a finite exponent. A vanished one errs by at most the smallest subnormal over the scale.
+    let relative = if value > 0.0 {
+        UNIT_ROUNDOFF * value * (8.0 + 8.0 * exponent)
+    } else {
+        0.0
+    };
+    (value, relative + SMALLEST_SUBNORMAL * (1.0 + scale.recip()))
 }
 
 /// `φ₂(h, k; ρ)`, the bivariate standard normal density, for `|ρ| < 1`.
@@ -385,29 +475,39 @@ pub fn bivariate_normal_pdf(h: f64, k: f64, rho: f64) -> Result<f64, BivariateNo
     if rho.abs() == 1.0 {
         return Err(BivariateNormalError::SingularCorrelation { rho });
     }
-    Ok(density(h, k, Correlation::from_rho(rho)))
+    Ok(density(h, k, Correlation::from_rho(rho)).0)
 }
 
 /// `φ(x) Φ((y − ρx)/√(1 − ρ²))`. The numerator is `(y − x) + x(1 − ρ)` for `ρ ≥ 0` and `(y + x) − x(1 + ρ)`
-/// for `ρ < 0`, so it keeps its digits as `|ρ| → 1`.
-fn conditional_partial(x: f64, y: f64, correlation: Correlation) -> f64 {
+/// for `ρ < 0`, so it keeps its digits as `|ρ| → 1`. Its rounding bound is derived at [`BivariateNormalPartials`].
+fn conditional_partial(x: f64, y: f64, correlation: Correlation) -> (f64, f64) {
     let weight = normal_pdf(x);
     if weight == 0.0 {
-        return 0.0;
+        return (0.0, SMALLEST_SUBNORMAL);
     }
     let numerator = if correlation.rho >= 0.0 {
         (y - x) + x * correlation.one_minus
     } else {
         (y + x) - x * correlation.one_plus
     };
-    weight * normal_cdf(numerator / correlation.complement().sqrt())
+    let value = weight * normal_cdf(numerator / correlation.complement().sqrt());
+    let rounding = UNIT_ROUNDOFF
+        * (8.0 * value + weight * (8.0 * ARGUMENT_SENSITIVITY + 4.0 * DENSITY_MAXIMUM * x.abs()))
+        + SMALLEST_SUBNORMAL;
+    (value, rounding)
 }
 
 fn partials_of(h: f64, k: f64, correlation: Correlation) -> BivariateNormalPartials {
+    let (d_h, d_h_rounding) = conditional_partial(h, k, correlation);
+    let (d_k, d_k_rounding) = conditional_partial(k, h, correlation);
+    let (d_rho, d_rho_rounding) = density(h, k, correlation);
     BivariateNormalPartials {
-        d_h: conditional_partial(h, k, correlation),
-        d_k: conditional_partial(k, h, correlation),
-        d_rho: density(h, k, correlation),
+        d_h,
+        d_k,
+        d_rho,
+        d_h_rounding,
+        d_k_rounding,
+        d_rho_rounding,
     }
 }
 
@@ -445,19 +545,165 @@ mod tests {
     use super::*;
     use std::f64::consts::TAU;
 
-    /// The rounding allowance of one production call.
-    ///
-    /// Per core evaluation:
-    /// - `Φ(h)Φ(k)`: each `erfc` is within one ulp, so the product is within `3ε`;
-    /// - each weighted node: the weight (≤ 2ε at these orders), the exponent (`ε·x e⁻ˣ ≤ ε` for each of four
-    ///   operations) and `exp` (1 ulp) put it within `7ε` of its weight. The weights sum to 2, under the
-    ///   prefactor `|α|/4π ≤ 1/24`;
-    /// - the final addition: `ε`.
-    ///
-    /// A reduction combines two evaluations, and the truncation adds `ε/6`.
-    fn contract() -> f64 {
-        let per_evaluation = (3.0 + 7.0 * 2.0 / 24.0 + 1.0) * f64::EPSILON;
-        2.0 * per_evaluation + f64::EPSILON / 6.0
+    /// A double-double `hi + lo`, with `|lo| ≤ ulp(hi)/2`: the reference arithmetic of the rounding tests.
+    #[derive(Clone, Copy, Debug)]
+    struct DoubleDouble {
+        hi: f64,
+        lo: f64,
+    }
+
+    impl DoubleDouble {
+        fn from(value: f64) -> Self {
+            Self { hi: value, lo: 0.0 }
+        }
+
+        /// Knuth's two-sum, `a + b` exactly.
+        fn two_sum(a: f64, b: f64) -> Self {
+            let sum = a + b;
+            let virtual_b = sum - a;
+            Self {
+                hi: sum,
+                lo: (a - (sum - virtual_b)) + (b - virtual_b),
+            }
+        }
+
+        /// `hi + lo` renormalized, for `|hi| ≥ |lo|`.
+        fn renormalized(hi: f64, lo: f64) -> Self {
+            let sum = hi + lo;
+            Self {
+                hi: sum,
+                lo: lo - (sum - hi),
+            }
+        }
+
+        fn add(self, other: Self) -> Self {
+            let head = Self::two_sum(self.hi, other.hi);
+            Self::renormalized(head.hi, head.lo + self.lo + other.lo)
+        }
+
+        fn negated(self) -> Self {
+            Self {
+                hi: -self.hi,
+                lo: -self.lo,
+            }
+        }
+
+        fn sub(self, other: Self) -> Self {
+            self.add(other.negated())
+        }
+
+        fn mul(self, other: Self) -> Self {
+            let product = self.hi * other.hi;
+            let residual = self.hi.mul_add(other.hi, -product);
+            Self::renormalized(product, residual + (self.hi * other.lo + self.lo * other.hi))
+        }
+
+        fn div(self, other: Self) -> Self {
+            let first = self.hi / other.hi;
+            let remainder = self.sub(other.mul(Self::from(first)));
+            let second = remainder.hi / other.hi;
+            let rest = remainder.sub(other.mul(Self::from(second)));
+            Self::renormalized(first, second).add(Self::from(rest.hi / other.hi))
+        }
+
+        fn sqrt(self) -> Self {
+            let root = self.hi.sqrt();
+            let remainder = self.sub(Self::from(root).mul(Self::from(root)));
+            Self::renormalized(root, remainder.hi / (2.0 * root))
+        }
+    }
+
+    const PI_DOUBLE_DOUBLE: DoubleDouble = DoubleDouble {
+        hi: PI,
+        lo: 1.224_646_799_147_353_2e-16,
+    };
+
+    /// `(P_n(x), P_n'(x))` by Bonnet's recurrence in double-double, with `P_n' = n(x P_n − P_{n−1})/(x² − 1)`.
+    fn legendre_double_double(order: usize, x: DoubleDouble) -> (DoubleDouble, DoubleDouble) {
+        let one = DoubleDouble::from(1.0);
+        let (mut current, mut previous) = (one, DoubleDouble::from(0.0));
+        for degree in 0..order {
+            let j = degree as f64;
+            let next = DoubleDouble::from(2.0 * j + 1.0)
+                .mul(x)
+                .mul(current)
+                .sub(DoubleDouble::from(j).mul(previous))
+                .div(DoubleDouble::from(j + 1.0));
+            previous = current;
+            current = next;
+        }
+        let slope = DoubleDouble::from(order as f64)
+            .mul(x.mul(current).sub(previous))
+            .div(x.mul(x).sub(one));
+        (current, slope)
+    }
+
+    /// `(1 − ρ, 1 + ρ, 1 − ρ²)` exactly as the production correlation defines them from its computed inputs.
+    fn reference_factors(rho: f64, complement: Option<f64>) -> (DoubleDouble, DoubleDouble, DoubleDouble) {
+        match complement {
+            None => {
+                let one_minus = DoubleDouble::from(1.0).sub(DoubleDouble::from(rho));
+                let one_plus = DoubleDouble::from(1.0).add(DoubleDouble::from(rho));
+                (one_minus, one_plus, one_minus.mul(one_plus))
+            }
+            Some(c) => {
+                let far = DoubleDouble::from(1.0).add(DoubleDouble::from(rho.abs()));
+                let near = DoubleDouble::from(c).div(far);
+                if rho >= 0.0 {
+                    (near, far, DoubleDouble::from(c))
+                } else {
+                    (far, near, DoubleDouble::from(c))
+                }
+            }
+        }
+    }
+
+    /// `φ(x)Φ(t)` with `t` carried in double-double, with an allowance for the reference's own `normal_cdf`
+    /// rounding and product. Production and reference read identical `φ(x)` bits.
+    fn reference_conditional_partial(
+        x: f64,
+        y: f64,
+        rho: f64,
+        factors: (DoubleDouble, DoubleDouble, DoubleDouble),
+    ) -> (f64, f64) {
+        let weight = normal_pdf(x);
+        if weight == 0.0 {
+            return (0.0, 0.0);
+        }
+        let (one_minus, one_plus, complement) = factors;
+        let numerator = if rho >= 0.0 {
+            DoubleDouble::from(y)
+                .sub(DoubleDouble::from(x))
+                .add(DoubleDouble::from(x).mul(one_minus))
+        } else {
+            DoubleDouble::from(y)
+                .add(DoubleDouble::from(x))
+                .sub(DoubleDouble::from(x).mul(one_plus))
+        };
+        let t = numerator.div(complement.sqrt());
+        let cdf = normal_cdf(t.hi) + normal_pdf(t.hi) * t.lo;
+        let value = weight * cdf;
+        let allowance = weight * 2.0 * UNIT_ROUNDOFF * (cdf + ARGUMENT_SENSITIVITY) + 2.0 * UNIT_ROUNDOFF * value;
+        (value, allowance)
+    }
+
+    /// `φ₂` with its exponent and scale carried in double-double, with an allowance for the reference's `exp`,
+    /// its first-order correction and the division.
+    fn reference_density(h: f64, k: f64, factors: (DoubleDouble, DoubleDouble, DoubleDouble)) -> (f64, f64) {
+        let (one_minus, one_plus, complement) = factors;
+        let gap = DoubleDouble::from(h.abs()).sub(DoubleDouble::from(k.abs()));
+        let a = gap.mul(gap).mul(DoubleDouble::from(0.5));
+        let product = DoubleDouble::from(h).mul(DoubleDouble::from(k));
+        let b = if product.hi < 0.0 { product.negated() } else { product };
+        let signed_factor = if h * k < 0.0 { one_minus } else { one_plus };
+        let exponent = a.div(complement).add(b.div(signed_factor));
+        let head = (-exponent.hi).exp() * (1.0 - exponent.lo);
+        let scale = DoubleDouble::from(2.0).mul(PI_DOUBLE_DOUBLE).mul(complement.sqrt());
+        let value = DoubleDouble::from(head).div(scale).hi;
+        (
+            value,
+            3.0 * UNIT_ROUNDOFF * value + SMALLEST_SUBNORMAL * (1.0 + scale.hi.recip()),
+        )
     }
 
     /// Neumaier's compensated sum, returned with `Σ|term|`. The rounding left over is the terms' own,
@@ -618,7 +864,7 @@ mod tests {
         let check = |h: f64, k: f64, rho: f64| {
             let (reference, magnitude) = conditional_reference(h, k, rho, 40);
             let coarse = conditional_reference(h, k, rho, 20).0;
-            let allowance = contract() + 4.0 * f64::EPSILON * magnitude + (reference - coarse).abs();
+            let allowance = BIVARIATE_NORMAL_CDF_ERROR_BOUND + 4.0 * f64::EPSILON * magnitude + (reference - coarse).abs();
             let production = bivariate_normal_cdf(h, k, rho).unwrap();
             ((production - reference).abs(), allowance, reference)
         };
@@ -653,12 +899,12 @@ mod tests {
                 let positive = core_cdf(h, k, 0.5, &CORE_RULE);
                 let split = h - k;
                 let halved = core_cdf(split, k, -0.5, &CORE_RULE) + core_cdf(-split, h, -0.5, &CORE_RULE);
-                assert!((positive - halved).abs() <= 1.5 * contract(), "h={h} k={k}");
+                assert!((positive - halved).abs() <= 1.5 * BIVARIATE_NORMAL_CDF_ERROR_BOUND, "h={h} k={k}");
                 let negative = core_cdf(h, k, -0.5, &CORE_RULE);
                 let (low, high) = if h <= k { (h, k) } else { (k, h) };
                 let difference =
                     core_cdf(h + k, low, 0.5, &CORE_RULE) - core_cdf(h + k, -high, -0.5, &CORE_RULE);
-                assert!((negative - difference).abs() <= 1.5 * contract(), "h={h} k={k}");
+                assert!((negative - difference).abs() <= 1.5 * BIVARIATE_NORMAL_CDF_ERROR_BOUND, "h={h} k={k}");
             }
         }
     }
@@ -671,7 +917,7 @@ mod tests {
         let agree = |exact: f64, integrand: &dyn Fn(f64) -> f64, breaks: &[f64]| {
             let (integral, magnitude) = composite(breaks, 40, integrand);
             let coarse = composite(breaks, 20, integrand).0;
-            let allowance = 2.0 * contract() + 4.0 * f64::EPSILON * magnitude + (integral - coarse).abs();
+            let allowance = 2.0 * BIVARIATE_NORMAL_CDF_ERROR_BOUND + 4.0 * f64::EPSILON * magnitude + (integral - coarse).abs();
             (exact - integral).abs() <= allowance
         };
         let cdf = |h: f64, k: f64, rho: f64| bivariate_normal_cdf(h, k, rho).unwrap();
@@ -697,7 +943,7 @@ mod tests {
         }
         // Positive control: the conditional partial with the correlation's sign flipped must fail.
         let (h0, h1, k, rho) = (-3.0, 1.0, 0.4, 0.3);
-        let wrong = |h: f64| conditional_partial(h, k, Correlation::from_rho(-rho));
+        let wrong = |h: f64| conditional_partial(h, k, Correlation::from_rho(-rho)).0;
         assert!(!agree(cdf(h1, k, rho) - cdf(h0, k, rho), &wrong, &panels(h0, h1)));
     }
 
@@ -709,11 +955,11 @@ mod tests {
             let lower = bivariate_normal_cdf(h, k, -1.0).unwrap();
             for gap in [1.0e-2_f64, 1.0e-6, 1.0e-10, 1.0e-14] {
                 let rho = 1.0 - gap;
-                let rate = rho.acos() / TAU + contract();
+                let rate = rho.acos() / TAU + BIVARIATE_NORMAL_CDF_ERROR_BOUND;
                 let near_upper = bivariate_normal_cdf(h, k, rho).unwrap();
                 let near_lower = bivariate_normal_cdf(h, k, -rho).unwrap();
-                assert!(near_upper <= upper + contract() && upper - near_upper <= rate, "h={h} k={k} gap={gap}");
-                assert!(near_lower >= lower - contract() && near_lower - lower <= rate, "h={h} k={k} gap={gap}");
+                assert!(near_upper <= upper + BIVARIATE_NORMAL_CDF_ERROR_BOUND && upper - near_upper <= rate, "h={h} k={k} gap={gap}");
+                assert!(near_lower >= lower - BIVARIATE_NORMAL_CDF_ERROR_BOUND && near_lower - lower <= rate, "h={h} k={k} gap={gap}");
             }
         }
     }
@@ -743,7 +989,7 @@ mod tests {
         for rho in [-(1.0_f64 - 1.0e-13), -0.7, -0.2, 0.45, 0.8, 1.0 - 1.0e-13] {
             let expected = 0.25 + rho.asin() / TAU;
             let actual = bivariate_normal_cdf(0.0, 0.0, rho).unwrap();
-            assert!((actual - expected).abs() <= contract(), "rho={rho} actual={actual:e}");
+            assert!((actual - expected).abs() <= BIVARIATE_NORMAL_CDF_ERROR_BOUND, "rho={rho} actual={actual:e}");
         }
     }
 
@@ -761,7 +1007,7 @@ mod tests {
         for &(h, lower, upper, rho) in &[(0.3, -1.0, 0.5, 0.6), (-0.4, 0.2, 2.5, -0.8), (1.1, -3.0, -0.5, 0.95)] {
             let actual = bivariate_normal_interval_probability(h, lower, upper, rho).unwrap();
             let difference = bivariate_normal_cdf(h, upper, rho).unwrap() - bivariate_normal_cdf(h, lower, rho).unwrap();
-            assert!((actual - difference).abs() <= 2.0 * contract(), "h={h} [{lower}, {upper}] rho={rho}");
+            assert!((actual - difference).abs() <= 2.0 * BIVARIATE_NORMAL_CDF_ERROR_BOUND, "h={h} [{lower}, {upper}] rho={rho}");
         }
     }
 
@@ -778,7 +1024,7 @@ mod tests {
                     // Re-forming the vanishing factor by one division moves the rotation constant by ≤ ε relative.
                     // That moves the value by at most `(φ(u*)|u*| + φ₂·c)ε < ε`, on top of both calls' rounding.
                     assert!(
-                        (plain - carried).abs() <= 2.0 * contract() + f64::EPSILON,
+                        (plain - carried).abs() <= 2.0 * BIVARIATE_NORMAL_CDF_ERROR_BOUND + f64::EPSILON,
                         "h={h} k={k} rho={rho}"
                     );
                     let p = bivariate_normal_cdf_partials(h, k, rho).unwrap();
@@ -807,9 +1053,9 @@ mod tests {
         // Sheppard at the origin, through the half angle: Φ₂(0,0;ρ) = ½ − asin(√((1 − ρ)/2))/π, with 1 − ρ = c/2.
         let expected = 0.5 - (0.5 * complement.sqrt()).asin() / PI;
         let carried = bivariate_normal_cdf_with_complement(0.0, 0.0, rho, complement).unwrap();
-        assert!((carried - expected).abs() <= contract(), "carried={carried:e} expected={expected:e}");
+        assert!((carried - expected).abs() <= BIVARIATE_NORMAL_CDF_ERROR_BOUND, "carried={carried:e} expected={expected:e}");
         let plain = bivariate_normal_cdf(0.0, 0.0, rho).unwrap();
-        assert!((plain - expected).abs() > contract(), "the rounded correlation must lose these digits");
+        assert!((plain - expected).abs() > BIVARIATE_NORMAL_CDF_ERROR_BOUND, "the rounded correlation must lose these digits");
 
         // Partials at a nearly equal pair, against an independent route: ρ = √(1 − c), so
         // 1 − ρ = −expm1(½ log1p(−c)), and φ₂ = φ(h)·φ(t)/√c with t = (k − ρh)/√c.
@@ -833,5 +1079,144 @@ mod tests {
         // Positive control: the nearest double below 1 forms 1 − ρ² = 2.2e−16 instead of 2e−17, and misses d_h.
         let rounded = bivariate_normal_cdf_partials(h, k, 1.0 - 0.5 * f64::EPSILON).unwrap();
         assert!((rounded.d_h - expected_d_h).abs() > 4.0 * f64::EPSILON * normal_pdf(h));
+    }
+
+    #[test]
+    fn core_rule_meets_the_gauss_legendre_contract_at_the_core_order() {
+        let order = core_order();
+        let (nodes, weights) = gauss_legendre(order);
+        let mut resolves_offsets = true;
+        for (&node, &weight) in nodes.iter().zip(&weights) {
+            // Newton in double-double from the computed node converges quadratically to the true root.
+            let mut root = DoubleDouble::from(node);
+            let mut remaining = 3;
+            while remaining > 0 {
+                let (value, slope) = legendre_double_double(order, root);
+                root = root.sub(value.div(slope));
+                remaining -= 1;
+            }
+            let slope = legendre_double_double(order, root).1;
+            let reference_weight = DoubleDouble::from(2.0)
+                .div(DoubleDouble::from(1.0).sub(root.mul(root)).mul(slope.mul(slope)));
+            let node_error = |candidate: f64| DoubleDouble::from(candidate).sub(root).hi.abs();
+            let weight_error =
+                |candidate: f64| DoubleDouble::from(candidate).sub(reference_weight).div(reference_weight).hi.abs();
+            assert!(
+                node_error(node) <= CORE_RULE_NODE_ERROR,
+                "node {node:.17e} errs by {:e}",
+                node_error(node)
+            );
+            assert!(
+                weight_error(weight) <= CORE_RULE_WEIGHT_ERROR,
+                "weight {weight:.17e} errs by {:e}",
+                weight_error(weight)
+            );
+            // Positive control: the reference resolves an 8-ulp node offset and a weight moved by three contracts.
+            resolves_offsets &= node_error(node + 8.0 * f64::EPSILON) > CORE_RULE_NODE_ERROR;
+            resolves_offsets &= weight_error(weight * (1.0 + 3.0 * CORE_RULE_WEIGHT_ERROR)) > CORE_RULE_WEIGHT_ERROR;
+        }
+        assert!(resolves_offsets, "the double-double reference must resolve offsets beyond the contract");
+    }
+
+    #[test]
+    fn cdf_error_bound_covers_the_complementary_orthant_identity() {
+        // Φ₂(h, k; ρ) + Φ₂(h, −k; −ρ) = Φ(h). For |ρ| > ½ the two evaluations take different reductions, so their
+        // errors do not cancel by construction. (On the core the two node sums are identical.)
+        let bounds = [-8.0_f64, -3.0, -0.7, 0.0, 0.4, 2.0, 6.0];
+        let rhos = [0.500_000_1_f64, 0.6, 0.9, 0.999, 1.0 - 1.0e-9, 1.0 - 1.0e-15];
+        let violation = |h: f64, k: f64, rho: f64, complement: Option<f64>, rule: &CoreRule| {
+            let (positive, negative) = match complement {
+                None => (Correlation::from_rho(rho), Correlation::from_rho(-rho)),
+                Some(c) => (
+                    Correlation::from_complement(rho, c),
+                    Correlation::from_complement(-rho, c),
+                ),
+            };
+            let total = DoubleDouble::two_sum(
+                cdf_on_rule(h, k, positive, rule),
+                cdf_on_rule(h, -k, negative, rule),
+            );
+            let marginal = normal_cdf(h);
+            let gap = total.sub(DoubleDouble::from(marginal)).hi.abs();
+            // Φ(h) errs by 2uΦ + 2u|h|φ(h).
+            let allowance = 2.0 * BIVARIATE_NORMAL_CDF_ERROR_BOUND
+                + 2.0 * UNIT_ROUNDOFF * (marginal + h.abs() * normal_pdf(h));
+            (gap, allowance)
+        };
+        let control_rule = CoreRule::with_order(3);
+        let mut control_fails = false;
+        for &h in &bounds {
+            for &k in &bounds {
+                for &rho in &rhos {
+                    let complement = Correlation::from_rho(rho).complement();
+                    for route in [None, Some(complement)] {
+                        let (gap, allowance) = violation(h, k, rho, route, &CORE_RULE);
+                        assert!(
+                            gap <= allowance,
+                            "h={h} k={k} rho={rho} route={route:?} gap={gap:e} allowance={allowance:e}"
+                        );
+                        control_fails |= violation(h, k, rho, route, &control_rule).0 > allowance;
+                    }
+                }
+            }
+        }
+        assert!(control_fails, "an order-3 core rule must break the same allowance somewhere");
+    }
+
+    #[test]
+    fn partial_rounding_bounds_cover_a_double_double_reference() {
+        let bounds = [-10.0_f64, -4.5, -1.3, 0.0, 0.6, 2.2, 5.0, 9.5, 25.0];
+        let rhos = [-0.9999_f64, -0.9, -0.4, 0.2, 0.7, 0.99, 0.999_999];
+        let mut density_needs_its_exponent_term = false;
+        let mut partial_bound_is_resolved = false;
+        let mut check = |h: f64, k: f64, rho: f64, complement: Option<f64>| {
+            let partials = match complement {
+                None => bivariate_normal_cdf_partials(h, k, rho),
+                Some(c) => bivariate_normal_cdf_partials_with_complement(h, k, rho, c),
+            }
+            .unwrap();
+            let factors = reference_factors(rho, complement);
+            for (production, rounding, (reference, allowance), name) in [
+                (
+                    partials.d_h,
+                    partials.d_h_rounding,
+                    reference_conditional_partial(h, k, rho, factors),
+                    "d_h",
+                ),
+                (
+                    partials.d_k,
+                    partials.d_k_rounding,
+                    reference_conditional_partial(k, h, rho, factors),
+                    "d_k",
+                ),
+            ] {
+                let gap = (production - reference).abs();
+                assert!(
+                    gap <= rounding + allowance,
+                    "{name} h={h} k={k} rho={rho} c={complement:?} gap={gap:e} rounding={rounding:e}"
+                );
+                partial_bound_is_resolved |= gap > (rounding + allowance) / 64.0;
+            }
+            let (reference, allowance) = reference_density(h, k, factors);
+            let gap = (partials.d_rho - reference).abs();
+            assert!(
+                gap <= partials.d_rho_rounding + allowance,
+                "d_rho h={h} k={k} rho={rho} c={complement:?} gap={gap:e} rounding={:e}",
+                partials.d_rho_rounding
+            );
+            density_needs_its_exponent_term |= gap > 8.0 * UNIT_ROUNDOFF * partials.d_rho + allowance;
+        };
+        for &h in &bounds {
+            for &k in &bounds {
+                for &rho in &rhos {
+                    check(h, k, rho, None);
+                    check(h, k, rho, Some(Correlation::from_rho(rho).complement()));
+                }
+            }
+        }
+        check(0.3, 0.3 + 2.0e-9, 1.0, Some(2.0e-17));
+        // Positive controls: the exponent's 8uE term is needed somewhere, and some gap exceeds 1/64 of its bound.
+        assert!(density_needs_its_exponent_term, "dropping the 8uE term must break the density bound somewhere");
+        assert!(partial_bound_is_resolved, "the reference must resolve the partial bounds to 1/64");
     }
 }
