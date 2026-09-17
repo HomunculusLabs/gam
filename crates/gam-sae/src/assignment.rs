@@ -1889,10 +1889,15 @@ impl ThresholdGateLogitCurvature {
 
 /// The logit Jacobian of a sigmoid gate's prior density (#2080).
 ///
-/// The ordered Beta--Bernoulli and ThresholdGate priors are densities on the gate
-/// `z = σ((ℓ − θ)/τ)`, while the inner solve and the Laplace evidence integrate over
+/// The ordered Beta--Bernoulli and ThresholdGate priors are energies on the gate
+/// `z = σ((ℓ − θ)/τ)`, while the inner solve and the quasi-Laplace criterion integrate over
 /// the logit `ℓ`. Changing variables, `p(ℓ) = p(z)·|dz/dℓ| = p(z)·z(1 − z)/τ`, so the
-/// penalized objective carries `−ln[z(1 − z)/τ]` per free gate. Without it the prior in
+/// penalized objective carries `−ln[z(1 − z)/τ]` per free gate. That leaves the mass of the
+/// energy unchanged, so it does not normalize it (#2933 F45). The ThresholdGate energy
+/// carries its partition ([`ThresholdGateLogPartition`]), and so does ordered Beta--Bernoulli
+/// with a learnable concentration (`OrderedBetaBernoulliPenalty::log_partition`); with a fixed
+/// concentration its energy is `λ_sparse·L`, whose normalizer is not computed, and it stays an
+/// unnormalized energy. Without the Jacobian the prior in
 /// `ℓ` is improper: along a saturated logit the data slope and the prior slope both
 /// decay like `e^{−|ℓ|/τ}`, the objective has no finite mode, and the evidence curvature
 /// `λ_ℓ ∝ e^{−|ℓ|/τ}` drifts through the exact-A rank floor. On the #2080 wide-p fixture
@@ -1989,8 +1994,10 @@ fn gate_logit_jacobian_at(
 /// The free logits of a softmax assignment and its temperature, or `None` when the mode is
 /// not softmax or no logit is free.
 ///
-/// A softmax row's prior is a density on the simplex, while the inner solve and the Laplace
-/// evidence integrate over its free logits. The chart holds the reference logit `K − 1` at
+/// A softmax row's prior is the entropy energy `λ·H(z)` on the simplex, while the inner solve
+/// and the quasi-Laplace criterion integrate over its free logits. That energy is not
+/// normalized: its simplex partition `∫_Δ e^{−λH(z)} dz` depends on `λ` and is not computed,
+/// and the change of variables below leaves the mass unchanged (#2933 F45). The chart holds the reference logit `K − 1` at
 /// zero, and frozen routing holds every logit, leaving no free set. An ungated atom never
 /// reaches here: softmax refuses it ([`SaeAssignment::validate_gate_configuration`], #2933 F04).
 /// For the free set `F`, with `R = 1 − Σ_{i∈F} z_i` the mass on the held atoms, the change of

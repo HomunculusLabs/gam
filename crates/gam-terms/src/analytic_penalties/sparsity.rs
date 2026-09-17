@@ -106,6 +106,12 @@ pub struct SparsityPenalty {
 /// softmax keeps `a_ik >= 0` and `sum_k a_ik = 1`. The exact Hessian is dense
 /// in each row and can be indefinite because entropy is concave in assignment
 /// space, so callers must use the HVP rather than a diagonal Hessian shortcut.
+///
+/// As a prior this is an unnormalized regularization energy. Its simplex partition
+/// `∫_Δ exp(−λ·H(a)) da` depends on `λ` and is not computed (#2933 F45), so
+/// [`AnalyticPenalty::value`] and [`AnalyticPenalty::grad_rho`] are those of the
+/// energy, not of a normalized log density, and a chart Jacobian over the logits
+/// does not normalize it.
 #[derive(Debug, Clone)]
 pub struct SoftmaxAssignmentSparsityPenalty {
     pub k_atoms: usize,

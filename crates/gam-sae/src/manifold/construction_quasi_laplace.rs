@@ -169,10 +169,13 @@ impl SaeManifoldTerm {
     /// `½ p·log|S|_+` piece is ρ-independent. The ρ-independent additive
     /// constants that ARE dropped here (they shift `V` by a constant and do not
     /// affect the ρ-argmin) are the formal `2π` Gaussian constant and the base
-    /// `½ p·log|S|_+` penalty logdet. #1421: NO assignment-prior normalizer is
-    /// dropped, because none exists (softmax/ThresholdGate priors are improper — see
-    /// the doc on this function): the quasi-Laplace score simply omits a
-    /// normalizer that is not a finite constant.
+    /// `½ p·log|S|_+` penalty logdet. #2933 F45: the assignment-prior normalizers are not
+    /// constants. The ThresholdGate partition `log[(1 − e^{−λ})/λ]` per free gate and the
+    /// learnable-concentration ordered Beta--Bernoulli partition `Σ_k log C(a_k, N)` are
+    /// carried in `loss.assignment_sparsity` with their ρ-derivatives. The softmax entropy
+    /// and fixed-concentration ordered Beta--Bernoulli energies have finite normalizers
+    /// that depend on `λ_sparse` but are not computed, so for those families `V` omits a
+    /// ρ-dependent prior term and scores an unnormalized regularization energy.
     ///
     /// Returns `(V, loss)` so the engine can both rank ρ and surface the inner
     /// loss breakdown.

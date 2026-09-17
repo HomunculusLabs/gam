@@ -4958,8 +4958,11 @@ impl SaeManifoldTerm {
             }
             pairwise_sum(&vals)
         };
-        // #2080 — the gate prior is a density on `z`, and this objective is integrated over
-        // the logit, so the prior carries its change-of-variables term.
+        // #2080 — the gate prior is an energy on `z`, and this objective is integrated over
+        // the logit, so the prior carries its change-of-variables term. Only the ThresholdGate
+        // and learnable-concentration ordered Beta--Bernoulli energies carry their partition
+        // functions; softmax entropy and fixed-concentration ordered Beta--Bernoulli stay
+        // unnormalized energies (#2933 F45).
         let assignment_sparsity = crate::assignment::assignment_prior_value_weighted(
             &self.assignment,
             rho,

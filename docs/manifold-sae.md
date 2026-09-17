@@ -145,8 +145,16 @@ worth of independent signal in `Z`.
 The fit minimizes reconstruction error plus a stack of penalties, with
 smoothing weights selected by a custom penalized quasi-Laplace criterion. It
 uses the solver's PSD/Gauss--Newton factor and explicit rank charges around the
-converged penalized mode; because the smooth assignment priors are improper, it
-is not normalized LAML, REML, or model evidence. Each piece plays a distinct role
+converged penalized mode, so it is not normalized LAML, REML, or model evidence.
+The smooth gate priors also differ in whether they are normalized densities over
+the relaxed gates. `"threshold_gate"` and `"ordered_beta_bernoulli"` with
+`learnable_alpha=True` add their partition functions, so the strength or
+concentration derivative of the criterion includes the prior's normalizer. The
+`"softmax"` entropy energy and `"ordered_beta_bernoulli"` with a fixed
+concentration (where the sparsity strength scales the whole prior) are
+unnormalized regularization energies: their normalizers depend on the sparsity
+strength and are not computed, so that strength is selected by the criterion,
+not by empirical Bayes. Each piece plays a distinct role
 (default state in parentheses):
 
 - **Reconstruction.** Squared error between `Z` and the sparse sum of
@@ -167,8 +175,15 @@ is not normalized LAML, REML, or model evidence. Each piece plays a distinct rol
   `M_k = Σ_i z_ik`. Logit, concentration, Hessian, and penalized
   quasi-Laplace channels all
   differentiate this same scalar. The prior mean is not multiplied into the
-  reconstruction, so shrinkage is scored exactly once. `"softmax"` is a dense,
-  simplex-normalized gate. `"threshold_gate"` is the smooth bounded gate
+  reconstruction, so shrinkage is scored exactly once. Over relaxed indicators
+  `exp(−L_k)` has mass `C(a_k, N) = E_{π∼Beta(a_k,1)}[((2π−1)/logit π)^N] < 1`
+  (`0.43` at `a_k = 1`, `N = 1`). With `learnable_alpha=True` the criterion adds
+  `log C(a_k, N)` and its concentration derivative; with a fixed concentration
+  it scores `λ_sparse·L_k` without a normalizer. `"softmax"` is a dense,
+  simplex-normalized gate whose entropy energy `λ·H(a_i)` is not normalized over
+  the simplex. The `"threshold_gate"` energy `λ·z` carries
+  `log[(1 − e^{−λ})/λ]` per free gate, the normalizer of the truncated
+  exponential on `(0, 1)`. `"threshold_gate"` is the smooth bounded gate
   `σ((ℓ−threshold)/τ)` with its exact logistic derivative; its threshold is
   configured by `threshold_gate_threshold=`. `"topk"` is a distinct hard-support
   model and requires `top_k=`; smooth assignment families reject that argument
