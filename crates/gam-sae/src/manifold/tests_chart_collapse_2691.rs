@@ -833,7 +833,7 @@ fn ard_face_for(n: usize, p: usize, radius: f64, sigma: f64) -> (f64, f64, f64) 
         1.0e-3_f64.ln(),
         vec![array![1.0e-3_f64.ln()]; 1],
     )
-    .for_assignment(term.assignment.mode);
+    .for_assignment(&term.assignment);
     let ard_index = rho.ard_flat_index(0, 0);
     let seed = rho.to_flat()[ard_index];
     let objective =
@@ -1087,7 +1087,7 @@ fn zz_2691_bounded_sigma_witness_returns_an_answer_at_every_sigma() {
             1.0e-3_f64.ln(),
             vec![array![1.0e-3_f64.ln()]; 1],
         )
-        .for_assignment(term.assignment.mode);
+        .for_assignment(&term.assignment);
         let ard_index = rho.ard_flat_index(0, 0);
         let rho_flat = rho.to_flat();
         let n_params = rho_flat.len();

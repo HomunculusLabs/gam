@@ -169,7 +169,7 @@ def sae_manifold_fit(
     coord_sparsity: str = "scad",
     scad_mcp_gamma: float | None = None,
     smoothness_weight: float = 1.0,
-    alpha: float | str | None = None,
+    alpha: float | None = None,
     learning_rate: float | None = None,
     random_state: int = 0,
     block_orthogonality_weight: float = 0.0,
@@ -201,14 +201,6 @@ def sae_manifold_fit(
     fisher, fisher_residual, fisher_provenance, fisher_factor_kind = _fisher_arrays(
         fisher_factors
     )
-    if alpha == "auto":
-        alpha_value = None
-        learnable_alpha = True
-    elif isinstance(alpha, str):
-        raise TypeError("alpha must be a number, None, or 'auto'")
-    else:
-        alpha_value = None if alpha is None else float(alpha)
-        learnable_alpha = False
     groups = (
         None
         if decoder_feature_sparsity_groups is None
@@ -233,8 +225,7 @@ def sae_manifold_fit(
         coord_sparsity=str(coord_sparsity),
         scad_mcp_gamma=None if scad_mcp_gamma is None else float(scad_mcp_gamma),
         smoothness=float(smoothness_weight),
-        alpha=alpha_value,
-        learnable_alpha=learnable_alpha,
+        alpha=None if alpha is None else float(alpha),
         learning_rate=None if learning_rate is None else float(learning_rate),
         random_state=int(random_state),
         block_orthogonality_weight=float(block_orthogonality_weight),

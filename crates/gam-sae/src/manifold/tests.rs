@@ -2361,10 +2361,24 @@ pub(crate) fn active_mass_guard_reseeds_once_then_records_terminal_collapse() {
 
 #[test]
 pub(crate) fn sae_rho_seed_dispersion_scaling_shifts_every_scale_coupled_axis() {
+    // The layout reads only the assignment family and its effective concentration
+    // predicate, so a one-row assignment of the requested width carries it.
+    let assignment_for = |mode: AssignmentMode, k: usize| {
+        SaeAssignment::from_blocks_with_mode_and_manifolds(
+            ndarray::Array2::<f64>::zeros((1, k)),
+            vec![ndarray::Array2::<f64>::zeros((1, 1)); k],
+            vec![LatentManifold::Euclidean; k],
+            mode,
+        )
+        .expect("one logit column, coordinate block and manifold per atom")
+    };
     let rho = SaeManifoldRho::new(0.7_f64.ln(), 1.3_f64.ln(), vec![array![0.2, -0.4]]);
     let dispersion = 0.05_f64 * 0.05;
     let scaled = rho
-        .seed_scaled_by_dispersion_for_assignment(dispersion, AssignmentMode::softmax(1.0))
+        .seed_scaled_by_dispersion_for_assignment(
+            dispersion,
+            &assignment_for(AssignmentMode::softmax(1.0), 1),
+        )
         .unwrap();
     let shift = dispersion.ln();
 
@@ -2402,7 +2416,10 @@ pub(crate) fn sae_rho_seed_dispersion_scaling_shifts_every_scale_coupled_axis() 
     );
     let multi_dispersion = 4.0_f64;
     let multi_scaled = multi_rho
-        .seed_scaled_by_dispersion_for_assignment(multi_dispersion, AssignmentMode::softmax(1.0))
+        .seed_scaled_by_dispersion_for_assignment(
+            multi_dispersion,
+            &assignment_for(AssignmentMode::softmax(1.0), 2),
+        )
         .unwrap();
     assert!(multi_scaled.sparse_flat_index().is_some());
     assert_abs_diff_eq!(
@@ -2430,14 +2447,24 @@ pub(crate) fn sae_rho_seed_dispersion_scaling_shifts_every_scale_coupled_axis() 
     // dispersion-weakened smoothness/ARD seed, collapsing the Fellner–Schall
     // fixed point; the sparse coordinate is a dimensionless log-α concentration
     // offset that was never a squared-output-unit penalty weight. So every ordered Beta--Bernoulli
-    // coordinate stays at its absolute (already dimensionless) construction value.
-    for ordered_beta_bernoulli_mode in [
-        AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, true),
-        AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
-    ] {
+    // coordinate stays at its absolute (already dimensionless) construction value. A fixed
+    // concentration has no sparse coordinate at all (#2933 F45).
+    for learnable in [true, false] {
         let ordered_beta_bernoulli = rho
-            .seed_scaled_by_dispersion_for_assignment(dispersion, ordered_beta_bernoulli_mode)
+            .seed_scaled_by_dispersion_for_assignment(
+                dispersion,
+                &assignment_for(
+                    AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, learnable),
+                    1,
+                ),
+            )
             .unwrap();
+        assert_eq!(
+            ordered_beta_bernoulli.sparse_flat_index().is_some(),
+            learnable,
+            "learnable_alpha={learnable}: the sparse coordinate exists exactly when the \
+             concentration is learned"
+        );
         assert_abs_diff_eq!(
             ordered_beta_bernoulli.log_lambda_sparse,
             rho.log_lambda_sparse,
@@ -2746,7 +2773,7 @@ pub(crate) fn planted_circle_ordered_beta_bernoulli_n40_sigma018_reaches_high_ev
     let (term, seed_dispersion) = planted_circle_seed_term(z.view(), assignment_mode);
     let seed_ev = global_ev(z.view(), term.fitted().view());
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, assignment_mode.mode())
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .unwrap();
     let init_rho_flat = init_rho.to_flat();
     let n_params = init_rho_flat.len();
@@ -2787,7 +2814,7 @@ pub(crate) fn planted_circle_noise_scale_sweep_reaches_high_ev_with_dimensionles
                 let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
                     .seed_scaled_by_dispersion_for_assignment(
                         seed_dispersion,
-                        assignment_mode.mode(),
+                        &term.assignment,
                     )
                     .unwrap();
                 let init_rho_flat = init_rho.to_flat();

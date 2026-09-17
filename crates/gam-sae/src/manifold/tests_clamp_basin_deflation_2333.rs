@@ -114,7 +114,7 @@ fn factor_stratum(cache: &ArrowFactorCache) -> (Vec<usize>, usize, String) {
 fn first_clamp_basin_state(mode: AssignmentMode, straddle: bool) -> ClampBasinState {
     let (mut term, target, fixture_rho) = threshold_gate_tiny_fixture(straddle);
     term.assignment.mode = mode;
-    let base_rho = fixture_rho.for_assignment(mode);
+    let base_rho = fixture_rho.for_assignment(&term.assignment);
     let mut census = Vec::new();
     for log_ard in [-1.0_f64, 0.0, 1.0, 2.0, 3.0, 4.0] {
         let mut rho = base_rho.clone();
@@ -171,7 +171,7 @@ fn first_clamp_basin_state_on_ladder(
 ) -> ClampBasinState {
     let (mut term, logistic_target, fixture_rho) = threshold_gate_tiny_fixture(straddle);
     term.assignment.mode = mode;
-    let base_rho = fixture_rho.for_assignment(mode);
+    let base_rho = fixture_rho.for_assignment(&term.assignment);
     // The fixture draws its target under independent logistic gates. `redraw_target`
     // re-draws it under `mode`'s own assignments at the fixture state, so the
     // residual curvature of the exact-A rows vanishes there.
@@ -398,7 +398,7 @@ fn independent_gate_trace_theta_adjoint_whitens_like_from_probes_2333() {
     let mode = AssignmentMode::threshold_gate(1.0, 0.0);
     let (mut term, target, fixture_rho) = threshold_gate_tiny_fixture(true);
     term.assignment.mode = mode;
-    let rho = fixture_rho.for_assignment(mode);
+    let rho = fixture_rho.for_assignment(&term.assignment);
     let (n, p) = (term.n_obs(), term.output_dim());
     assert_eq!(p, 3, "#2333 the metric cell below is 3x3");
     let cell = [

@@ -474,7 +474,7 @@ fn efs_ard_fixed_point_recovers_cost_criterion_argmin_and_stays_finite() {
     let term = build_collapse_probe_term(coords);
 
     // The OBJECTIVE owns the flat layout: `SaeManifoldOuterObjective::new`
-    // opens with `init_rho.for_assignment(term.assignment.mode)`, because a
+    // opens with `init_rho.for_assignment(&term.assignment)`, because a
     // K=1 Softmax and every hard TopK are STRUCTURAL absences of the
     // assignment-strength coordinate, not frozen coordinates. This probe term
     // is one of those, so the objective's flat vector is
@@ -484,7 +484,7 @@ fn efs_ard_fixed_point_recovers_cost_criterion_argmin_and_stays_finite() {
     // through the same call the objective makes, and take every index from the
     // rho itself below, so a layout change cannot silently re-stale this test.
     let init_rho =
-        SaeManifoldRho::new(0.0, 0.0, vec![array![0.0, 0.0]]).for_assignment(term.assignment.mode);
+        SaeManifoldRho::new(0.0, 0.0, vec![array![0.0, 0.0]]).for_assignment(&term.assignment);
     // Atom 0, axis 1 = the deliberately collapsing axis this test measures.
     let collapsing_axis_index = init_rho.ard_flat_index(0, 1);
     let mut obj = SaeManifoldOuterObjective::new(

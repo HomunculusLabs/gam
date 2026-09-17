@@ -4793,7 +4793,7 @@ impl SaeManifoldTerm {
         }
         // ∂B/∂ρ_sparse: the majorizer's diagonal log-strength derivative on the
         // logit slots — the SAME builder the B-majorizer trace uses.
-        let mut hdiag = crate::assignment::assignment_prior_log_strength_hdiag_weighted(
+        let hdiag = crate::assignment::assignment_prior_log_strength_hdiag_weighted(
             &self.assignment,
             rho,
             row_weights,
@@ -4802,90 +4802,48 @@ impl SaeManifoldTerm {
             // Inert / frozen prior: ∂B and ΔC are both zero.
             return Ok(0.0);
         }
+        if !self.assignment.effective_alpha_is_learnable() {
+            // A fixed concentration puts no coordinate into the prior (#2933 F45), so
+            // `∂A/∂ρ_sparse` is zero on the logit block.
+            return Ok(0.0);
+        }
         let channels = ordered_beta_bernoulli_psd_majorizer_third_channels_weighted(
             &self.assignment,
             rho,
             row_weights,
         )?;
-        if self.assignment.effective_alpha_is_learnable() {
-            // A learnable concentration makes `ρ_sparse = log(α/α_base)` move only the
-            // Beta shapes `a_k` (the prior weight stays one), so on the logit block
-            // `∂A/∂ρ_sparse` is the concentration derivative of the EXACT prior Hessian:
-            // `B` and `ΔC` split one operator and their majorizer parts cancel. Per atom
-            // column that derivative is `∂S'_k/∂ρ·u uᵀ + diag(∂S_k/∂ρ·w_i·curv_i)` with
-            // `u = w·J` (`z_jac`), and `hdiag` already holds its full diagonal
-            // `∂S'_k/∂ρ·u_i² + ∂S_k/∂ρ·w_i·curv_i`. The trace is one rank-one quadratic
-            // form per column plus the row-local part of the diagonal.
-            let ch = channels.as_ref().ok_or_else(|| {
-                "dense_exact_a_ordered_bb_sparse_trace: a learnable concentration needs the \
-                 ordered Beta--Bernoulli prior channels"
-                    .to_string()
-            })?;
-            let mut tr_joint = 0.0_f64;
-            for atom in 0..k_atoms {
-                let mass_curvature = ch.mass_hessian_log_alpha_derivative[atom];
-                let mut quadratic = 0.0_f64;
-                for irow in 0..n {
-                    let Some(gi) = logit_gindex[irow][atom] else {
-                        continue;
-                    };
-                    let islot = irow * k_atoms + atom;
-                    let ui = ch.z_jac[islot];
-                    tr_joint += a_pinv[[gi, gi]] * (hdiag[islot] - mass_curvature * ui * ui);
-                    for jrow in 0..n {
-                        let Some(gj) = logit_gindex[jrow][atom] else {
-                            continue;
-                        };
-                        quadratic += a_pinv[[gi, gj]] * ui * ch.z_jac[jrow * k_atoms + atom];
-                    }
-                }
-                tr_joint += mass_curvature * quadratic;
-            }
-            return Ok(0.5 * tr_joint);
-        }
-        if let Some(ch) = channels.as_ref() {
-            for row in 0..n {
-                for atom in 0..k_atoms {
-                    let slot = row * k_atoms + atom;
-                    hdiag[slot] =
-                        super::construction_arrow_schur_assembly::ordered_beta_bernoulli_psd_majorized_hdiag(
-                            ch, row, k_atoms, atom, hdiag[slot],
-                        );
-                }
-            }
-        }
-        // ½tr(A⁺ ∂A/∂ρ_sparse), column by column over
-        // the flat logit basis: ∂A/∂ρ_sparse·e_j = ΔC_obb·e_j + hdiag[j]·e_j.
-        let n_logits = n * k_atoms;
-        let mut e = Array1::<f64>::zeros(n_logits);
+        // A learnable concentration makes `ρ_sparse = log(α/α_base)` move only the
+        // Beta shapes `a_k` (the prior weight stays one), so on the logit block
+        // `∂A/∂ρ_sparse` is the concentration derivative of the EXACT prior Hessian:
+        // `B` and `ΔC` split one operator and their majorizer parts cancel. Per atom
+        // column that derivative is `∂S'_k/∂ρ·u uᵀ + diag(∂S_k/∂ρ·w_i·curv_i)` with
+        // `u = w·J` (`z_jac`), and `hdiag` already holds its full diagonal
+        // `∂S'_k/∂ρ·u_i² + ∂S_k/∂ρ·w_i·curv_i`. The trace is one rank-one quadratic
+        // form per column plus the row-local part of the diagonal.
+        let ch = channels.as_ref().ok_or_else(|| {
+            "dense_exact_a_ordered_bb_sparse_trace: a learnable concentration needs the \
+             ordered Beta--Bernoulli prior channels"
+                .to_string()
+        })?;
         let mut tr_joint = 0.0_f64;
-        for jrow in 0..n {
-            for jatom in 0..k_atoms {
-                let Some(gj) = logit_gindex[jrow][jatom] else {
+        for atom in 0..k_atoms {
+            let mass_curvature = ch.mass_hessian_log_alpha_derivative[atom];
+            let mut quadratic = 0.0_f64;
+            for irow in 0..n {
+                let Some(gi) = logit_gindex[irow][atom] else {
                     continue;
                 };
-                let jflat = jrow * k_atoms + jatom;
-                e[jflat] = 1.0;
-                let dc = crate::assignment::ordered_beta_bernoulli_exact_hessian_minus_majorizer_hvp_weighted(
-                    &self.assignment,
-                    rho,
-                    row_weights,
-                    e.view(),
-                )?;
-                e[jflat] = 0.0;
-                for irow in 0..n {
-                    for iatom in 0..k_atoms {
-                        let val = dc[irow * k_atoms + iatom];
-                        if val == 0.0 {
-                            continue;
-                        }
-                        if let Some(gi) = logit_gindex[irow][iatom] {
-                            tr_joint += a_pinv[[gi, gj]] * val;
-                        }
-                    }
+                let islot = irow * k_atoms + atom;
+                let ui = ch.z_jac[islot];
+                tr_joint += a_pinv[[gi, gi]] * (hdiag[islot] - mass_curvature * ui * ui);
+                for jrow in 0..n {
+                    let Some(gj) = logit_gindex[jrow][atom] else {
+                        continue;
+                    };
+                    quadratic += a_pinv[[gi, gj]] * ui * ch.z_jac[jrow * k_atoms + atom];
                 }
-                tr_joint += a_pinv[[gj, gj]] * hdiag[jflat];
             }
+            tr_joint += mass_curvature * quadratic;
         }
         Ok(0.5 * tr_joint)
     }

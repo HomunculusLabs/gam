@@ -257,7 +257,7 @@ fn constant_curvature_term(kappa: f64) -> (SaeManifoldTerm, SaeManifoldRho) {
     .expect("one coordinate block for one atom");
     let term = SaeManifoldTerm::new(vec![atom], assignment).expect("single-atom term");
     let rho = SaeManifoldRho::new(0.0, 0.3, vec![Array1::<f64>::zeros(2)])
-        .for_assignment(mode)
+        .for_assignment(&term.assignment)
         .with_curvature(vec![(0, kappa)]);
     (term, rho)
 }

@@ -1055,7 +1055,7 @@ impl SaeManifoldOuterObjective {
         // presence to the actual term so K=1 Softmax and hard TopK cannot enter
         // as held/frozen rho coordinates through a manually constructed seed.
         let init_rho = init_rho
-            .for_assignment(term.assignment.mode)
+            .for_assignment(&term.assignment)
             .with_curvature(Self::curvature_seed(&term));
         term.dictionary_cocollapse_reseeds = 0;
         term.best_cocollapse_incumbent = None;
@@ -1764,10 +1764,10 @@ impl SaeManifoldOuterObjective {
             .zip(pre_canonical_flags.iter())
             .any(|(atom, before)| atom.chart_canonicalized != *before);
         // The certified `(term, ρ)` pair leaves verbatim. For ordered Beta--Bernoulli,
-        // `log_lambda_sparse` is the concentration offset only while the concentration
-        // is effectively learnable, and the prior weight otherwise. Rewriting the mode
-        // and zeroing that coordinate changes the objective under an override, and
-        // decouples the coordinate from the persisted `alpha`/`learnable_alpha` (#2933 F06).
+        // `log_lambda_sparse` is the concentration offset while the concentration is
+        // effectively learnable, and an unread placeholder otherwise (#2933 F45). Rewriting
+        // the mode and zeroing that coordinate decouples it from the persisted
+        // `alpha`/`learnable_alpha` (#2933 F06).
         let fitted_loss = fitted.loss(target.view(), &fitted_rho)?;
         let termination = termination_report;
         log::warn!(
@@ -3197,17 +3197,11 @@ pub(super) fn reactive_rho_domain_upper(
         }
     }
 
-    // An ordered Beta--Bernoulli prior whose concentration is effectively fixed keeps the
-    // literal target on its sparse coordinate. Every other present assignment coordinate
-    // is capped on the same largest observed native-curvature scale, rather than
-    // inheriting the unrelated generic `exp(30)` strength. The exemption reads the
-    // resolved concentration, not the raw `learnable_alpha` flag, so an override and its
-    // fixed-concentration twin (one objective) receive one box (#2933 F06).
+    // A present assignment coordinate is capped on the same largest observed native-curvature
+    // scale, rather than inheriting the unrelated generic `exp(30)` strength. An ordered
+    // Beta--Bernoulli prior whose concentration is effectively fixed has no coordinate here
+    // (#2933 F45), so an override and its fixed-concentration twin receive one box.
     if let Some(index) = rho.sparse_flat_index()
-        && !(matches!(
-            entry_term.assignment.mode,
-            AssignmentMode::OrderedBetaBernoulli { .. }
-        ) && !entry_term.assignment.effective_alpha_is_learnable())
         && largest_native_scale > 0.0
     {
         let target_strength = target[index].exp();

@@ -1615,7 +1615,7 @@ fn run_sae_manifold_fit_on_target(request: SaeFitRequest) -> Result<SaeFitOutcom
 
     // The seed ρ vector the outer engine optimizes; its length is the objective's
     // declared `n_params`.
-    let init_rho = init_rho.for_assignment(base_term.assignment.mode);
+    let init_rho = init_rho.for_assignment(&base_term.assignment);
     base_term
         .assignment
         .validate_rho_domain(&init_rho)
@@ -1995,7 +1995,7 @@ pub fn run_sae_manifold_certify(
     // Bind the flat assignment-strength layout tag to the term's assignment
     // family; this changes no numeric value, so `rho` is otherwise installed
     // verbatim from the caller.
-    let rho = initial_rho.for_assignment(term.assignment.mode);
+    let rho = initial_rho.for_assignment(&term.assignment);
     term.assignment
         .validate_rho_domain(&rho)
         .map_err(SaeFitError::Fit)?;

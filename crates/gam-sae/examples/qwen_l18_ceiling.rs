@@ -349,9 +349,10 @@ fn fit_ceiling_region(
 ) -> Result<CeilingRegionReport, String> {
     let fit_started = Instant::now();
     let (term, seed_dispersion, basis_size) = periodic_k1_term(target, harmonics)?;
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
-    let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![Array1::zeros(1)])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)?;
+    // The fixed-concentration ordered Beta--Bernoulli prior has no strength coordinate
+    // (#2933 F45), so the sparse entry is an unread placeholder.
+    let init_rho = SaeManifoldRho::new(0.0, 1.0_f64.ln(), vec![Array1::zeros(1)])
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)?;
     let seed = init_rho.to_flat();
     let n_params = seed.len();
     let mut objective = SaeManifoldOuterObjective::new(

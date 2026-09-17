@@ -157,7 +157,7 @@ pub(crate) fn objective_and_seed(
 ) -> (SaeManifoldOuterObjective, Array1<f64>) {
     let (term, seed_dispersion) = build_term(z, k, topo, mode);
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; k])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .unwrap();
     let init_rho_flat = init_rho.to_flat();
     let objective =
@@ -814,7 +814,7 @@ fn seed_infeasibility_channel_is_named_2609() {
     for (label, topo, mode) in cases {
         let (mut term, seed_dispersion) = build_term(z.view(), 4, topo, mode);
         let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 4])
-            .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+            .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
             .unwrap();
         let warm = term.warm_start_latents_from_amortized_encoder(z.view(), &rho);
         let outcome = term.penalized_quasi_laplace_criterion_with_refine_policy_and_lane(

@@ -131,7 +131,7 @@ pub(crate) fn threshold_gate_tiny_fixture(
         -1.0,
         vec![Array1::from_vec(vec![-1.0]), Array1::from_vec(vec![-1.0])],
     )
-    .for_assignment(mode);
+    .for_assignment(&term.assignment);
     (term, target, rho)
 }
 

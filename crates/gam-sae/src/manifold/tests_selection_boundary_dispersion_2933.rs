@@ -128,7 +128,7 @@ fn two_center_term(
     let term = SaeManifoldTerm::new(atoms, assignment)
         .expect("each atom's basis width matches its assignment block");
     let rho = SaeManifoldRho::new(0.0, log_lambda_smooth, vec![array![0.0], array![0.0]])
-        .for_assignment(mode);
+        .for_assignment(&term.assignment);
     let target = Array2::from_shape_fn((n, 1), |(row, _)| targets[row]);
     (term, rho, target)
 }

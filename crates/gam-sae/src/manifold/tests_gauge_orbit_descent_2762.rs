@@ -52,9 +52,8 @@ fn seeded_two_circle_term(
     // `‖g‖ = 2.85e5` — a state in which every gauge direction is a near-null
     // eigenvector and nothing about the orbit is representative. This is the
     // same construction `#2080`'s own fixture uses.
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![ndarray::array![0.0]; k])
-        .seed_scaled_by_dispersion_for_assignment(dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
     (term, z, rho)
 }

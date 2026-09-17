@@ -51,11 +51,11 @@ The full signature, with defaults (keyword-only arguments follow the `*`):
 | `ard_per_atom` | `True` | ARD pruning of unused coordinate axes |
 | `decoder_feature_sparsity_groups` | `None` | output-feature partition for decoder group-lasso |
 | `n_iter` | `50` | joint-solve iterations |
-| `sparsity_weight` | `None` | optional coordinate-shrinkage strength override; omitted delegates to the native neutral log-strength origin (`1.0`) |
+| `sparsity_weight` | `None` | optional coordinate-shrinkage strength override; omitted delegates to the native neutral log-strength origin (`1.0`). Refused with a fixed-concentration `ordered_beta_bernoulli` prior, which has no strength coordinate |
 | `coord_sparsity` | `"scad"` | coordinate (latent `t`-block) magnitude penalty: `scad` / `mcp` / `l1` |
 | `scad_mcp_gamma` | `None` | SCAD/MCP concavity (defaults SCAD 3.7, MCP 2.5) |
 | `smoothness_weight` | `1.0` | roughness penalty strength |
-| `alpha` | `None` | assignment-concentration seed (`float`, `None`, or exact policy `"auto"`) |
+| `alpha` | `None` | `ordered_beta_bernoulli` concentration: `None` learns it by empirical Bayes from the dictionary-spanning default, a `float` fixes it |
 | `learning_rate` | `None` | optional step size override |
 | `random_state` | `0` | RNG seed |
 | `block_orthogonality_weight` | `0.0` | orthogonalize latent axes (needs `d_atom >= 2`) |
@@ -147,14 +147,14 @@ smoothing weights selected by a custom penalized quasi-Laplace criterion. It
 uses the solver's PSD/Gauss--Newton factor and explicit rank charges around the
 converged penalized mode, so it is not normalized LAML, REML, or model evidence.
 The smooth gate priors also differ in whether they are normalized densities over
-the relaxed gates. `"threshold_gate"` and `"ordered_beta_bernoulli"` with
-`learnable_alpha=True` add their partition functions, so the strength or
-concentration derivative of the criterion includes the prior's normalizer. The
-`"softmax"` entropy energy and `"ordered_beta_bernoulli"` with a fixed
-concentration (where the sparsity strength scales the whole prior) are
-unnormalized regularization energies: their normalizers depend on the sparsity
-strength and are not computed, so that strength is selected by the criterion,
-not by empirical Bayes. Each piece plays a distinct role
+the relaxed gates. `"threshold_gate"` and `"ordered_beta_bernoulli"` add their
+partition functions, so the strength or concentration derivative of the
+criterion includes the prior's normalizer. An ordered Beta--Bernoulli fit learns
+its concentration by default (`alpha=None`); a numeric `alpha` fixes it, and the
+fixed prior has no strength to tune, so `sparsity_weight` is refused there. The
+`"softmax"` entropy energy is an unnormalized regularization energy: its
+normalizer depends on the sparsity strength and is not computed, so that
+strength is selected by the criterion, not by empirical Bayes. Each piece plays a distinct role
 (default state in parentheses):
 
 - **Reconstruction.** Squared error between `Z` and the sparse sum of
@@ -177,9 +177,11 @@ not by empirical Bayes. Each piece plays a distinct role
   differentiate this same scalar. The prior mean is not multiplied into the
   reconstruction, so shrinkage is scored exactly once. Over relaxed indicators
   `exp(−L_k)` has mass `C(a_k, N) = E_{π∼Beta(a_k,1)}[((2π−1)/logit π)^N] < 1`
-  (`0.43` at `a_k = 1`, `N = 1`). With `learnable_alpha=True` the criterion adds
-  `log C(a_k, N)` and its concentration derivative; with a fixed concentration
-  it scores `λ_sparse·L_k` without a normalizer. `"softmax"` is a dense,
+  (`0.43` at `a_k = 1`, `N = 1`). The criterion adds `log C(a_k, N)`, and while
+  the concentration is learned, its concentration derivative. There is no
+  tempering strength `λ·L_k`: its partition over the relaxed gates is not the
+  one-dimensional rate integral, and sparsity is already tuned through `α`.
+  `"softmax"` is a dense,
   simplex-normalized gate whose entropy energy `λ·H(a_i)` is not normalized over
   the simplex. The `"threshold_gate"` energy `λ·z` carries
   `log[(1 − e^{−λ})/λ]` per free gate, the normalizer of the truncated

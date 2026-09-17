@@ -47,8 +47,15 @@ mod log_strength_domain_tests {
 
     #[test]
     fn structurally_absent_sparse_placeholder_is_ignored_and_never_scaled() {
+        let softmax = SaeAssignment::from_blocks_with_mode_and_manifolds(
+            ndarray::Array2::<f64>::zeros((1, 1)),
+            vec![ndarray::Array2::<f64>::zeros((1, 1))],
+            vec![LatentManifold::Euclidean],
+            AssignmentMode::softmax(1.0),
+        )
+        .expect("one logit column, coordinate block and manifold");
         let rho = SaeManifoldRho::new(17.0, 0.0, vec![Array1::<f64>::zeros(0)])
-            .for_assignment(AssignmentMode::softmax(1.0));
+            .for_assignment(&softmax);
         assert_eq!(rho.sparse_flat_index(), None);
         let mut irrelevant_placeholder = rho.clone();
         irrelevant_placeholder.log_lambda_sparse = f64::INFINITY;
@@ -58,7 +65,7 @@ mod log_strength_domain_tests {
         assert_eq!(rho.to_flat(), array![0.0]);
 
         let scaled = rho
-            .seed_scaled_by_dispersion_for_assignment(1.0e300, AssignmentMode::softmax(1.0))
+            .seed_scaled_by_dispersion_for_assignment(1.0e300, &softmax)
             .expect("dispersion scaling must not touch an absent sparse coordinate");
         assert_eq!(scaled.log_lambda_sparse, 17.0);
         assert_eq!(scaled.to_flat().len(), 1);
@@ -75,8 +82,12 @@ mod log_strength_domain_tests {
 /// the inner assignment prior, but the flat outer layout includes it only when
 /// the assignment family has a non-constant strength-dependent objective:
 ///
-/// * [`Self::PenaltyWeight`] always carries the coordinate (ordered Beta--Bernoulli and
-///   threshold-gate priors).
+/// * [`Self::PenaltyWeight`] always carries the coordinate (threshold-gate prior).
+/// * [`Self::ConcentrationOffset`] always carries it as `log(α/α_mode)` (ordered
+///   Beta--Bernoulli with an effectively learnable concentration).
+/// * [`Self::FixedConcentration`] never carries it. With the concentration fixed the
+///   ordered Beta--Bernoulli prior is complete at weight one, with its constant partition
+///   `Σ_k log C(a_k, N)`, so nothing optimized enters it (#2933 F45).
 /// * [`Self::SoftmaxEntropy`] carries it only for `K > 1`. At `K = 1` the
 ///   simplex assignment is identically one and its entropy is identically zero,
 ///   so there is no parameter to optimize or certify.
@@ -89,6 +100,8 @@ mod log_strength_domain_tests {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignmentStrengthLayout {
     PenaltyWeight,
+    ConcentrationOffset,
+    FixedConcentration,
     SoftmaxEntropy,
     FixedSupport,
 }
@@ -96,9 +109,9 @@ pub enum AssignmentStrengthLayout {
 impl AssignmentStrengthLayout {
     fn has_outer_coordinate(self, k_atoms: usize) -> bool {
         match self {
-            Self::PenaltyWeight => true,
+            Self::PenaltyWeight | Self::ConcentrationOffset => true,
             Self::SoftmaxEntropy => k_atoms > 1,
-            Self::FixedSupport => false,
+            Self::FixedConcentration | Self::FixedSupport => false,
         }
     }
 }
@@ -108,7 +121,7 @@ impl AssignmentStrengthLayout {
 pub struct SaeManifoldRho {
     /// `log(lambda_sparse)` for softmax entropy or ThresholdGate gated L1. For ordered
     /// Beta--Bernoulli it is the concentration offset `log(α/α_mode)` while α is
-    /// effectively learnable, and the log prior weight otherwise; see
+    /// effectively learnable, and an inert placeholder the prior never reads otherwise; see
     /// `SaeAssignment::ordered_beta_bernoulli_prior_parameters`.
     pub log_lambda_sparse: f64,
     /// Typed assignment-strength layout. This is assignment-family state, not
@@ -318,15 +331,25 @@ impl SaeManifoldRho {
     }
 
     /// Bind the flat assignment-strength layout to the term's assignment
-    /// family. The `K = 1` Softmax case and every hard-TopK case are structural
+    /// family. The `K = 1` Softmax case, every hard-TopK case and an ordered
+    /// Beta--Bernoulli prior whose concentration is effectively fixed are structural
     /// absences, not frozen coordinates.
+    ///
+    /// The layout reads the assignment, not only its mode: a per-fit concentration
+    /// override pins a learnable mode, and that fit has no sparse coordinate
+    /// ([`SaeAssignment::effective_alpha_is_learnable`], #2933 F45).
     #[must_use]
-    pub fn for_assignment(mut self, assignment_mode: AssignmentMode) -> Self {
-        self.assignment_strength_layout = match assignment_mode {
+    pub fn for_assignment(mut self, assignment: &SaeAssignment) -> Self {
+        self.assignment_strength_layout = match assignment.mode {
             AssignmentMode::Softmax { .. } => AssignmentStrengthLayout::SoftmaxEntropy,
             AssignmentMode::TopK { .. } => AssignmentStrengthLayout::FixedSupport,
-            AssignmentMode::OrderedBetaBernoulli { .. } | AssignmentMode::ThresholdGate { .. } => {
-                AssignmentStrengthLayout::PenaltyWeight
+            AssignmentMode::ThresholdGate { .. } => AssignmentStrengthLayout::PenaltyWeight,
+            AssignmentMode::OrderedBetaBernoulli { .. } => {
+                if assignment.effective_alpha_is_learnable() {
+                    AssignmentStrengthLayout::ConcentrationOffset
+                } else {
+                    AssignmentStrengthLayout::FixedConcentration
+                }
             }
         };
         self
@@ -454,9 +477,9 @@ impl SaeManifoldRho {
     /// Fellner–Schall multiplicative fixed point (`λ_new ∝ φ̂`) then spirals the
     /// smoothing/ARD penalties to zero — a degenerate outer basin the ρ-optimizer
     /// stalls in (#1744: ordered_beta_bernoulli n=40 σ=0.18 stalled at EV 0.86). The ordered Beta--Bernoulli sparse
-    /// coordinate is the log-concentration offset while α is effectively learnable and
-    /// the log prior weight otherwise (`SaeAssignment::ordered_beta_bernoulli_prior_parameters`);
-    /// the seed leaves it unscaled in both cases. NONE of the ordered Beta--Bernoulli ρ coordinates therefore admit the
+    /// coordinate is the log-concentration offset while α is effectively learnable, and
+    /// absent otherwise (`SaeAssignment::ordered_beta_bernoulli_prior_parameters`);
+    /// the seed leaves it unscaled. NONE of the ordered Beta--Bernoulli ρ coordinates therefore admit the
     /// Gaussian response-dispersion scaling; the seed stays at its absolute
     /// (already dimensionless) construction values, which keeps the smoothing/ARD
     /// penalties strong enough that the inner ordered Beta--Bernoulli solve cannot overfit at the seed
@@ -466,10 +489,10 @@ impl SaeManifoldRho {
     pub fn seed_scaled_by_dispersion_for_assignment(
         &self,
         dispersion: f64,
-        assignment_mode: AssignmentMode,
+        assignment: &SaeAssignment,
     ) -> Result<Self, String> {
-        let bound = self.clone().for_assignment(assignment_mode);
-        if matches!(assignment_mode, AssignmentMode::OrderedBetaBernoulli { .. }) {
+        let bound = self.clone().for_assignment(assignment);
+        if matches!(assignment.mode, AssignmentMode::OrderedBetaBernoulli { .. }) {
             // Validate the dispersion for parity with the scaled path (a
             // non-finite/​non-positive φ is still a caller error), then return the
             // unscaled seed: no ordered Beta--Bernoulli ρ coordinate is response-dispersion-scalable.

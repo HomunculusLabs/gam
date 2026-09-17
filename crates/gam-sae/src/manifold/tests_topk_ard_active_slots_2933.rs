@@ -71,12 +71,20 @@ fn topk_term(inactive: f64) -> SaeManifoldTerm {
 }
 
 fn rho(log_alpha_circle: f64, log_alpha_plane: [f64; 2]) -> SaeManifoldRho {
+    // The layout reads only the assignment family, so a one-row TopK assignment carries it.
+    let topk = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        Array2::<f64>::zeros((1, 2)),
+        vec![Array2::<f64>::zeros((1, 1)); 2],
+        vec![LatentManifold::Euclidean; 2],
+        AssignmentMode::top_k_support(1),
+    )
+    .expect("layout fixture: one logit column, coordinate block and manifold per atom");
     SaeManifoldRho::new(
         0.0,
         0.0,
         vec![array![log_alpha_circle], array![log_alpha_plane[0], log_alpha_plane[1]]],
     )
-    .for_assignment(AssignmentMode::top_k_support(1))
+    .for_assignment(&topk)
 }
 
 /// `(1 − cos κt)/κ²` on the period-one circle: the von Mises energy per unit precision.

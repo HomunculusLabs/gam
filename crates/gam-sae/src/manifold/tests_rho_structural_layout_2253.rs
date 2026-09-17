@@ -56,10 +56,22 @@ fn invalid_constructor_rho_is_refused_before_bounds_or_fixed_fit_2253() {
     );
 }
 
+/// A one-row assignment of `k` atoms under `mode`: the layout reads only the assignment
+/// family and its effective concentration predicate.
+fn layout_assignment(mode: AssignmentMode, k: usize) -> SaeAssignment {
+    SaeAssignment::from_blocks_with_mode_and_manifolds(
+        ndarray::Array2::<f64>::zeros((1, k)),
+        vec![ndarray::Array2::<f64>::zeros((1, 1)); k],
+        vec![LatentManifold::Euclidean; k],
+        mode,
+    )
+    .expect("one logit column, coordinate block and manifold per atom")
+}
+
 #[test]
 fn fixed_assignment_strength_is_absent_from_flat_rho_layout_2253() {
     let softmax = SaeManifoldRho::new(-1.7, 0.4, vec![array![-0.2]])
-        .for_assignment(AssignmentMode::softmax(0.8));
+        .for_assignment(&layout_assignment(AssignmentMode::softmax(0.8), 1));
     assert_eq!(softmax.sparse_flat_index(), None);
     assert_eq!(softmax.smooth_flat_index(0), 0);
     assert_eq!(softmax.ard_flat_index(0, 0), 1);
@@ -76,15 +88,41 @@ fn fixed_assignment_strength_is_absent_from_flat_rho_layout_2253() {
     // TopK has no assignment-strength penalty at any K: the fixed support is
     // the sparsity constraint itself.
     let topk = SaeManifoldRho::new(-0.9, 0.1, vec![array![0.2], array![0.3]])
-        .for_assignment(AssignmentMode::top_k_support(1));
+        .for_assignment(&layout_assignment(AssignmentMode::top_k_support(1), 2));
     assert_eq!(topk.sparse_flat_index(), None);
     assert_eq!(topk.to_flat(), array![0.1, 0.1, 0.2, 0.3]);
 
     // Softmax regains the assignment-strength coordinate automatically when a
     // second atom makes entropy non-constant.
     let two_atom_softmax = SaeManifoldRho::new(-0.9, 0.1, vec![array![0.2], array![0.3]])
-        .for_assignment(AssignmentMode::softmax(0.8));
+        .for_assignment(&layout_assignment(AssignmentMode::softmax(0.8), 2));
     assert_eq!(two_atom_softmax.sparse_flat_index(), Some(0));
     assert_eq!(two_atom_softmax.smooth_flat_index(0), 1);
+}
+
+/// #2933 F45 — an ordered Beta--Bernoulli prior carries the sparse coordinate exactly while
+/// its concentration is learned. A fixed concentration, by the mode or by a per-fit override
+/// of a learnable mode, is the complete prior at weight one, and its placeholder is kept out
+/// of the flat vector and left unchanged by reconstitution.
+#[test]
+fn ordered_beta_bernoulli_sparse_coordinate_follows_the_effective_concentration_2933() {
+    let smooth_and_ard = vec![array![0.2], array![0.3]];
+    let learnable = layout_assignment(AssignmentMode::ordered_beta_bernoulli(0.8, 1.7, true), 2);
+    let learned = SaeManifoldRho::new(-0.9, 0.1, smooth_and_ard.clone()).for_assignment(&learnable);
+    assert_eq!(learned.sparse_flat_index(), Some(0));
+    assert_eq!(learned.to_flat(), array![-0.9, 0.1, 0.1, 0.2, 0.3]);
+
+    let fixed = layout_assignment(AssignmentMode::ordered_beta_bernoulli(0.8, 1.7, false), 2);
+    let mut overridden = learnable.clone();
+    overridden.set_ordered_beta_bernoulli_alpha_override(Some(0.6));
+    for (label, assignment) in [("fixed mode", &fixed), ("override", &overridden)] {
+        let rho = SaeManifoldRho::new(-0.9, 0.1, smooth_and_ard.clone()).for_assignment(assignment);
+        assert_eq!(rho.sparse_flat_index(), None, "{label}");
+        assert_eq!(rho.to_flat(), array![0.1, 0.1, 0.2, 0.3], "{label}");
+        let restored = rho
+            .from_flat(array![0.4, -0.2, 0.5, 0.6].view())
+            .expect("the four present coordinates rebuild");
+        assert_abs_diff_eq!(restored.log_lambda_sparse, -0.9, epsilon = 0.0);
+    }
 }
 

@@ -164,9 +164,8 @@ fn two_circle_objective(
 ) -> (SaeManifoldOuterObjective, Array2<f64>, Array1<f64>) {
     let z = two_circle_wide_target(n, p, 0.03);
     let (term, seed_dispersion) = two_circle_periodic_term(z.view(), k, harmonics);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; k])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("the seed rho scales for this assignment mode");
     let seed = init_rho.to_flat();
     let objective = SaeManifoldOuterObjective::new(

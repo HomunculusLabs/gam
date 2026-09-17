@@ -5417,9 +5417,9 @@ impl SaeManifoldTerm {
             Array2::<f64>::zeros((0, 0))
         };
         // `hdiag` differentiates the prior along whatever `log_lambda_sparse` carries:
-        // the concentration when it is effectively learnable, the weight when an
-        // override pins it. The majorizer derivative must follow the same predicate.
-        let learnable_alpha = self.assignment.effective_alpha_is_learnable();
+        // the concentration when it is effectively learnable. A fixed concentration puts
+        // no coordinate into the prior (#2933 F45), so `hdiag` is zero and there is nothing
+        // to majorize.
         let ordered_channels = ordered_beta_bernoulli_psd_majorizer_third_channels_weighted(
             &self.assignment,
             rho,
@@ -5429,19 +5429,16 @@ impl SaeManifoldTerm {
         // negative, so its cross-row rank-one block has the zero PSD Loewner
         // majorizer. Retain only the positive part of the row-local
         // concrete-Jacobian term, matching assembly exactly.
-        if let Some(ch) = ordered_channels.as_ref() {
+        if let Some(ch) = ordered_channels.as_ref()
+            && self.assignment.effective_alpha_is_learnable()
+        {
             for row in 0..self.n_obs() {
                 for atom in 0..k_atoms {
                     let slot = row * k_atoms + atom;
-                    hdiag[slot] = if learnable_alpha {
+                    hdiag[slot] =
                         super::construction_arrow_schur_assembly::ordered_beta_bernoulli_psd_majorized_log_alpha_hdiag(
                             ch, row, k_atoms, atom, hdiag[slot],
-                        )
-                    } else {
-                        super::construction_arrow_schur_assembly::ordered_beta_bernoulli_psd_majorized_hdiag(
-                            ch, row, k_atoms, atom, hdiag[slot],
-                        )
-                    };
+                        );
                 }
             }
         }
@@ -5602,21 +5599,17 @@ impl SaeManifoldTerm {
             rho,
             self.row_loss_weights.as_deref(),
         )?;
-        // Same predicate as the dense trace: an override makes the coordinate a weight.
-        let learnable_alpha = self.assignment.effective_alpha_is_learnable();
-        if let Some(channels) = ordered_channels.as_ref() {
+        // Same predicate as the dense trace: a fixed concentration leaves `hdiag` zero.
+        if let Some(channels) = ordered_channels.as_ref()
+            && self.assignment.effective_alpha_is_learnable()
+        {
             for row in 0..self.n_obs() {
                 for atom in 0..k_atoms {
                     let index = row * k_atoms + atom;
-                    hdiag[index] = if learnable_alpha {
+                    hdiag[index] =
                         super::construction_arrow_schur_assembly::ordered_beta_bernoulli_psd_majorized_log_alpha_hdiag(
                             channels, row, k_atoms, atom, hdiag[index],
-                        )
-                    } else {
-                        super::construction_arrow_schur_assembly::ordered_beta_bernoulli_psd_majorized_hdiag(
-                            channels, row, k_atoms, atom, hdiag[index],
-                        )
-                    };
+                        );
                 }
             }
         }

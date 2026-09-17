@@ -83,6 +83,70 @@ impl SaeFitAssignmentKind {
     }
 }
 
+/// The public fit front door's assignment-strength inputs after default resolution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SaePublicAssignmentStrength {
+    /// Base concentration of an ordered Beta--Bernoulli prior; `1` for the other families.
+    pub alpha: f64,
+    /// Whether the ordered Beta--Bernoulli concentration is learned by empirical Bayes.
+    pub learnable_alpha: bool,
+    /// Seed of `log_lambda_sparse` and the coordinate-shrinkage weight.
+    pub sparsity_strength: f64,
+}
+
+/// Resolve the public front door's `alpha` and `sparsity_weight` (#2933 F45).
+///
+/// An ordered Beta--Bernoulli fit learns its concentration by default: `alpha = None` starts
+/// the concentration at the dictionary-spanning
+/// [`default_ordered_beta_bernoulli_concentration_for_k_atoms`] and selects it by empirical
+/// Bayes through the normalized prior. A numeric `alpha` fixes the concentration, and the
+/// fixed prior is the complete Beta--Bernoulli prior with no strength coordinate, so an
+/// explicit `sparsity_weight` is refused rather than silently dropped. Softmax,
+/// threshold-gate and TopK fits keep their strength coordinate and ignore concentration.
+pub fn resolve_public_assignment_strength(
+    assignment_kind: SaeFitAssignmentKind,
+    k_atoms: usize,
+    alpha: Option<f64>,
+    sparsity_strength: Option<f64>,
+) -> Result<SaePublicAssignmentStrength, String> {
+    let default_strength = sparsity_strength.unwrap_or(DEFAULT_SAE_SPARSITY_STRENGTH);
+    if assignment_kind != SaeFitAssignmentKind::OrderedBetaBernoulli {
+        return Ok(SaePublicAssignmentStrength {
+            alpha: alpha.unwrap_or(1.0),
+            learnable_alpha: false,
+            sparsity_strength: default_strength,
+        });
+    }
+    match alpha {
+        None => Ok(SaePublicAssignmentStrength {
+            alpha: default_ordered_beta_bernoulli_concentration_for_k_atoms(k_atoms),
+            learnable_alpha: true,
+            sparsity_strength: default_strength,
+        }),
+        Some(concentration) if !(concentration.is_finite() && concentration > 0.0) => Err(
+            format!(
+                "sae_manifold_fit: ordered Beta--Bernoulli alpha must be finite and positive; got \
+                 {concentration}"
+            ),
+        ),
+        Some(concentration) => match sparsity_strength {
+            Some(strength) => Err(format!(
+                "sae_manifold_fit: sparsity_weight={strength} has nothing to scale in a \
+                 fixed-concentration ordered Beta--Bernoulli prior (alpha={concentration}). That \
+                 prior is the complete Beta--Bernoulli prior at weight one; a tempering strength \
+                 would need a partition function over the relaxed gates that is not computed \
+                 (#2933 F45). Omit alpha to learn the concentration by empirical Bayes, or omit \
+                 sparsity_weight to keep alpha fixed."
+            )),
+            None => Ok(SaePublicAssignmentStrength {
+                alpha: concentration,
+                learnable_alpha: false,
+                sparsity_strength: DEFAULT_SAE_SPARSITY_STRENGTH,
+            }),
+        },
+    }
+}
+
 /// Borrowed arrays and owned policy needed to construct one fit seed.
 pub struct SaeFitSeedRequest<'a, 'context> {
     pub target: ArrayView2<'a, f64>,
@@ -388,7 +452,7 @@ pub fn build_sae_fit_seed(request: SaeFitSeedRequest<'_, '_>) -> Result<SaeFitSe
     } else {
         SaeManifoldRho::new(sparsity_strength.ln(), smoothness.ln(), log_ard)
     }
-    .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)?;
+    .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &base_term.assignment)?;
     let isometry_pin_active = request
         .registry
         .penalties
@@ -418,6 +482,66 @@ mod tests {
             SaeFitAssignmentKind::from_tag("threshold_gate"),
             Ok(SaeFitAssignmentKind::ThresholdGate)
         );
+    }
+
+    /// #2933 F45 — the public ordered Beta--Bernoulli default learns its concentration, a
+    /// fixed concentration refuses a strength it has no coordinate for, and the other families
+    /// keep their strength and ignore concentration.
+    #[test]
+    fn public_assignment_strength_learns_concentration_and_refuses_a_fixed_strength_2933() {
+        let obb = SaeFitAssignmentKind::OrderedBetaBernoulli;
+        let expected_base = 1.0 / ((1.0_f64 / 64.0).exp() - 1.0);
+        assert_eq!(
+            resolve_public_assignment_strength(obb, 64, None, None),
+            Ok(SaePublicAssignmentStrength {
+                alpha: expected_base,
+                learnable_alpha: true,
+                sparsity_strength: 1.0,
+            })
+        );
+        assert_eq!(
+            resolve_public_assignment_strength(obb, 64, None, Some(0.25)),
+            Ok(SaePublicAssignmentStrength {
+                alpha: expected_base,
+                learnable_alpha: true,
+                sparsity_strength: 0.25,
+            })
+        );
+        assert_eq!(
+            resolve_public_assignment_strength(obb, 64, Some(2.5), None),
+            Ok(SaePublicAssignmentStrength {
+                alpha: 2.5,
+                learnable_alpha: false,
+                sparsity_strength: 1.0,
+            })
+        );
+        let refusal = resolve_public_assignment_strength(obb, 64, Some(2.5), Some(0.25))
+            .expect_err("a fixed concentration must refuse an explicit strength");
+        assert!(
+            refusal.contains("sparsity_weight") && refusal.contains("#2933 F45"),
+            "the refusal must name the dropped option and the finding: {refusal}"
+        );
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                resolve_public_assignment_strength(obb, 64, Some(invalid), None).is_err(),
+                "alpha={invalid} is outside the concentration domain"
+            );
+        }
+        for kind in [
+            SaeFitAssignmentKind::Softmax,
+            SaeFitAssignmentKind::ThresholdGate,
+            SaeFitAssignmentKind::TopK,
+        ] {
+            assert_eq!(
+                resolve_public_assignment_strength(kind, 64, Some(3.0), Some(0.5)),
+                Ok(SaePublicAssignmentStrength {
+                    alpha: 3.0,
+                    learnable_alpha: false,
+                    sparsity_strength: 0.5,
+                }),
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]

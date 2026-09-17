@@ -215,7 +215,7 @@ fn build_oos_atom(
 fn build_rho(
     regularization: SaeOosRegularization,
     latent_dims: &[usize],
-    assignment_mode: AssignmentMode,
+    assignment: &SaeAssignment,
 ) -> Result<SaeManifoldRho, String> {
     let k_atoms = latent_dims.len();
     let SaeOosRegularization {
@@ -248,7 +248,7 @@ fn build_rho(
         ard.push(Array1::from(values.clone()));
     }
     let rho = SaeManifoldRho::with_per_atom_smooth(log_lambda_sparse, log_lambda_smooth, ard)
-        .for_assignment(assignment_mode);
+        .for_assignment(assignment);
     rho.validate_log_strength_domain()
         .map_err(|error| format!("run_sae_manifold_oos: {error}"))?;
     Ok(rho)
@@ -412,7 +412,7 @@ pub fn run_sae_manifold_oos(request: SaeOosRequest) -> Result<SaeOosReport, Stri
     if !hybrid_linear_images.is_empty() {
         term.set_hybrid_linear_images(hybrid_linear_images.clone())?;
     }
-    let mut rho = build_rho(regularization, &latent_dims, mode)?;
+    let mut rho = build_rho(regularization, &latent_dims, &term.assignment)?;
     if cold_coords {
         term.seed_coords_by_decoder_projection(target.view())?;
     }
@@ -1040,7 +1040,7 @@ pub fn run_sae_manifold_certify_external(
         base_term.set_row_metric(metric)?;
     }
 
-    let initial_rho = build_rho(regularization, &latent_dims, mode)?;
+    let initial_rho = build_rho(regularization, &latent_dims, &base_term.assignment)?;
 
     let outcome = run_sae_manifold_certify(SaeCertifyRequest {
         base_term,

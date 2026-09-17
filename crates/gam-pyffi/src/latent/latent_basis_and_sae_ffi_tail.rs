@@ -467,7 +467,6 @@ impl Tier0SaeCore {
     scad_mcp_gamma=None,
     smoothness=1.0,
     alpha=None,
-    learnable_alpha=false,
     learning_rate=None,
     random_state=0,
     block_orthogonality_weight=0.0,
@@ -513,7 +512,6 @@ fn sae_manifold_fit_model<'py>(
     scad_mcp_gamma: Option<f64>,
     smoothness: f64,
     alpha: Option<f64>,
-    learnable_alpha: bool,
     learning_rate: Option<f64>,
     random_state: u64,
     block_orthogonality_weight: f64,
@@ -536,8 +534,6 @@ fn sae_manifold_fit_model<'py>(
     run_structure_search: bool,
     structured_residual_passes: usize,
 ) -> PyResult<PyObject> {
-    let sparsity_strength =
-        sparsity_strength.unwrap_or(gam::terms::sae::manifold::DEFAULT_SAE_SPARSITY_STRENGTH);
     let gpu_policy = gam::gpu::GpuPolicy::parse(gpu_policy).ok_or_else(|| {
         py_value_error(format!(
             "sae_manifold_fit gpu must be 'auto', 'off', or 'required'; got {gpu_policy:?}"
@@ -602,15 +598,17 @@ fn sae_manifold_fit_model<'py>(
         gumbel_temperature_schedule_from_pydict(gumbel_schedule).map_err(py_value_error)?;
     let resolved_tau =
         tau.unwrap_or_else(|| schedule.as_ref().map_or(0.5, |state| state.tau_start));
-    let resolved_alpha = alpha.unwrap_or_else(|| {
-        if assignment == "ordered_beta_bernoulli" && !learnable_alpha {
-            gam::terms::sae::assignment::default_ordered_beta_bernoulli_concentration_for_k_atoms(
-                k_atoms,
-            )
-        } else {
-            1.0
-        }
-    });
+    let strength = gam::terms::sae::manifold::resolve_public_assignment_strength(
+        gam::terms::sae::manifold::SaeFitAssignmentKind::from_tag(&assignment)
+            .map_err(py_value_error)?,
+        k_atoms,
+        alpha,
+        sparsity_strength,
+    )
+    .map_err(py_value_error)?;
+    let resolved_alpha = strength.alpha;
+    let learnable_alpha = strength.learnable_alpha;
+    let sparsity_strength = strength.sparsity_strength;
     let resolved_learning_rate = learning_rate.unwrap_or(if assignment == "threshold_gate" {
         0.05
     } else {

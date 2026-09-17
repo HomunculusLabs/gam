@@ -49,7 +49,6 @@ def test_heterogeneous_d_atom_with_fixed_d_row_block_penalty_raises_clear_error(
             decoder_incoherence_weight=0.1,
             nuclear_norm_weight=0.0,
             random_state=0,
-            alpha="auto",
         )
     msg = str(excinfo.value)
     # A direct, actionable engine error (moved into gam-sae under #2098/SPEC-8),
@@ -89,7 +88,6 @@ def test_isometry_gauge_is_admitted_on_heterogeneous_atom_dims() -> None:
             decoder_incoherence_weight=0.1,
             nuclear_norm_weight=0.0,
             random_state=0,
-            alpha="auto",
         )
     except Exception as exc:  # noqa: BLE001 - the claim is about ONE message
         assert "heterogeneous atom coordinate dims" not in str(exc), (
@@ -124,7 +122,6 @@ def test_heterogeneous_d_atom_passes_validation_when_row_block_penalties_disable
             nuclear_norm_weight=0.0,
             block_orthogonality_weight=0.0,
             random_state=0,
-            alpha="auto",
         )
     except ValueError as exc:
         assert "heterogeneous atom coordinate dims" not in str(exc), (

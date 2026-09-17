@@ -220,7 +220,7 @@ fn ridge_smoother_scale_is_unbiased_and_covers_2933_f40() {
         SaeManifoldTerm::new(vec![atom], assignment).expect("the atom matches its block")
     };
     let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)])
-        .for_assignment(AssignmentMode::softmax(1.0));
+        .for_assignment(&base_term.assignment);
     let channel_means = [2.0, -1.0, 0.5, 3.0, -2.0, 1.0, 0.7, -0.4];
     for (case, mean_scale) in [("zero mean", 0.0_f64), ("reproduced nonzero mean", 1.0)] {
         let mean = Array2::<f64>::from_shape_fn((n, p), |(row, out)| {

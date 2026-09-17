@@ -99,7 +99,7 @@ fn softmax_residual_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) 
     let term = SaeManifoldTerm::new(atoms, assignment)
         .expect("the assignment was built with exactly one block per atom");
     let rho = SaeManifoldRho::new(-1.0, -1.0, vec![Array1::from_vec(vec![-1.0]); k_atoms])
-        .for_assignment(mode);
+        .for_assignment(&term.assignment);
     (term, target, rho)
 }
 

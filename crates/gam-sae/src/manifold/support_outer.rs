@@ -2579,7 +2579,7 @@ mod tests {
                 log_lambda.to_vec(),
                 vec![Array1::zeros(1), Array1::zeros(2)],
             )
-            .for_assignment(mode)
+            .for_assignment(&dense_term.assignment)
         };
         let log_lambda = lambda.iter().map(|value| value.ln()).collect::<Vec<_>>();
         let dense_frozen = |log_lambda: &[f64]| {

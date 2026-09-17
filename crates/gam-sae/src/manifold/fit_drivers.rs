@@ -5959,7 +5959,7 @@ impl SaeManifoldTerm {
         step_size: f64,
         ridge_ext_coord: f64,
     ) -> Result<SaeManifoldLoss, String> {
-        *rho = rho.clone().for_assignment(self.assignment.mode);
+        *rho = rho.clone().for_assignment(&self.assignment);
         self.assignment.validate_rho_domain(rho)?;
         if !(step_size.is_finite() && step_size > 0.0) {
             return Err(format!(
@@ -6601,7 +6601,7 @@ impl SaeManifoldTerm {
     ) -> Result<JointFitOutcome, String> {
         let joint_fit_entered = std::time::Instant::now();
         let mut setup_marks: Vec<(&'static str, f64)> = Vec::new();
-        *rho = rho.clone().for_assignment(self.assignment.mode);
+        *rho = rho.clone().for_assignment(&self.assignment);
         self.assignment.validate_rho_domain(rho)?;
         if !(step_size.is_finite() && step_size > 0.0) {
             return Err(format!(

@@ -46,7 +46,6 @@ _REPRO = textwrap.dedent(
             decoder_incoherence_weight=0.1,
             nuclear_norm_weight=0.0,
             random_state=0,
-            alpha="auto",
         )
         print("COMPLETED_OK")
     except Exception as exc:  # a diagnosable Python exception is acceptable

@@ -204,7 +204,7 @@ fn loss_carries_the_jacobian_the_assembly_installs_2080() {
     let z = one_circle_wide_target(24, 8, 0.05);
     let term = two_circle_periodic_term(z.view(), 2, 1).0;
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 2])
-        .for_assignment(AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false));
+        .for_assignment(&term.assignment);
     let (threshold, temperature) = sigmoid_gate_frame(&term.assignment.mode)
         .expect("the fixture's ordered Beta--Bernoulli gates are per-logit sigmoids");
     let h = temperature * f64::EPSILON.cbrt();
@@ -615,7 +615,7 @@ fn installed_softmax_logit_block_holds_the_jacobian_block_2080() {
         term.assignment.logits[[row, 2]] = 0.0;
     }
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 3])
-        .for_assignment(AssignmentMode::softmax(temperature));
+        .for_assignment(&term.assignment);
     let weights = term.row_loss_weights.clone();
     let n = term.assignment.logits.nrows();
     let count = crate::assignment::simplex_gate_free_count(&term.assignment)

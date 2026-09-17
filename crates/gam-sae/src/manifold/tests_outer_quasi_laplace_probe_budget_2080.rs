@@ -328,9 +328,8 @@ fn reactive_entry_reseeds_nonzero_k2_seed_to_strict_separated_root_2080() {
         "regression requires the nonzero decoder seed that bypassed the old cold-entry placement; norms={seed_norms:?}"
     );
 
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; k])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
     let mut objective =
         SaeManifoldOuterObjective::new(term, z.clone(), None, init_rho, 8, 0.04, 1.0e-6, 1.0e-6);
@@ -480,9 +479,8 @@ fn run_wide_outer_fit(
 ) -> (f64, OuterProbeTelemetry) {
     let z = two_circle_wide_target(n, p, 0.03);
     let (term, seed_dispersion) = two_circle_periodic_term(z.view(), k, harmonics);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; k])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
     let seed = init_rho.to_flat();
     let n_params = seed.len();
@@ -527,9 +525,8 @@ fn run_k1_generated_seed_outer_fit(
 ) -> (f64, OuterProbeTelemetry) {
     let z = one_circle_wide_target(n, p, 0.05);
     let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, harmonics);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
     let n_params = init_rho.to_flat().len();
     let mut objective =
@@ -628,9 +625,8 @@ fn seeded_k1_circle_objective(
 ) {
     let z = one_circle_wide_target(cfg.n, cfg.p, cfg.sigma);
     let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, cfg.harmonics);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
     let seed = init_rho.to_flat();
     let objective = SaeManifoldOuterObjective::new(
@@ -990,9 +986,8 @@ fn entangled_two_circle_outer_reml_separates_2080() {
         _ => 0,
     };
     let (term, seed_dispersion) = two_circle_periodic_term(z.view(), k, harmonics);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; k])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
     let seed = init_rho.to_flat();
     let n_params = seed.len();
@@ -1276,9 +1271,8 @@ fn profile_wide_p_criterion_cost_2080() {
         let n = 96usize;
         let z = one_circle_wide_target(n, p, 0.05);
         let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, harmonics);
-        let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
         let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
-            .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+            .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
             .expect("seed dispersion is finite and strictly positive");
         let beta_dim = term.beta_dim();
 
@@ -1347,9 +1341,8 @@ fn saturating_gate_specimen_prices_a_finite_root_2080() {
     let (learning_rate, ridge_ext_coord, ridge_beta) = (0.04, 1.0e-6, 1.0e-6);
     let z = one_circle_wide_target(n, p, 0.05);
     let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, harmonics);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
 
     // The root: the criterion's own initial fit and converge.
@@ -1462,9 +1455,8 @@ fn zz_measure_wide_p_criterion_cost_localizer_2080() {
         let n = 96usize;
         let z = one_circle_wide_target(n, p, 0.05);
         let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, harmonics);
-        let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
         let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
-            .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+            .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
             .expect("seed dispersion is finite and strictly positive");
         let beta_dim = term.beta_dim();
 
@@ -1581,11 +1573,10 @@ fn zz_measure_2439_value_vs_gradient_inner_mode() {
     let p = 48usize;
     let z = one_circle_wide_target(n, p, 0.05);
     let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, 2);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let imi = 16usize;
     let (lr, re, rb) = (0.04_f64, 1.0e-6_f64, 1.0e-6_f64);
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
     let rho_flat = rho.to_flat();
 
@@ -1692,7 +1683,6 @@ fn zz_measure_2228_value_lane_budget_sweep() {
     let n = 96usize;
     let p = 48usize;
     let z = one_circle_wide_target(n, p, 0.05);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let (lr, re, rb) = (0.04_f64, 1.0e-6_f64, 1.0e-6_f64);
     // The sweep's binary CONVERGED/REFUSED outcome only answers the rate-vs-floor
     // question if every budget is run against the same well-posed wide-p target.
@@ -1710,7 +1700,7 @@ fn zz_measure_2228_value_lane_budget_sweep() {
         // budget it names.
         let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, 2);
         let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
-            .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+            .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
             .expect("seed dispersion is finite and strictly positive");
         // FULL budget (refine_progress_extension = true): the arm that must reach
         // the root the test prices against.
@@ -1796,9 +1786,8 @@ fn zz_measure_2228_value_lane_budget_sweep() {
 fn zz_measure_k2_wide_p_gradient_is_the_objectives_2080() {
     let z = two_circle_wide_target(96, 96, 0.03);
     let (base, seed_dispersion) = two_circle_periodic_term(z.view(), 2, 2);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 2])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &base.assignment)
         .expect("seed dispersion is finite and strictly positive");
 
     // Read the question at BOTH ends of the trajectory: the cold seed, where the
@@ -1912,9 +1901,8 @@ fn zz_measure_k2_wide_p_gradient_is_the_objectives_2080() {
 fn zz_measure_k2_wide_p_gradient_arm_vs_solver_arm_2080() {
     let z = two_circle_wide_target(96, 96, 0.03);
     let (base, seed_dispersion) = two_circle_periodic_term(z.view(), 2, 2);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 2])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &base.assignment)
         .expect("seed dispersion is finite and strictly positive");
 
     // The shared starting state: the plateau the production solve reaches and
@@ -2092,9 +2080,8 @@ fn zz_measure_k2_wide_p_gradient_arm_vs_solver_arm_2080() {
 fn zz_measure_k2_wide_p_residual_block_split_2080() {
     let z = two_circle_wide_target(96, 96, 0.03);
     let (base, seed_dispersion) = two_circle_periodic_term(z.view(), 2, 2);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 2])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &base.assignment)
         .expect("seed dispersion is finite and strictly positive");
 
     for &warmup in &[0usize, 32, 128] {
@@ -2214,9 +2201,8 @@ fn zz_measure_k2_wide_p_residual_block_split_2080() {
 fn zz_measure_k2_wide_p_beta_step_is_annihilated_2080() {
     let z = two_circle_wide_target(96, 96, 0.03);
     let (base, seed_dispersion) = two_circle_periodic_term(z.view(), 2, 2);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 2])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &base.assignment)
         .expect("seed dispersion is finite and strictly positive");
 
     for &warmup in &[32usize, 128] {
@@ -2367,9 +2353,8 @@ fn zz_measure_k2_wide_p_beta_step_is_annihilated_2080() {
 fn zz_measure_k2_wide_p_schur_floor_clamps_the_residual_2080() {
     let z = two_circle_wide_target(96, 96, 0.03);
     let (base, seed_dispersion) = two_circle_periodic_term(z.view(), 2, 2);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 2])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &base.assignment)
         .expect("seed dispersion is finite and strictly positive");
 
     for &warmup in &[32usize, 128] {
@@ -2673,9 +2658,8 @@ fn zz_measure_wide_p_cost_exponent_2080() {
             let p = widths[wi];
             let z = one_circle_wide_target(n, p, 0.05);
             let (base, seed_dispersion) = two_circle_periodic_term(z.view(), 1, harmonics);
-            let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
             let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
-                .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+                .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &base.assignment)
                 .expect("seed dispersion is finite and strictly positive");
 
             // Phase W: the inner evidence fit on a FIXED iteration budget.
@@ -2992,7 +2976,6 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
     let p = 48usize;
     let z = one_circle_wide_target(n, p, 0.05);
     let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, 2);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     // Refine budget for BOTH arms. Measured (`zz_measure_2228_value_lane_budget_sweep`,
     // run 30150455983): the full arm REFUSES at 8 and converges from 16 on, with the
     // value identical to ten significant figures across 16/32/64/128, while the coarse
@@ -3009,7 +2992,7 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
     // coarse probe budget to reach the fixed point. The sanity check below asserts
     // the fixture actually exercises that regime (else the invariant is vacuous).
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
     let rho_flat = rho.to_flat();
 
@@ -3205,10 +3188,9 @@ fn zz_measure_value_lane_root_continuation_2228() {
     let p = 48usize;
     let z = one_circle_wide_target(n, p, 0.05);
     let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, 2);
-    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let (lr, re, rb) = (0.04_f64, 1.0e-6_f64, 1.0e-6_f64);
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
-        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
     let mut continued = term.clone();
     let root16 = continued

@@ -840,7 +840,7 @@ pub fn run_sae_crosscoder_fit(
         .map_err(SaeFitError::Fit)?;
     request.initial_rho = request
         .initial_rho
-        .for_assignment(request.base_term.assignment.mode);
+        .for_assignment(&request.base_term.assignment);
     request
         .base_term
         .assignment

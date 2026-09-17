@@ -3,7 +3,7 @@
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
-use crate::manifold::SaeManifoldRho;
+use crate::manifold::{AssignmentStrengthLayout, SaeManifoldRho};
 use gam_terms::analytic_penalties::{
     AnalyticPenalty, OrderedBetaBernoulliHessianDiagThirdChannels,
     OrderedBetaBernoulliLogitAdjointData, OrderedBetaBernoulliPenalty,
@@ -356,23 +356,15 @@ impl std::fmt::Display for GateConfigurationRefusal {
     }
 }
 
-/// Which quantity `SaeManifoldRho::log_lambda_sparse` carries for an ordered
-/// Beta--Bernoulli assignment; see [`SaeAssignment::ordered_beta_bernoulli_prior_parameters`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OrderedBetaBernoulliSparseCoordinate {
-    /// `log(concentration / α_mode)`: the concentration is an outer parameter and the
-    /// prior weight is one.
-    LogConcentrationOffset,
-    /// `log(weight)`: the concentration is fixed and the coordinate scales the prior.
-    LogPenaltyWeight,
-}
-
-/// The ordered Beta--Bernoulli prior at one `rho` is `weight · P(concentration)`.
+/// The ordered Beta--Bernoulli prior at one `rho` is the complete prior `P(concentration)`
+/// at weight one, with its partition; see
+/// [`SaeAssignment::ordered_beta_bernoulli_prior_parameters`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct OrderedBetaBernoulliPriorParameters {
     pub(crate) concentration: f64,
-    pub(crate) weight: f64,
-    pub(crate) sparse_coordinate: OrderedBetaBernoulliSparseCoordinate,
+    /// Whether `rho.log_lambda_sparse` is the outer coordinate `log(concentration / α_mode)`.
+    /// Otherwise the concentration is fixed and no coordinate enters the prior.
+    pub(crate) concentration_is_learnable: bool,
 }
 
 /// Per-row latent assignment state — the DENSE-CERTIFICATION / debug-and-research
@@ -635,15 +627,16 @@ impl SaeAssignment {
         }
     }
 
-    /// The ordered Beta--Bernoulli prior this assignment scores at `rho`,
-    /// `weight · P(concentration)`, with the meaning of `rho.log_lambda_sparse` named.
+    /// The ordered Beta--Bernoulli prior this assignment scores at `rho`: the complete
+    /// prior `P(concentration)` at weight one.
     ///
-    /// That one stored coordinate carries two different quantities. While the
-    /// concentration is effectively learnable ([`Self::effective_alpha_is_learnable`]) it is
-    /// `log(concentration / α_mode)` and the weight is one. Otherwise the concentration is
-    /// fixed (the per-fit override when present, else the mode's `α`) and the coordinate is
-    /// `log(weight)`. A transformation of the mode or of that coordinate preserves the
-    /// objective only if both resolved fields are unchanged. `None` for other modes.
+    /// While the concentration is effectively learnable ([`Self::effective_alpha_is_learnable`])
+    /// `rho.log_lambda_sparse` is `log(concentration / α_mode)`. Otherwise the concentration is
+    /// fixed (the per-fit override when present, else the mode's `α`), the stored coordinate is
+    /// an inert placeholder, and the rho layout carries no sparse coordinate. There is no
+    /// tempering strength: `λ·L` with `λ ≠ 1` has a partition over the relaxed gates that does
+    /// not reduce to the one-dimensional rate integral, and sparsity is already tuned through
+    /// the concentration (#2933 F45). `None` for other modes.
     pub(crate) fn ordered_beta_bernoulli_prior_parameters(
         &self,
         rho: &SaeManifoldRho,
@@ -656,14 +649,12 @@ impl SaeAssignment {
                 concentration: resolve_learnable_weight(alpha, rho.log_lambda_sparse).map_err(
                     |error| format!("ordered Beta--Bernoulli learnable concentration: {error}"),
                 )?,
-                weight: 1.0,
-                sparse_coordinate: OrderedBetaBernoulliSparseCoordinate::LogConcentrationOffset,
+                concentration_is_learnable: true,
             }
         } else {
             OrderedBetaBernoulliPriorParameters {
                 concentration: self.ordered_beta_bernoulli_alpha_override.unwrap_or(alpha),
-                weight: rho.lambda_sparse()?,
-                sparse_coordinate: OrderedBetaBernoulliSparseCoordinate::LogPenaltyWeight,
+                concentration_is_learnable: false,
             }
         };
         Ok(Some(parameters))
@@ -672,13 +663,10 @@ impl SaeAssignment {
     pub(crate) fn validate_rho_domain(&self, rho: &SaeManifoldRho) -> Result<(), String> {
         self.validate_gate_configuration()
             .map_err(|refusal| refusal.to_string())?;
+        self.validate_rho_layout(rho)?;
         rho.validate_log_strength_domain()?;
-        if let AssignmentMode::OrderedBetaBernoulli {
-            alpha,
-            learnable_alpha: true,
-            ..
-        } = self.mode
-            && self.ordered_beta_bernoulli_alpha_override.is_none()
+        if let AssignmentMode::OrderedBetaBernoulli { alpha, .. } = self.mode
+            && self.effective_alpha_is_learnable()
         {
             resolve_learnable_weight(alpha, rho.log_lambda_sparse).map_err(|error| {
                 format!("ordered Beta--Bernoulli learnable concentration: {error}")
@@ -687,16 +675,65 @@ impl SaeAssignment {
         Ok(())
     }
 
+    /// Refuse a rho whose ordered Beta--Bernoulli layout contradicts this assignment
+    /// (#2933 F45). A layout bound while the concentration was learnable carries a sparse
+    /// coordinate, and a per-fit override installed afterwards removes it, so the flat length
+    /// the objective was built with no longer describes the prior. Rebinding here would change
+    /// that length mid-objective, so the contradiction is an error. An unbound rho
+    /// ([`AssignmentStrengthLayout::PenaltyWeight`], the constructors' tag) is not an ordered
+    /// Beta--Bernoulli layout and is admitted: its coordinate is the concentration offset while
+    /// the concentration is learnable, and no fixed-concentration channel reads it.
+    pub(crate) fn validate_rho_layout(&self, rho: &SaeManifoldRho) -> Result<(), String> {
+        let bound = rho.assignment_strength_layout;
+        let expected = match self.mode {
+            AssignmentMode::OrderedBetaBernoulli { .. } if self.effective_alpha_is_learnable() => {
+                AssignmentStrengthLayout::ConcentrationOffset
+            }
+            AssignmentMode::OrderedBetaBernoulli { .. } => {
+                AssignmentStrengthLayout::FixedConcentration
+            }
+            _ => {
+                return if matches!(
+                    bound,
+                    AssignmentStrengthLayout::ConcentrationOffset
+                        | AssignmentStrengthLayout::FixedConcentration
+                ) {
+                    Err(format!(
+                        "rho layout {bound:?} was bound for an ordered Beta--Bernoulli prior, \
+                         but the assignment is {} (#2933 F45)",
+                        self.mode.family_label()
+                    ))
+                } else {
+                    Ok(())
+                };
+            }
+        };
+        if matches!(
+            bound,
+            AssignmentStrengthLayout::ConcentrationOffset
+                | AssignmentStrengthLayout::FixedConcentration
+        ) && bound != expected
+        {
+            return Err(format!(
+                "rho layout {bound:?} contradicts the ordered Beta--Bernoulli concentration, \
+                 which is effectively {} (override {:?}); bind the rho after the per-fit \
+                 configuration (#2933 F45)",
+                if self.effective_alpha_is_learnable() {
+                    "learnable"
+                } else {
+                    "fixed"
+                },
+                self.ordered_beta_bernoulli_alpha_override
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn learnable_alpha_rho_domain(&self) -> Result<Option<(f64, f64)>, String> {
-        let AssignmentMode::OrderedBetaBernoulli {
-            alpha,
-            learnable_alpha: true,
-            ..
-        } = self.mode
-        else {
+        let AssignmentMode::OrderedBetaBernoulli { alpha, .. } = self.mode else {
             return Ok(None);
         };
-        if self.ordered_beta_bernoulli_alpha_override.is_some() {
+        if !self.effective_alpha_is_learnable() {
             return Ok(None);
         }
         gam_terms::analytic_penalties::learnable_weight_coordinate_domain(alpha)
@@ -1256,8 +1293,7 @@ pub(crate) fn flat_logits(logits: ArrayView2<'_, f64>) -> Array1<f64> {
 /// honoring #Bug6 (α is FIXED to the forward-gate value whenever an override
 /// pins it — see [`SaeAssignment::ordered_beta_bernoulli_prior_parameters`]) and #Bug4
 /// (ungated atoms are inert columns excluded from value/gradient/curvature).
-/// Returns `(penalty, rho_view)`; the fixed-α branch uses the `lambda_sparse`
-/// weight convention with an empty `rho_view`.
+/// Returns `(penalty, rho_view)` at weight one; the fixed-α branch has an empty `rho_view`.
 fn ordered_beta_bernoulli_prior_penalty(
     assignment: &SaeAssignment,
     rho: &SaeManifoldRho,
@@ -1271,10 +1307,9 @@ fn ordered_beta_bernoulli_prior_penalty(
             "ordered Beta--Bernoulli prior requires an ordered Beta--Bernoulli assignment"
                 .to_string()
         })?;
-    let learnable = parameters.sparse_coordinate
-        == OrderedBetaBernoulliSparseCoordinate::LogConcentrationOffset;
+    let learnable = parameters.concentration_is_learnable;
     // A learnable penalty re-resolves `base · exp(ρ)` from its own rho view, so it keeps
-    // the base; a fixed penalty carries the resolved concentration and weight directly.
+    // the base; a fixed penalty carries the resolved concentration directly.
     let alpha_eff = if learnable {
         base_alpha
     } else {
@@ -1297,7 +1332,6 @@ fn ordered_beta_bernoulli_prior_penalty(
     let rho_view = if learnable {
         Array1::from_vec(vec![rho.log_lambda_sparse])
     } else {
-        penalty.weight = parameters.weight;
         Array1::zeros(0)
     };
     Ok((penalty, rho_view))
@@ -1499,16 +1533,11 @@ pub(crate) fn assignment_prior_value_weighted(
                 temperature,
                 row_weights,
             )?;
-            let energy = penalty.value(target.view(), rho_view.view());
-            // #2933 F45 — with a learnable concentration the prior is `exp(−L)`, a density over
-            // relaxed gates only with its partition `C(a_k, N)`. The fixed-concentration branch
-            // scores `λ_sparse·L`, whose normalizer is not computed, so it stays an
-            // unnormalized energy.
-            if penalty.learnable_alpha {
-                energy + penalty.log_partition(target.view(), rho_view.view())?.0
-            } else {
-                energy
-            }
+            // #2933 F45 — the prior `exp(−L)` is a density over the relaxed gates only with its
+            // partition `C(a_k, N)`. Both branches score it at weight one; with a fixed
+            // concentration the partition is a constant, and nothing optimized enters it.
+            penalty.value(target.view(), rho_view.view())
+                + penalty.log_partition(target.view(), rho_view.view())?.0
         }
         AssignmentMode::ThresholdGate {
             temperature,
@@ -1590,7 +1619,9 @@ pub(crate) fn assignment_prior_log_strength_derivative_weighted(
                 penalty.grad_rho(target.view(), rho_view.view())[0]
                     + penalty.log_partition(target.view(), rho_view.view())?.1[0]
             } else {
-                penalty.value(target.view(), rho_view.view())
+                // A fixed concentration leaves `log_lambda_sparse` out of the prior value, so
+                // the derivative is an exact zero, like the absent coordinate it would carry.
+                0.0
             }
         }
         // No prior term ⇒ no ρ-derivative (sparsity lives in the fixed support).
@@ -1676,16 +1707,13 @@ pub(crate) fn assignment_prior_log_strength_hdiag_weighted(
                 temperature,
                 row_weights,
             )?;
-            let mut d = if penalty.learnable_alpha {
-                penalty.hessian_diag_log_alpha_derivative(target.view(), rho_view.view())
-            } else {
-                penalty
-                    .hessian_diag(target.view(), rho_view.view())
-                    .ok_or_else(|| {
-                        "ordered Beta--Bernoulli assignment log-strength hessian diag unavailable"
-                            .to_string()
-                    })?
-            };
+            if !penalty.learnable_alpha {
+                // No coordinate enters a fixed-concentration prior, so its curvature does not
+                // move with `log_lambda_sparse`.
+                return Ok(Array1::<f64>::zeros(target.len()));
+            }
+            let mut d =
+                penalty.hessian_diag_log_alpha_derivative(target.view(), rho_view.view());
             // #Bug4: zero the curvature diagonal of ungated (inert) columns so the
             // log-det ρ-trace never charges them (the array methods are not
             // internally column-masked).
@@ -2236,9 +2264,10 @@ fn mask_fixed_logit_entries(assignment: &SaeAssignment, arr: &mut Array1<f64>) {
     }
 }
 
-/// #991-weighted log-strength/target mixed derivative of the assignment prior. The fixed-α
-/// fall-through reuses the `w_i`-weighted gradient; the learnable-α ordered Beta--Bernoulli branch
-/// uses the same weighted active mass as the value, gradient, and Hessian.
+/// #991-weighted log-strength/target mixed derivative of the assignment prior. The
+/// degree-one strength families reuse the `w_i`-weighted gradient; the learnable-α ordered
+/// Beta--Bernoulli branch uses the same weighted active mass as the value, gradient, and
+/// Hessian, and a fixed-α ordered Beta--Bernoulli prior has no strength to mix with.
 pub(crate) fn assignment_prior_log_strength_target_mixed_weighted(
     assignment: &SaeAssignment,
     rho: &SaeManifoldRho,
@@ -2257,10 +2286,14 @@ pub(crate) fn assignment_prior_log_strength_target_mixed_weighted(
         return Ok(Array1::<f64>::zeros(target.len()));
     }
     // #Bug6: the α-target mixed derivative only exists when α is EFFECTIVELY
-    // learnable (mode-learnable AND not pinned by an override); otherwise α is a
-    // constant and there is no log-α channel, so fall through to the grad_hdiag
-    // (fixed-α) path.
+    // learnable (mode-learnable AND not pinned by an override). Otherwise α is a
+    // constant, the prior sits at weight one (#2933 F45), and no coordinate enters it.
     match assignment.mode {
+        AssignmentMode::OrderedBetaBernoulli { .. }
+            if !assignment.effective_alpha_is_learnable() =>
+        {
+            Ok(Array1::<f64>::zeros(target.len()))
+        }
         AssignmentMode::OrderedBetaBernoulli {
             temperature, alpha, ..
         } if assignment.effective_alpha_is_learnable() => {
@@ -2575,12 +2608,12 @@ mod ordered_alpha_domain_tests {
         assert!(upper < LOG_STRENGTH_MAX);
 
         let legal = SaeManifoldRho::new(upper, 0.0, vec![Array1::zeros(1); 2])
-            .for_assignment(assignment.mode);
+            .for_assignment(&assignment);
         assignment
             .validate_rho_domain(&legal)
             .expect("closed effective-alpha upper face is legal");
         let invalid = SaeManifoldRho::new(upper + 1.0e-6, 0.0, vec![Array1::zeros(1); 2])
-            .for_assignment(assignment.mode);
+            .for_assignment(&assignment);
         assert!(assignment.validate_rho_domain(&invalid).is_err());
 
         assert_eq!(
@@ -2946,7 +2979,7 @@ mod ungated_background_jvp_2933_tests {
                 let mut scratch = [f64::NAN; 2];
                 assert!(assignment.try_assignments_row_into(0, &mut scratch).is_err());
                 let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::zeros(1); 2])
-                    .for_assignment(assignment.mode);
+                    .for_assignment(&assignment);
                 let rho_refusal = assignment
                     .validate_rho_domain(&rho)
                     .expect_err("the rho-domain seam must refuse too");
@@ -3031,7 +3064,7 @@ mod ungated_background_jvp_2933_tests {
         }
         .to_string();
         assert_eq!(refused.try_assignments_row(0), Err(expected.clone()));
-        let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::zeros(1); 3]).for_assignment(softmax);
+        let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::zeros(1); 3]).for_assignment(&refused);
         assert_eq!(refused.validate_rho_domain(&rho), Err(expected));
     }
 }
@@ -3066,7 +3099,7 @@ mod threshold_gate_partition_2933_tests {
 
     fn strength_rho(assignment: &SaeAssignment, strength: f64) -> SaeManifoldRho {
         SaeManifoldRho::new(strength.ln(), 0.0, vec![Array1::zeros(1); assignment.k_atoms()])
-            .for_assignment(assignment.mode)
+            .for_assignment(assignment)
     }
 
     /// The production negative log prior in logit coordinates: prior value plus Jacobian.
@@ -3221,7 +3254,7 @@ mod ordered_beta_bernoulli_partition_2933_tests {
     /// `ρ = ln α` against the unit base concentration.
     fn concentration_rho(assignment: &SaeAssignment, alpha: f64) -> SaeManifoldRho {
         SaeManifoldRho::new(alpha.ln(), 0.0, vec![Array1::zeros(1); assignment.k_atoms()])
-            .for_assignment(assignment.mode)
+            .for_assignment(assignment)
     }
 
     fn negative_log_prior(assignment: &SaeAssignment, rho: &SaeManifoldRho) -> f64 {
@@ -3335,9 +3368,8 @@ mod ordered_beta_bernoulli_partition_2933_tests {
 #[cfg(test)]
 mod ordered_beta_bernoulli_partition_columns_2933_tests {
     //! #2933 F45 — the learnable ordered Beta--Bernoulli normalizer is `Σ_k log C(a_k, N)` over
-    //! exactly the free columns at the effective row count `N = Σ w_i`, its log-concentration
-    //! derivative is a central difference of the value, and the fixed-concentration branch
-    //! (`λ_sparse·L`, whose normalizer is not computed) is left an unnormalized energy.
+    //! exactly the free columns at the effective row count `N = Σ w_i`, and its log-concentration
+    //! derivative is a central difference of the value.
     use super::*;
     use gam_terms::analytic_penalties::ordered_beta_bernoulli_log_partition;
     use ndarray::array;
@@ -3357,7 +3389,7 @@ mod ordered_beta_bernoulli_partition_columns_2933_tests {
         .expect("one logit column, coordinate block and manifold per atom");
         assignment.ungated = vec![false, true, false];
         let rho = SaeManifoldRho::new(alpha.ln(), 0.0, vec![Array1::zeros(1); 3])
-            .for_assignment(assignment.mode);
+            .for_assignment(&assignment);
         let (penalty, rho_view) = ordered_beta_bernoulli_prior_penalty(
             &assignment,
             &rho,
@@ -3401,25 +3433,157 @@ mod ordered_beta_bernoulli_partition_columns_2933_tests {
             "log-concentration derivative {derivative:.12e} vs central difference \
              {difference:.12e}"
         );
+    }
+}
 
-        let mut fixed = assignment.clone();
-        fixed.mode = AssignmentMode::ordered_beta_bernoulli(temperature, alpha, false);
-        let strength_rho = SaeManifoldRho::new(2.0_f64.ln(), 0.0, vec![Array1::zeros(1); 3])
-            .for_assignment(fixed.mode);
-        let (tempered, tempered_view) = ordered_beta_bernoulli_prior_penalty(
-            &fixed,
-            &strength_rho,
-            alpha,
-            temperature,
-            Some(&weights),
+#[cfg(test)]
+mod ordered_beta_bernoulli_fixed_concentration_2933_tests {
+    //! #2933 F45 — with its concentration fixed, by the mode or by a per-fit override, the
+    //! ordered Beta--Bernoulli prior is the complete prior `exp(−L)` at weight one plus its
+    //! constant partition `Σ_k log C(a_k, N)`. `rho.log_lambda_sparse` is then a placeholder
+    //! that must not enter the value: a tempering `λ·L` has a partition over the relaxed gates
+    //! that the one-dimensional rate integral does not give, and before this change the branch
+    //! scored `λ·L` with no normalizer at all. Every expectation is built from an
+    //! [`OrderedBetaBernoulliPenalty`] at the stated concentration and
+    //! [`ordered_beta_bernoulli_log_partition`], so no assertion reads the resolution it checks.
+    use super::*;
+    use gam_terms::analytic_penalties::ordered_beta_bernoulli_log_partition;
+    use ndarray::array;
+
+    const OVERRIDE_ALPHA: f64 = 0.6;
+
+    /// A fixed-concentration assignment, either by its mode or by an override of a learnable
+    /// mode whose base concentration differs from the override.
+    fn fixed_assignment(
+        logits: Array2<f64>,
+        temperature: f64,
+        alpha: f64,
+        by_override: bool,
+    ) -> SaeAssignment {
+        let (n, k) = logits.dim();
+        let mode = if by_override {
+            AssignmentMode::ordered_beta_bernoulli(temperature, 4.0 * alpha, true)
+        } else {
+            AssignmentMode::ordered_beta_bernoulli(temperature, alpha, false)
+        };
+        let mut assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+            logits,
+            vec![Array2::<f64>::zeros((n, 1)); k],
+            vec![LatentManifold::Euclidean; k],
+            mode,
         )
-        .expect("fixed ordered Beta--Bernoulli penalty");
-        assert_eq!(
-            assignment_prior_value_weighted(&fixed, &strength_rho, Some(&weights))
-                .expect("admitted prior value"),
-            tempered.value(target.view(), tempered_view.view()),
-            "the tempered fixed-concentration branch has no computed normalizer and must score \
-             only its energy"
-        );
+        .expect("one logit column, coordinate block and manifold per atom");
+        if by_override {
+            assignment.set_ordered_beta_bernoulli_alpha_override(Some(alpha));
+        }
+        assignment
+    }
+
+    fn placeholder_rho(k: usize, log_lambda_sparse: f64) -> SaeManifoldRho {
+        SaeManifoldRho::new(log_lambda_sparse, 0.0, vec![Array1::zeros(1); k])
+    }
+
+    fn trapezoid(range: f64, h: f64, mut f: impl FnMut(f64) -> f64) -> f64 {
+        let count = (range / h).round() as i64;
+        (-count..=count).map(|i| h * f(i as f64 * h)).sum()
+    }
+
+    /// No data: the production prior value plus the logit Jacobian integrates to one over the
+    /// logit for every concentration, temperature and placeholder. Before the change the mass
+    /// was `λ`-dependent and `C(α, 1) ≠ 1` even at `λ = 1`.
+    #[test]
+    fn fixed_concentration_prior_integrates_to_one_for_every_placeholder_2933() {
+        for by_override in [false, true] {
+            for temperature in [0.5_f64, 1.7] {
+                for alpha in [0.1_f64, 1.0, 10.0] {
+                    for log_lambda_sparse in [0.3_f64.ln(), 0.0, 3.0_f64.ln()] {
+                        let mut assignment =
+                            fixed_assignment(Array2::zeros((1, 1)), temperature, alpha, by_override);
+                        let rho = placeholder_rho(1, log_lambda_sparse);
+                        let mass = temperature
+                            * trapezoid(60.0, 1.0 / 16.0, |x| {
+                                assignment.logits[[0, 0]] = temperature * x;
+                                let negative_log_prior =
+                                    assignment_prior_value_weighted(&assignment, &rho, None)
+                                        .expect("admitted prior value")
+                                        + gate_logit_jacobian_value_weighted(&assignment, None);
+                                (-negative_log_prior).exp()
+                            });
+                        assert!(
+                            (mass - 1.0).abs() <= 1.0e-10,
+                            "fixed ordered Beta--Bernoulli prior (override={by_override}) at \
+                             α={alpha}, τ={temperature}, log_lambda_sparse={log_lambda_sparse:.4} \
+                             has no-data mass {mass:.15e}, not one"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// With data, row weights and an ungated column, the value is the weight-one energy plus
+    /// the free columns' partition at `N = Σ w_i`, whatever the placeholder holds; its central
+    /// difference in `log_lambda_sparse` is exactly zero, and so is the derivative channel.
+    #[test]
+    fn fixed_concentration_prior_is_complete_and_reads_no_strength_2933() {
+        let logits = array![[1.1, -0.3, 0.6], [-1.8, 2.0, -0.2], [0.4, 0.9, -2.5]];
+        let weights = [0.5, 1.0, 2.0];
+        let temperature = 0.7_f64;
+        let alpha = OVERRIDE_ALPHA;
+        let target = Array1::from_iter(logits.iter().copied());
+        let rows: f64 = weights.iter().sum();
+        let mut energy_penalty = OrderedBetaBernoulliPenalty::new(3, alpha, temperature, false)
+            .with_row_weights(Some(&weights));
+        energy_penalty.fixed_columns = Some(vec![false, true, false]);
+        let energy = energy_penalty.value(target.view(), Array1::<f64>::zeros(0).view());
+        let partition: f64 = [0usize, 2]
+            .iter()
+            .map(|&k| {
+                let mean = (alpha / (alpha + 1.0)).powi(k as i32 + 1);
+                ordered_beta_bernoulli_log_partition(mean / (1.0 - mean), rows)
+                    .expect("a, N > 0")
+                    .value
+            })
+            .sum();
+        let expected = energy + partition;
+        for by_override in [false, true] {
+            let mut assignment = fixed_assignment(logits.clone(), temperature, alpha, by_override);
+            assignment.ungated = vec![false, true, false];
+            for log_lambda_sparse in [2.0_f64.ln(), -1.5] {
+                let rho = placeholder_rho(3, log_lambda_sparse);
+                let value = assignment_prior_value_weighted(&assignment, &rho, Some(&weights))
+                    .expect("admitted prior value");
+                assert!(
+                    (value - expected).abs() <= 1.0e-12 * (1.0 + expected.abs()),
+                    "override={by_override}, log_lambda_sparse={log_lambda_sparse}: prior value \
+                     {value:.15e}, but the weight-one energy plus Σ log C(a_k, {rows}) is \
+                     {expected:.15e}"
+                );
+                let h = 1.0e-3;
+                let shifted = |delta: f64| {
+                    let mut moved = rho.clone();
+                    moved.log_lambda_sparse += delta;
+                    assignment_prior_value_weighted(&assignment, &moved, Some(&weights))
+                        .expect("admitted prior value")
+                };
+                assert_eq!(
+                    shifted(h),
+                    shifted(-h),
+                    "override={by_override}: the fixed-concentration prior must not read \
+                     log_lambda_sparse"
+                );
+                assert_eq!(
+                    assignment_prior_log_strength_derivative_weighted(
+                        &assignment,
+                        &rho,
+                        Some(&weights)
+                    )
+                    .expect("admitted derivative"),
+                    0.0,
+                    "override={by_override}: the log-strength derivative of a prior that does \
+                     not read the coordinate is zero"
+                );
+            }
+        }
     }
 }
