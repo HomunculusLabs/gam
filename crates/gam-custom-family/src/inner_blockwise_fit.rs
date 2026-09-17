@@ -2780,6 +2780,68 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
     })
 }
 
+/// Seat every constrained block's starting β inside the constraint set THIS
+/// evaluation declares, before anything evaluates the family there (#2714).
+///
+/// A warm seed is the mode another evaluation solved, under that evaluation's
+/// constraints. When a family's constraints move with an outer coordinate, the
+/// seed can sit outside the moved set. The latent survival chart is the case
+/// this was measured on: its derivative guard `X_D β + o_D(θ) ≥ guard` moves
+/// with θ, and job 657828 (`8c00ee3bb`) refused every backtracking probe of
+/// `latent_loaded_vs_unloaded_fit_selects_its_background_with_rho_2714` at
+/// entry, 0.009 s each, with `latent survival exact event requires positive
+/// finite baseline hazard derivative, got -0.558`. No inner cycle ran. Those
+/// trial points have nonempty feasible sets. They were refused only because the
+/// seed came from an earlier probe at another θ. Seeds 1–8 then inherited the
+/// same seed and were refused before solver start with the identical value.
+///
+/// `post_update_block_beta` cannot supply this. A constrained block's hook may
+/// not repair (`reject_constrained_post_update_repair`), and the latent families
+/// answer with the identity. The constraint is represented analytically, so the
+/// repair belongs here, once, against the represented set. The gate is the one
+/// the constrained joint-Newton cycle already refuses on
+/// (`check_linear_feasibility`). A seed within the solver's own primal-feasibility
+/// contract passes through unchanged, so feasible warm starts keep their exact
+/// bits. A seed beyond it takes the strictly interior projection that the
+/// reduced-face solve uses for an infeasible base. A set with no certified
+/// interior point stays a typed trial-point refusal.
+fn seat_inner_start_inside_block_constraints<F: CustomFamily + Clone + Send + Sync + 'static>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+    states: &mut [ParameterBlockState],
+) -> Result<(), CustomFamilyError> {
+    for b in 0..specs.len() {
+        let Some(constraints) = family.block_linear_constraints(states, b, &specs[b])? else {
+            continue;
+        };
+        let Err(infeasible) =
+            crate::blockwise_solve::check_linear_feasibility(&states[b].beta, &constraints)
+        else {
+            continue;
+        };
+        let seated = gam_solve::active_set::project_point_strictly_into_feasible_constraint_set(
+            &states[b].beta,
+            &constraints,
+        )
+        .map_err(|error| {
+            CustomFamilyError::trial_point(format!(
+                "inner start of block '{}' lies outside this evaluation's constraints ({infeasible}) \
+                 and the constraint set has no certified interior point: {error}",
+                specs[b].name
+            ))
+        })?;
+        log::info!(
+            "[PIRLS/inner start] block '{}' seed lies outside this evaluation's constraints \
+             ({infeasible}); seated strictly inside them before the first evaluation (#2714)",
+            specs[b].name
+        );
+        states[b].beta.assign(&seated);
+        // A later block's constraints may read this block's predictor.
+        refresh_single_block_eta(family, specs, states, b)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     specs: &[ParameterBlockSpec],
@@ -3235,6 +3297,7 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
         cached_active_sets = seed.active_sets.clone();
         refresh_all_block_etas(family, specs, &mut states)?;
     }
+    seat_inner_start_inside_block_constraints(family, specs, &mut states)?;
     let load_joint_started = std::time::Instant::now();
     if prelude_log {
         log::info!(

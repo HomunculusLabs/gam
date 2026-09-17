@@ -4902,6 +4902,166 @@ impl CustomFamily for OneBlockGaussianFamily {
     }
 }
 
+/// One coefficient under `β ≥ lower`, whose likelihood `2 ln x − x` with
+/// `x = β − lower` exists only strictly inside that set. It refuses any β on or
+/// below the bound, as the latent survival family refuses a non-positive hazard
+/// derivative. Every β the solver evaluates is recorded.
+#[derive(Clone)]
+struct OneBlockBarrierDomainFamily {
+    lower: f64,
+    evaluated: Arc<std::sync::Mutex<Vec<f64>>>,
+}
+
+impl CustomFamily for OneBlockBarrierDomainFamily {
+    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        let beta = block_states
+            .first()
+            .and_then(|state| state.beta.first().copied())
+            .ok_or_else(|| "missing coefficient".to_string())?;
+        self.evaluated
+            .lock()
+            .map_err(|error| format!("evaluation record poisoned: {error}"))?
+            .push(beta);
+        let x = beta - self.lower;
+        if !(x > 0.0) {
+            return Err(format!(
+                "barrier domain requires beta > {}, got {beta}",
+                self.lower
+            ));
+        }
+        Ok(FamilyEvaluation {
+            log_likelihood: 2.0 * x.ln() - x,
+            blockworking_sets: vec![BlockWorkingSet::ExactNewton {
+                gradient: array![2.0 / x - 1.0],
+                hessian: SymmetricMatrix::Dense(array![[2.0 / (x * x)]]),
+            }],
+        })
+    }
+
+    fn block_linear_constraints(
+        &self,
+        block_states: &[ParameterBlockState],
+        block_idx: usize,
+        block_spec: &ParameterBlockSpec,
+    ) -> Result<Option<ConstraintSet>, String> {
+        if block_idx != 0 {
+            return Ok(None);
+        }
+        let a = array![[1.0]];
+        let b = array![self.lower];
+        assert_block_face(block_states, block_idx, block_spec, &a, &b);
+        Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
+            a,
+            b,
+        })))
+    }
+}
+
+/// #2714: a warm seed solved under another evaluation's constraints must not get
+/// a trial point refused when the point has a nonempty feasible set.
+///
+/// The latent survival chart moves its derivative guard with θ, so a mode
+/// carried from one probe can violate the next probe's guard. The family then
+/// refused the start before any inner cycle (job 657828). The seed must be seated
+/// inside the declared set before the family sees it. A seed that is already
+/// feasible must reach the family bit for bit.
+#[test]
+fn infeasible_warm_seed_is_seated_inside_this_evaluations_constraints_2714() {
+    let lower = 1.5;
+    let cold_start = lower + 1.0;
+    let spec = || ParameterBlockSpec {
+        name: "barrier domain".to_string(),
+        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
+        offset: array![0.0],
+        penalties: Vec::new(),
+        nullspace_dims: Vec::new(),
+        initial_log_lambdas: Array1::zeros(0),
+        initial_beta: Some(array![cold_start]),
+        gauge_priority: 100,
+        jacobian_callback: None,
+        stacked_design: None,
+        stacked_offset: None,
+    };
+    let options = BlockwiseFitOptions {
+        inner_tol: 1e-10,
+        use_remlobjective: false,
+        compute_covariance: false,
+        ..BlockwiseFitOptions::default()
+    };
+    let seed_at = |beta: f64| ConstrainedWarmStart {
+        rho: Array1::zeros(0),
+        block_beta: vec![array![beta]],
+        active_sets: vec![None],
+        cached_inner: None,
+    };
+
+    // A seed three units outside the set: the solve must start inside it and
+    // reach the interior mode x = 2 without ever handing the family a refused β.
+    let infeasible = OneBlockBarrierDomainFamily {
+        lower,
+        evaluated: Arc::new(std::sync::Mutex::new(Vec::new())),
+    };
+    let seated = inner_blockwise_fit(
+        &infeasible,
+        &[spec()],
+        &[Array1::zeros(0)],
+        &options,
+        Some(&seed_at(lower - 3.0)),
+    )
+    .expect("#2714: a feasible trial point must not be refused for where its warm seed came from");
+    assert!(seated.converged, "the seated solve must converge");
+    let mode = seated.block_states[0].beta[0];
+    assert!(
+        (mode - (lower + 2.0)).abs() < 1e-6,
+        "the seated solve must reach the barrier mode {}, got {mode}",
+        lower + 2.0
+    );
+    let seen = infeasible.evaluated.lock().expect("evaluation record").clone();
+    println!(
+        "[2714] infeasible-seed arm: cold start {cold_start}, seed {}, evaluations {seen:?}",
+        lower - 3.0
+    );
+    assert!(!seen.is_empty(), "the family must have been evaluated");
+    assert!(
+        seen.iter().all(|&beta| beta > lower),
+        "the family must never be evaluated outside its constraints: {seen:?}"
+    );
+
+    // A seed already inside the set is untouched. Before any seed is installed,
+    // the solver probes the declared joint curvature at the spec's cold start
+    // (`exact_newton_joint_hessian_with_specs`), and that probe evaluates the
+    // family. So the seed is the first β the family sees past the cold start,
+    // and it must arrive bit for bit (job 1102363 read the probe's 2.5 here).
+    let feasible_seed = lower + 2.5;
+    let feasible = OneBlockBarrierDomainFamily {
+        lower,
+        evaluated: Arc::new(std::sync::Mutex::new(Vec::new())),
+    };
+    let untouched = inner_blockwise_fit(
+        &feasible,
+        &[spec()],
+        &[Array1::zeros(0)],
+        &options,
+        Some(&seed_at(feasible_seed)),
+    )
+    .expect("a feasible warm seed must solve");
+    assert!(untouched.converged, "the feasible-seed solve must converge");
+    let seen = feasible.evaluated.lock().expect("evaluation record").clone();
+    println!(
+        "[2714] feasible-seed arm: cold start {cold_start}, seed {feasible_seed}, evaluations {seen:?}"
+    );
+    let first_seeded = seen
+        .iter()
+        .copied()
+        .find(|beta| beta.to_bits() != cold_start.to_bits())
+        .expect("the family must have been evaluated past the cold start");
+    assert_eq!(
+        first_seeded.to_bits(),
+        feasible_seed.to_bits(),
+        "a feasible seed must reach the family bit for bit, got {first_seeded}"
+    );
+}
+
 #[derive(Clone)]
 pub(crate) struct OneBlockConstrainedExactFamily {
     pub(crate) target: f64,
