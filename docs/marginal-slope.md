@@ -80,8 +80,21 @@ probs_reloaded = gamfit.load("predictor.gamfit").predict(test_df)
 ```
 
 By default, Bernoulli marginal-slope prediction returns a 1-D NumPy
-array of probabilities. Passing `return_type=` asks for a table. Passing
-`interval=0.95` asks for the interval table with `linear_predictor`,
+array of probabilities. Each probability is the posterior-predictive
+probability of the anchored model, `E[Φ(η(θ)) | data]` over the coefficient
+posterior: the linear predictor is `η = c(b)·q + b·z` (or `a(q, b) + b·z`
+under a declared empirical latent law), so a coefficient draw moves the
+marginal index `q`, the slope `b` *and* the anchor `c(b)·q` / `a(q, b)`.
+Because `q` and `b` are affine in the coefficients, the integral is taken
+exactly over their bivariate Gaussian law with the anchor re-solved at every
+quadrature node — not by inserting posterior-mean coefficients into `Φ`, and
+not by the Gaussian shortcut `Φ(η̂/√(1 + v))`, which is exact only when `η`
+itself is Gaussian. The shortcuts remain reachable by name in Rust
+(`gam_predict::bernoulli_marginal_slope::AnchoredPosteriorIntegration`) for
+comparison; with a score-warp or link-deviation runtime the anchor depends on
+those coefficient vectors as well and the point is the first-order
+(linearised-anchor) integration. Passing `return_type=` asks for a table.
+Passing `interval=0.95` asks for the interval table with `linear_predictor`,
 `mean`, `std_error`, `mean_lower`, and `mean_upper`; probability-scale
 values are clipped to `[0, 1]`. `std_error` is the probability-scale
 posterior standard error (the same response-scale quantity every class's

@@ -4907,6 +4907,9 @@ mod tests {
 mod predict_2_2_tests;
 
 #[cfg(test)]
+mod anchored_posterior_predictive_tests;
+
+#[cfg(test)]
 mod test_support;
 
 #[cfg(test)]

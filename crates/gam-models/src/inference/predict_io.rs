@@ -2,6 +2,7 @@ use crate::bms::{
     BernoulliMarginalSlopeSavedAloReplay, BernoulliMarginalSlopeSavedAloReplayInput,
     EmpiricalZGrid, LatentMeasureKind, LatentZConditionalCalibration, LatentZRankIntCalibration,
     bernoulli_marginal_link_map, empirical_intercept_from_marginal,
+    empirical_intercept_from_marginal_within, empirical_intercept_tail_tolerance,
     replay_saved_bernoulli_marginal_slope_alo,
 };
 use crate::inference::model::{SavedCompiledFlexBlock, SavedLatentZNormalization};
@@ -66,6 +67,67 @@ pub enum LatentConditioningSpan {
     /// The conditioning span is the trailing `ncols` columns of the primary
     /// design.
     PrimaryDesignTail { ncols: usize },
+}
+
+/// One prediction row's anchored marginal-slope kernel: everything the rigid
+/// (standard-normal) or declared-law (empirical) intercept calibration needs
+/// besides the two primaries `(q, b)` it is anchored on.
+///
+/// [`Self::eta`] re-solves the anchor at the supplied primaries, so a caller
+/// integrating over the coefficient posterior evaluates the *anchored* model at
+/// every node instead of linearising it at `θ̂`. Built by
+/// [`BernoulliMarginalSlopePredictor::anchored_row_kernels`].
+pub struct AnchoredRowKernel {
+    z: f64,
+    probit_scale: f64,
+    base_link: InverseLink,
+    /// `None` is the rigid standard-normal law; `Some` is the declared
+    /// empirical law (global, or this row's local mixture).
+    grid: Option<EmpiricalZGrid>,
+}
+
+impl AnchoredRowKernel {
+    /// The calibrated latent score of this row.
+    pub fn latent_z(&self) -> f64 {
+        self.z
+    }
+
+    /// The probit frailty scale `s` multiplying the slope in the kernel.
+    pub fn probit_scale(&self) -> f64 {
+        self.probit_scale
+    }
+
+    /// The base-scale linear predictor at primaries `(q, b)`, with the anchor
+    /// re-solved there: `η = c(b)·q + s·b·z` under the standard-normal law and
+    /// `η = a(q, b) + s·b·z` under an empirical law, `a` being the root of
+    /// `Σ wᵢ Φ(a + s·b·zᵢ) = Φ(q)`. The same formulas
+    /// [`BernoulliMarginalSlopePredictor::final_eta_from_theta`] evaluates at
+    /// `θ̂`; the only difference is that a posterior node can sit several
+    /// standard deviations into the tail of `q`, where the root is accepted at
+    /// the roundoff floor of its log-space residual
+    /// (`empirical_intercept_tail_tolerance`) rather than refused.
+    pub fn eta(&self, q: f64, b: f64) -> Result<f64, EstimationError> {
+        let sb = self.probit_scale * b;
+        match &self.grid {
+            None => Ok((1.0 + sb * sb).sqrt() * q + sb * self.z),
+            Some(grid) => {
+                let marginal = bernoulli_marginal_link_map(&self.base_link, q)
+                    .map_err(EstimationError::InvalidInput)?;
+                let intercept = empirical_intercept_from_marginal_within(
+                    marginal.mu,
+                    marginal.q,
+                    b,
+                    self.probit_scale,
+                    &grid.nodes,
+                    &grid.weights,
+                    None,
+                    empirical_intercept_tail_tolerance(marginal.mu),
+                )
+                .map_err(EstimationError::InvalidInput)?;
+                Ok(intercept + sb * self.z)
+            }
+        }
+    }
 }
 
 pub struct BernoulliMarginalSlopePredictor {
@@ -1431,16 +1493,6 @@ impl BernoulliMarginalSlopePredictor {
         theta: &Array1<f64>,
         need_gradient: bool,
     ) -> Result<(Array1<f64>, Option<Array2<f64>>), EstimationError> {
-        let z_raw = input.auxiliary_scalar.as_ref().ok_or_else(|| {
-            EstimationError::InvalidInput(format!(
-                "bernoulli marginal-slope prediction requires auxiliary z column '{}'",
-                self.z_column
-            ))
-        })?;
-        let z_normalized = self
-            .latent_z_normalization
-            .apply(z_raw, "bernoulli marginal-slope prediction")
-            .map_err(EstimationError::from)?;
         // P4: when training applied a rank-INT calibration to the latent
         // z (so the BMS rigid kernel could use the closed-form
         // standard-normal path), the predictor MUST apply the same
@@ -1450,11 +1502,12 @@ impl BernoulliMarginalSlopePredictor {
         // Φ⁻¹, both strictly monotone and invertible up to the empirical
         // CDF resolution. `None` ⇒ training-time z passed the strict
         // normality check, no transform was applied, leave z unchanged.
-        let z = self.apply_latent_z_calibration(&z_normalized);
-        // #905: replace z by ζ = (z − m(C))/√v(C) when training engaged the
-        // conditional Auto gate (no-op otherwise; mutually exclusive with the
-        // rank-INT calibration above).
-        let z = self.apply_latent_z_conditional_calibration(&z, input)?;
+        // #905: then replace z by ζ = (z − m(C))/√v(C) when training engaged
+        // the conditional Auto gate (no-op otherwise; mutually exclusive with
+        // the rank-INT calibration). Both live in `prediction_latent_z` so
+        // every kernel evaluation — this one, the time tangent, and the
+        // anchored row kernels — consumes the same score.
+        let z = self.prediction_latent_z(input)?;
         let design_slope = input.design_noise.as_ref().ok_or_else(|| {
             EstimationError::InvalidInput(
                 "bernoulli marginal-slope prediction requires slope design".to_string(),
@@ -2152,6 +2205,108 @@ impl BernoulliMarginalSlopePredictor {
             + self.beta_link_dev.as_ref().map_or(0, Array1::len)
     }
 
+    /// Whether a score-warp or link-deviation runtime is active. With either,
+    /// the calibrated intercept depends on that runtime's whole coefficient
+    /// vector, so η is not a function of the two primaries `(q, b)` alone and
+    /// [`Self::anchored_row_kernels`] is unavailable.
+    pub fn has_flexible_runtime(&self) -> bool {
+        self.score_warp_runtime.is_some() || self.link_deviation_runtime.is_some()
+    }
+
+    /// The latent score every kernel evaluation consumes: the saved
+    /// normalisation, then the rank-INT calibration or the conditional
+    /// calibration, exactly as the fit applied them.
+    fn prediction_latent_z(&self, input: &PredictInput) -> Result<Array1<f64>, EstimationError> {
+        let z_raw = input.auxiliary_scalar.as_ref().ok_or_else(|| {
+            EstimationError::InvalidInput(format!(
+                "bernoulli marginal-slope prediction requires auxiliary z column '{}'",
+                self.z_column
+            ))
+        })?;
+        let z_normalized = self
+            .latent_z_normalization
+            .apply(z_raw, "bernoulli marginal-slope prediction")
+            .map_err(EstimationError::from)?;
+        let z = self.apply_latent_z_calibration(&z_normalized);
+        self.apply_latent_z_conditional_calibration(&z, input)
+    }
+
+    /// The two primaries the anchored kernel is a function of, at `theta`:
+    /// the marginal index `q = X·β_q + q₀ + offset` and the slope
+    /// `b = W·β_b + b₀ + offset_b`, one entry per prediction row. Both are
+    /// affine in `theta`, which is what lets a coefficient posterior be
+    /// pushed onto `(q, b)` exactly.
+    pub fn anchored_primaries(
+        &self,
+        input: &PredictInput,
+        theta: &Array1<f64>,
+    ) -> Result<(Array1<f64>, Array1<f64>), EstimationError> {
+        let (beta_marginal, beta_slope, _, _) = self.split_theta(theta)?;
+        let design_slope = input.design_noise.as_ref().ok_or_else(|| {
+            EstimationError::InvalidInput(
+                "bernoulli marginal-slope prediction requires slope design".to_string(),
+            )
+        })?;
+        let n = input.design.nrows();
+        if input.offset.len() != n {
+            return Err(EstimationError::InvalidInput(format!(
+                "bernoulli marginal-slope prediction primary offset length mismatch: rows={n}, offset={}",
+                input.offset.len()
+            )));
+        }
+        let slope_offset = input
+            .offset_noise
+            .as_ref()
+            .map_or_else(|| Array1::zeros(n), Clone::clone);
+        if slope_offset.len() != n {
+            return Err(EstimationError::InvalidInput(format!(
+                "bernoulli marginal-slope prediction slope offset length mismatch: rows={n}, offset_noise={}",
+                slope_offset.len()
+            )));
+        }
+        let marginal_eta = input
+            .design
+            .dot(&beta_marginal.to_owned())
+            .mapv(|v| v + self.baseline_marginal)
+            + &input.offset;
+        let slope_eta = design_slope
+            .dot(&beta_slope.to_owned())
+            .mapv(|v| v + self.baseline_slope)
+            + &slope_offset;
+        Ok((marginal_eta, slope_eta))
+    }
+
+    /// One [`AnchoredRowKernel`] per prediction row: the latent score and the
+    /// declared latent law the intercept is anchored against, so a caller can
+    /// re-solve the anchor at any `(q, b)` — every node of a posterior
+    /// integration, not only `θ̂`. Refused while a flexible runtime is active
+    /// (see [`Self::has_flexible_runtime`]).
+    pub fn anchored_row_kernels(
+        &self,
+        input: &PredictInput,
+    ) -> Result<Vec<AnchoredRowKernel>, EstimationError> {
+        if self.has_flexible_runtime() {
+            return Err(EstimationError::InvalidInput(
+                "bernoulli marginal-slope anchored row kernels are only defined for the rigid \
+                 and declared-law latent measures; a score-warp or link-deviation runtime \
+                 anchors the intercept on its own coefficient vector"
+                    .to_string(),
+            ));
+        }
+        let z = self.prediction_latent_z(input)?;
+        let probit_scale = self.probit_frailty_scale();
+        (0..z.len())
+            .map(|row| {
+                Ok(AnchoredRowKernel {
+                    z: z[row],
+                    probit_scale,
+                    base_link: self.base_link.clone(),
+                    grid: self.empirical_grid_for_prediction_row(input, row)?,
+                })
+            })
+            .collect()
+    }
+
     /// Per-row `(eta, eta_t)` under the exact saved-model IFT pull-back.
     ///
     /// Returns the same `eta` as `predict_plugin_response`/`predict_linear_predictor`
@@ -2170,26 +2325,12 @@ impl BernoulliMarginalSlopePredictor {
         q_t: &Array1<f64>,
         b_t: &Array1<f64>,
     ) -> Result<(Array1<f64>, Array1<f64>), EstimationError> {
-        let z_raw = input.auxiliary_scalar.as_ref().ok_or_else(|| {
-            EstimationError::InvalidInput(format!(
-                "bernoulli marginal-slope prediction requires auxiliary z column '{}'",
-                self.z_column
-            ))
-        })?;
-        let z_normalized = self
-            .latent_z_normalization
-            .apply(z_raw, "bernoulli marginal-slope prediction")
-            .map_err(EstimationError::from)?;
         // P4: see `final_eta_and_gradient_from_theta` for the rationale.
         // The rank-INT calibration is a mathematically exact monotone
         // transform; both the rigid standard-normal kernel and the
         // implicit-function chain rule consume the calibrated z, never
         // the raw normalized z, exactly mirroring fit-time semantics.
-        let z = self.apply_latent_z_calibration(&z_normalized);
-        // #905: replace z by ζ = (z − m(C))/√v(C) when training engaged the
-        // conditional Auto gate (no-op otherwise; mutually exclusive with the
-        // rank-INT calibration above).
-        let z = self.apply_latent_z_conditional_calibration(&z, input)?;
+        let z = self.prediction_latent_z(input)?;
         let design_slope = input.design_noise.as_ref().ok_or_else(|| {
             EstimationError::InvalidInput(
                 "bernoulli marginal-slope prediction requires slope design".to_string(),

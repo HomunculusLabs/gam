@@ -1591,6 +1591,63 @@ pub(crate) fn empirical_intercept_from_marginal(
     weights: &[f64],
     initial: Option<f64>,
 ) -> Result<f64, String> {
+    // Convergence is on the log-space residual |F| = |log Σ wᵢ Φᵢ − log μ★|.
+    // Near the root this is the relative error in the calibrated probability,
+    // so 1e-13 in log-space corresponds to absolute residual μ★ · 1e-13 in
+    // linear space — strictly tighter than the legacy 1e-13 absolute tolerance
+    // for every μ★ ∈ (0, 1). The 4·ε floor keeps the contract meaningful when
+    // μ★ approaches 1 (where log Σ Φᵢ approaches 0).
+    let abs_tol = 1e-13_f64.max(4.0 * f64::EPSILON);
+    empirical_intercept_from_marginal_within(
+        target_mu,
+        target_q,
+        slope,
+        probit_scale,
+        nodes,
+        weights,
+        initial,
+        abs_tol,
+    )
+}
+
+/// The log-space tolerance the calibration residual can actually be driven to
+/// at target `μ★`: the fit's `1e-13` where that is attainable, widened to the
+/// roundoff floor of the streaming log-sum-exp `log Σ wᵢ Φᵢ` deep in the tail.
+///
+/// The floor is set by `normal_logcdf` at the grid's extreme node, whose
+/// magnitude `|log Φ(a + s·b·z_min)| ≈ (a + s·b·z_min)²/2` grows like `|log μ★|`
+/// times the kernel's own scale factors, evaluated to a relative accuracy of
+/// order `1e-12` in the far tail. Measured floors on a 41-node heavy-tailed
+/// grid: `3e-13` at `μ★ = 3e-6`, `1.4e-12` at `μ★ = 1.6e-5`, `1.7e-10` at the
+/// `μ★ = 1e-12` link clamp (`a ≈ −17.8`). A quadratic envelope in `log μ★`
+/// covers all of them with margin. Chasing `1e-13` there burns the solver's
+/// whole refinement budget on an unattainable target, and the clamp floor
+/// sits above even the fit's `1e3·abs_tol` acceptance, so roots correct to
+/// every representable digit were refused.
+///
+/// Training rows sit at moderate `μ★`, where this is the fit's own tolerance;
+/// posterior-integration nodes several standard deviations into the tail are
+/// where the widening engages. Even at the clamp the widened tolerance is a
+/// relative error in the calibrated probability below `1e-9`, i.e. an error in
+/// the intercept below `1e-10` (the residual divided by `F'(a) ≈ |a|`).
+pub(crate) fn empirical_intercept_tail_tolerance(target_mu: f64) -> f64 {
+    let fit_tol = 1e-13_f64.max(4.0 * f64::EPSILON);
+    let log_mu = target_mu.ln();
+    fit_tol.max(4096.0 * f64::EPSILON * (log_mu * log_mu).max(1.0))
+}
+
+/// [`empirical_intercept_from_marginal`] accepting the root when its log-space
+/// residual is within an explicit `abs_tol`.
+pub(crate) fn empirical_intercept_from_marginal_within(
+    target_mu: f64,
+    target_q: f64,
+    slope: f64,
+    probit_scale: f64,
+    nodes: &[f64],
+    weights: &[f64],
+    initial: Option<f64>,
+    abs_tol: f64,
+) -> Result<f64, String> {
     if !(target_mu.is_finite() && target_mu > 0.0 && target_mu < 1.0) {
         return Err(format!(
             "empirical latent calibration requires target mu in (0,1), got {target_mu}"
@@ -1602,13 +1659,6 @@ pub(crate) fn empirical_intercept_from_marginal(
     let eval = |a: f64| {
         empirical_rigid_calibration_eval(a, log_target_mu, slope, probit_scale, nodes, weights)
     };
-    // Convergence is on the log-space residual |F| = |log Σ wᵢ Φᵢ − log μ★|.
-    // Near the root this is the relative error in the calibrated probability,
-    // so 1e-13 in log-space corresponds to absolute residual μ★ · 1e-13 in
-    // linear space — strictly tighter than the legacy 1e-13 absolute tolerance
-    // for every μ★ ∈ (0, 1). The 4·ε floor keeps the contract meaningful when
-    // μ★ approaches 1 (where log Σ Φᵢ approaches 0).
-    let abs_tol = 1e-13_f64.max(4.0 * f64::EPSILON);
     let solve_from = |s: f64| {
         crate::monotone_root::solve_monotone_root(
             eval,
