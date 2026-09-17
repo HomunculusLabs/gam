@@ -39,9 +39,6 @@ pub struct OrderedBetaBernoulliPenalty {
     pub learnable_alpha: bool,
     pub weight: f64,
     pub weight_schedule: Option<ScalarWeightSchedule>,
-    /// Fixed/ungated columns are outside this prior and contribute no value or
-    /// derivative channels.
-    pub fixed_columns: Option<Vec<bool>>,
     /// Optional design weights.  They define both `M_k = sum_i w_i z_ik` and
     /// `N_eff = sum_i w_i`, so value and every derivative remain one operator.
     pub row_weights: Option<std::sync::Arc<[f64]>>,
@@ -71,7 +68,6 @@ impl OrderedBetaBernoulliPenalty {
             learnable_alpha,
             weight: 1.0,
             weight_schedule: None,
-            fixed_columns: None,
             row_weights: None,
         }
     }
@@ -129,14 +125,6 @@ impl OrderedBetaBernoulliPenalty {
             }
         }
         (mass, n_eff)
-    }
-
-    #[inline]
-    fn column_is_fixed(&self, k: usize) -> bool {
-        self.fixed_columns
-            .as_ref()
-            .and_then(|m| m.get(k).copied())
-            .unwrap_or(false)
     }
 
     /// Shapes of the independent `Beta(a_k, 1)` columns. The stable identity
@@ -241,9 +229,6 @@ impl OrderedBetaBernoulliPenalty {
         let z = self.concrete_logits(target);
         let (columns, _) = self.marginal_columns(z.view(), a_col.view());
         for (k, column) in columns.iter().enumerate() {
-            if self.column_is_fixed(k) {
-                continue;
-            }
             d_score[k] = -trigamma(column.mass + column.a) * da_col[k];
             d_score_derivative[k] = -tetragamma(column.mass + column.a) * da_col[k];
         }
@@ -281,9 +266,6 @@ impl OrderedBetaBernoulliPenalty {
             let start = row * self.k_max;
             let w_i = self.row_weight(row);
             for k in 0..self.k_max {
-                if self.column_is_fixed(k) {
-                    continue;
-                }
                 let column = columns[k];
                 let zk = z[start + k];
                 let jac = zk * (1.0 - zk) * inv_tau;
@@ -304,9 +286,6 @@ impl OrderedBetaBernoulliPenalty {
 
         let mut mass_hessian_coefficient = Array1::<f64>::zeros(self.k_max);
         for k in 0..self.k_max {
-            if self.column_is_fixed(k) {
-                continue;
-            }
             mass_hessian_coefficient[k] = self.weight * columns[k].score_derivative;
         }
 
@@ -314,9 +293,6 @@ impl OrderedBetaBernoulliPenalty {
         if self.learnable_alpha {
             let (_, d_score_derivative) = self.learnable_alpha_score_rho_derivs(target, rho);
             for k in 0..self.k_max {
-                if self.column_is_fixed(k) {
-                    continue;
-                }
                 mass_hessian_log_alpha_derivative[k] = self.weight * d_score_derivative[k];
             }
         }
@@ -341,8 +317,7 @@ impl OrderedBetaBernoulliPenalty {
     /// integrated-marginal score and its first TWO M-derivatives
     /// `S_k, S'_k, S''_k` (the third is `−ψ₂(M+a)+ψ₂(N−M+1)`), plus the concrete
     /// gates `z` and the row weights — everything except the cache-layout
-    /// contraction, which the caller owns. Fixed/ungated columns are flagged so
-    /// the caller drops them exactly as every other channel does.
+    /// contraction, which the caller owns.
     #[must_use]
     pub fn logit_theta_adjoint_data(
         &self,
@@ -357,12 +332,7 @@ impl OrderedBetaBernoulliPenalty {
         let mut score = vec![0.0_f64; self.k_max];
         let mut score_derivative = vec![0.0_f64; self.k_max];
         let mut score_second = vec![0.0_f64; self.k_max];
-        let mut column_fixed = vec![false; self.k_max];
         for k in 0..self.k_max {
-            if self.column_is_fixed(k) {
-                column_fixed[k] = true;
-                continue;
-            }
             let column = columns[k];
             let active_arg = column.mass + column.a;
             let inactive_arg = n_eff - column.mass + 1.0;
@@ -382,7 +352,6 @@ impl OrderedBetaBernoulliPenalty {
             score,
             score_derivative,
             score_second,
-            column_fixed,
         }
     }
 
@@ -404,9 +373,6 @@ impl OrderedBetaBernoulliPenalty {
             let start = row * self.k_max;
             let w_i = self.row_weight(row);
             for k in 0..self.k_max {
-                if self.column_is_fixed(k) {
-                    continue;
-                }
                 let zk = z[start + k];
                 out[start + k] = self.weight * d_score[k] * w_i * zk * (1.0 - zk) / self.tau;
             }
@@ -434,9 +400,6 @@ impl OrderedBetaBernoulliPenalty {
             let start = row * self.k_max;
             let w_i = self.row_weight(row);
             for k in 0..self.k_max {
-                if self.column_is_fixed(k) {
-                    continue;
-                }
                 let zk = z[start + k];
                 let jac = zk * (1.0 - zk) * inv_tau;
                 let u = w_i * jac;
@@ -448,7 +411,7 @@ impl OrderedBetaBernoulliPenalty {
         out
     }
 
-    /// `Σ_k log C(a_k, N)` over the free columns ([`ordered_beta_bernoulli_log_partition`]),
+    /// `Σ_k log C(a_k, N)` over the columns ([`ordered_beta_bernoulli_log_partition`]),
     /// and its derivative in the learnable log concentration (empty when α is fixed).
     ///
     /// `N = Σ_i w_i` is the effective row count the integrated scalar already scores its
@@ -489,9 +452,6 @@ impl OrderedBetaBernoulliPenalty {
         let mut value = 0.0;
         let mut log_alpha_derivative = 0.0;
         for k in 0..self.k_max {
-            if self.column_is_fixed(k) {
-                continue;
-            }
             let partition = ordered_beta_bernoulli_log_partition(a_col[k], n_eff)?;
             value += partition.value;
             // `da_k/dρ = (k + 1)·a_k(a_k + 1)/(α + 1)` and the partition carries `a_k·∂_a log C`.
@@ -526,8 +486,6 @@ pub struct OrderedBetaBernoulliLogitAdjointData {
     pub score: Vec<f64>,
     pub score_derivative: Vec<f64>,
     pub score_second: Vec<f64>,
-    /// Fixed/ungated columns (dropped by the caller).
-    pub column_fixed: Vec<bool>,
 }
 
 /// Third-derivative channels for the row-major `(N, K)` assignment-logit block.
@@ -588,10 +546,7 @@ impl AnalyticPenalty for OrderedBetaBernoulliPenalty {
         let z = self.concrete_logits(target);
         let (columns, n_eff) = self.marginal_columns(z.view(), a_col.view());
         let mut value = 0.0;
-        for (k, column) in columns.iter().enumerate() {
-            if self.column_is_fixed(k) {
-                continue;
-            }
+        for column in &columns {
             value += -column.a.ln()
                 - ln_gamma(column.mass + column.a)
                 - ln_gamma(n_eff - column.mass + 1.0)
@@ -611,9 +566,6 @@ impl AnalyticPenalty for OrderedBetaBernoulliPenalty {
             let start = row * self.k_max;
             let w_i = self.row_weight(row);
             for k in 0..self.k_max {
-                if self.column_is_fixed(k) {
-                    continue;
-                }
                 let zk = z[start + k];
                 out[start + k] = self.weight * columns[k].score * w_i * zk * (1.0 - zk) / self.tau;
             }
@@ -638,9 +590,6 @@ impl AnalyticPenalty for OrderedBetaBernoulliPenalty {
             let start = row * self.k_max;
             let w_i = self.row_weight(row);
             for k in 0..self.k_max {
-                if self.column_is_fixed(k) {
-                    continue;
-                }
                 let zk = z[start + k];
                 let jac = zk * (1.0 - zk) * inv_tau;
                 let u = w_i * jac;
@@ -675,9 +624,6 @@ impl AnalyticPenalty for OrderedBetaBernoulliPenalty {
             let start = row * self.k_max;
             let w_i = self.row_weight(row);
             for k in 0..self.k_max {
-                if self.column_is_fixed(k) {
-                    continue;
-                }
                 let zk = z[start + k];
                 contraction[k] += w_i * zk * (1.0 - zk) * inv_tau * v[start + k];
             }
@@ -687,9 +633,6 @@ impl AnalyticPenalty for OrderedBetaBernoulliPenalty {
             let start = row * self.k_max;
             let w_i = self.row_weight(row);
             for k in 0..self.k_max {
-                if self.column_is_fixed(k) {
-                    continue;
-                }
                 let zk = z[start + k];
                 let u = w_i * zk * (1.0 - zk) * inv_tau;
                 let curvature = zk * (1.0 - zk) * (1.0 - 2.0 * zk) * inv_tau2;
@@ -712,9 +655,6 @@ impl AnalyticPenalty for OrderedBetaBernoulliPenalty {
         let (columns, n_eff) = self.marginal_columns(z.view(), a_col.view());
         let mut gradient = 0.0;
         for (k, column) in columns.iter().enumerate() {
-            if self.column_is_fixed(k) {
-                continue;
-            }
             let d_l_da =
                 -1.0 / column.a - digamma(column.mass + column.a) + digamma(n_eff + column.a + 1.0);
             gradient += d_l_da * da_col[k];

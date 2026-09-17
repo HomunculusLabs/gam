@@ -1936,17 +1936,16 @@ pub(crate) fn small_two_atom_periodic_term_at_shared_inner_state()
 }
 
 /// #Bug4 — the ThresholdGate θ-adjoint prior THIRD derivative
-/// (`assignment_prior_hdiag_derivative_entry`) must be ZERO for a FIXED
-/// (ungated / frozen) logit, matching the zeroed assembled `htt` diagonal entry.
-/// A FREE logit inside the smoothing/optimization band carries a nonzero third
-/// derivative (non-vacuous fixture); the ungated atom's must be exactly zero.
+/// (`assignment_prior_hdiag_derivative_entry`) must be ZERO for a FIXED logit, matching the
+/// zeroed assembled `htt` diagonal entry. Under frozen routing (#1033) every logit is fixed, so
+/// every atom's third derivative must be exactly zero; the thawed assignment, with its logits
+/// inside the smoothing/optimization band, carries a nonzero third derivative (non-vacuous
+/// fixture).
 #[test]
 pub(crate) fn threshold_gate_fixed_logit_third_derivative_is_zero_bug4() {
     use crate::manifold::arrow_solver::SaeLocalRowVar;
     let (mut term, _target, rho) = small_two_atom_periodic_term();
-    // ThresholdGate mode with atom 1 UNGATED — a fixed/inert logit.
     term.assignment.mode = AssignmentMode::threshold_gate(1.0, 0.0);
-    term.assignment.ungated = vec![false, true];
     // Both atoms' logits well inside the optimization band (cutoff is −36) AND
     // BELOW the threshold, so `1-2a > 0`: the PSD clamp #2520 put in `B` is
     // inactive there and a FREE logit genuinely carries a nonzero third
@@ -1958,8 +1957,14 @@ pub(crate) fn threshold_gate_fixed_logit_third_derivative_is_zero_bug4() {
         term.assignment.logits[[row, 1]] = -0.5;
     }
     assert!(
-        term.assignment.logit_is_fixed(1) && !term.assignment.logit_is_fixed(0),
-        "atom 1 must be fixed (ungated), atom 0 free"
+        !term.assignment.logits_are_fixed(),
+        "the thawed assignment holds no logit"
+    );
+    let mut frozen = term.clone();
+    frozen.assignment.frozen_logits = Some(frozen.assignment.logits.clone());
+    assert!(
+        frozen.assignment.logits_are_fixed(),
+        "frozen routing must fix every logit"
     );
 
     // The mask is a property of BOTH operators (#2520): `B` installs the clamped
@@ -1967,35 +1972,38 @@ pub(crate) fn threshold_gate_fixed_logit_third_derivative_is_zero_bug4() {
     // entry is zeroed on each, so each one's theta-adjoint must be zero too.
     let threshold_strength = rho.lambda_sparse().unwrap();
     for exact_a in [false, true] {
-        // FREE atom 0 inside the band => nonzero third derivative (live fixture).
-        let free = term.assignment_prior_hdiag_derivative_entry(
-            threshold_strength,
-            0,
-            0,
-            SaeLocalRowVar::Logit { atom: 0 },
-            None,
-            exact_a,
-        );
-        assert!(
-            free.abs() > 0.0,
-            "a FREE logit inside the band must carry a nonzero third derivative \
-             (exact_a={exact_a}); got {free}"
-        );
+        for atom in 0..2 {
+            let wrt = SaeLocalRowVar::Logit { atom };
+            // FREE logit inside the band => nonzero third derivative (live fixture).
+            let free = term.assignment_prior_hdiag_derivative_entry(
+                threshold_strength,
+                0,
+                atom,
+                wrt,
+                None,
+                exact_a,
+            );
+            assert!(
+                free.abs() > 0.0,
+                "a FREE logit inside the band must carry a nonzero third derivative \
+                 (atom={atom}, exact_a={exact_a}); got {free}"
+            );
 
-        // FIXED atom 1 => the theta-adjoint third derivative MUST be exactly zero.
-        let fixed = term.assignment_prior_hdiag_derivative_entry(
-            threshold_strength,
-            0,
-            1,
-            SaeLocalRowVar::Logit { atom: 1 },
-            None,
-            exact_a,
-        );
-        assert_eq!(
-            fixed, 0.0,
-            "a FIXED (ungated) logit third derivative must be zero \
-             (exact_a={exact_a}); got {fixed}"
-        );
+            // FIXED logit => the theta-adjoint third derivative MUST be exactly zero.
+            let fixed = frozen.assignment_prior_hdiag_derivative_entry(
+                threshold_strength,
+                0,
+                atom,
+                wrt,
+                None,
+                exact_a,
+            );
+            assert_eq!(
+                fixed, 0.0,
+                "a FIXED (frozen-routing) logit third derivative must be zero \
+                 (atom={atom}, exact_a={exact_a}); got {fixed}"
+            );
+        }
     }
 }
 

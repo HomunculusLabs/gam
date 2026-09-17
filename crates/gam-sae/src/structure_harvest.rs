@@ -2477,7 +2477,7 @@ fn fold_atom_into(term: &mut SaeManifoldTerm, a: usize, b: usize) -> Result<(), 
 /// floor and RESEEDS its logits to per-row winner parity, resurrecting the atom
 /// the glue just retired (the effective atom count never falls, #1890). So for a
 /// certified glue we excise the folded atoms outright — decoder atom,
-/// routing-logit column, latent coordinate block, per-atom `ungated`/frozen slot,
+/// routing-logit column, latent coordinate block,
 /// and per-atom ρ (smoothness + ARD) blocks — so BOTH the raw and the active
 /// dictionary size fall, no zero-mass atom survives for the guard to revive, and
 /// each survivor is forced to carry the absorbed arc through the refit.
@@ -2509,14 +2509,12 @@ pub(crate) fn remove_atoms(
     let n = term.assignment.logits.nrows();
     if term.assignment.logits.ncols() != k
         || term.assignment.coords.len() != k
-        || term.assignment.ungated.len() != k
     {
         return Err(format!(
             "remove_atoms: atom-indexed assignment shape mismatch: atoms={k}, \
-             logits={:?}, coords={}, ungated={}",
+             logits={:?}, coords={}",
             term.assignment.logits.dim(),
-            term.assignment.coords.len(),
-            term.assignment.ungated.len()
+            term.assignment.coords.len()
         ));
     }
     if let Some(frozen) = term.assignment.frozen_logits.as_ref() {
@@ -2544,7 +2542,7 @@ pub(crate) fn remove_atoms(
     }
     term.remap_chart_atlases(&old_to_new)?;
     rho.remap_curvature_atoms(&old_to_new)?;
-    // Rebuild the atom list, coord blocks, ungated flags, and ρ blocks keeping
+    // Rebuild the atom list, coord blocks, and ρ blocks keeping
     // only the surviving indices (descending removal on the Vecs would also work,
     // but the keep-mask keeps atoms/coords/logits/ρ provably in lock-step).
     term.atoms = keep.iter().map(|&j| term.atoms[j].clone()).collect();
@@ -2560,7 +2558,6 @@ pub(crate) fn remove_atoms(
         .iter()
         .map(|&j| term.assignment.coords[j].clone())
         .collect();
-    term.assignment.ungated = keep.iter().map(|&j| term.assignment.ungated[j]).collect();
     // A frozen router was trained against the old dictionary.  Merely slicing
     // its columns would not encode the fold's log-sum-exp mass transfer and
     // would keep routing permanently frozen to an invalid model.  The reduced

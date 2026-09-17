@@ -91,30 +91,19 @@ pub(crate) fn ard_log_precision_trace_matches_dense_fd_pd_region_deflation() {
     assert!(checked > 0, "no ARD axes were checked");
 }
 
-/// #Bug4 — the assignment log-strength ρ-trace must carry NO contribution from a
-/// FIXED (ungated) logit. The assembled assignment prior zeroes the
-/// `htt` diagonal entry of every fixed logit, so its ρ-derivative — which the
-/// `assignment_log_strength_hessian_trace` contracts against the selected-inverse
-/// diagonals — must also be zero. Equivalently, the trace must be INVARIANT to the
-/// fixed atom's logit VALUES (its curvature contribution is identically masked),
-/// while remaining sensitive to a FREE atom's logits (proving the fixture is not
-/// vacuous). We hold the converged cache/solver fixed and only re-evaluate the
-/// analytic trace with perturbed logits, isolating the masked source term.
+/// #Bug4 — the assignment log-strength ρ-trace carries NO contribution from a FIXED logit.
+/// Under frozen routing (#1033) every logit is fixed: the assembled assignment prior zeroes
+/// every logit `htt` diagonal entry, so its ρ-derivative — which
+/// `assignment_log_strength_hessian_trace` contracts against the selected-inverse diagonals —
+/// is zero too, and the trace is INVARIANT to the logit VALUES. The same perturbation on the
+/// thawed assignment moves the trace, so the fixture is not vacuous. The converged cache and
+/// solver are held fixed and only the analytic trace is re-evaluated, isolating the masked
+/// source term.
 #[test]
 pub(crate) fn assignment_log_strength_trace_ignores_fixed_logit_bug4() {
     let (mut term, target, mut rho) = gamma_fd_tiny_fixture();
     term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, true);
-    // Atom 1 is the #1026 ungated background tier: a FIXED (inert) logit.
-    // The deleted builder checked the flag count against K and refused Softmax routing,
-    // then set the field; this ordered Beta--Bernoulli fixture has K = 2, so set it directly.
-    assert_eq!(term.assignment.ungated.len(), 2, "the tiny fixture has two atoms");
-    term.assignment.ungated = vec![false, true];
-    assert!(
-        term.assignment.logit_is_fixed(1) && !term.assignment.logit_is_fixed(0),
-        "atom 1 must be the fixed (ungated) logit, atom 0 free"
-    );
-    // Find a PD-region ρ (the ungated atom shifts the feasibility boundary), then
-    // fit the term there so the selected inverse is well-posed.
+    // Find a PD-region ρ, then fit the term there so the selected inverse is well-posed.
     {
         let mut found = None;
         for &r in &[1.0_f64, 1.5, 2.0, 2.5, 3.0, 0.5, 0.0, -0.5] {
@@ -138,7 +127,7 @@ pub(crate) fn assignment_log_strength_trace_ignores_fixed_logit_bug4() {
             }
         }
         rho.log_lambda_sparse =
-            found.expect("no PD-region ρ found for the ungated fixed-logit fixture");
+            found.expect("no PD-region ρ found for the ordered Beta--Bernoulli fixture");
     }
     let (_value, _loss, cache) = term
         .penalized_quasi_laplace_criterion_with_cache(
@@ -163,30 +152,12 @@ pub(crate) fn assignment_log_strength_trace_ignores_fixed_logit_bug4() {
         "the fixture must have a nonzero selected-inverse diagonal"
     );
 
+    // Perturbing a FREE logit on the thawed assignment DOES move the trace — the fixture
+    // genuinely exercises the contracted curvature source, so the invariance below is a real
+    // mask, not a dead path.
     let base_trace = term
         .assignment_log_strength_hessian_trace(&rho, &cache, &solver)
         .expect("baseline prior-Hessian ρ trace");
-
-    // Perturb ONLY the FIXED atom's (atom 1) logits, on the SAME cache. Because
-    // its curvature source (`hdiag`/third channels) is masked to zero, the trace
-    // must be BIT-IDENTICAL — the fixed logit contributes nothing.
-    let mut fixed_perturbed = term.clone();
-    for row in 0..fixed_perturbed.n_obs() {
-        fixed_perturbed.assignment.logits[[row, 1]] += 1.7;
-    }
-    let fixed_trace = fixed_perturbed
-        .assignment_log_strength_hessian_trace(&rho, &cache, &solver)
-        .expect("fixed-logit-perturbed trace");
-    assert_eq!(
-        fixed_trace.to_bits(),
-        base_trace.to_bits(),
-        "perturbing a FIXED (ungated) logit must not move the ρ-trace \
-         (base={base_trace:.12e}, perturbed={fixed_trace:.12e})"
-    );
-
-    // Perturbing the FREE atom's (atom 0) logits DOES move the trace — the fixture
-    // genuinely exercises the contracted curvature source, so the invariance above
-    // is a real mask, not a dead path.
     let mut free_perturbed = term.clone();
     for row in 0..free_perturbed.n_obs() {
         free_perturbed.assignment.logits[[row, 0]] += 1.7;
@@ -198,5 +169,32 @@ pub(crate) fn assignment_log_strength_trace_ignores_fixed_logit_bug4() {
         (free_trace - base_trace).abs() > 1e-9,
         "perturbing a FREE logit must move the ρ-trace (non-vacuity): \
          base={base_trace:.12e}, perturbed={free_trace:.12e}"
+    );
+
+    // Frozen routing holds every logit, on the SAME cache. Its curvature source is masked to
+    // zero, so perturbing every free logit must leave the trace BIT-IDENTICAL.
+    let mut frozen = term.clone();
+    frozen.assignment.frozen_logits = Some(frozen.assignment.logits.clone());
+    assert!(
+        frozen.assignment.logits_are_fixed(),
+        "frozen routing must fix every logit"
+    );
+    let frozen_trace = frozen
+        .assignment_log_strength_hessian_trace(&rho, &cache, &solver)
+        .expect("frozen-routing trace");
+    let mut frozen_perturbed = frozen.clone();
+    for row in 0..frozen_perturbed.n_obs() {
+        for atom in 0..frozen_perturbed.k_atoms() {
+            frozen_perturbed.assignment.logits[[row, atom]] += 1.7;
+        }
+    }
+    let frozen_perturbed_trace = frozen_perturbed
+        .assignment_log_strength_hessian_trace(&rho, &cache, &solver)
+        .expect("frozen-routing perturbed trace");
+    assert_eq!(
+        frozen_perturbed_trace.to_bits(),
+        frozen_trace.to_bits(),
+        "perturbing a FIXED (frozen-routing) logit must not move the ρ-trace \
+         (base={frozen_trace:.12e}, perturbed={frozen_perturbed_trace:.12e})"
     );
 }

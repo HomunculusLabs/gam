@@ -6291,7 +6291,7 @@ impl SaeManifoldTerm {
         let q_dense = self.assignment.row_block_dim();
         let assignment_dim = self.assignment.assignment_coord_dim();
         let coord_offsets = self.assignment.coord_offsets();
-        let fixed_logits = self.assignment.fixed_logit_mask();
+        let logits_fixed = self.assignment.logits_are_fixed();
         let inv_tau = 1.0 / self.assignment.mode.temperature();
         let softmax = matches!(self.assignment.mode, AssignmentMode::Softmax { .. });
         let second_jets = self.atom_second_jets()?;
@@ -6386,15 +6386,12 @@ impl SaeManifoldTerm {
                     .collect();
                 let mut derivative = vec![0.0_f64; p];
                 for j in 0..assignment_dim {
-                    if fixed_logits.get(j).copied().unwrap_or(false) {
+                    if logits_fixed {
                         continue;
                     }
                     let a_j = assignments[j];
                     // Logit–logit: `Σ_k ∂²a_k/∂z_j∂z_l · ⟨Mr, f_k⟩`.
                     for l in 0..assignment_dim {
-                        if fixed_logits.get(l).copied().unwrap_or(false) {
-                            continue;
-                        }
                         let a_l = assignments[l];
                         let value = if softmax {
                             let diagonal = if j == l { a_j * channel[j] } else { 0.0 };
@@ -8969,15 +8966,12 @@ impl SaeManifoldTerm {
         // Carry the assignment-defining metadata that `with_mode` resets to
         // defaults, so the chunk computes the SAME model as the resident term.
         // Without this the streaming/chunked path silently diverges from the dense
-        // path: ungated atoms revert to their raw-logit gate instead of the fixed
-        // unit gate (#1026), frozen routing thaws back to the free logits (#1033),
-        // and the per-fit truncated-ordered Beta--Bernoulli α override is dropped (#1777). All three
-        // change the forward gate map, hence the loss, gradient, and log-det.
-        //   * `ungated` is per-atom (length K) — row-independent.
+        // path: frozen routing thaws back to the free logits (#1033), and the per-fit
+        // truncated-ordered Beta--Bernoulli α override is dropped (#1777). Both change the
+        // forward gate map, hence the loss, gradient, and log-det.
         //   * `ordered_beta_bernoulli_alpha_override` is scalar — row-independent.
         //   * frozen routing is per-row (n×K) — the caller slices it to the chunk's
         //     rows and passes it as `chunk_frozen_logits`.
-        assignment.ungated = self.assignment.ungated.clone();
         assignment.ordered_beta_bernoulli_alpha_override =
             self.assignment.ordered_beta_bernoulli_alpha_override;
         if let Some(frozen) = chunk_frozen_logits {

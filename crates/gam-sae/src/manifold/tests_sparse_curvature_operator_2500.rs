@@ -1107,13 +1107,17 @@ fn threshold_gate_priced_clamp_theta_diagonal_matches_finite_difference_2820() {
     }
     assert!(live >= term.n_obs(), "the concave logit channel must be live");
 
+    // Frozen routing (#1033) holds every logit, so no logit slot carries a clamp derivative.
     let mut fixed = term.clone();
-    fixed.assignment.ungated[0] = true;
+    fixed.assignment.frozen_logits = Some(fixed.assignment.logits.clone());
     let fixed_derivative = fixed
         .ard_concave_clamp_dt_diagonal(&rho, &cache)
-        .expect("fixed-logit clamp derivative");
-    for (_, atom, slot) in logit_slots(&fixed, &cache) {
-        assert_eq!(fixed_derivative[slot], if atom == 0 { 0.0 } else { derivative[slot] });
+        .expect("frozen-routing clamp derivative");
+    for (_, _, slot) in logit_slots(&fixed, &cache) {
+        assert_eq!(
+            fixed_derivative[slot], 0.0,
+            "frozen routing holds every logit, so no logit slot carries a clamp derivative"
+        );
     }
 }
 

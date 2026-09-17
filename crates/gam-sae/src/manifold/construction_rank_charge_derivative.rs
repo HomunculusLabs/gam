@@ -19,7 +19,7 @@ impl SaeManifoldTerm {
         atom: usize,
         assignments: &[f64],
     ) -> f64 {
-        if self.assignment.logit_is_fixed(wrt_atom) {
+        if self.assignment.logits_are_fixed() {
             return 0.0;
         }
         match self.assignment.mode {

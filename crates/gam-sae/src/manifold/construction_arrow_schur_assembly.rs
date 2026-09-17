@@ -888,17 +888,18 @@ impl SaeManifoldTerm {
                             // `Array2::zeros` allocation needs no separate `fill(0.0)` and
                             // the populated buffer is returned by move without a clone.
                             let mut jac_row = Array2::<f64>::zeros((q, p));
-                            fill_assignment_logit_jvp_rows(
-                                self.assignment.mode,
-                                self.assignment.logits.row(row),
-                                assignments.view(),
-                                decoded.view(),
-                                fitted.view(),
-                                // #1026/#1033: zero logit-JVP rows for FIXED-logit atoms
-                                // (ungated, and all atoms under frozen routing).
-                                &self.assignment.fixed_logit_mask(),
-                                &mut jac_row,
-                            );
+                            // #1033: under TopK or frozen routing no logit is a free
+                            // parameter, so its logit-JVP rows stay zero.
+                            if !self.assignment.logits_are_fixed() {
+                                fill_assignment_logit_jvp_rows(
+                                    self.assignment.mode,
+                                    self.assignment.logits.row(row),
+                                    assignments.view(),
+                                    decoded.view(),
+                                    fitted.view(),
+                                    &mut jac_row,
+                                );
+                            }
                             // Coordinate columns for all atoms.
                             for atom_idx in 0..k_atoms {
                                 let d = self.atoms[atom_idx].latent_dim();

@@ -4078,5 +4078,16 @@
     },
     "reason": "#2899 F7: the columns a fit reads now have one owner, gam-models fit_orchestration::fit_required_columns and formula_columns. The fit boundary applies them, so an unused column cannot block a fit on any front door. gam-cli's copies of that derivation are deleted.",
     "evidence": "At the base, git grep -n finds these three only in crates/gam-cli/src/main (dataset_io.rs, run_fit.rs and multinomial_cli.rs), each called only by the others or by the four call sites this commit moves to the gam-models functions. The gam-cli binary tests in tests/src_modules/misc/cli_tests.rs imported two of them and now call the gam-models functions. No example, Python or FFI source names them."
+  },
+  {
+    "base": "d6e0e0dd792f86b17f344aa369f954b5622e730d",
+    "removed": {
+      "crates/gam-sae/src/assignment.rs::fixed_logit_mask": 1,
+      "crates/gam-sae/src/assignment.rs::has_ungated": 1,
+      "crates/gam-sae/src/assignment.rs::logit_is_fixed": 1,
+      "crates/gam-sae/src/assignment.rs::validate_gate_configuration": 1
+    },
+    "reason": "#2933 audit remainder, SPEC 25 (gam-60 ruling): the #1026 ungated background tier had no production producer and is deleted. has_ungated and validate_gate_configuration existed only for it. Without partial fixed-logit masks the per-atom logit_is_fixed(k) and fixed_logit_mask() are replaced by the scalar SaeAssignment::logits_are_fixed() (TopK or frozen routing).",
+    "evidence": "At the base, git grep -n finds has_ungated and validate_gate_configuration only in assignment.rs, and logit_is_fixed and fixed_logit_mask in assignment.rs, construction_exact_hessian.rs, construction_quasi_laplace.rs, construction_rank_charge_derivative.rs, construction_arrow_schur_assembly.rs, fit_drivers.rs and three gam-sae tests, all of which now call logits_are_fixed or were restated on frozen routing. No example, Python or FFI source names them."
   }
 ]

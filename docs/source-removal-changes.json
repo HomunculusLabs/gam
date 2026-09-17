@@ -9634,5 +9634,22 @@
     ],
     "reason": "#2899 F7: the fit boundary (EncodedDataset::validate_fit_boundary in materialize_impl) refused a table over any degenerate column, even one no term reads, while gam fit loaded only the columns it reads. So a missing cell in an unused column blocked gamfit.fit, validate_formula and Arrow fits but not gam fit. The column set a fit reads now has one owner, gam-models fit_orchestration::fit_required_columns (with formula_columns), which the fit boundary applies. gam-cli's copies are deleted and the CLI loads with the gam-models functions.",
     "evidence": "At the base, git grep -n finds collect_term_column_names and required_columns_for_formula only in crates/gam-cli/src/main/dataset_io.rs (their definitions and the formula walk) and in run_fit.rs and multinomial_cli.rs (the calls this commit moves to formula_columns). required_columns_for_resolved_fit is defined in run_fit.rs and called twice there, and both calls now use fit_required_columns. tests/src_modules/misc/cli_tests.rs (included into the gam-cli binary's tests) imported required_columns_for_formula and required_columns_for_resolved_fit through super:: in two tests, which now call formula_columns and fit_required_columns with the same assertions. Two regression doc comments named collect_term_column_names and now name the new owner. No example, Python or FFI source names any of the three."
+  },
+  {
+    "base": "d6e0e0dd792f86b17f344aa369f954b5622e730d",
+    "items": [
+      "crates/gam-sae/src/assignment.rs:enum:GateConfigurationRefusal",
+      "crates/gam-sae/src/assignment.rs:fn:fixed_logit_mask",
+      "crates/gam-sae/src/assignment.rs:fn:fmt",
+      "crates/gam-sae/src/assignment.rs:fn:gate_logit_jvp_matches_forward_difference_for_every_admitted_ungated_mix_2933",
+      "crates/gam-sae/src/assignment.rs:fn:has_ungated",
+      "crates/gam-sae/src/assignment.rs:fn:logit_is_fixed",
+      "crates/gam-sae/src/assignment.rs:fn:softmax_ungated_refusal_is_typed_and_names_the_ungated_atoms_2933",
+      "crates/gam-sae/src/assignment.rs:fn:softmax_with_ungated_background_is_refused_not_differentiated_as_another_map_2933",
+      "crates/gam-sae/src/assignment.rs:fn:validate_gate_configuration",
+      "crates/gam-terms/src/analytic_penalties/ordered_beta_bernoulli.rs:fn:column_is_fixed"
+    ],
+    "reason": "#2933 audit remainder, SPEC 25 (gam-60 ruling): the #1026 ungated background tier had no production producer. SaeAssignment::ungated was initialized all-false, and only tests set it; pyffi, the CLI and Python expose no setter. The tier is deleted with every branch keyed on it. Without it no fixed-logit mask can be partial, so logit_is_fixed(k) and fixed_logit_mask() are replaced by the scalar SaeAssignment::logits_are_fixed() (TopK or frozen routing). has_ungated, validate_gate_configuration and GateConfigurationRefusal, whose only variant was SoftmaxWithUngatedAtoms, are deleted with the enum's Display fmt. The gam-terms OrderedBetaBernoulliPenalty::fixed_columns field, whose only producer was the tier, is deleted with column_is_fixed. Two #2933 F04 tests measured only the tier's softmax refusal and are deleted. The F04 JVP test is restated on the production path as gate_logit_jvp_matches_forward_difference_for_every_gate_family_2933 together with frozen_routing_gates_do_not_move_with_the_free_logits_2933.",
+    "evidence": "At the base, git grep -n over crates, tests and python finds ungated written only by SaeAssignment::with_mode (vec![false; k]), the chunk carry in manifold/fit_drivers.rs, structure_harvest::remove_atoms re-indexing, and tests (manifold/tests.rs, tests_deflation_traces_780.rs, tests_sparse_curvature_operator_2500.rs and assignment.rs test modules), each restated in this commit on frozen routing or the free-logit path. The callers of logit_is_fixed and fixed_logit_mask (assignment.rs, construction_exact_hessian.rs, construction_quasi_laplace.rs, construction_rank_charge_derivative.rs, construction_arrow_schur_assembly.rs, fit_drivers.rs) now call logits_are_fixed. validate_gate_configuration was called only by validate_rho_domain and the two forward seams. fixed_columns was set only from assignment.ungated in ordered_beta_bernoulli_prior_penalty and by one F45 test, restated over every column; column_is_fixed read it and nothing else. The deleted fmt is the refusal enum's Display impl. No example, Python or FFI source names any of these."
   }
 ]

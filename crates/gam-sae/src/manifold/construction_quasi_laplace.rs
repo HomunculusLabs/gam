@@ -6957,13 +6957,12 @@ impl SaeManifoldTerm {
         let SaeLocalRowVar::Logit { atom: wrt_atom } = wrt else {
             return 0.0;
         };
-        // #Bug4: a FIXED logit (ungated atom, or every atom under frozen routing)
-        // has its assembled `htt` diagonal entry ZEROED (see
-        // `assignment_prior_grad_hdiag_weighted`), so the θ-adjoint third derivative of that
-        // zeroed entry must also be zero. Mirror the ordered Beta--Bernoulli channel zeroing in
-        // `ordered_beta_bernoulli_psd_majorizer_third_channels_weighted`. The ThresholdGate/ordered Beta--Bernoulli branches below are
-        // both diagonal (`diag_atom == wrt_atom`), so masking on `wrt_atom` suffices.
-        if self.assignment.logit_is_fixed(wrt_atom) {
+        // #Bug4: under TopK or frozen routing every logit is FIXED and its assembled `htt`
+        // diagonal entry is ZEROED (see `assignment_prior_grad_hdiag_weighted`), so the
+        // θ-adjoint third derivative of that zeroed entry must also be zero. Mirror the ordered
+        // Beta--Bernoulli channel zeroing in
+        // `ordered_beta_bernoulli_psd_majorizer_third_channels_weighted`.
+        if self.assignment.logits_are_fixed() {
             return 0.0;
         }
         // #2080 — the gate prior's logit Jacobian adds the exact curvature `2z(1 − z)/τ²`
@@ -7040,7 +7039,7 @@ impl SaeManifoldTerm {
                     None => 0.0,
                 }
             }
-            // Unreachable in practice: every TopK logit is `logit_is_fixed`, so
+            // Unreachable in practice: `logits_are_fixed` holds under TopK, so
             // the mask above already returned 0.0 (no prior, no free logits).
             AssignmentMode::TopK { .. } => 0.0,
         }
@@ -7825,10 +7824,7 @@ impl SaeManifoldTerm {
                             // #2080 — the softmax row's logit Jacobian has the exact dense
                             // curvature `c·(diag z − zzᵀ)/τ²` in both `B` and `A`.
                             if let Some(count) = simplex_count {
-                                if !self.assignment.logit_is_fixed(atom_a)
-                                    && !self.assignment.logit_is_fixed(atom_b)
-                                    && !self.assignment.logit_is_fixed(_atom_w)
-                                {
+                                if !self.assignment.logits_are_fixed() {
                                     dh += w_row_prior
                                         * crate::assignment::simplex_gate_logit_jacobian_third(
                                             a_soft, atom_a, atom_b, _atom_w, count, inv_tau,

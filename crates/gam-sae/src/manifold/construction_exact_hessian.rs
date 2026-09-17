@@ -1093,7 +1093,7 @@ impl std::fmt::Display for ThirdJetUnavailable {
 enum SparseLogitCurvature {
     /// There is no operator to install and a zero row is CORRECT: no sparse outer
     /// coordinate at all (`TopK` is `FixedSupport`), no free logit (`K ≤ 1`
-    /// softmax), or a frozen/ungated routing whose prior is inert.
+    /// softmax), or a frozen routing whose prior is inert.
     Inert,
     /// The operator is DIAGONAL on the cache's global logit `t`-slots, as
     /// `(global slot, ∂H_{slot,slot}/∂ρ_sparse)`. Every installed assignment-prior
@@ -3781,10 +3781,7 @@ impl SaeManifoldTerm {
                             // #2080 — the softmax row's logit Jacobian has the exact dense
                             // curvature `c·(diag z − zzᵀ)/τ²` in both `B` and `A`.
                             if let Some(count) = simplex_count {
-                                if !self.assignment.logit_is_fixed(atom_a)
-                                    && !self.assignment.logit_is_fixed(atom_b)
-                                    && !self.assignment.logit_is_fixed(atom_w)
-                                {
+                                if !self.assignment.logits_are_fixed() {
                                     dh += w_row
                                         * crate::assignment::simplex_gate_logit_jacobian_third(
                                             a_soft, atom_a, atom_b, atom_w, count, inv_tau,
@@ -5472,7 +5469,7 @@ impl SaeManifoldTerm {
             let w_row = row_loss_w.map_or(1.0, |w| w[row]);
             for (a, va) in vars.iter().enumerate() {
                 if let SaeLocalRowVar::Logit { atom } = *va {
-                    if self.assignment.logit_is_fixed(atom) {
+                    if self.assignment.logits_are_fixed() {
                         continue;
                     }
                     if let AssignmentMode::ThresholdGate {
@@ -5983,9 +5980,6 @@ impl SaeManifoldTerm {
             (u, curv, curvp, w)
         };
         for col in 0..k {
-            if data.column_fixed[col] {
-                continue;
-            }
             let s = data.score[col];
             let sp = data.score_derivative[col];
             let spp = data.score_second[col];
