@@ -383,14 +383,15 @@ impl SparseAtomCodes {
         }
 
         let mean_support = counts.row_atoms.len() as f64 / nn;
-        let cardinality_bits = (g as f64 + 1.0).log2();
-        let combinatorial_bits = cardinality_bits
-            + counts
-                .row_ptr
-                .windows(2)
-                .map(|bounds| log2_binom(g as i64, (bounds[1] - bounds[0]) as i64))
-                .sum::<f64>()
-                / nn;
+        let mut cardinality_counts = Vec::new();
+        for bounds in counts.row_ptr.windows(2) {
+            let cardinality = bounds[1] - bounds[0];
+            if cardinality >= cardinality_counts.len() {
+                cardinality_counts.resize(cardinality + 1, 0);
+            }
+            cardinality_counts[cardinality] += 1;
+        }
+        let combinatorial_bits = combinatorial_support_bits(g, &cardinality_counts);
 
         SupportEntropy {
             tree_bits: tree_total / nn,
@@ -756,8 +757,9 @@ impl SupportCounts {
 /// zero-bit plug-in pathology) is exchangeable: the product of its predictive
 /// probabilities depends only on the counts,
 /// `P = Γ(zeros+½) Γ(ones+½) / (Γ(½)² Γ(zeros+ones+1))`, so the length is
-/// evaluated in closed form rather than by replaying the sequence.
-fn kt_code_bits(zeros: u64, ones: u64) -> f64 {
+/// evaluated in closed form rather than by replaying the sequence. Shared by
+/// [`SparseAtomCodes::support_entropy`] and the Eq. 4 support charge.
+pub(crate) fn kt_code_bits(zeros: u64, ones: u64) -> f64 {
     if zeros == 0 && ones == 0 {
         return 0.0;
     }
@@ -766,6 +768,29 @@ fn kt_code_bits(zeros: u64, ones: u64) -> f64 {
         - ln_gamma(zeros as f64 + 0.5)
         - ln_gamma(ones as f64 + 0.5))
         / LN_2
+}
+
+/// Per-token length, in bits, of the cardinality-then-subset support code:
+/// each row names its cardinality `k ∈ {0,…,G}` uniformly (`log₂(G+1)` bits)
+/// and then which `k`-subset of the `G` atoms fired (`log₂ C(G, k)` bits), so
+/// variable support sizes are charged exactly rather than at a rounded mean.
+/// `cardinality_counts[k]` is the number of rows of cardinality `k`; the slice
+/// need only reach the largest cardinality present. Cardinalities with no rows
+/// are skipped, so the cost is `O(len + Σ_i |S_i|)`. Zero when there are no
+/// rows. Shared by [`SparseAtomCodes::support_entropy`] and the Eq. 4 support
+/// charge.
+pub(crate) fn combinatorial_support_bits(g: usize, cardinality_counts: &[usize]) -> f64 {
+    let rows: usize = cardinality_counts.iter().sum();
+    if rows == 0 {
+        return 0.0;
+    }
+    let subset_bits: f64 = cardinality_counts
+        .iter()
+        .enumerate()
+        .filter(|entry| *entry.1 > 0)
+        .map(|(cardinality, &count)| count as f64 * log2_binom(g as i64, cardinality as i64))
+        .sum();
+    (g as f64 + 1.0).log2() + subset_bits / rows as f64
 }
 
 /// Plug-in mutual information `I(x_u; x_v)` in bits of two binary indicators
