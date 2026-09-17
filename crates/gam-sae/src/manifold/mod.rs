@@ -267,6 +267,9 @@ mod tests_penalty_pseudodeterminant_2933;
 mod tests_kappa_outer_gradient_2935;
 
 #[cfg(test)]
+mod tests_kappa_gauge_transport_2935;
+
+#[cfg(test)]
 mod tests_parallelism_invariance_1557;
 
 #[cfg(test)]
