@@ -12,7 +12,8 @@
 //! elementary functions; nothing here is a quadrature.
 //!
 //! The approximate GELUs (`gelu_new`, `gelu_pytorch_tanh`) are different
-//! activations and have no primitive here.
+//! activations and have no primitive here. SiLU, the gate of SwiGLU blocks,
+//! has no closed form; `gaussian_gated` owns its expectations.
 //!
 //! # Smoothing
 //!
@@ -67,6 +68,13 @@
 //! `ρ = r/√(vw) = cos θ`, this is the arc-cosine kernel
 //! `K = √(vw) (sin θ + (π − θ) cos θ)/(2π)` with `∂_r K = (π − θ)/(2π)`.
 //!
+//! Both zero-mean kernels take the orthant angle from the exactly carried
+//! residual `vw − r²`: `H = atan2(√(vw − r²), −r)/(2π)` for ReLU and
+//! `H = atan2(√Δ, −r)/(2π)` for the exact GELU. `arccos(−ρ)` of a rounded `ρ`
+//! multiplies that rounding by `1/√(1 − ρ²)`; for anti-correlated large-norm
+//! readers the GELU kernel's two `√v`-sized terms cancel on top of it, which
+//! reached 90% relative error at `v = w = −r = 1e8` (#2946).
+//!
 //! The biased kernels need the bivariate normal CDF `Φ₂`, whose owner is moving
 //! into this crate; [`pair_kernel`] refuses nonzero means until it has.
 
@@ -74,27 +82,67 @@ use crate::probability::{normal_cdf, normal_logcdf_derivatives, normal_pdf};
 use std::f64::consts::TAU;
 use std::fmt;
 
-/// An elementwise activation whose Gaussian expectations are closed forms.
+/// An elementwise activation of a known MLP block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GaussianActivation {
     /// `σ(t) = max(t, 0)`.
     Relu,
     /// The exact GELU `σ(t) = t Φ(t)`, not its `tanh` or sigmoid approximations.
     ExactGelu,
+    /// SiLU (swish) `σ(t) = t/(1 + e^{−t})`, the gate of SwiGLU blocks. Its
+    /// Gaussian expectations have no closed form: `gaussian_gated` owns them,
+    /// and the closed-form entries here refuse it.
+    Silu,
+}
+
+impl GaussianActivation {
+    /// The activation a Hugging Face `hidden_act` tag names.
+    ///
+    /// `gelu` is the exact erf GELU. `gelu_new` and `gelu_pytorch_tanh` are its
+    /// `tanh` approximation, a different activation, and are refused as such;
+    /// every tag not named here is refused, with no fallback.
+    pub fn from_hidden_act(tag: &str) -> Result<Self, GaussianActivationError> {
+        match tag {
+            "relu" => Ok(Self::Relu),
+            "gelu" => Ok(Self::ExactGelu),
+            "silu" | "swish" => Ok(Self::Silu),
+            "gelu_new" | "gelu_pytorch_tanh" => Err(GaussianActivationError::ApproximateGelu {
+                tag: tag.to_owned(),
+            }),
+            _ => Err(GaussianActivationError::UnsupportedHiddenAct {
+                tag: tag.to_owned(),
+            }),
+        }
+    }
 }
 
 /// A refused Gaussian activation expectation.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum GaussianActivationError {
     /// A pre-activation variance must be finite and nonnegative.
     InvalidVariance { variance: f64 },
     /// A mean, covariance or evaluation point must be finite.
     NonFiniteArgument { value: f64 },
+    /// A covariance rounding bound must be finite and nonnegative.
+    InvalidCovarianceRounding { bound: f64 },
+    /// `r² − vw` exceeds what the stated rounding of the Gram inputs produces.
+    CovarianceOutsideCauchySchwarz {
+        variance_x: f64,
+        variance_y: f64,
+        covariance: f64,
+        covariance_rounding: f64,
+    },
     /// ReLU with zero smoothing variance has no t-derivative of order ≥ 2 at
     /// its kink `t = 0`: the second derivative there is a Dirac mass.
     UnsmoothedReluKink { order: usize },
     /// A biased pair kernel needs the bivariate normal CDF `Φ₂`.
     BiasedPairNeedsBivariateNormalCdf { mean_x: f64, mean_y: f64 },
+    /// The activation has no closed-form Gaussian expectation here.
+    NoClosedForm { activation: GaussianActivation },
+    /// A `hidden_act` tag naming a GELU approximation, a different activation.
+    ApproximateGelu { tag: String },
+    /// A `hidden_act` tag that names no activation here.
+    UnsupportedHiddenAct { tag: String },
 }
 
 impl fmt::Display for GaussianActivationError {
@@ -108,6 +156,19 @@ impl fmt::Display for GaussianActivationError {
                 formatter,
                 "a Gaussian pre-activation mean, covariance or evaluation point must be finite, got {value}"
             ),
+            Self::InvalidCovarianceRounding { bound } => write!(
+                formatter,
+                "a covariance rounding bound must be finite and nonnegative, got {bound}"
+            ),
+            Self::CovarianceOutsideCauchySchwarz {
+                variance_x,
+                variance_y,
+                covariance,
+                covariance_rounding,
+            } => write!(
+                formatter,
+                "covariance {covariance} exceeds √({variance_x}·{variance_y}) by more than its stated rounding {covariance_rounding}"
+            ),
             Self::UnsmoothedReluKink { order } => write!(
                 formatter,
                 "ReLU without smoothing variance has no t-derivative of order {order} at its kink t = 0"
@@ -116,6 +177,17 @@ impl fmt::Display for GaussianActivationError {
                 formatter,
                 "the pair kernel at means ({mean_x}, {mean_y}) needs the bivariate normal CDF, whose owner has not moved into gam-math"
             ),
+            Self::NoClosedForm { activation } => write!(
+                formatter,
+                "{activation:?} has no closed-form Gaussian expectation; gaussian_gated owns its quadrature"
+            ),
+            Self::ApproximateGelu { tag } => write!(
+                formatter,
+                "hidden_act {tag:?} is a tanh approximation of the GELU, a different activation from the exact erf GELU"
+            ),
+            Self::UnsupportedHiddenAct { tag } => {
+                write!(formatter, "hidden_act {tag:?} names no supported activation")
+            }
         }
     }
 }
@@ -145,6 +217,7 @@ pub fn gaussian_smoothing_derivatives(
             exact_gelu_smoothing(t, variance, derivatives);
             Ok(())
         }
+        GaussianActivation::Silu => Err(GaussianActivationError::NoClosedForm { activation }),
     }
 }
 
@@ -157,6 +230,10 @@ pub struct PreactivationPair {
     pub variance_x: f64,
     pub variance_y: f64,
     pub covariance: f64,
+    /// A derived bound on how far the rounding of the caller's Gram inputs can
+    /// push `|covariance|` past `√(variance_x variance_y)`; `0` for an exact
+    /// law. See [`project_covariance`].
+    pub covariance_rounding: f64,
 }
 
 /// `K = E[σ(X) σ(Y)]` and its covariance derivative.
@@ -170,13 +247,9 @@ pub struct PairKernel {
 
 /// The pair kernel `K_σ(b, c; v, w, r) = E[σ(X) σ(Y)]` with `∂_r K_σ`.
 ///
-/// The kernel is evaluated at the metric projection of the covariance onto
-/// the Cauchy-Schwarz interval `|r| ≤ √(vw)`. A Gram matrix computed in
-/// floating point leaves that interval only by its rounding, and a reader
-/// lying in a retained subspace puts `r` on its boundary, so a refusal there
-/// would refuse exact subspaces. The projection moves `K` by at most
-/// `sup|σ'|² (|r| − √(vw))`, because `|∂_r K| = |E σ'(X) σ'(Y)| ≤ sup|σ'|²`:
-/// `1` for ReLU and `(Φ(√2) + √2 φ(√2))² < 1.28` for the exact GELU.
+/// The covariance first passes [`project_covariance`] with the pair's
+/// `covariance_rounding`: within that band it is evaluated on the
+/// Cauchy-Schwarz boundary, and beyond it the law is refused.
 ///
 /// A zero-variance pre-activation is constant. For ReLU at zero mean it sits
 /// on the kink, where the slope is its Gaussian limit `½`, as in
@@ -187,19 +260,102 @@ pub fn pair_kernel(
 ) -> Result<PairKernel, GaussianActivationError> {
     validate_finite(pair.mean_x)?;
     validate_finite(pair.mean_y)?;
-    validate_variance(pair.variance_x)?;
-    validate_variance(pair.variance_y)?;
-    validate_finite(pair.covariance)?;
+    let law = project_covariance(
+        pair.variance_x,
+        pair.variance_y,
+        pair.covariance,
+        pair.covariance_rounding,
+    )?;
     if pair.mean_x != 0.0 || pair.mean_y != 0.0 {
         return Err(GaussianActivationError::BiasedPairNeedsBivariateNormalCdf {
             mean_x: pair.mean_x,
             mean_y: pair.mean_y,
         });
     }
-    let law = ProjectedCovariance::new(pair.variance_x, pair.variance_y, pair.covariance);
-    Ok(match activation {
-        GaussianActivation::Relu => relu_zero_mean_pair_kernel(&law),
-        GaussianActivation::ExactGelu => exact_gelu_zero_mean_pair_kernel(&law),
+    match activation {
+        GaussianActivation::Relu => Ok(relu_zero_mean_pair_kernel(
+            pair.variance_x,
+            pair.variance_y,
+            law,
+        )),
+        GaussianActivation::ExactGelu => Ok(exact_gelu_zero_mean_pair_kernel(
+            pair.variance_x,
+            pair.variance_y,
+            law,
+        )),
+        GaussianActivation::Silu => Err(GaussianActivationError::NoClosedForm { activation }),
+    }
+}
+
+/// A pre-activation covariance on the Cauchy-Schwarz interval of its variances.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProjectedCovariance {
+    /// `r`, moved onto `|r| = √(vw)` when rounding put it past that boundary.
+    pub covariance: f64,
+    /// `vw − r² ≥ 0` for that covariance, with both squares carried exactly.
+    pub residual: f64,
+}
+
+/// The one Cauchy-Schwarz predicate for a Gaussian pre-activation pair.
+///
+/// A Gram computed in floating point leaves `r² ≤ vw` only by its rounding,
+/// and a reader inside a retained subspace puts `r` on the boundary. The caller
+/// therefore states `covariance_rounding = β`, a derived bound on how far the
+/// rounding of its Gram inputs can push `|r|` past `√(vw)`; `0` states an exact
+/// law. The residual `vw − r²` is formed from the two products and their exact
+/// rounding residuals, so forming it rounds by at most `ε (vw + r²)`. A residual
+/// below zero by no more than `β (2√(vw) + β) + ε (vw + r²)`, the squared form
+/// of `|r| ≤ √(vw) + β`, puts the covariance on the boundary. A larger excess is
+/// refused: past the stated rounding, an invalid covariance or a disagreeing
+/// predicate is not rounding.
+///
+/// The projection moves `K` by at most `sup|σ'|² β`, because
+/// `|∂_r K| = |E σ'(X) σ'(Y)| ≤ sup|σ'|²`: `1` for ReLU and
+/// `(Φ(√2) + √2 φ(√2))² < 1.28` for the exact GELU.
+pub fn project_covariance(
+    variance_x: f64,
+    variance_y: f64,
+    covariance: f64,
+    covariance_rounding: f64,
+) -> Result<ProjectedCovariance, GaussianActivationError> {
+    validate_variance(variance_x)?;
+    validate_variance(variance_y)?;
+    validate_finite(covariance)?;
+    if !(covariance_rounding.is_finite() && covariance_rounding >= 0.0) {
+        return Err(GaussianActivationError::InvalidCovarianceRounding {
+            bound: covariance_rounding,
+        });
+    }
+    let product = variance_x * variance_y;
+    let square = covariance * covariance;
+    if !product.is_finite() {
+        return Err(GaussianActivationError::NonFiniteArgument { value: product });
+    }
+    if !square.is_finite() {
+        return Err(GaussianActivationError::NonFiniteArgument { value: square });
+    }
+    let residual = (product - square)
+        + (variance_x.mul_add(variance_y, -product) - covariance.mul_add(covariance, -square));
+    if residual >= 0.0 {
+        return Ok(ProjectedCovariance {
+            covariance,
+            residual,
+        });
+    }
+    let scale = variance_x.sqrt() * variance_y.sqrt();
+    let band = covariance_rounding * (2.0 * scale + covariance_rounding)
+        + f64::EPSILON * (product + square);
+    if -residual > band {
+        return Err(GaussianActivationError::CovarianceOutsideCauchySchwarz {
+            variance_x,
+            variance_y,
+            covariance,
+            covariance_rounding,
+        });
+    }
+    Ok(ProjectedCovariance {
+        covariance: scale.copysign(covariance),
+        residual: 0.0,
     })
 }
 
@@ -344,93 +500,45 @@ fn fill_exact_gelu_curvature(
     }
 }
 
-/// A covariance projected onto the Cauchy-Schwarz interval of its variances.
-struct ProjectedCovariance {
+/// `K = (√(vw − r²) + r atan2(√(vw − r²), −r))/(2π)` and
+/// `∂_r K = atan2(√(vw − r²), −r)/(2π)`: the arc-cosine kernel with
+/// `√(vw) sin θ = √(vw − r²)` and `θ = π − atan2(√(vw − r²), −r)`.
+fn relu_zero_mean_pair_kernel(
     variance_x: f64,
     variance_y: f64,
-    /// `√v √w`.
-    scale: f64,
-    /// `r` projected onto `[−√(vw), √(vw)]`.
-    covariance: f64,
-    /// `r/√(vw)`, and `0` when a variance is zero.
-    correlation: f64,
-    /// `vw − r² ≥ 0`, with both squares carried exactly.
-    determinant: f64,
-}
-
-impl ProjectedCovariance {
-    fn new(variance_x: f64, variance_y: f64, covariance: f64) -> Self {
-        let scale = variance_x.sqrt() * variance_y.sqrt();
-        if scale == 0.0 {
-            return Self {
-                variance_x,
-                variance_y,
-                scale,
-                covariance: 0.0,
-                correlation: 0.0,
-                determinant: 0.0,
-            };
-        }
-        let ratio = covariance / scale;
-        if ratio.abs() > 1.0 {
-            let correlation = ratio.signum();
-            return Self {
-                variance_x,
-                variance_y,
-                scale,
-                covariance: correlation * scale,
-                correlation,
-                determinant: 0.0,
-            };
-        }
-        let product = variance_x * variance_y;
-        let square = covariance * covariance;
-        let determinant = (product - square)
-            + (variance_x.mul_add(variance_y, -product) - covariance.mul_add(covariance, -square));
-        Self {
-            variance_x,
-            variance_y,
-            scale,
-            covariance,
-            correlation: ratio,
-            determinant: determinant.max(0.0),
-        }
-    }
-}
-
-/// `K = √(vw) (sin θ + ρ (π − θ))/(2π)` and `∂_r K = (π − θ)/(2π)`, `ρ = cos θ`.
-///
-/// `sin θ` is formed from the same rounded `ρ` as `arccos(−ρ)`, so as `ρ → −1`
-/// the rounding of `ρ` cancels between the two terms to first order.
-fn relu_zero_mean_pair_kernel(law: &ProjectedCovariance) -> PairKernel {
-    if law.scale == 0.0 {
+    law: ProjectedCovariance,
+) -> PairKernel {
+    if variance_x == 0.0 || variance_y == 0.0 {
         return PairKernel {
             value: 0.0,
             covariance_derivative: 0.25,
         };
     }
-    let correlation = law.correlation;
-    let orthant = (-correlation).acos() / TAU;
-    let sine = ((1.0 - correlation) * (1.0 + correlation)).sqrt();
+    let root_residual = law.residual.sqrt();
+    let orthant = root_residual.atan2(-law.covariance) / TAU;
     PairKernel {
-        value: law.scale * (sine / TAU + correlation * orthant),
+        value: root_residual / TAU + law.covariance * orthant,
         covariance_derivative: orthant,
     }
 }
 
 /// `K = r H + (vw + r² q)/(2π √Δ)` and `∂_r K = H + r (1/A + 1/B + 1/Δ)/(2π √Δ)`
-/// with `H = arccos(−r/√(AB))/(2π)`. `vw + r² q = (vw − r²) + r² (1/A + 1/B)`
-/// sums two nonnegative terms.
-fn exact_gelu_zero_mean_pair_kernel(law: &ProjectedCovariance) -> PairKernel {
-    let total_x = 1.0 + law.variance_x;
-    let total_y = 1.0 + law.variance_y;
+/// with `H = atan2(√Δ, −r)/(2π)` and `Δ = 1 + v + w + (vw − r²)`.
+/// `vw + r² q = (vw − r²) + r² (1/A + 1/B)` sums two nonnegative terms.
+fn exact_gelu_zero_mean_pair_kernel(
+    variance_x: f64,
+    variance_y: f64,
+    law: ProjectedCovariance,
+) -> PairKernel {
+    let total_x = 1.0 + variance_x;
+    let total_y = 1.0 + variance_y;
     let covariance = law.covariance;
-    let discriminant = 1.0 + law.variance_x + law.variance_y + law.determinant;
-    let correlation = (covariance / (total_x.sqrt() * total_y.sqrt())).clamp(-1.0, 1.0);
-    let orthant = (-correlation).acos() / TAU;
-    let density = 1.0 / (TAU * discriminant.sqrt());
+    let discriminant = 1.0 + variance_x + variance_y + law.residual;
+    let root_discriminant = discriminant.sqrt();
+    let orthant = root_discriminant.atan2(-covariance) / TAU;
+    let density = 1.0 / (TAU * root_discriminant);
     let inverse_totals = total_x.recip() + total_y.recip();
-    let coupling = law.determinant + covariance * covariance * inverse_totals;
+    let coupling = law.residual + covariance * covariance * inverse_totals;
     PairKernel {
         value: covariance * orthant + coupling * density,
         covariance_derivative: orthant
@@ -450,6 +558,9 @@ mod tests {
     /// integrand evaluation, chains: none takes more than 64 steps, and each
     /// adds at most one ulp of relative error to first order.
     const EVALUATION_OPERATIONS: f64 = 64.0;
+
+    /// `sup|σ'|` of the exact GELU, `Φ(√2) + √2 φ(√2) = 1.12893…`, rounded up.
+    const EXACT_GELU_SLOPE_BOUND: f64 = 1.129;
 
     /// A quadrature estimate and a derived bound on its error.
     #[derive(Clone, Copy, Debug)]
@@ -602,6 +713,7 @@ mod tests {
                     }
                 }
             }
+            GaussianActivation::Silu => unreachable!("SiLU has no closed form here"),
         }
     }
 
@@ -624,7 +736,28 @@ mod tests {
             variance_x,
             variance_y,
             covariance,
+            covariance_rounding: 0.0,
         }
+    }
+
+    /// The terms of the zero-mean exact-GELU closed forms, recomputed for the
+    /// rounding model: `|r H| + (vw + r² q)/(2π√Δ)` for `K` and
+    /// `H + |r| (1/A + 1/B + 1/Δ)/(2π√Δ)` for `∂_r K`.
+    fn exact_gelu_zero_mean_magnitudes(
+        variance_x: f64,
+        variance_y: f64,
+        covariance: f64,
+    ) -> (f64, f64) {
+        let residual = (variance_x * variance_y - covariance * covariance).max(0.0);
+        let discriminant = 1.0 + variance_x + variance_y + residual;
+        let orthant = discriminant.sqrt().atan2(-covariance) / TAU;
+        let density = 1.0 / (TAU * discriminant.sqrt());
+        let inverse_totals = 1.0 / (1.0 + variance_x) + 1.0 / (1.0 + variance_y);
+        (
+            covariance.abs() * orthant
+                + (residual + covariance * covariance * inverse_totals) * density,
+            orthant + covariance.abs() * density * (inverse_totals + 1.0 / discriminant),
+        )
     }
 
     /// `E[ReLU⁽ᵏ⁾(t + √v E)]`, `k ∈ {0, 1}`, as `s^p ∫_ℓ^∞ (e − ℓ)^p φ(e) de`
@@ -1043,11 +1176,11 @@ mod tests {
             )
             .expect("zero-mean ReLU pair kernel");
             let reference = relu_zero_mean_pair_reference(variance_x, variance_y, covariance, 16);
-            let scale = variance_x.sqrt() * variance_y.sqrt();
-            let correlation = (covariance / scale).clamp(-1.0, 1.0);
-            let sine = ((1.0 - correlation) * (1.0 + correlation)).sqrt();
+            let root_residual = (variance_x * variance_y - covariance * covariance)
+                .max(0.0)
+                .sqrt();
             let magnitude =
-                scale * (sine / TAU + correlation.abs() * closed.covariance_derivative);
+                root_residual / TAU + covariance.abs() * closed.covariance_derivative;
             let tolerance = reference.bound + closed_form_rounding(magnitude);
             let discrepancy = (closed.value - reference.value).abs();
             assert!(
@@ -1113,11 +1246,8 @@ mod tests {
             let kernel = doubled_order(coarse_kernel, fine_kernel, 2 * nodes, 2 * nodes, 0.0);
             let derivative =
                 doubled_order(coarse_derivative, fine_derivative, 2 * nodes, 2 * nodes, 0.0);
-            // |r H| ≤ |r|/2, 0 ≤ vw + r² q ≤ vw + 2r² and 2π√Δ ≥ 2π bound the
-            // closed form's terms; likewise H ≤ ½ and 1/A + 1/B + 1/Δ ≤ 3.
-            let kernel_magnitude = 0.5 * covariance.abs()
-                + (variance_x * variance_y + 2.0 * covariance * covariance) / TAU;
-            let derivative_magnitude = 0.5 + 3.0 * covariance.abs() / TAU;
+            let (kernel_magnitude, derivative_magnitude) =
+                exact_gelu_zero_mean_magnitudes(variance_x, variance_y, covariance);
             let kernel_tolerance = kernel.bound + closed_form_rounding(kernel_magnitude);
             let derivative_tolerance =
                 derivative.bound + closed_form_rounding(derivative_magnitude);
@@ -1159,6 +1289,99 @@ mod tests {
     }
 
     #[test]
+    fn exact_gelu_kernel_resolves_large_norm_anticorrelated_readers() {
+        // At v = w and r = −v the pre-activations are Y = −X with X ~ N(0, v),
+        // so K = −E[X² Φ(X) Φ(−X)] and ∂_r K = E[σ'(X) σ'(−X)] are one-dimensional
+        // with analytic integrands on the O(1) scale of Φ, whatever v is. For
+        // |x| ≥ 1, x² Φ(x) Φ(−x) ≤ |x| φ(x) and |σ'(x) σ'(−x)| ≤ sup|σ'| |x| φ(x),
+        // and the weight φ(x/√v)/√v ≤ 1/√(2πv), so the mass beyond |x| = L is at
+        // most 2 φ(L)/√(2πv), times sup|σ'| for the derivative. Here the closed
+        // form's two √v-sized terms cancel to a K of order 1/√v.
+        const REACH: f64 = 8.0;
+        let coarse_rule = legendre_rule(64);
+        let fine_rule = legendre_rule(128);
+        for variance in [4096.0, 1.0e6, 1.0e8] {
+            let covariance = -variance;
+            let closed = pair_kernel(
+                GaussianActivation::ExactGelu,
+                zero_mean(variance, variance, covariance),
+            )
+            .expect("anti-correlated exact GELU pair kernel");
+            let root_variance = variance.sqrt();
+            let weight = |x: f64| normal_pdf(x / root_variance) / root_variance;
+            let kernel_integrand = |x: f64| {
+                let value = -x * x * normal_cdf(x) * normal_cdf(-x) * weight(x);
+                (value, value.abs())
+            };
+            let derivative_integrand = |x: f64| {
+                let density = normal_pdf(x);
+                let upper = normal_cdf(x) + x * density;
+                let lower = normal_cdf(-x) - x * density;
+                (
+                    upper * lower * weight(x),
+                    (normal_cdf(x) + (x * density).abs())
+                        * (normal_cdf(-x) + (x * density).abs())
+                        * weight(x),
+                )
+            };
+            let tail = 2.0 * normal_pdf(REACH) / (TAU * variance).sqrt();
+            let kernel = doubled_order(
+                legendre_pass(&coarse_rule, -REACH, REACH, kernel_integrand),
+                legendre_pass(&fine_rule, -REACH, REACH, kernel_integrand),
+                128,
+                128,
+                tail,
+            );
+            let derivative = doubled_order(
+                legendre_pass(&coarse_rule, -REACH, REACH, derivative_integrand),
+                legendre_pass(&fine_rule, -REACH, REACH, derivative_integrand),
+                128,
+                128,
+                EXACT_GELU_SLOPE_BOUND * tail,
+            );
+            let (kernel_magnitude, derivative_magnitude) =
+                exact_gelu_zero_mean_magnitudes(variance, variance, covariance);
+            let kernel_tolerance = kernel.bound + closed_form_rounding(kernel_magnitude);
+            let derivative_tolerance =
+                derivative.bound + closed_form_rounding(derivative_magnitude);
+            let kernel_discrepancy = (closed.value - kernel.value).abs();
+            let derivative_discrepancy = (closed.covariance_derivative - derivative.value).abs();
+            assert!(
+                kernel_discrepancy <= kernel_tolerance,
+                "exact GELU K at v = w = −r = {variance}: closed form {} against the degenerate law {} (discrepancy {kernel_discrepancy:e}, derived tolerance {kernel_tolerance:e})",
+                closed.value,
+                kernel.value
+            );
+            assert!(
+                derivative_discrepancy <= derivative_tolerance,
+                "exact GELU ∂_r K at v = w = −r = {variance}: closed form {} against the degenerate law {} (discrepancy {derivative_discrepancy:e}, derived tolerance {derivative_tolerance:e})",
+                closed.covariance_derivative,
+                derivative.value
+            );
+            // Positive control: the orthant as arccos(−ρ) of a rounded ρ. Every
+            // rounded ρ lies within one ulp of the true one, and one of the two
+            // ulp neighbours of the computed ρ lies at least half an ulp from it,
+            // so the larger of their discrepancies shows what the arccos form
+            // costs; the same tolerance rejects it.
+            let total = 1.0 + variance;
+            let discriminant = 1.0 + 2.0 * variance;
+            let orthant = discriminant.sqrt().atan2(-covariance) / TAU;
+            let correlation = covariance / (total.sqrt() * total.sqrt());
+            let control = [correlation.next_up(), correlation.next_down()]
+                .into_iter()
+                .map(|neighbour| {
+                    let arccos_orthant = (-neighbour).acos() / TAU;
+                    (closed.value + covariance * (arccos_orthant - orthant) - kernel.value).abs()
+                })
+                .fold(0.0, f64::max);
+            assert!(
+                control > kernel_tolerance,
+                "arccos control at v = {variance}: discrepancy {control:e} within tolerance {kernel_tolerance:e}"
+            );
+        }
+    }
+
+    #[test]
     fn pair_kernel_covariance_derivative_matches_a_richardson_checked_difference() {
         // Central differences D(h) = K_r + c h² + O(h⁴): |D(h) − D(h/2)| bounds
         // the truncation of D(h/2), and each kernel's rounding enters divided by
@@ -1182,8 +1405,9 @@ mod tests {
                 let magnitude = match activation {
                     GaussianActivation::Relu => scale / TAU + 0.5 * reach,
                     GaussianActivation::ExactGelu => {
-                        0.5 * reach + (variance_x * variance_y + 2.0 * reach * reach) / TAU
+                        exact_gelu_zero_mean_magnitudes(variance_x, variance_y, reach).0
                     }
+                    GaussianActivation::Silu => unreachable!("SiLU has no closed form here"),
                 };
                 let tolerance = (coarse - fine).abs()
                     + closed_form_rounding(magnitude) / half_step
@@ -1203,6 +1427,7 @@ mod tests {
                         (-covariance / ((1.0 + variance_x) * (1.0 + variance_y)).sqrt()).acos()
                             / TAU
                     }
+                    GaussianActivation::Silu => unreachable!("SiLU has no closed form here"),
                 };
                 assert!(
                     (wrong - fine).abs() > tolerance,
@@ -1213,26 +1438,60 @@ mod tests {
     }
 
     #[test]
-    fn pair_kernel_projects_the_covariance_onto_the_cauchy_schwarz_interval() {
+    fn covariance_past_cauchy_schwarz_projects_within_its_rounding_and_is_refused_beyond() {
         for activation in [GaussianActivation::Relu, GaussianActivation::ExactGelu] {
             for sign in [1.0, -1.0] {
                 let boundary = pair_kernel(activation, zero_mean(4.0, 9.0, sign * 6.0))
                     .expect("boundary covariance");
-                let beyond = pair_kernel(activation, zero_mean(4.0, 9.0, sign * 6.0 * (1.0 + 1.0e-9)))
-                    .expect("covariance beyond Cauchy-Schwarz");
-                assert_eq!(beyond, boundary, "{activation:?} projection at sign {sign}");
+                // Past √(vw) = 6 by 6e-9, inside a stated rounding of 1e-8.
+                let within = PreactivationPair {
+                    covariance_rounding: 1.0e-8,
+                    ..zero_mean(4.0, 9.0, sign * 6.0 * (1.0 + 1.0e-9))
+                };
+                assert_eq!(
+                    pair_kernel(activation, within),
+                    Ok(boundary),
+                    "{activation:?} projection at sign {sign}"
+                );
+                // Past √(vw) by 6e-6: beyond that rounding, and beyond any rounding
+                // for an exact law.
+                for rounding in [1.0e-8, 0.0] {
+                    let beyond = PreactivationPair {
+                        covariance_rounding: rounding,
+                        ..zero_mean(4.0, 9.0, sign * 6.0 * (1.0 + 1.0e-6))
+                    };
+                    assert!(
+                        matches!(
+                            pair_kernel(activation, beyond),
+                            Err(GaussianActivationError::CovarianceOutsideCauchySchwarz { .. })
+                        ),
+                        "{activation:?} covariance beyond its rounding at sign {sign}, rounding {rounding}"
+                    );
+                }
             }
             // A constant pre-activation: K = σ(0) E σ(Y) = 0 and ∂_r K = σ'(0) E σ'(Y) = ¼.
-            for covariance in [0.0, 0.1] {
-                assert_eq!(
-                    pair_kernel(activation, zero_mean(0.0, 2.0, covariance)),
-                    Ok(PairKernel {
-                        value: 0.0,
-                        covariance_derivative: 0.25
-                    }),
-                    "{activation:?} with a zero variance and r = {covariance}"
-                );
-            }
+            let constant = PairKernel {
+                value: 0.0,
+                covariance_derivative: 0.25,
+            };
+            assert_eq!(
+                pair_kernel(activation, zero_mean(0.0, 2.0, 0.0)),
+                Ok(constant),
+                "{activation:?} with a zero variance"
+            );
+            let rounded = PreactivationPair {
+                covariance_rounding: 0.2,
+                ..zero_mean(0.0, 2.0, 0.1)
+            };
+            assert_eq!(
+                pair_kernel(activation, rounded),
+                Ok(constant),
+                "{activation:?} with a zero variance and a covariance inside its rounding"
+            );
+            assert!(matches!(
+                pair_kernel(activation, zero_mean(0.0, 2.0, 0.1)),
+                Err(GaussianActivationError::CovarianceOutsideCauchySchwarz { .. })
+            ));
         }
         assert_eq!(
             pair_kernel(GaussianActivation::Relu, zero_mean(4.0, 9.0, 6.0)),
@@ -1241,6 +1500,34 @@ mod tests {
                 covariance_derivative: 0.5
             })
         );
+    }
+
+    #[test]
+    fn hidden_act_tags_name_their_activation_or_are_refused() {
+        for (tag, activation) in [
+            ("relu", GaussianActivation::Relu),
+            ("gelu", GaussianActivation::ExactGelu),
+            ("silu", GaussianActivation::Silu),
+            ("swish", GaussianActivation::Silu),
+        ] {
+            assert_eq!(GaussianActivation::from_hidden_act(tag), Ok(activation), "tag {tag}");
+        }
+        for tag in ["gelu_new", "gelu_pytorch_tanh"] {
+            assert_eq!(
+                GaussianActivation::from_hidden_act(tag),
+                Err(GaussianActivationError::ApproximateGelu {
+                    tag: tag.to_owned()
+                })
+            );
+        }
+        for tag in ["tanh", "GELU", ""] {
+            assert_eq!(
+                GaussianActivation::from_hidden_act(tag),
+                Err(GaussianActivationError::UnsupportedHiddenAct {
+                    tag: tag.to_owned()
+                })
+            );
+        }
     }
 
     #[test]
@@ -1261,11 +1548,31 @@ mod tests {
             })
         );
         assert_eq!(
+            gaussian_smoothing_derivatives(GaussianActivation::Silu, 0.0, 1.0, &mut derivatives),
+            Err(GaussianActivationError::NoClosedForm {
+                activation: GaussianActivation::Silu
+            })
+        );
+        assert_eq!(
             pair_kernel(GaussianActivation::Relu, zero_mean(1.0, f64::INFINITY, 0.0)),
             Err(GaussianActivationError::InvalidVariance {
                 variance: f64::INFINITY
             })
         );
+        assert_eq!(
+            pair_kernel(GaussianActivation::Silu, zero_mean(1.0, 1.0, 0.2)),
+            Err(GaussianActivationError::NoClosedForm {
+                activation: GaussianActivation::Silu
+            })
+        );
+        let unbounded = PreactivationPair {
+            covariance_rounding: f64::NAN,
+            ..zero_mean(1.0, 1.0, 0.2)
+        };
+        assert!(matches!(
+            pair_kernel(GaussianActivation::Relu, unbounded),
+            Err(GaussianActivationError::InvalidCovarianceRounding { .. })
+        ));
         let biased = PreactivationPair {
             mean_x: 0.5,
             ..zero_mean(1.0, 1.0, 0.2)
