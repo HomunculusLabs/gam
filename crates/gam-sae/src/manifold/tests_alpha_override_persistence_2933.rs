@@ -104,8 +104,10 @@ fn assert_finalization_preserves_the_objective(learnable: bool, override_alpha: 
     let criterion_before = objective
         .terminal_penalized_quasi_laplace_criterion
         .expect("a fixed-rho fit stamps its criterion");
-    let assignments_before = objective.term.assignment.try_assignments().unwrap();
-    let reconstruction_before = objective.term.try_fitted().unwrap();
+    let assignments_before = objective.term.assignment.try_assignments()
+        .expect("finite fitted logits give assignments");
+    let reconstruction_before = objective.term.try_fitted()
+        .expect("the fitted state reconstructs");
     let prior_expected = expected_prior_value(&logits_before, concentration, weight);
     assert!(
         prior_expected.abs() >= 1.0e-2,
@@ -163,11 +165,13 @@ fn assert_finalization_preserves_the_objective(learnable: bool, override_alpha: 
         fitted.charts_canonicalized
     );
     assert_eq!(
-        fitted.term.assignment.try_assignments().unwrap(),
+        fitted.term.assignment.try_assignments()
+        .expect("finite fitted logits give assignments"),
         assignments_before,
         "{label}: finalization must not change assignments"
     );
-    let reconstruction_after = fitted.term.try_fitted().unwrap();
+    let reconstruction_after = fitted.term.try_fitted()
+        .expect("the fitted state reconstructs");
     let reconstruction_gap = max_abs(&(&reconstruction_after - &reconstruction_before));
     assert!(
         reconstruction_gap <= 1.0e-6 * (1.0 + max_abs(&reconstruction_before)),
@@ -376,13 +380,13 @@ fn prior_parameters_name_the_concentration_and_the_weight_2933() {
                 vec![LatentManifold::Euclidean; 2],
                 AssignmentMode::ordered_beta_bernoulli(TEMPERATURE, BASE_ALPHA, learnable),
             )
-            .unwrap();
+            .expect("zero logits and matching coordinate blocks build an assignment");
             assignment.set_ordered_beta_bernoulli_alpha_override(override_alpha);
             let rho = SaeManifoldRho::new(3.0_f64.ln(), 0.0, vec![Array1::zeros(1); 2])
                 .for_assignment(assignment.mode);
             let parameters = assignment
                 .ordered_beta_bernoulli_prior_parameters(&rho)
-                .unwrap()
+                .expect("rho = ln 3 is inside every configuration's domain")
                 .expect("an ordered Beta--Bernoulli mode resolves prior parameters");
             let (concentration, weight) = expected_prior_parameters(learnable, override_alpha);
             let label = format!("learnable_alpha={learnable}, override={override_alpha:?}");
