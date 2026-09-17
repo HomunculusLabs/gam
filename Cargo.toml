@@ -10,6 +10,8 @@ license = "AGPL-3.0-or-later"
 # Without this, `bench/large_scale/` (>1 GB of benchmark data) is bundled
 # into the package and crates.io rejects the upload at the 10 MiB limit.
 # Patterns are gitignore-style; leading `/` anchors to crate root.
+# `src/lib.rs` embeds `docs/rust-library-surface.md` as the crate documentation
+# (`include_str!`), so the package must carry it or the library does not build.
 include = [
     "/src/**/*.rs",
     "/src/**/*.pest",
@@ -19,6 +21,7 @@ include = [
     "/rust-toolchain.toml",
     "/README.md",
     "/LICENSE",
+    "/docs/rust-library-surface.md",
 ]
 
 [package.metadata.cargo-machete]
