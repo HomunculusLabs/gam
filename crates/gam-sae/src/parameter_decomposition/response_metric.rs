@@ -93,18 +93,28 @@
 //! `ℓ₁` norm at most 2, and `∇_z KL = −F(z) δ` has `ℓ₁` norm
 //! `Σᵢ pᵢ|δᵢ − E_p δ| ≤ osc(δ)`, where `δ` moves by at most `2e` per coordinate
 //! and so its oscillation by at most `4e`.
+//!
+//! The family also carries its metric. With `F(z) = L(p)ᵀ L(p)` and
+//! `L(p) = diag(√p)(I − 1pᵀ)`, the factor `A(h) = [√ν_α L(p_α(h)) J_α(h)]` is not
+//! the Jacobian of any map, because `L` moves with `h`. So it is resolved as a
+//! stacked factor through
+//! [`resolve_stacked_factor`](super::state::resolve_stacked_factor)
+//! ([`CategoricalFamily::at`]). Each `L(p)` has the exact kernel `1`, so the rank
+//! ceiling is `min(Σ_α (K_α − 1), d)`.
 
 use std::fmt;
 
 use gam_linalg::decision::projector_error_bar;
-use gam_linalg::roundoff::{accumulation_band, accumulation_growth};
-use gam_math::categorical::{CategoricalError, categorical_kl_from_logits_with_error};
+use gam_linalg::roundoff::{UNIT_ROUNDOFF, accumulation_band, accumulation_growth};
+use gam_math::categorical::{
+    CategoricalError, categorical_kl_from_logits_with_error, log_softmax_with_error,
+};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 use super::state::{
     ConstantRankCheck, DifferentiableNativeMap, Evaluation, FiberVerdict, JacobianEvaluation,
     LocalQuotient, NativeMap, StateChart, StateDomain, StateError, StateRow, constant_rank_check,
-    fiber_test,
+    fiber_test, resolve_stacked_factor,
 };
 use super::supports::{EvidenceStatus, EvidenceStatusError, Extremum};
 
@@ -336,27 +346,7 @@ impl<'a> ResponseMetric<'a> {
         &self,
         anchor: ArrayView1<'_, f64>,
     ) -> Result<LocalStateCoordinates, ResponseMetricError> {
-        let rank = self.at(anchor.insert_axis(Axis(0)))?;
-        let quotient = rank
-            .states
-            .first()
-            .ok_or(ResponseMetricError::State(StateError::EmptyFamily {
-                context: "response metric: anchor",
-            }))?;
-        let resolved = quotient.resolved_rank;
-        let subspace_error_bar = if resolved == 0 || resolved == self.dimension {
-            0.0
-        } else {
-            let leading = quotient.singular_values[resolved - 1];
-            let trailing = quotient.singular_values.get(resolved).copied().unwrap_or(0.0);
-            projector_error_bar(leading - trailing, quotient.band)
-        };
-        let chart = LinearStateChart::new(anchor.to_owned(), quotient.observed_directions.clone())?;
-        Ok(LocalStateCoordinates {
-            rank,
-            chart,
-            subspace_error_bar,
-        })
+        coordinates_at(self.at(anchor.insert_axis(Axis(0)))?, anchor, self.dimension)
     }
 }
 
@@ -725,6 +715,167 @@ impl<'a> CategoricalFamily<'a> {
         self.dimension
     }
 
+    /// `min(Σ_α (K_α − 1), d)`: each `L(p_α)` has the exact kernel `1`, so the
+    /// stacked factor has at most that rank at every state.
+    pub fn rank_ceiling(&self) -> usize {
+        self.members
+            .iter()
+            .map(|member| member.logits.output_dimension() - 1)
+            .sum::<usize>()
+            .min(self.dimension)
+    }
+
+    /// The stacked factor `A(h) = [√ν_α L(p_α(h)) J_α(h)]` of
+    /// `G(h) = Σ_α ν_α J_αᵀ F(z_α(h)) J_α`, and a bound on its spectral distance
+    /// from the exact factor at `h`.
+    ///
+    /// Per member, `r = maxᵢ ρᵢ + 2e_R` bounds `|log p̂ᵢ − log p*ᵢ|`: `ρ` comes from
+    /// `log_softmax_with_error`, and moving the logits by their sup-norm roundoff
+    /// `e_R` moves each log-probability by at most `2e_R`. The exponential adds `2u`
+    /// and the square root `u`, so `b = expm1(r + 4u)` bounds `|p̂ᵢ − p*ᵢ|/p*ᵢ` and
+    /// `a = expm1(r/2 + 4u)` bounds `|√p̂ᵢ − √p*ᵢ|/√p*ᵢ`. With `‖√p*‖₂ = 1` and
+    /// `‖p*‖₂ ≤ 1`, `‖L(p̂) − L(p*)‖₂ ≤ a + a(1 + b) + b`. Forming `L(p̂)` rounds
+    /// entrywise within `γ₂(√p̂ᵢ p̂ⱼ + δᵢⱼ √p̂ᵢ)`, the product `L̂ Ĵ` within
+    /// `γ_K Σₗ|L̂ᵢₗ Ĵₗⱼ|`, and `‖L(p*)‖₂ ≤ 1` because `F ≼ diag p`. So `fl(ŝ L̂ Ĵ)` is
+    /// within `ŝ(1 + γ₁)(2u‖X̂‖_F + ‖B‖_F + (‖L̂ − L(p̂)‖_F + ‖L(p̂) − L(p*)‖₂)‖Ĵ‖_F + e_J)`
+    /// of `√ν L(p*) J`. The stacked bound is the root sum of the members' squared
+    /// bounds.
+    pub fn factor(
+        &self,
+        state: ArrayView1<'_, f64>,
+    ) -> Result<(Array2<f64>, f64), ResponseMetricError> {
+        require_input(state, 0.0, self.dimension, "categorical metric: state")?;
+        let rows: usize = self
+            .members
+            .iter()
+            .map(|member| member.logits.output_dimension())
+            .sum();
+        let mut stacked = Array2::<f64>::zeros((rows, self.dimension));
+        let mut formation_squared = 0.0_f64;
+        let mut offset = 0;
+        for member in &self.members {
+            let categories = member.logits.output_dimension();
+            let logits = member.logits.evaluate(state, 0.0)?;
+            require_logits(&logits, categories, "categorical metric: logits")?;
+            let jacobian = member.logits.jacobian(state)?;
+            if jacobian.matrix.dim() != (categories, self.dimension) {
+                return Err(StateError::DimensionMismatch {
+                    context: "categorical metric: Jacobian shape",
+                    expected: categories * self.dimension,
+                    found: jacobian.matrix.len(),
+                }
+                .into());
+            }
+            if !jacobian.roundoff.is_finite()
+                || jacobian.roundoff < 0.0
+                || jacobian.matrix.iter().any(|value| !value.is_finite())
+            {
+                return Err(StateError::NonFinite {
+                    context: "categorical metric: Jacobian",
+                }
+                .into());
+            }
+            let (log_probabilities, radii) = log_softmax_with_error(&logits.value.to_vec())
+                .map_err(ResponseMetricError::Categorical)?;
+            let radius = radii
+                .iter()
+                .fold(0.0_f64, |largest, &radius| largest.max(radius))
+                + 2.0 * logits.roundoff;
+            let relative_probability =
+                rounded_up((radius + 4.0 * UNIT_ROUNDOFF).exp_m1() * growth_factor(2));
+            let relative_root =
+                rounded_up((0.5 * radius + 4.0 * UNIT_ROUNDOFF).exp_m1() * growth_factor(2));
+            if !(relative_probability.is_finite() && relative_root.is_finite()) {
+                return Err(StateError::NonFinite {
+                    context: "categorical metric: probability radius",
+                }
+                .into());
+            }
+            let probabilities = Array1::from_iter(log_probabilities.iter().map(|value| value.exp()));
+            let roots = probabilities.mapv(f64::sqrt);
+            let mut fisher_factor = Array2::<f64>::zeros((categories, categories));
+            let mut entry_rounding_squared = 0.0_f64;
+            for row in 0..categories {
+                for column in 0..categories {
+                    let product = roots[row] * probabilities[column];
+                    let diagonal = if row == column { roots[row] } else { 0.0 };
+                    fisher_factor[[row, column]] = diagonal - product;
+                    let band = accumulation_band(2, product + diagonal);
+                    entry_rounding_squared += band * band;
+                }
+            }
+            let entry_rounding = rounded_up(
+                entry_rounding_squared.sqrt() * growth_factor(categories * categories + 1),
+            );
+            let probability_drift = rounded_up(
+                (relative_root + relative_root * (1.0 + relative_probability) + relative_probability)
+                    * growth_factor(4),
+            );
+            let projected = fisher_factor.dot(&jacobian.matrix);
+            let magnitudes = fisher_factor
+                .mapv(f64::abs)
+                .dot(&jacobian.matrix.mapv(f64::abs));
+            let product_rounding = frobenius_upper(
+                magnitudes
+                    .iter()
+                    .map(|&magnitude| accumulation_band(categories, magnitude)),
+            );
+            let spread = frobenius_upper(projected.iter().copied());
+            let jacobian_norm = frobenius_upper(jacobian.matrix.iter().copied());
+            let bound = 2.0 * accumulation_growth(1) * spread
+                + product_rounding
+                + (entry_rounding + probability_drift) * jacobian_norm
+                + jacobian.roundoff;
+            let weight_root = member.weight.sqrt();
+            let member_formation = rounded_up(weight_root * growth_factor(8) * bound);
+            stacked
+                .slice_mut(ndarray::s![offset..offset + categories, ..])
+                .assign(&projected.mapv(|value| weight_root * value));
+            formation_squared += member_formation * member_formation;
+            offset += categories;
+        }
+        Ok((
+            stacked,
+            rounded_up(formation_squared.sqrt() * growth_factor(self.members.len() + 1)),
+        ))
+    }
+
+    /// The factor resolved at each stated state, the rows of `states`, with the
+    /// structural ceiling `min(Σ_α (K_α − 1), d)` in place of `min(rows, d)`.
+    pub fn at(&self, states: ArrayView2<'_, f64>) -> Result<ConstantRankCheck, ResponseMetricError> {
+        if states.nrows() == 0 {
+            return Err(StateError::EmptyFamily {
+                context: "categorical metric: states",
+            }
+            .into());
+        }
+        let ceiling = self.rank_ceiling();
+        let mut locals = Vec::with_capacity(states.nrows());
+        for state in states.rows() {
+            let (stacked, formation) = self.factor(state)?;
+            let mut local = resolve_stacked_factor(&stacked, formation)?;
+            local.rank_ceiling = ceiling;
+            locals.push(local);
+        }
+        let generic_rank = locals
+            .iter()
+            .map(|local| local.resolved_rank)
+            .max()
+            .unwrap_or(0);
+        Ok(ConstantRankCheck {
+            states: locals,
+            generic_rank,
+        })
+    }
+
+    /// Local state coordinates at `anchor` under the Fisher metric.
+    pub fn local_coordinates(
+        &self,
+        anchor: ArrayView1<'_, f64>,
+    ) -> Result<LocalStateCoordinates, ResponseMetricError> {
+        coordinates_at(self.at(anchor.insert_axis(Axis(0)))?, anchor, self.dimension)
+    }
+
     /// Test `coordinates`' chart at the declared finite states, the rows of
     /// `states`, in KL: each tested state `h` against
     /// `Σ_α ν_α KL(softmax z_α(h) ‖ softmax z_α(D(E h)))` and the declared
@@ -1087,6 +1238,44 @@ fn frobenius_upper(entries: impl Iterator<Item = f64>) -> f64 {
         count += 1;
     }
     rounded_up(sum.sqrt() * growth_factor(count + 1))
+}
+
+/// Local state coordinates from the factor resolved at `anchor`, its only stated
+/// state.
+///
+/// Where the resolved rank reaches the ceiling, the exact factor's next singular
+/// value is zero: `min(rows, d)` bounds the rank of a stacked Jacobian, and the
+/// kernel `1` of each `L(p)` bounds the categorical factor by `Σ(K − 1)`. The
+/// computed `σ̂_{k+1}` there is roundoff of an exact zero, so Wedin's gap is `σ̂_k`.
+fn coordinates_at(
+    rank: ConstantRankCheck,
+    anchor: ArrayView1<'_, f64>,
+    dimension: usize,
+) -> Result<LocalStateCoordinates, ResponseMetricError> {
+    let quotient = rank
+        .states
+        .first()
+        .ok_or(ResponseMetricError::State(StateError::EmptyFamily {
+            context: "response metric: anchor",
+        }))?;
+    let resolved = quotient.resolved_rank;
+    let subspace_error_bar = if resolved == 0 || resolved == dimension {
+        0.0
+    } else {
+        let leading = quotient.singular_values[resolved - 1];
+        let trailing = if resolved == quotient.rank_ceiling {
+            0.0
+        } else {
+            quotient.singular_values.get(resolved).copied().unwrap_or(0.0)
+        };
+        projector_error_bar(leading - trailing, quotient.band)
+    };
+    let chart = LinearStateChart::new(anchor.to_owned(), quotient.observed_directions.clone())?;
+    Ok(LocalStateCoordinates {
+        rank,
+        chart,
+        subspace_error_bar,
+    })
 }
 
 fn require_input(
@@ -1677,6 +1866,134 @@ mod tests {
 
     fn categorical(logits: &dyn DifferentiableNativeMap, weight: f64) -> CategoricalMember<'_> {
         CategoricalMember { logits, weight }
+    }
+
+    /// Logits `z(t) = (t, 0)`: exact, and moving `t` by `δ` moves a logit by at
+    /// most `δ`.
+    fn first_logit_of_two() -> Closed {
+        Closed {
+            input: 1,
+            output: 2,
+            evaluate: |h, delta| (array![h[0], 0.0], delta),
+            jacobian: |h| {
+                Array2::from_shape_fn((2, h.len()), |(row, column)| {
+                    if row == 0 && column == 0 { 1.0 } else { 0.0 }
+                })
+            },
+        }
+    }
+
+    /// Logits `z(t) = (t, 0, 0)`.
+    fn first_logit_of_three() -> Closed {
+        Closed {
+            input: 1,
+            output: 3,
+            evaluate: |h, delta| (array![h[0], 0.0, 0.0], delta),
+            jacobian: |h| {
+                Array2::from_shape_fn((3, h.len()), |(row, column)| {
+                    if row == 0 && column == 0 { 1.0 } else { 0.0 }
+                })
+            },
+        }
+    }
+
+    /// The factor brackets the Fisher information. `z(t) = (t, 0)` at `t = 0` has
+    /// `p = (½, ½)` and `G = p₀p₁ = ¼`; a weight of ¼ gives `1/16`, strictly below.
+    /// With three categories `G = p₀(1 − p₀) = 2/9`, and the ceiling is
+    /// `min(K − 1, d) = 1`.
+    #[test]
+    fn the_fisher_factor_brackets_the_fisher_information_2951() {
+        let two = first_logit_of_two();
+        let origin = array![[0.0]];
+        let unit = CategoricalFamily::new(vec![categorical(&two, 1.0)]).expect("family");
+        let quarter = metric_eigenvalues(&unit.at(origin.view()).expect("at").states[0])[0];
+        assert!(quarter.lower <= 0.25 && 0.25 <= quarter.upper, "{quarter:?}");
+        let weighted = CategoricalFamily::new(vec![categorical(&two, 0.25)]).expect("family");
+        let sixteenth = metric_eigenvalues(&weighted.at(origin.view()).expect("at").states[0])[0];
+        assert!(
+            sixteenth.lower <= 0.0625 && 0.0625 <= sixteenth.upper,
+            "{sixteenth:?}"
+        );
+        assert!(sixteenth.upper < quarter.lower);
+
+        let three = first_logit_of_three();
+        let ternary = CategoricalFamily::new(vec![categorical(&three, 1.0)]).expect("family");
+        assert_eq!(ternary.rank_ceiling(), 1);
+        let resolved = ternary.at(origin.view()).expect("at");
+        let two_ninths = metric_eigenvalues(&resolved.states[0])[0];
+        // 2/9 is not representable: widen by one rounding of the test's own division.
+        let target = 2.0 / 9.0;
+        let slack = accumulation_growth(1) * target;
+        assert!(
+            two_ninths.lower <= target + slack && target - slack <= two_ninths.upper,
+            "{two_ninths:?}"
+        );
+    }
+
+    /// Under the Fisher metric a common logit shift is structural kernel.
+    /// `(a + b, b)` at `(0.5, −1)` resolves rank 1 at the ceiling `min(K − 1, d) = 1`,
+    /// Exact, and the check along `b` certifies no divergence at fidelity 0. Control:
+    /// the Euclidean factor on the same logits charges the shift, rank 2.
+    #[test]
+    fn the_fisher_metric_is_blind_to_a_common_logit_shift_2951() {
+        let logits = shifted_logits();
+        let anchor = array![0.5, -1.0];
+        let family = CategoricalFamily::new(vec![categorical(&logits, 1.0)]).expect("family");
+        assert_eq!(family.rank_ceiling(), 1);
+        let coordinates = family
+            .local_coordinates(anchor.view())
+            .expect("coordinates");
+        assert!(matches!(
+            coordinates.dimension(),
+            Some(Ok(EvidenceStatus::Exact { value, .. })) if value == 1.0
+        ));
+        match family
+            .divergence_check(&coordinates, array![[0.5, 2.0], [0.5, -3.0]].view(), 0.0)
+            .expect("divergence check")
+        {
+            DivergenceVerdict::Unresolved { .. } => {}
+            other => panic!("a common logit shift costs no divergence, got {other:?}"),
+        }
+        let euclidean = ResponseMetric::new(vec![declared(
+            &logits,
+            1.0,
+            array![[1.0, 0.0], [0.0, 1.0]],
+        )])
+        .expect("metric");
+        let charged = euclidean
+            .local_coordinates(anchor.view())
+            .expect("coordinates");
+        assert_eq!(charged.rank.states[0].resolved_rank, 2);
+    }
+
+    /// The singular-point caveat under the Fisher metric. `z(t) = (t², 0)` has
+    /// `J(0) = 0`, so the factor is zero: rank 0 of the ceiling 1, Unresolved [0, 1],
+    /// and a chart with no directions. The KL check refutes it at `t = ½`.
+    #[test]
+    fn the_fisher_metric_at_a_singular_point_is_refuted_by_the_kl_check_2951() {
+        let logits = squared_logit();
+        let family = CategoricalFamily::new(vec![categorical(&logits, 1.0)]).expect("family");
+        let coordinates = family
+            .local_coordinates(array![0.0].view())
+            .expect("coordinates");
+        assert_eq!(
+            (
+                coordinates.rank.states[0].resolved_rank,
+                coordinates.rank.states[0].rank_ceiling
+            ),
+            (0, 1)
+        );
+        assert!(matches!(
+            coordinates.dimension(),
+            Some(Ok(EvidenceStatus::Unresolved { lower, upper, .. })) if lower == 0.0 && upper == 1.0
+        ));
+        let verdict = family
+            .divergence_check(&coordinates, array![[0.5]].view(), 0.0)
+            .expect("divergence check");
+        assert!(
+            matches!(verdict, DivergenceVerdict::Separated { .. }),
+            "t² is not constant along its kernel at 0, got {verdict:?}"
+        );
     }
 
     /// Logits `z(t) = (t², 0)`. One product rounds once; moving `t` by `δ` moves the
