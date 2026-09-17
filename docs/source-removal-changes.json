@@ -1,5 +1,21 @@
 [
   {
+    "base": "120bd117dc9666aa712890cda427847d2bbaa06d",
+    "items": [
+      "crates/gam-terms/src/analytic_penalties/registry.rs:const:ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD",
+      "crates/gam-terms/src/analytic_penalties/registry.rs:const:HUTCHINSON_DIAG_SAMPLES",
+      "crates/gam-terms/src/analytic_penalties/registry.rs:const:ORTHOGONALITY_LOGDET_LANCZOS_STEPS",
+      "crates/gam-terms/src/analytic_penalties/registry.rs:const:ORTHOGONALITY_LOGDET_SLQ_PROBES",
+      "crates/gam-terms/src/analytic_penalties/registry.rs:fn:lanczos_log_quadrature",
+      "crates/gam-terms/src/analytic_penalties/registry.rs:fn:rademacher_unit_probe_into",
+      "crates/gam-terms/src/analytic_penalties/registry.rs:fn:splitmix64",
+      "crates/gam-terms/src/analytic_penalties/registry.rs:fn:stochastic_diag_via_matvec",
+      "crates/gam-terms/src/analytic_penalties/registry.rs:fn:stochastic_log_det_plus_lambda_i"
+    ],
+    "reason": "#2900 row 6.5 (SPEC rule 6: no size window). FrozenAnalyticPenaltyOp answered diag with a 32-sample Hutchinson estimate for BlockOrthogonality, DecoderIncoherence, BlockSparsity, MechanismSparsity, Isometry, SheafConsistency and Monotonicity, and log_det_plus_lambda_i with a 16-probe, 32-step SLQ estimate for graph TV, NuclearNorm, IvaeRidgeMeanGauge, BlockSparsity, MechanismSparsity, BlockOrthogonality, DecoderIncoherence, SoftmaxAssignmentSparsity, SheafConsistency and Monotonicity, once its dimension passed ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD = 1024; below it the same operator returned the exact values. Both are exact at every dimension now: diag takes each kind's closed-form diagonal (diag_target) or unit probes of its matvec (diag_via_matvec), and log_det_plus_lambda_i takes the dense eigensolve admitted on the memory governor's ledger (governed_dense_log_det_plus_lambda_i), where a refusal is an error. The threshold, HUTCHINSON_DIAG_SAMPLES, ORTHOGONALITY_LOGDET_SLQ_PROBES, ORTHOGONALITY_LOGDET_LANCZOS_STEPS, stochastic_diag_via_matvec, stochastic_log_det_plus_lambda_i, lanczos_log_quadrature, rademacher_unit_probe_into and the file-local splitmix64 wrapper made up the stochastic route and are deleted with it.",
+    "evidence": "At the base, git grep -n -w finds ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD, HUTCHINSON_DIAG_SAMPLES, ORTHOGONALITY_LOGDET_SLQ_PROBES, ORTHOGONALITY_LOGDET_LANCZOS_STEPS, stochastic_diag_via_matvec, stochastic_log_det_plus_lambda_i, lanczos_log_quadrature and rademacher_unit_probe_into only in crates/gam-terms/src/analytic_penalties/registry.rs: their declarations, the 17 dimension guards in FrozenAnalyticPenaltyOp::diag and log_det_plus_lambda_i, and the calls inside the stochastic route, every one of which this commit removes. The only other occurrence of any of them is ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD in an earlier entry of this ledger, a different identity (crates/gam-solve/src/evidence.rs). The deleted splitmix64 is registry.rs's const fn wrapper over gam_linalg::utils::splitmix64, called only by rademacher_unit_probe_into; every other splitmix64 in the tree is a different item and stays."
+  },
+  {
     "base": "f599d1f943c2df942470de76349abbc4d134f094",
     "items": [
       "crates/gam-sae/src/manifold/support_outer.rs:fn:support_laml_coarsest_quadrature_tolerance",

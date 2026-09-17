@@ -2353,3 +2353,50 @@ fn harmonic_roughness_value_grad_hessian_are_consistent() {
         }
     }
 }
+
+/// #2900 — `FrozenAnalyticPenaltyOp` used to answer `diag` with 32 Hutchinson
+/// samples and `log det(S + λI)` with 16-probe SLQ above dimension 1024, so one
+/// operator returned exact values on one side of a size window and estimates on the
+/// other. Both are exact at every dimension now. One dimension past the old window,
+/// on a group-sparsity Hessian whose within-group coupling puts off-diagonal mass in
+/// every row (the mass a Hutchinson diagonal averages over), the diagonal equals the
+/// frozen operator's own dense form, and the log-determinant equals that dense form's
+/// eigensolve.
+#[test]
+fn frozen_penalty_diag_and_log_det_are_exact_past_dimension_1024_2900() {
+    let n_eff = 205;
+    let latent_dim = 5;
+    let dim = n_eff * latent_dim;
+    let penalty = BlockSparsityPenalty::new(
+        PsiSlice::full(dim, Some(latent_dim)),
+        vec![vec![0, 1], vec![2, 3, 4]],
+        0.7,
+        n_eff,
+        1e-3,
+        true,
+    )
+    .expect("block sparsity penalty");
+    let kind = AnalyticPenaltyKind::BlockSparsity(Arc::new(penalty));
+    let rho = Array1::<f64>::zeros(kind.rho_count());
+    let target = Array1::from_shape_fn(dim, |i| ((i * 37 % 101) as f64 - 50.0) / 25.0);
+    let op = FrozenAnalyticPenaltyOp::new(kind, target, rho).expect("frozen operator");
+    assert_eq!(op.dim(), 1025);
+
+    let dense = op.as_dense();
+    let diag = op.diag();
+    let off_diagonal_mass = dense
+        .indexed_iter()
+        .filter(|((i, j), _)| i != j)
+        .fold(0.0_f64, |acc, (_, &v)| acc.max(v.abs()));
+    let diagonal_scale = dense.diag().iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+    assert!(diagonal_scale > 0.0 && off_diagonal_mass > 0.0);
+    for i in 0..dim {
+        assert_abs_diff_eq!(diag[i], dense[[i, i]], epsilon = 1e-12 * diagonal_scale);
+    }
+
+    let lambda = 0.3;
+    let exact = <Array2<f64> as PenaltyOp>::log_det_plus_lambda_i(&dense, lambda)
+        .expect("dense log det");
+    let log_det = op.log_det_plus_lambda_i(lambda).expect("frozen log det");
+    assert_abs_diff_eq!(log_det, exact, epsilon = 1e-9 * exact.abs().max(1.0));
+}

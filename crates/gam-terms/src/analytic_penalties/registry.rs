@@ -308,14 +308,6 @@ pub(crate) struct FrozenAnalyticPenaltyOp {
     rho: Array1<f64>,
 }
 
-const ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD: usize = 1024;
-
-const HUTCHINSON_DIAG_SAMPLES: usize = 32;
-
-const ORTHOGONALITY_LOGDET_SLQ_PROBES: usize = 16;
-
-const ORTHOGONALITY_LOGDET_LANCZOS_STEPS: usize = 32;
-
 impl FrozenAnalyticPenaltyOp {
     #[must_use = "invalid analytic-penalty rho must be handled"]
     pub fn new(
@@ -353,8 +345,11 @@ impl PenaltyOp for FrozenAnalyticPenaltyOp {
     fn diag(&self) -> Array1<f64> {
         // Each diagonal penalty exposes `hessian_diag` directly (ARD,
         // smoothed-L¹, Log; Hoyer currently exposes its preconditioner
-        // diagonal). Penalties whose exact diagonal is cheap or contractually
-        // required use the analytic path even when the dense Hessian is large.
+        // diagonal). Every other penalty returns its exact diagonal at every
+        // dimension: the closed form where the penalty has one, otherwise unit
+        // probes of the PSD majorizer. A Hutchinson estimate used to stand in
+        // above dimension 1024, so the same operator answered with an estimate on
+        // one side of a size window and the exact value on the other (#2900).
         match &self.penalty {
             AnalyticPenaltyKind::Ard(p) => p
                 .psd_majorizer_diag(self.target.view(), self.rho.view())
@@ -371,32 +366,12 @@ impl PenaltyOp for FrozenAnalyticPenaltyOp {
             AnalyticPenaltyKind::HarmonicRoughness(p) => p
                 .psd_majorizer_diag(self.target.view(), self.rho.view())
                 .expect("HarmonicRoughness diag"),
-            AnalyticPenaltyKind::BlockOrthogonality(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_diag_via_matvec()
-            }
             AnalyticPenaltyKind::BlockOrthogonality(_) => self.diag_via_matvec(),
-            AnalyticPenaltyKind::DecoderIncoherence(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_diag_via_matvec()
-            }
             AnalyticPenaltyKind::DecoderIncoherence(_) => self.diag_via_matvec(),
             AnalyticPenaltyKind::Orthogonality(_) => self.diag_via_matvec(),
             AnalyticPenaltyKind::NuclearNorm(_) => self.diag_via_matvec(),
-            AnalyticPenaltyKind::BlockSparsity(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_diag_via_matvec()
-            }
             AnalyticPenaltyKind::BlockSparsity(p) => {
                 p.diag_target(self.target.view(), self.rho.view())
-            }
-            AnalyticPenaltyKind::MechanismSparsity(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_diag_via_matvec()
             }
             AnalyticPenaltyKind::MechanismSparsity(p) => {
                 p.diag_target(self.target.view(), self.rho.view())
@@ -422,26 +397,11 @@ impl PenaltyOp for FrozenAnalyticPenaltyOp {
                     self.diag_via_matvec()
                 }
             }
-            AnalyticPenaltyKind::Isometry(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_diag_via_matvec()
-            }
             AnalyticPenaltyKind::Isometry(_) => self.diag_via_matvec(),
             AnalyticPenaltyKind::NestedPrefix(p) => p
                 .psd_majorizer_diag(self.target.view(), self.rho.view())
                 .expect("NestedPrefix diag"),
-            AnalyticPenaltyKind::SheafConsistency(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_diag_via_matvec()
-            }
             AnalyticPenaltyKind::SheafConsistency(_) => self.diag_via_matvec(),
-            AnalyticPenaltyKind::Monotonicity(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_diag_via_matvec()
-            }
             AnalyticPenaltyKind::Monotonicity(_) => self.diag_via_matvec(),
         }
     }
@@ -454,10 +414,10 @@ impl PenaltyOp for FrozenAnalyticPenaltyOp {
         }
         // For the diagonal-Hessian penalties (ARD, smoothed-L¹ and Log) the
         // closed form is `Σ_i log(d_i + λ)`. Forward-difference TV uses the
-        // tridiagonal path-graph structure. Graph TV, NuclearNorm,
-        // BlockSparsity, BlockOrthogonality, and IvaeRidgeMeanGauge keep the
-        // exact dense eigensolve only below the small-block threshold; large
-        // blocks use SLQ against the analytic HVP.
+        // tridiagonal path-graph structure. Every other PSD penalty takes the
+        // exact dense eigensolve at every dimension, admitted on the memory
+        // governor's ledger. A 16-probe SLQ estimate used to replace it above
+        // dimension 1024 (#2900).
         // Orthogonality is excluded because its exact Hessian is indefinite.
         match &self.penalty {
             AnalyticPenaltyKind::Ard(_)
@@ -485,31 +445,16 @@ impl PenaltyOp for FrozenAnalyticPenaltyOp {
                 DifferenceOpKind::ForwardDiff1D => {
                     p.log_det_plus_lambda_i_forward_1d(self.target.view(), self.rho.view(), lambda)
                 }
-                DifferenceOpKind::GraphEdges(_)
-                    if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-                {
-                    self.stochastic_log_det_plus_lambda_i(lambda)
-                }
-                DifferenceOpKind::GraphEdges(_) => {
-                    let dense = p.as_dense(self.target.view(), self.rho.view());
-                    <Array2<f64> as PenaltyOp>::log_det_plus_lambda_i(&dense, lambda)
-                }
+                DifferenceOpKind::GraphEdges(_) => self.governed_dense_log_det_plus_lambda_i(
+                    lambda,
+                    || p.as_dense(self.target.view(), self.rho.view()),
+                ),
             },
             AnalyticPenaltyKind::Orthogonality(_) => Err(
                 "FrozenAnalyticPenaltyOp::log_det_plus_lambda_i cannot treat \
                  OrthogonalityPenalty as PSD; its exact Hessian is indefinite"
                     .to_string(),
             ),
-            AnalyticPenaltyKind::NuclearNorm(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_log_det_plus_lambda_i(lambda)
-            }
-            AnalyticPenaltyKind::IvaeRidgeMeanGauge(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_log_det_plus_lambda_i(lambda)
-            }
             AnalyticPenaltyKind::RowPrecisionPrior(p) => {
                 p.log_det_plus_lambda_i(self.rho.view(), lambda)
             }
@@ -519,45 +464,6 @@ impl PenaltyOp for FrozenAnalyticPenaltyOp {
             AnalyticPenaltyKind::ScadMcp(p) => {
                 p.log_det_plus_lambda_i(self.target.view(), self.rho.view(), lambda)
             }
-            AnalyticPenaltyKind::BlockSparsity(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_log_det_plus_lambda_i(lambda)
-            }
-            AnalyticPenaltyKind::MechanismSparsity(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_log_det_plus_lambda_i(lambda)
-            }
-            AnalyticPenaltyKind::BlockOrthogonality(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_log_det_plus_lambda_i(lambda)
-            }
-            AnalyticPenaltyKind::DecoderIncoherence(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_log_det_plus_lambda_i(lambda)
-            }
-            AnalyticPenaltyKind::SoftmaxAssignmentSparsity(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_log_det_plus_lambda_i(lambda)
-            }
-            AnalyticPenaltyKind::Isometry(_) => {
-                let dense = self.as_dense();
-                <Array2<f64> as PenaltyOp>::log_det_plus_lambda_i(&dense, lambda)
-            }
-            AnalyticPenaltyKind::SheafConsistency(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_log_det_plus_lambda_i(lambda)
-            }
-            AnalyticPenaltyKind::Monotonicity(_)
-                if self.dim() > ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD =>
-            {
-                self.stochastic_log_det_plus_lambda_i(lambda)
-            }
             AnalyticPenaltyKind::NuclearNorm(_)
             | AnalyticPenaltyKind::BlockSparsity(_)
             | AnalyticPenaltyKind::MechanismSparsity(_)
@@ -565,10 +471,10 @@ impl PenaltyOp for FrozenAnalyticPenaltyOp {
             | AnalyticPenaltyKind::BlockOrthogonality(_)
             | AnalyticPenaltyKind::DecoderIncoherence(_)
             | AnalyticPenaltyKind::SoftmaxAssignmentSparsity(_)
+            | AnalyticPenaltyKind::Isometry(_)
             | AnalyticPenaltyKind::SheafConsistency(_)
             | AnalyticPenaltyKind::Monotonicity(_) => {
-                let dense = self.as_dense();
-                <Array2<f64> as PenaltyOp>::log_det_plus_lambda_i(&dense, lambda)
+                self.governed_dense_log_det_plus_lambda_i(lambda, || self.as_dense())
             }
         }
     }
@@ -746,175 +652,34 @@ impl FrozenAnalyticPenaltyOp {
         d
     }
 
-    fn stochastic_diag_via_matvec(&self) -> Array1<f64> {
-        match &self.penalty {
-            AnalyticPenaltyKind::Orthogonality(p) => {
-                let n = self.target.len();
-                let Some(t) = p.target_matrix(self.target.view()) else {
-                    return Array1::<f64>::zeros(n);
-                };
-                let gram = OrthogonalityPenalty::gram_minus_identity(t.view());
-                let scale = p.scale(self.rho.view());
-                let samples = HUTCHINSON_DIAG_SAMPLES.max(1);
-                let mut diag = Array1::<f64>::zeros(n);
-                let mut z = Array1::<f64>::zeros(n);
-                for probe in 0..samples {
-                    rademacher_unit_probe_into(z.view_mut(), probe as u64, 1.0);
-                    let Some(z_mat) = p.target_matrix(z.view()) else {
-                        return diag;
-                    };
-                    let hz = p.hvp_with_precomputed_m(t.view(), gram.view(), z_mat, scale);
-                    for i in 0..n {
-                        diag[i] += z[i] * hz[[i / t.ncols(), i % t.ncols()]];
-                    }
-                }
-                let inv_samples = 1.0 / samples as f64;
-                for i in 0..n {
-                    diag[i] *= inv_samples;
-                }
-                return diag;
-            }
-            AnalyticPenaltyKind::Isometry(p) => {
-                let n = self.target.len();
-                let Some(state) = p.hvp_state(self.target.view()) else {
-                    return Array1::<f64>::zeros(n);
-                };
-                let samples = HUTCHINSON_DIAG_SAMPLES.max(1);
-                let mut diag = Array1::<f64>::zeros(n);
-                let mut z = Array1::<f64>::zeros(n);
-                for probe in 0..samples {
-                    rademacher_unit_probe_into(z.view_mut(), probe as u64, 1.0);
-                    let hz = p.hvp_with_precomputed_state(&state, self.rho.view(), z.view());
-                    for i in 0..n {
-                        diag[i] += z[i] * hz[i];
-                    }
-                }
-                let inv_samples = 1.0 / samples as f64;
-                for i in 0..n {
-                    diag[i] *= inv_samples;
-                }
-                return diag;
-            }
-            // No cached HVP state to exploit: fall through to the generic
-            // Hutchinson probe loop below. Enumerated rather than wildcarded
-            // so a newly registered penalty has to state which side it is on.
-            AnalyticPenaltyKind::Sparsity(_)
-            | AnalyticPenaltyKind::SoftmaxAssignmentSparsity(_)
-            | AnalyticPenaltyKind::OrderedBetaBernoulli(_)
-            | AnalyticPenaltyKind::Ard(_)
-            | AnalyticPenaltyKind::TopKActivation(_)
-            | AnalyticPenaltyKind::SmoothThreshold(_)
-            | AnalyticPenaltyKind::TotalVariation(_)
-            | AnalyticPenaltyKind::HarmonicRoughness(_)
-            | AnalyticPenaltyKind::NuclearNorm(_)
-            | AnalyticPenaltyKind::BlockSparsity(_)
-            | AnalyticPenaltyKind::MechanismSparsity(_)
-            | AnalyticPenaltyKind::Monotonicity(_)
-            | AnalyticPenaltyKind::NestedPrefix(_)
-            | AnalyticPenaltyKind::RowPrecisionPrior(_)
-            | AnalyticPenaltyKind::IvaeRidgeMeanGauge(_)
-            | AnalyticPenaltyKind::ParametricRowPrecisionPrior(_)
-            | AnalyticPenaltyKind::ScadMcp(_)
-            | AnalyticPenaltyKind::BlockOrthogonality(_)
-            | AnalyticPenaltyKind::DecoderIncoherence(_)
-            | AnalyticPenaltyKind::SheafConsistency(_) => {}
-        }
-        let n = self.target.len();
-        let samples = HUTCHINSON_DIAG_SAMPLES.max(1);
-        let mut diag = Array1::<f64>::zeros(n);
-        let mut z = Array1::<f64>::zeros(n);
-        let mut hz = Array1::<f64>::zeros(n);
-        // Hutchinson-Hadamard diagonal estimator (Bekas et al., 2007):
-        // Var[(z ⊙ Hz)_i] = Σ_{j≠i} H_ij², so averaging m probes leaves
-        // variance equal to the off-diagonal row mass divided by m.
-        // With m=32, diagonally dominant Frobenius/TV Hessians have ~16% relative SD.
-        for probe in 0..samples {
-            rademacher_unit_probe_into(z.view_mut(), probe as u64, 1.0);
-            self.matvec(z.view(), hz.view_mut());
-            for i in 0..n {
-                diag[i] += z[i] * hz[i];
-            }
-        }
-        let inv_samples = 1.0 / samples as f64;
-        for i in 0..n {
-            diag[i] *= inv_samples;
-        }
-        diag
-    }
-
-    fn stochastic_log_det_plus_lambda_i(&self, lambda: f64) -> Result<f64, String> {
-        let n = self.dim();
-        if n == 0 {
-            return Ok(0.0);
-        }
-        let probes = ORTHOGONALITY_LOGDET_SLQ_PROBES.max(1);
-        let steps = ORTHOGONALITY_LOGDET_LANCZOS_STEPS.min(n).max(1);
-        let inv_norm = 1.0 / (n as f64).sqrt();
-        let mut estimate = 0.0;
-        for probe in 0..probes {
-            let mut q0 = Array1::<f64>::zeros(n);
-            rademacher_unit_probe_into(q0.view_mut(), probe as u64, inv_norm);
-            let quad = self.lanczos_log_quadrature(lambda, q0, steps)?;
-            estimate += n as f64 * quad;
-        }
-        Ok(estimate / probes as f64)
-    }
-
-    fn lanczos_log_quadrature(
+    /// `log det(S + λI)` of the dense form `dense` builds, admitted on the memory
+    /// governor's ledger before it is built. The ledger is charged three `n × n`
+    /// blocks: the dense form, the regularized copy and the eigenvectors of the
+    /// eigensolve (faer's tridiagonalization workspace is not counted). A refusal is
+    /// an error, never a stochastic estimate.
+    fn governed_dense_log_det_plus_lambda_i(
         &self,
         lambda: f64,
-        q: Array1<f64>,
-        max_steps: usize,
+        dense: impl FnOnce() -> Array2<f64>,
     ) -> Result<f64, String> {
         let n = self.dim();
-        let eigen = symmetric_lanczos_eigenpairs(
-            n,
-            q.as_slice().ok_or_else(|| {
-                "FrozenAnalyticPenaltyOp::log_det_plus_lambda_i SLQ start vector is not contiguous"
-                    .to_string()
-            })?,
-            SymmetricLanczosOptions {
-                max_steps,
-                residual_tol: 1e-12,
-                local_reorthogonalize: false,
-                full_reorthogonalize: false,
-            },
-            |q, out| {
-                self.matvec(ArrayView1::from(q), ArrayViewMut1::from(&mut *out));
-                for i in 0..n {
-                    out[i] += lambda * q[i];
-                }
-                Ok(())
-            },
-        )
-        .map_err(|e| {
-            format!("FrozenAnalyticPenaltyOp::log_det_plus_lambda_i SLQ Lanczos failed: {e}")
-        })?;
-        symmetric_lanczos_log_quadrature(
-            &eigen,
-            "FrozenAnalyticPenaltyOp::log_det_plus_lambda_i expected SPD S+λI",
-        )
+        let reservation = gam_runtime::resource::MemoryGovernor::global()
+            .try_reserve_dense_f64_copies(
+                n,
+                n,
+                3,
+                "FrozenAnalyticPenaltyOp::log_det_plus_lambda_i dense penalty form",
+            )
+            .map_err(|error| {
+                format!(
+                    "FrozenAnalyticPenaltyOp::log_det_plus_lambda_i: refusing a {n}x{n} dense \
+                     penalty form: {error}"
+                )
+            })?;
+        let log_det = <Array2<f64> as PenaltyOp>::log_det_plus_lambda_i(&dense(), lambda);
+        drop(reservation);
+        log_det
     }
-}
-
-fn rademacher_unit_probe_into(mut z: ArrayViewMut1<'_, f64>, probe: u64, scale: f64) {
-    let mut state = 0x6A09E667F3BCC909_u64 ^ probe.wrapping_mul(0xD1B54A32D192ED03);
-    let mut bits = 0_u64;
-    let mut remaining_bits = 0_u32;
-    for i in 0..z.len() {
-        if remaining_bits == 0 {
-            bits = splitmix64(&mut state);
-            remaining_bits = 64;
-        }
-        z[i] = if bits & 1 == 0 { scale } else { -scale };
-        bits >>= 1;
-        remaining_bits -= 1;
-    }
-}
-
-#[inline]
-const fn splitmix64(state: &mut u64) -> u64 {
-    gam_linalg::utils::splitmix64(state)
 }
 
 impl AnalyticPenaltyKind {
