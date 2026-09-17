@@ -629,19 +629,22 @@ fn format_g(x: f64) -> String {
 ///
 /// The single Rust home for the `gamfit._description_length` scorer: it prices a
 /// featurizer's reconstruction of `test_x` at each R² target into support / code
-/// / residual / dictionary bits. Every numeric term (the combinatorial `lgamma`
-/// support cost, the residual covariance eigendecomposition, each atom's SVD
-/// coordinate spectrum, and the joint firing-weighted reverse-water-filling)
-/// lives in `eq4_description_length`; this only marshals the arrays and drives
-/// the Python `atom_contribution` callback that materialises each atom's firing
-/// rows. `dictionary_params` is the STORAGE-CODE decoder scalar count and
-/// `amortization_horizon` is the DECLARED dictionary-code `N` (the message /
-/// deployment / training horizon), passed separately from the `test_x` row count
-/// so the dictionary term is invariant to the estimation subsample (#2283).
-/// Returns the same dict shape the NumPy scorer returned (`support_bits`,
-/// `independent_support_bits`, `achieved_block_l0`, `dictionary_bits`, `estimation_rows`,
+/// / residual / dictionary bits. Every numeric term (the combinatorial support
+/// cost, the residual raw second-moment eigendecomposition, each atom's full raw
+/// contribution spectrum split at its code dimension, and the joint
+/// firing-weighted reverse-water-filling) lives in `eq4_description_length`; this
+/// only marshals the arrays and drives the Python `atom_contribution` callback
+/// that materialises each atom's firing rows. `dictionary_params` is the stored
+/// decoder scalar COUNT fed to a declared BIC-inspired amortised parameter penalty
+/// (not a storage code, #2933 F20) and `amortization_horizon` is its DECLARED `N`
+/// (the tokens the parameters are amortised over), passed separately from the
+/// `test_x` row count so the dictionary term is invariant to the estimation
+/// subsample (#2283). Returns `support_bits`, `independent_support_bits`,
+/// `achieved_block_l0`, `dictionary_bits`, `estimation_rows`,
 /// `amortization_horizon`, `bits_at_r2_{g}` / `code_bits_at_r2_{g}` /
-/// `resid_bits_at_r2_{g}` per target, and `native_bits_per_token` when given).
+/// `resid_bits_at_r2_{g}` / `truncation_bits_at_r2_{g}` per target (truncation
+/// bits are the residual-coded atom modes beyond `code_dims`, already inside the
+/// residual bits), and `native_bits_per_token` when given.
 #[pyfunction]
 #[pyo3(signature = (
     test_x, recon, gate, code_dims, dictionary_params, amortization_horizon,
@@ -721,6 +724,7 @@ fn sae_eq4_description_length<'py>(
         out.set_item(format!("bits_at_r2_{suffix}"), row.bits)?;
         out.set_item(format!("code_bits_at_r2_{suffix}"), row.code_bits)?;
         out.set_item(format!("resid_bits_at_r2_{suffix}"), row.resid_bits)?;
+        out.set_item(format!("truncation_bits_at_r2_{suffix}"), row.truncation_bits)?;
     }
     if let Some(native) = dl.native_bits_per_token {
         out.set_item("native_bits_per_token", native)?;

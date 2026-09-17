@@ -43,6 +43,7 @@ def test_description_length_scores_one_dimensional_residual_covariance() -> None
         "bits_at_r2_0.9",
         "code_bits_at_r2_0.9",
         "resid_bits_at_r2_0.9",
+        "truncation_bits_at_r2_0.9",
     }
     assert result["dictionary_bits"] == 0.0
     assert result["estimation_rows"] == test_x.shape[0]

@@ -41,17 +41,23 @@ def description_length(
 ) -> dict[str, Any]:
     """Score support, code, residual, and dictionary bits at fixed R-squared.
 
-    Every numeric term (the combinatorial ``lgamma`` support cost, the residual
-    covariance eigendecomposition, each atom's SVD coordinate spectrum, and the
-    joint firing-weighted reverse-water-filling) lives in the Rust
-    ``sae_eq4_description_length`` core; this only coerces the arrays to the
-    core's dtypes and adapts ``atom_contribution`` into the row-fetch callback
-    the core drives (one atom at a time, so a lazy contribution still only
-    materialises the sampled firing rows).
+    Every numeric term (the combinatorial support cost, the residual raw
+    second-moment eigendecomposition, each atom's full raw contribution spectrum
+    split at its ``code_dims``, and the joint firing-weighted
+    reverse-water-filling) lives in the Rust ``sae_eq4_description_length`` core;
+    this only coerces the arrays to the core's dtypes and adapts
+    ``atom_contribution`` into the row-fetch callback the core drives (one atom at
+    a time, so a lazy contribution still only materialises the sampled firing
+    rows). The score is an ambient Gaussian linear-code surrogate: modes beyond an
+    atom's ``code_dims`` are residual-coded (``truncation_bits_at_r2_*``, inside
+    ``resid_bits_at_r2_*``) and nothing is centered, so a reconstruction bias is
+    paid.
 
-    ``amortization_horizon`` is the DECLARED dictionary-code ``N`` — the
-    message / deployment horizon or declared training-observation count — charged
-    in ``0.5 * dictionary_params / N * log2(N)``. It is a REQUIRED keyword with no
+    ``amortization_horizon`` is the DECLARED ``N`` of the dictionary term, a
+    BIC-inspired amortised parameter penalty
+    ``0.5 * dictionary_params / N * log2(N)`` on a parameter COUNT (not a decoder
+    storage code): the number of tokens the stored parameters are amortised over.
+    It is a REQUIRED keyword with no
     default: the number of rows of ``test_x`` is the estimation subsample
     (Monte-Carlo estimator size) and must NEVER be reused as the horizon (#2283 /
     audit §21). Passing them as one number silently made the authoritative

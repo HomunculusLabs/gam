@@ -14,23 +14,51 @@
 //!   reported alongside it and never charged, so a comparison whose whole margin
 //!   lives in the support term can be read in both currencies (#2283);
 //! * **code** bits — a JOINT reverse-water-filling of every atom's per-firing
-//!   coordinate spectrum, each spectrum weighted by that atom's firing
+//!   contribution spectrum, each spectrum weighted by that atom's firing
 //!   probability `p_g`, sharing ONE water level across all components with the
 //!   residual, so the fixed total-distortion budget is split optimally between
-//!   coding coordinates and leaving residual;
-//! * **residual** bits — the same joint water level applied to the residual
-//!   covariance spectrum (its own weight-1 component);
-//! * **dictionary** bits — the amortised `½·(dictionary_params / N)·log₂(N)` BIC
-//!   charge for storing the decoder, where `N` is the DECLARED
-//!   `amortization_horizon` (the message/deployment horizon or declared
-//!   training-observation count), NOT the number of rows sampled to estimate the
-//!   score. The estimation subsample size (`estimation_rows = test_x.nrows()`)
-//!   controls ONLY the Monte-Carlo variance of the support / code / residual
-//!   expectations; it must never leak into the dictionary code (#2283 / audit
-//!   §21). Conflating the two made the authoritative bits-at-R² row meaningless
-//!   (the same fitted flat model priced radically different dictionary bits at
-//!   256 vs 8192 estimation rows), so the two `N`s are now passed separately and
-//!   the dictionary term depends on the horizon alone.
+//!   coding and leaving distortion. The code bits are the rates of each atom's
+//!   top `d_g` modes, the modes its declared `d_g` transmitted scalars carry;
+//! * **residual** bits — the same joint water level applied to what the residual
+//!   coder must carry: the decoded residual's spectrum (weight one) and every
+//!   atom's modes BEYOND its declared code dimension (weight `p_g`, reported as
+//!   **truncation** bits inside the residual bits);
+//! * **dictionary** bits — a declared BIC-INSPIRED AMORTISED PARAMETER PENALTY
+//!   `½·(dictionary_params / N)·log₂(N)`, where `N` is the DECLARED
+//!   `amortization_horizon`: the number of tokens the stored parameters are
+//!   amortised over, NOT the number of rows sampled to estimate the score. It is
+//!   a heuristic on a parameter COUNT, not a decoder storage code (#2933 F20; see
+//!   [`Eq4DescriptionLength::dictionary_bits`] for its assumptions). The
+//!   estimation subsample size (`estimation_rows = test_x.nrows()`) controls ONLY
+//!   the Monte-Carlo variance of the support / code / residual expectations; it
+//!   must never leak into the dictionary term (#2283 / audit §21). Conflating the
+//!   two made the authoritative bits-at-R² row meaningless (the same fitted flat
+//!   model priced radically different dictionary bits at 256 vs 8192 estimation
+//!   rows), so the two `N`s are now passed separately and the dictionary term
+//!   depends on the horizon alone.
+//!
+//! # Which object this is
+//!
+//! Every spectral term is a GAUSSIAN rate–distortion SURROGATE over AMBIENT
+//! second moments: a linear transform code of each component, not an
+//! operational codec and not an intrinsic nonlinear code. Two consequences are
+//! load-bearing (#2933 F17, F18):
+//!
+//! * The receiver is handed no per-component mean, so every component (each
+//!   atom's contribution and the residual) is priced at its RAW second moment
+//!   `E[v vᵀ]`. A reconstruction bias or a nonzero mean code is paid per token.
+//!   The moments are those of the scored batch alone; nothing is estimated on
+//!   training data or carried to a held-out batch. Only the R² baseline
+//!   (`reference_variance`) is centered, because R² is defined against the
+//!   column-mean predictor.
+//! * The whole ambient spectrum of each contribution is priced. A curve spans
+//!   more ambient directions than its intrinsic dimension (`(cos t, sin t,
+//!   cos 2t, sin 2t)` is one-dimensional with four eigenvalues of ½), and a linear
+//!   code of `d_g` scalars cannot carry the rest, so the rest is residual-coded
+//!   or left as distortion at the shared water level. An intrinsic chart code
+//!   that transmits `(t, a)` and decodes the curve through the decoder would
+//!   need the chart coordinates and the decoder's pullback metric. This callback
+//!   supplies neither, so the scorer does not credit such a code.
 //!
 //! Unlike [`crate::description_length::reverse_water_filling`] (which water-fills
 //! a single unweighted spectrum), the Eq. 4 scorer water-fills a collection of
@@ -46,10 +74,11 @@
 //! is generic over a `fetch_contribution` callback that returns the
 //! `(take, d)` contribution matrix for the selected firing rows. Rust owns the
 //! firing-row selection, the subsampling cap, the skip rule for under-fired
-//! atoms, the SVD spectrum, the covariance eigendecomposition, the water-filling
-//! and the bit assembly; the callback ONLY materialises the atom's rows. This
-//! keeps peak memory to one atom's contribution at a time (the caller may fetch
-//! lazily), exactly as the reference NumPy loop did.
+//! atoms, the certified rank-one / SVD contribution spectrum, the residual
+//! second-moment eigendecomposition, the water-filling and the bit assembly; the
+//! callback ONLY materialises the atom's rows. This keeps peak memory to one
+//! atom's contribution at a time (the caller may fetch lazily), exactly as the
+//! reference NumPy loop did.
 
 use ndarray::{Array1, Array2, ArrayView2};
 
@@ -75,10 +104,19 @@ pub struct Eq4TargetBits {
     pub target: f64,
     /// Total bits: `support + code + residual + dictionary`.
     pub bits: f64,
-    /// The summed firing-weighted coordinate coding bits over all atoms.
+    /// The summed firing-weighted rates of every atom's top `d_g` modes: the
+    /// modes its declared `d_g` transmitted scalars carry.
     pub code_bits: f64,
-    /// The residual component's coding bits at the shared water level.
+    /// The residual coder's bits at the shared water level: the decoded
+    /// residual's raw second-moment spectrum PLUS every atom's modes beyond its
+    /// declared code dimension ([`Self::truncation_bits`], already included).
     pub resid_bits: f64,
+    /// The part of [`Self::resid_bits`] spent on atom variation beyond the
+    /// declared code dimensions (each atom's tail modes, weight `p_g`, coded on
+    /// its firing rows). It is a sub-term, never added to the total a second
+    /// time. A curved atom declared at `d+1` scalars whose contribution spans more
+    /// ambient directions reports that excess here.
+    pub truncation_bits: f64,
 }
 
 /// The Eq. 4 fixed-distortion description-length report of one featurizer.
@@ -104,20 +142,36 @@ pub struct Eq4DescriptionLength {
     /// Achieved mean per-token support cardinality `L0` (mean active atoms per
     /// row), the un-rounded value that the support cardinality rounds.
     pub achieved_block_l0: f64,
-    /// Amortised BIC dictionary charge
+    /// BIC-inspired amortised parameter penalty
     /// `0.5 * dictionary_params / amortization_horizon * log2(amortization_horizon)`,
-    /// shared by every target. Depends ONLY on the declared `amortization_horizon`,
-    /// never on `estimation_rows` (#2283): re-estimating the score on a different
-    /// row subsample leaves this term bitwise identical.
+    /// shared by every target.
+    ///
+    /// This is a DECLARED HEURISTIC, not a decoder storage code (#2933 F20). It
+    /// charges each counted scalar `½·log₂ H` bits, the leading term of a regular
+    /// two-part code that quantises an identifiable parameter at precision
+    /// `O(H^{-1/2})` for an `H`-token message, and spreads the charge over those
+    /// `H` tokens. Its assumptions: every counted scalar is a regular,
+    /// identifiable, full-rank parameter, and the `O(1)` Fisher-determinant and
+    /// prior terms are dropped. What it does not see: coefficient magnitudes, the
+    /// output distortion that quantising them induces through the decoder,
+    /// redundancy in the stored representation (a factored and an unfactored
+    /// decoder that decode identically declare different counts), and learned
+    /// metadata such as knots or topology. A real parameter message
+    /// `L(B̃, metadata) / H` with a declared quantiser and output-distortion
+    /// allocation is not implemented here.
+    ///
+    /// Depends ONLY on the declared `amortization_horizon`, never on
+    /// `estimation_rows` (#2283): re-estimating the score on a different row
+    /// subsample leaves this term bitwise identical.
     pub dictionary_bits: f64,
     /// The number of rows actually used to estimate the code / residual / support
     /// expectations (`test_x.nrows()`). This is the Monte-Carlo estimator size; it
     /// affects only estimator variance and is reported for provenance. It is NOT
     /// the dictionary amortisation horizon (see [`Self::amortization_horizon`]).
     pub estimation_rows: i64,
-    /// The declared amortisation horizon `N` charged in the dictionary code (the
-    /// message/deployment horizon or declared training-observation count). Echoed
-    /// through so a reader can confirm the dictionary term is sample-invariant.
+    /// The declared amortisation horizon `N` of the dictionary penalty: the number
+    /// of tokens the stored parameters are amortised over. Echoed through so a
+    /// reader can confirm the dictionary term is sample-invariant.
     pub amortization_horizon: i64,
     /// One entry per R² target, in the order the targets were supplied.
     pub per_target: Vec<Eq4TargetBits>,
@@ -125,18 +179,23 @@ pub struct Eq4DescriptionLength {
     pub native_bits_per_token: Option<f64>,
 }
 
-/// The eigenvalues of the sample covariance of `values` (rows = observations),
-/// `(centered.ᵀ centered) / max(N−1, 1)`, ascending. Mirrors the reference
-/// `numpy.linalg.eigvalsh` on the column-centered Gram.
-fn covariance_eigenvalues(values: ArrayView2<f64>) -> Result<Array1<f64>, String> {
-    let centered = column_centered(values);
-    let n = values.nrows();
-    let denom = (n.saturating_sub(1)).max(1) as f64;
-    let mut covariance = centered.t().dot(&centered);
-    covariance.mapv_inplace(|v| v / denom);
-    let (eigenvalues, _vectors) = covariance
+/// The eigenvalues of the RAW second-moment matrix `vᵀv / N` of `values`
+/// (rows = observations), ascending.
+///
+/// Nothing is centered. The Eq. 4 receiver is handed no residual mean, so the
+/// residual is coded under a zero-mean Gaussian surrogate at its raw second
+/// moment and a constant reconstruction bias is paid per token. Centering first
+/// priced innovations about a mean that no message transmits: a residual of all
+/// fives had spectrum 0 while its squared error is 25 (#2933 F18). No mean is
+/// estimated, so there is no Bessel factor, and the scored batch alone defines
+/// the moment.
+fn second_moment_eigenvalues(values: ArrayView2<f64>) -> Result<Array1<f64>, String> {
+    let n = values.nrows().max(1) as f64;
+    let mut moment = values.t().dot(&values);
+    moment.mapv_inplace(|v| v / n);
+    let (eigenvalues, _vectors) = moment
         .eigh(faer::Side::Lower)
-        .map_err(|e| format!("residual covariance eigensolve failed: {e:?}"))?;
+        .map_err(|e| format!("residual second-moment eigensolve failed: {e:?}"))?;
     Ok(eigenvalues)
 }
 
@@ -152,38 +211,95 @@ fn column_centered(values: ArrayView2<f64>) -> Array2<f64> {
     centered
 }
 
-/// The per-firing coordinate variance spectrum of one atom's contribution:
-/// `σ_i² / max(rows−1, 1)` for the top `code_dim` singular values of the
-/// column-centered contribution. Mirrors the reference
-/// `svd(compute_uv=False)[:code_dim]² / max(rows−1, 1)`.
-fn atom_code_spectrum(contribution: ArrayView2<f64>, code_dim: usize) -> Result<Vec<f64>, String> {
+/// One atom's per-firing raw second-moment spectrum, split at its declared code
+/// dimension `d_g`.
+struct AtomSpectrum {
+    /// The top `d_g` eigenvalues: the modes the atom's `d_g` transmitted scalars
+    /// carry. Their rates are the report's code bits.
+    coded: Vec<f64>,
+    /// Every remaining eigenvalue: variation of the contribution that `d_g`
+    /// scalars cannot carry. The residual coder codes it on the atom's firing
+    /// rows, so it is water-filled at the atom's weight and priced as truncation
+    /// bits inside the residual bits.
+    tail: Vec<f64>,
+}
+
+/// The per-firing raw second-moment spectrum `σ_i² / rows` of one atom's
+/// `(rows, d)` contribution over EVERY singular value, split into the top
+/// `code_dim` coded modes and the tail.
+///
+/// The full spectrum is kept because this is an ambient linear-code surrogate
+/// that sees only the contribution matrix: modes beyond the declared scalars
+/// must be residual-coded or left as distortion, and the joint water-fill
+/// decides which. Keeping only `code_dim` singular values priced a curve's extra
+/// harmonics at zero rate AND zero distortion while `recon` still contained
+/// them. `code_dim == 0` scored a varying contribution free (#2933 F17). Nothing
+/// is centered (#2933 F18): no per-atom mean code is transmitted, so a nonzero
+/// mean code is part of the moment.
+///
+/// Rank-one fast path (#2233). A flat atom transmits one scalar times one decoder
+/// row, so its contribution is rank one with the single eigenvalue
+/// `‖C‖_F² / rows`, which needs no SVD. That is the dominant cost at large
+/// overcompleteness, where an O(rows·d) pass replaces an O(rows·d·min(rows, d))
+/// SVD per atom. The rank is CERTIFIED rather than assumed from `code_dim`. Every
+/// row is projected onto the largest-norm row `v`. The off-axis energy
+/// `Σ_i ‖c_i − (c_i·v / v·v) v‖²` bounds the energy beyond the leading singular
+/// direction from above, since no single direction captures more than `σ₁²`.
+/// When it lies within the numerical-rank floor `(max(rows, d)·ε)²·‖C‖_F²` (every
+/// trailing singular value below the `max(rows, d)·ε·σ₁` rank tolerance), the
+/// matrix is rank one to working precision. Otherwise the SVD runs. The old path
+/// trusted `code_dim == 1` and put a rank-two contribution's whole trace into
+/// one mode.
+fn atom_code_spectrum(
+    contribution: ArrayView2<f64>,
+    code_dim: usize,
+) -> Result<AtomSpectrum, String> {
     let rows = contribution.nrows();
-    let centered = column_centered(contribution);
-    let denom = (rows.saturating_sub(1)).max(1) as f64;
-    // Flat-atom fast path (#2233). A `code_dim == 1` atom transmits a single
-    // scalar code times one decoder row, so its contribution — and, since
-    // column-centering only subtracts a per-column constant, its centered form —
-    // is exactly rank one. A rank-one matrix has a single nonzero singular value
-    // equal to its Frobenius norm, so `σ₁² = ‖centered‖_F²` with no SVD. This is
-    // the dominant scorer cost at large overcompleteness (a K=32768 TopK
-    // dictionary is entirely flat atoms), where an O(rows·d) sum of squares
-    // replaces an O(rows·d·min(rows,d)) SVD per atom. It is exact for the rank-one
-    // flat contributions the scorer is fed (parity-gated against the SVD path);
-    // it would over-count if handed a genuinely higher-rank `code_dim == 1`
-    // contribution, which the featurizer construction never produces.
-    if code_dim == 1 {
-        let frobenius_sq: f64 = centered.iter().map(|&value| value * value).sum();
-        return Ok(vec![frobenius_sq / denom]);
+    let denom = rows.max(1) as f64;
+    let mut frobenius_sq = 0.0_f64;
+    let mut pivot = 0usize;
+    let mut pivot_norm_sq = 0.0_f64;
+    for (row_index, row) in contribution.rows().into_iter().enumerate() {
+        let norm_sq = row.dot(&row);
+        frobenius_sq += norm_sq;
+        if norm_sq > pivot_norm_sq {
+            pivot_norm_sq = norm_sq;
+            pivot = row_index;
+        }
     }
-    let (_u, singular_values, _vt) = centered
-        .svd(false, false)
-        .map_err(|e| format!("atom contribution SVD failed: {e:?}"))?;
-    let keep = code_dim.min(singular_values.len());
-    Ok(singular_values
-        .iter()
-        .take(keep)
-        .map(|&s| s * s / denom)
-        .collect())
+    let spectrum: Vec<f64> = if frobenius_sq == 0.0 {
+        Vec::new()
+    } else {
+        let axis = contribution.row(pivot);
+        let mut off_axis_sq = 0.0_f64;
+        for row in contribution.rows() {
+            let coefficient = row.dot(&axis) / pivot_norm_sq;
+            off_axis_sq += row
+                .iter()
+                .zip(axis.iter())
+                .map(|(&value, &along)| {
+                    let off = value - coefficient * along;
+                    off * off
+                })
+                .sum::<f64>();
+        }
+        let rank_tolerance = rows.max(contribution.ncols()) as f64 * f64::EPSILON;
+        if off_axis_sq <= rank_tolerance * rank_tolerance * frobenius_sq {
+            vec![frobenius_sq / denom]
+        } else {
+            let (_u, singular_values, _vt) = contribution
+                .svd(false, false)
+                .map_err(|e| format!("atom contribution SVD failed: {e:?}"))?;
+            let mut modes: Vec<f64> = singular_values.iter().map(|&s| s * s / denom).collect();
+            modes.sort_by(|left, right| right.total_cmp(left));
+            modes
+        }
+    };
+    let split = code_dim.min(spectrum.len());
+    let tail = spectrum[split..].to_vec();
+    let mut coded = spectrum;
+    coded.truncate(split);
+    Ok(AtomSpectrum { coded, tail })
 }
 
 /// Score `test_x` against a featurizer's reconstruction at each R² target and
@@ -193,20 +309,24 @@ fn atom_code_spectrum(contribution: ArrayView2<f64>, code_dim: usize) -> Result<
 ///   reconstruction of them; same shape `(N, d)`, both finite.
 /// * `gate` — the `(N, G)` per-atom firing gate; an atom fires on a row when its
 ///   gate there exceeds `1e-10`.
-/// * `code_dims` — the coded-coordinate dimension `d_g` of each of the `G`
-///   atoms (length `G`, nonnegative).
-/// * `dictionary_params` — the decoder scalar count charged the BIC dictionary
-///   term. This is a STORAGE-CODE scalar count (the number of decoder scalars a
-///   receiver must be handed to reconstruct: `K_flat·P + K_curved·b·P`), NOT a
-///   BIC free-identifiable/effective dimension. The two coincide only for a
-///   full-rank unpenalised decoder; the scorer declares the storage-code reading
-///   explicitly so a future edit cannot silently relabel it as EDF (#2283 / audit
-///   §21).
-/// * `amortization_horizon` — the DECLARED `N` charged in the dictionary code
-///   `0.5·dictionary_params/N·log₂(N)`: the message/deployment horizon or the
-///   declared training-observation count. It is passed SEPARATELY from the
-///   estimation subsample (`test_x.nrows()`), and must be at least `2` (an
-///   `Err` is returned otherwise — the horizon is never silently defaulted to the
+/// * `code_dims` — the number `d_g` of scalars each of the `G` atoms transmits
+///   per firing (length `G`, nonnegative). The top `d_g` modes of the atom's raw
+///   contribution spectrum are priced as code bits, and every further mode as
+///   residual-coded truncation bits. `d_g = 0` is valid: all of the atom's
+///   variation goes to the residual coder.
+/// * `dictionary_params` — the stored decoder scalar COUNT fed to the declared
+///   BIC-inspired amortised parameter penalty
+///   (`K_flat·P + K_curved·b·P` for the #2283 arms). It is a representation
+///   count, neither a quantised storage message nor a free-identifiable/effective
+///   dimension: the three coincide only for a full-rank, unpenalised, non-redundant
+///   decoder whose coefficients all need the same precision (#2283 / audit §21,
+///   #2933 F20).
+/// * `amortization_horizon` — the DECLARED `N` of the parameter penalty
+///   `0.5·dictionary_params/N·log₂(N)`: the number of tokens the stored
+///   parameters are amortised over, which also sets the asymptotic `O(N^{-1/2})`
+///   precision the penalty assumes. It is passed SEPARATELY from the estimation
+///   subsample (`test_x.nrows()`), and must be at least `2` (an `Err` is
+///   returned otherwise — the horizon is never silently defaulted to the
 ///   estimation subsample, so the #2283 confound cannot recur). The dictionary
 ///   term depends on this value ALONE.
 /// * `r2_targets` — the fixed-distortion R² operating points, each finite and in
@@ -327,10 +447,11 @@ where
         })
         .sum();
 
-    // Residual covariance spectrum and the reference variance the targets scale.
+    // Residual raw second-moment spectrum (no residual mean is transmitted, so a
+    // bias is paid) and the centered reference variance that defines R².
     let mut residual = test_x.to_owned();
     residual -= &recon;
-    let residual_covariance_eigenvalues = covariance_eigenvalues(residual.view())?;
+    let residual_eigenvalues = second_moment_eigenvalues(residual.view())?;
     let centered_x = column_centered(test_x);
     // reference_variance = mean(centered²)·d = Σ centered² / N.
     let reference_variance = centered_x.iter().map(|&v| v * v).sum::<f64>() / n as f64;
@@ -338,15 +459,18 @@ where
         return Err("test_x must have positive variance".to_string());
     }
 
-    // Per-atom firing-coordinate spectra (weight-`p_g` water-fill components).
-    let mut code_spectra: Vec<Vec<f64>> = Vec::with_capacity(n_atoms);
+    // Per-atom firing-contribution spectra (weight-`p_g` water-fill components).
+    let mut code_spectra: Vec<AtomSpectrum> = Vec::with_capacity(n_atoms);
     for atom in 0..n_atoms {
         let code_dim = code_dims[atom] as usize;
         let rows: Vec<usize> = (0..n)
             .filter(|&row| gate[[row, atom]] > 0.0)
             .collect();
         if rows.len() < (code_dim + 1).max(4) {
-            code_spectra.push(vec![0.0; code_dim]);
+            code_spectra.push(AtomSpectrum {
+                coded: vec![0.0; code_dim],
+                tail: Vec::new(),
+            });
             continue;
         }
         let take: Vec<usize> = if rows.len() <= SPECTRUM_ROW_CAP {
@@ -372,28 +496,35 @@ where
     }
 
     // Dictionary bits are the same at every target AND independent of the
-    // estimation subsample: the charge is `0.5·params/N·log₂(N)` in the DECLARED
-    // amortization horizon `N`, never the `n`-row Monte-Carlo subsample (#2283).
+    // estimation subsample: the declared BIC-inspired penalty `0.5·params/N·log₂(N)`
+    // in the DECLARED amortization horizon `N`, never the `n`-row Monte-Carlo
+    // subsample (#2283). A heuristic on a count, not a storage code (#2933 F20).
     let horizon = amortization_horizon as f64;
     let dictionary_bits = 0.5 * dictionary_params as f64 / horizon * horizon.log2();
 
     let mut per_target = Vec::with_capacity(r2_targets.len());
     for &target in r2_targets {
         let total_distortion = (1.0 - target) * reference_variance;
-        let mut components: Vec<(f64, Vec<f64>)> = p_g
-            .iter()
-            .zip(code_spectra.iter())
-            .map(|(&probability, spectrum)| (probability, spectrum.clone()))
-            .collect();
-        components.push((1.0, residual_covariance_eigenvalues.to_vec()));
+        // Components: atoms' coded modes, then atoms' tail modes, then the
+        // residual. One shared water level prices all of them.
+        let mut components: Vec<(f64, Vec<f64>)> = Vec::with_capacity(2 * n_atoms + 1);
+        for (&probability, spectrum) in p_g.iter().zip(code_spectra.iter()) {
+            components.push((probability, spectrum.coded.clone()));
+        }
+        for (&probability, spectrum) in p_g.iter().zip(code_spectra.iter()) {
+            components.push((probability, spectrum.tail.clone()));
+        }
+        components.push((1.0, residual_eigenvalues.to_vec()));
         let component_bits = weighted_reverse_water_filling(&components, total_distortion)?;
         let code_bits: f64 = component_bits[..n_atoms].iter().sum();
-        let resid_bits = component_bits[n_atoms];
+        let truncation_bits: f64 = component_bits[n_atoms..2 * n_atoms].iter().sum();
+        let resid_bits = truncation_bits + component_bits[2 * n_atoms];
         per_target.push(Eq4TargetBits {
             target,
             bits: support_bits + code_bits + resid_bits + dictionary_bits,
             code_bits,
             resid_bits,
+            truncation_bits,
         });
     }
 
@@ -606,56 +737,42 @@ mod tests {
         assert_eq!(medium.dictionary_bits, expected_dictionary);
         assert_eq!(large.dictionary_bits, expected_dictionary);
 
-        // The balanced block makes the only finite-n change analytic. With n
-        // rows, the active code and residual sample variances are respectively
-        //   a_c(n)=(n/2)/(n/2-1),  a_r(n)=n/(n-1).
-        // All four requested water levels remain below both positive modes, so
-        // relative to N the total-bit drift is exactly
-        //   1/4 log2(a_c(n)/a_c(N)) + 1/2 log2(a_r(n)/a_r(N)).
-        let code_variance = |rows: usize| (rows as f64 / 2.0) / (rows as f64 / 2.0 - 1.0);
-        let residual_variance = |rows: usize| rows as f64 / (rows as f64 - 1.0);
-        let expected_drift = |rows: usize| {
-            0.25 * (code_variance(rows) / code_variance(FULL_ROWS)).log2()
-                + 0.5 * (residual_variance(rows) / residual_variance(FULL_ROWS)).log2()
-        };
-        let small_drift = expected_drift(256);
-        let medium_drift = expected_drift(1024);
-        assert!(small_drift > medium_drift && medium_drift > 0.0);
-
+        // Raw second moments estimate no mean, so there is no Bessel factor and
+        // no finite-n drift at all (#2933 F18). Every prefix of whole blocks has
+        // exactly the same empirical row distribution (codes ±1 on half the rows,
+        // residual ±1), and every sum is an exact integer before the division by a
+        // power of two, so each spectrum and therefore each total is bitwise
+        // identical across the three row counts. The centered estimator drifted
+        // by `¼·log₂(a_c(n)/a_c(N)) + ½·log₂(a_r(n)/a_r(N))` with
+        // `a_c(n) = (n/2)/(n/2−1)`, `a_r(n) = n/(n−1)`.
         for (target_index, &target) in targets.iter().enumerate() {
-            let observed_small =
-                small.per_target[target_index].bits - large.per_target[target_index].bits;
-            let observed_medium =
-                medium.per_target[target_index].bits - large.per_target[target_index].bits;
-            let tolerance =
-                1.0e-11 * (1.0 + large.per_target[target_index].bits.abs() + small_drift.abs());
+            let full = large.per_target[target_index];
             assert!(
-                (observed_small - small_drift).abs() <= tolerance,
-                "target {target}: 256-row drift {observed_small:.17e} != derived \
-                 {small_drift:.17e} within {tolerance:.3e}"
+                full.code_bits > 0.0 && full.resid_bits > 0.0,
+                "target {target}: both spectral terms must be priced, got {full:?}"
             );
-            assert!(
-                (observed_medium - medium_drift).abs() <= tolerance,
-                "target {target}: 1024-row drift {observed_medium:.17e} != derived \
-                 {medium_drift:.17e} within {tolerance:.3e}"
-            );
+            for run in [&small, &medium] {
+                assert_eq!(
+                    run.per_target[target_index].bits, full.bits,
+                    "target {target}: {}-row total must equal the {FULL_ROWS}-row total",
+                    run.estimation_rows
+                );
+            }
         }
 
         // Anti-vacuity: the pre-#2283 estimator-sized dictionary charge moved
-        // by exactly 60.75 bits between these row counts, more than four orders
-        // above the legitimate finite-n spectral drift.
+        // by exactly 60.75 bits between these row counts.
         let legacy_dictionary =
             |rows: usize| 0.5 * dictionary_params as f64 * (rows as f64).log2() / rows as f64;
         let legacy_swing = (legacy_dictionary(256) - legacy_dictionary(FULL_ROWS)).abs();
         assert!((legacy_swing - 60.75).abs() < 1.0e-12);
-        assert!(legacy_swing > 1000.0 * small_drift);
     }
 
     #[test]
     fn flat_atom_fast_path_matches_svd_to_tolerance() {
         // A rank-one contribution: scalar codes ⊗ one decoder row — the exact
-        // shape a flat (code_dim == 1) atom transmits. The Frobenius fast path
-        // must equal the top singular value of the column-centered matrix.
+        // shape a flat atom transmits. The certified fast path must return the
+        // closed-form raw moment `Σ s² · ‖w‖² / rows` and leave no tail.
         let codes = array![0.3_f64, -1.2, 2.5, 0.0, 4.1, -0.7];
         let decoder = array![1.5_f64, -0.5, 2.0, 0.25];
         let mut contribution = Array2::<f64>::zeros((codes.len(), decoder.len()));
@@ -665,20 +782,19 @@ mod tests {
             }
         }
         let fast = atom_code_spectrum(contribution.view(), 1).unwrap();
-        // Reference: explicit SVD of the column-centered matrix, top value only.
-        let centered = column_centered(contribution.view());
-        let (_u, singular_values, _vt) = centered.svd(false, false).unwrap();
-        let denom = (codes.len() - 1) as f64;
-        let svd_spectrum = singular_values[0] * singular_values[0] / denom;
-        assert_eq!(fast.len(), 1);
+        let closed_form = codes.iter().map(|c| c * c).sum::<f64>()
+            * decoder.iter().map(|w| w * w).sum::<f64>()
+            / codes.len() as f64;
+        assert_eq!(fast.coded.len(), 1);
+        assert!(fast.tail.is_empty(), "rank-one tail must be empty: {:?}", fast.tail);
         assert!(
-            (fast[0] - svd_spectrum).abs() <= 1.0e-10 * (1.0 + svd_spectrum.abs()),
-            "fast {} vs svd {}",
-            fast[0],
-            svd_spectrum
+            (fast.coded[0] - closed_form).abs() <= 1.0e-12 * closed_form,
+            "fast {} vs closed form {closed_form}",
+            fast.coded[0]
         );
-        // Confirm the centered contribution really is rank one (the assumption
-        // the fast path rests on): the second singular value must vanish.
+        // Confirm the raw contribution really is rank one (what the certificate
+        // accepted): the second singular value must vanish.
+        let (_u, singular_values, _vt) = contribution.svd(false, false).unwrap();
         if singular_values.len() > 1 {
             assert!(
                 singular_values[1] <= 1.0e-9 * singular_values[0].max(1.0),
@@ -689,8 +805,8 @@ mod tests {
 
     #[test]
     fn curved_atom_still_uses_full_svd_spectrum() {
-        // A rank-two contribution with code_dim == 2 must keep both singular
-        // values via the SVD path (the fast path fires only for code_dim == 1).
+        // A rank-three contribution declared at code_dim == 2: the SVD path keeps
+        // the top two raw modes as coded and the third as the residual-coded tail.
         let contribution = array![
             [1.0_f64, 0.0, 0.5],
             [0.0, 2.0, 0.5],
@@ -699,12 +815,330 @@ mod tests {
             [3.0, 0.0, 1.5],
         ];
         let spectrum = atom_code_spectrum(contribution.view(), 2).unwrap();
-        assert_eq!(spectrum.len(), 2);
-        let centered = column_centered(contribution.view());
-        let (_u, singular_values, _vt) = centered.svd(false, false).unwrap();
-        let denom = (contribution.nrows() - 1) as f64;
-        for (k, value) in spectrum.iter().enumerate() {
-            assert!((value - singular_values[k] * singular_values[k] / denom).abs() < 1.0e-12);
+        assert_eq!(spectrum.coded.len(), 2);
+        assert_eq!(spectrum.tail.len(), 1);
+        let (_u, singular_values, _vt) = contribution.svd(false, false).unwrap();
+        let denom = contribution.nrows() as f64;
+        let mut reference: Vec<f64> = singular_values.iter().map(|s| s * s / denom).collect();
+        reference.sort_by(|left, right| right.total_cmp(left));
+        assert!(reference[2] > 1.0e-3, "fixture must have a genuine third mode");
+        for (value, expected) in spectrum.coded.iter().chain(spectrum.tail.iter()).zip(&reference) {
+            assert!((value - expected).abs() < 1.0e-12);
+        }
+    }
+
+    /// A `fetch_contribution` callback serving one fixed contribution matrix per atom.
+    fn serve_rows(
+        contributions: Vec<Array2<f64>>,
+    ) -> impl FnMut(usize, &[usize]) -> Result<Array2<f64>, String> {
+        move |atom, take| {
+            let source = &contributions[atom];
+            let mut selected = Array2::zeros((take.len(), source.ncols()));
+            for (out_row, &source_row) in take.iter().enumerate() {
+                selected.row_mut(out_row).assign(&source.row(source_row));
+            }
+            Ok(selected)
+        }
+    }
+
+    /// `values` padded with two zero columns and reflected by a fixed Householder
+    /// matrix: the same point cloud in a rotated, larger ambient space.
+    fn householder_embed(values: &Array2<f64>) -> Array2<f64> {
+        let width = values.ncols() + 2;
+        let normal: Array1<f64> = (1..=width).map(|j| j as f64).collect();
+        let scale = 2.0 / normal.dot(&normal);
+        let mut embedded = Array2::zeros((values.nrows(), width));
+        for (mut out, row) in embedded.rows_mut().into_iter().zip(values.rows()) {
+            let mut padded = Array1::<f64>::zeros(width);
+            padded.slice_mut(ndarray::s![..values.ncols()]).assign(&row);
+            let along = scale * padded.dot(&normal);
+            out.assign(&(&padded - &(along * &normal)));
+        }
+        embedded
+    }
+
+    /// Harmonic features of order `order` on a uniform phase grid of `grid`
+    /// angles per axis: `(cos kt, sin kt)` for `k = 1..order` on a curve, and also
+    /// `(cos ks, sin ks)` on a torus-grid surface. Discrete orthogonality
+    /// (`2·order < grid`) makes every raw moment eigenvalue exactly ½.
+    fn harmonic_features(order: usize, grid: usize, surface: bool) -> Array2<f64> {
+        let axes = if surface { 2 } else { 1 };
+        let rows = grid.pow(axes as u32);
+        Array2::from_shape_fn((rows, 2 * axes * order), |(i, j)| {
+            let axis = j / (2 * order);
+            let step = if axis == 0 { i % grid } else { i / grid };
+            let phase = std::f64::consts::TAU * step as f64 / grid as f64;
+            let k = ((j % (2 * order)) / 2 + 1) as f64;
+            if j % 2 == 0 {
+                (k * phase).cos()
+            } else {
+                (k * phase).sin()
+            }
+        })
+    }
+
+    /// #2933 F17: a curve or surface built from harmonics of order `H` has
+    /// intrinsic dimension 1 or 2, but its contribution has `2H` or `4H` raw
+    /// eigenvalues, each exactly ½. The atom declares `d+1` transmitted scalars
+    /// (chart coordinates plus amplitude), `recon` contains every harmonic, and
+    /// the residual is zero, so the variation the declared scalars cannot carry
+    /// must be coded or paid as distortion. At fixed R² the budget is
+    /// `(1−R²)·modes/2` and every mode sits above the level `(1−R²)/2`, so the
+    /// total is `(modes/2)·log₂(1/(1−R²))`, linear in the harmonic order and the
+    /// same for an equivalent rotated embedding. The truncating scorer kept `d+1`
+    /// modes, and its bits FELL as the order rose (curve H=2 at R²=0.9: `log₂5 ≈
+    /// 2.32` against `2·log₂10 ≈ 6.64`).
+    #[test]
+    fn eq4_harmonic_curves_and_surfaces_pay_for_every_harmonic() {
+        let targets = [0.9, 0.99];
+        for order in 1..=4_usize {
+            for (label, surface, intrinsic_dim) in [("curve", false, 1_i64), ("surface", true, 2)]
+            {
+                let features = harmonic_features(order, 16, surface);
+                let modes = features.ncols() as f64;
+                let gate = Array2::ones((features.nrows(), 1));
+                for (embedding, values) in [
+                    ("axis-aligned", features.clone()),
+                    ("rotated", householder_embed(&features)),
+                ] {
+                    let report = eq4_fixed_distortion_description_length(
+                        values.view(),
+                        values.view(),
+                        gate.view(),
+                        &[intrinsic_dim + 1],
+                        0,
+                        FIXTURE_HORIZON,
+                        &targets,
+                        None,
+                        serve_rows(vec![values.clone()]),
+                    )
+                    .expect("harmonic fixture must score");
+                    for (row, &target) in report.per_target.iter().zip(targets.iter()) {
+                        let expected = 0.5 * modes * (1.0 / (1.0 - target)).log2();
+                        assert!(
+                            (row.bits - expected).abs() <= 1.0e-10 * expected,
+                            "{label} order {order} ({embedding}) at R²={target}: \
+                             {} bits, every harmonic costs {expected}",
+                            row.bits
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// #2933 F17 callback contracts, plus the atom half of F18.
+    /// (a) `d_g = 0`: an atom that transmits no scalar but whose contribution
+    /// varies (rank one, `λ = 1`) must pay for that variation through the
+    /// residual coder. The truncating scorer scored it free: 0 bits against
+    /// `½·log₂(1/(1−R²))`.
+    /// (b) `d_g = 1` handed a rank-two contribution `(cos t, sin t)` with
+    /// eigenvalues ½ and ½. The uncertified fast path put the whole trace into
+    /// ONE mode, `½·log₂(1/(1−R²))`, where the two modes cost `log₂(1/(1−R²))`.
+    /// (c) A genuine rank-one flat atom with a NONZERO mean code `s = 2 + cos t`
+    /// is priced at its raw moment `E[s²]‖w‖² = 4.5‖w‖²`, since no per-atom mean
+    /// is transmitted. The centered scorer charged `Var(s)‖w‖² = 0.5‖w‖²`.
+    #[test]
+    fn eq4_zero_and_rank_one_code_dims_price_the_contribution_they_are_handed() {
+        let rows = 64;
+        let target = 0.9;
+        let phase = |i: usize| std::f64::consts::TAU * i as f64 / rows as f64;
+        let gate = Array2::ones((rows, 1));
+        let score = |values: &Array2<f64>, code_dim: i64| -> f64 {
+            eq4_fixed_distortion_description_length(
+                values.view(),
+                values.view(),
+                gate.view(),
+                &[code_dim],
+                0,
+                FIXTURE_HORIZON,
+                &[target],
+                None,
+                serve_rows(vec![values.clone()]),
+            )
+            .expect("contract fixture must score")
+            .per_target[0]
+                .bits
+        };
+        let log_inverse_budget = (1.0 / (1.0 - target)).log2();
+
+        let rank_one = Array2::from_shape_fn((rows, 2), |(i, j)| {
+            std::f64::consts::SQRT_2 * phase(i).cos() * [0.6, 0.8][j]
+        });
+        let zero_dim = score(&rank_one, 0);
+        let expected_zero_dim = 0.5 * log_inverse_budget;
+        assert!(
+            (zero_dim - expected_zero_dim).abs() <= 1.0e-10 * expected_zero_dim,
+            "code_dim 0 atom: {zero_dim} bits, its variation costs {expected_zero_dim}"
+        );
+
+        let rank_two = Array2::from_shape_fn((rows, 2), |(i, j)| {
+            if j == 0 {
+                phase(i).cos()
+            } else {
+                phase(i).sin()
+            }
+        });
+        let one_dim = score(&rank_two, 1);
+        assert!(
+            (one_dim - log_inverse_budget).abs() <= 1.0e-10 * log_inverse_budget,
+            "code_dim 1 atom handed rank two: {one_dim} bits, its two modes cost \
+             {log_inverse_budget}"
+        );
+
+        let decoder = [1.5_f64, -0.5, 2.0, 0.25];
+        let mean_code = Array2::from_shape_fn((rows, decoder.len()), |(i, j)| {
+            (2.0 + phase(i).cos()) * decoder[j]
+        });
+        let raw = score(&mean_code, 1);
+        // λ = 4.5‖w‖², budget (1−R²)·0.5‖w‖²: the ratio is 90 at R²=0.9.
+        let expected_raw = 0.5 * (4.5 / ((1.0 - target) * 0.5)).log2();
+        assert!(
+            (raw - expected_raw).abs() <= 1.0e-10 * expected_raw,
+            "mean-code flat atom: {raw} bits, its raw moment costs {expected_raw}"
+        );
+    }
+
+    /// #2933 F18: a reconstruction bias must be paid, not centered away. One
+    /// rank-one atom carries `s = √2 cos t` on axis 0 (`λ = 1`). Axis 1 holds a
+    /// zero-mean innovation `u = √2 sin t` that the featurizer leaves in the
+    /// residual. Shifting `recon` by a constant `β` on axis 1 leaves every
+    /// centered moment unchanged, but the decoded squared error rises by `β²`.
+    /// The residual's raw moment is `diag(0, 1 + β²)`, the budget `(1−R²)·2`, and
+    /// both positive modes sit above the level `1−R²`, so the total is
+    /// `½·log₂(1/(1−R²)) + ½·log₂((1+β²)/(1−R²))`. The centered scorer returned
+    /// the β = 0 price for every β. The audit's own case, a residual of all fives
+    /// with no innovation, prices the mode 25, not 0.
+    #[test]
+    fn eq4_reconstruction_bias_is_paid_not_centered_away() {
+        let rows = 64;
+        let target = 0.9;
+        let budget = 1.0 - target;
+        let phase = |i: usize| std::f64::consts::TAU * i as f64 / rows as f64;
+        let code = |i: usize| std::f64::consts::SQRT_2 * phase(i).cos();
+        let atom = Array2::from_shape_fn((rows, 2), |(i, j)| if j == 0 { code(i) } else { 0.0 });
+        let gate = Array2::ones((rows, 1));
+        let score = |test_x: &Array2<f64>, recon: &Array2<f64>| -> f64 {
+            eq4_fixed_distortion_description_length(
+                test_x.view(),
+                recon.view(),
+                gate.view(),
+                &[1],
+                0,
+                FIXTURE_HORIZON,
+                &[target],
+                None,
+                serve_rows(vec![atom.clone()]),
+            )
+            .expect("bias fixture must score")
+            .per_target[0]
+                .bits
+        };
+
+        let test_x = Array2::from_shape_fn((rows, 2), |(i, j)| {
+            if j == 0 {
+                code(i)
+            } else {
+                std::f64::consts::SQRT_2 * phase(i).sin()
+            }
+        });
+        for bias in [0.0_f64, 1.0, 5.0] {
+            let recon =
+                Array2::from_shape_fn((rows, 2), |(i, j)| if j == 0 { code(i) } else { bias });
+            let bits = score(&test_x, &recon);
+            let expected = 0.5 * (1.0 / budget).log2() + 0.5 * ((1.0 + bias * bias) / budget).log2();
+            assert!(
+                (bits - expected).abs() <= 1.0e-10 * expected,
+                "bias {bias}: {bits} bits, the biased residual costs {expected}"
+            );
+        }
+
+        // Audit check 8: the residual is all fives on axis 1 and there is no
+        // innovation. Reference variance 1, budget 0.1, modes {1, 25}, level 0.05.
+        let flat_x = atom.clone();
+        let fives = Array2::from_shape_fn((rows, 2), |(i, j)| if j == 0 { code(i) } else { -5.0 });
+        let bits = score(&flat_x, &fives);
+        let level = budget / 2.0;
+        let expected = 0.5 * (1.0 / level).log2() + 0.5 * (25.0 / level).log2();
+        assert!(
+            (bits - expected).abs() <= 1.0e-10 * expected,
+            "all-fives residual: {bits} bits, its mode 25 costs {expected}"
+        );
+    }
+
+    /// #2933 F17 ledger split. The order-3 harmonic curve declared at 2 scalars
+    /// has six modes of ½ and zero residual. Its top two modes are code bits,
+    /// `log₂(1/(1−R²))`. The four modes the scalars cannot carry are
+    /// residual-coded truncation bits, `2·log₂(1/(1−R²))`, all of `resid_bits`.
+    /// The total still reconciles to support + code + resid + dictionary.
+    #[test]
+    fn eq4_reports_modes_beyond_the_code_dims_as_residual_coded_truncation_bits() {
+        let target = 0.9;
+        let features = harmonic_features(3, 16, false);
+        let gate = Array2::ones((features.nrows(), 1));
+        let report = eq4_fixed_distortion_description_length(
+            features.view(),
+            features.view(),
+            gate.view(),
+            &[2],
+            32,
+            FIXTURE_HORIZON,
+            &[target],
+            None,
+            serve_rows(vec![features.clone()]),
+        )
+        .expect("split fixture must score");
+        let row = report.per_target[0];
+        let per_pair = (1.0 / (1.0 - target)).log2();
+        let close = |got: f64, want: f64| (got - want).abs() <= 1.0e-10 * want.max(1.0);
+        assert!(close(row.code_bits, per_pair), "code bits {row:?}");
+        assert!(close(row.truncation_bits, 2.0 * per_pair), "truncation bits {row:?}");
+        assert!(close(row.resid_bits, row.truncation_bits), "resid bits {row:?}");
+        assert!(
+            (row.bits
+                - (report.support_bits + row.code_bits + row.resid_bits + report.dictionary_bits))
+                .abs()
+                <= 1.0e-12 * row.bits
+        );
+    }
+
+    /// #2933 F20 contract pin (a declared limitation, not a measurement). The
+    /// dictionary term is a BIC-inspired amortised penalty on a COUNT. Two
+    /// featurizers that decode identically, one declaring an unfactored `r×d`
+    /// decoder (`4×16 = 64` scalars) and one a factored `r×q, q×d` decoder
+    /// (`4×2 + 2×16 = 40`), get different penalties while their support, code and
+    /// residual terms agree bitwise. The penalty is `½·count·log₂H/H` and scales
+    /// only with the declared count and horizon.
+    #[test]
+    fn eq4_dictionary_penalty_depends_on_the_declared_count_not_the_decoded_model() {
+        let features = harmonic_features(2, 16, false);
+        let gate = Array2::ones((features.nrows(), 1));
+        let score = |count: i64, horizon: i64| {
+            eq4_fixed_distortion_description_length(
+                features.view(),
+                features.view(),
+                gate.view(),
+                &[2],
+                count,
+                horizon,
+                &[0.9],
+                None,
+                serve_rows(vec![features.clone()]),
+            )
+            .expect("penalty fixture must score")
+        };
+        let unfactored = score(64, FIXTURE_HORIZON);
+        let factored = score(40, FIXTURE_HORIZON);
+        let longer = score(64, 4 * FIXTURE_HORIZON);
+        let penalty = |count: f64, horizon: f64| 0.5 * count / horizon * horizon.log2();
+        assert_eq!(unfactored.dictionary_bits, penalty(64.0, FIXTURE_HORIZON as f64));
+        assert_eq!(factored.dictionary_bits, penalty(40.0, FIXTURE_HORIZON as f64));
+        assert_eq!(longer.dictionary_bits, penalty(64.0, 4.0 * FIXTURE_HORIZON as f64));
+        assert!(unfactored.dictionary_bits > factored.dictionary_bits);
+        for other in [&factored, &longer] {
+            assert_eq!(other.support_bits, unfactored.support_bits);
+            assert_eq!(other.per_target[0].code_bits, unfactored.per_target[0].code_bits);
+            assert_eq!(other.per_target[0].resid_bits, unfactored.per_target[0].resid_bits);
         }
     }
 }
