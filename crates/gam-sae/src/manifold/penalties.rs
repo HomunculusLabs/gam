@@ -3368,6 +3368,22 @@ impl SaeManifoldTerm {
                 }
             }
         }
+        // The exact isometry Hessian also needs the decoder third jet `K` for its
+        // residual·curvature term. An evaluator that declares its third jet
+        // unavailable installs no `K`, and `hvp` would then return its zero
+        // default, so refuse exactly as a missing second jet is refused (#2933 F02).
+        if corrected.duchon_radial_source.is_none() && corrected.third_decoder_derivative().is_none()
+        {
+            return Err(ArrowSchurError::SchurFactorFailed {
+                reason: format!(
+                    "IsometryPenalty requested for SAE atom '{}' (basis kind {:?}) but this \
+                     evaluator declares its basis third jet unavailable; the exact isometry \
+                     Hessian needs the decoder third jet",
+                    atom.name,
+                    atom.basis_kind()
+                ),
+            });
+        }
         Ok(AnalyticPenaltyKind::Isometry(Arc::new(corrected)))
     }
 

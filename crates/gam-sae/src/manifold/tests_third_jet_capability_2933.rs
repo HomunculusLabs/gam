@@ -11,7 +11,9 @@
 
 use super::construction::{AtomThirdJet, ThirdJetUnavailable};
 use super::tests::*;
+use super::tests_isometry_exact_hvp_majorizer_457::build_isometry_atom_for_evaluator;
 use super::*;
+use gam_solve::arrow_schur::ArrowSchurError;
 use ndarray::{Array4, Array5, array};
 
 /// `[1, sin 2πt, cos 2πt]` with its analytic second jet and no third jet. The
@@ -492,5 +494,79 @@ fn subspace_reduction_forwards_the_third_jet_capability_2933() {
                 "the identity-prefix remix must keep inner column {col} at row {row}"
             );
         }
+    }
+}
+
+/// The exact isometry Hessian reads the same declaration through the cache
+/// refresh, and production must refuse an unavailable third jet there too.
+///
+/// Premise, free to fail: with no decoder third jet installed, `hvp` returns
+/// its zero default while the analytic twin's is nonzero. So a penalty built on
+/// an unavailable jet would carry zero curvature rather than an exact one.
+#[test]
+fn isometry_penalty_refuses_an_unavailable_third_jet_2933() {
+    let coords = Array2::from_shape_fn((12, 1), |(row, _)| (row as f64 + 0.3) / 12.0);
+    let direction: Array1<f64> = (0..12).map(|row| (0.7 * row as f64).cos()).collect();
+    let rho = array![0.0_f64];
+    let refreshed_hvp = |evaluator: Arc<dyn SaeBasisSecondJet>| -> (bool, f64) {
+        let (atom, penalty, target_flat) = build_isometry_atom_for_evaluator(
+            evaluator,
+            SaeAtomBasisKind::Periodic,
+            &coords,
+            2,
+            0.91,
+        );
+        refresh_isometry_caches_from_atom(&penalty, &atom, coords.view())
+            .expect("the isometry caches refresh from the atom");
+        let hv = penalty.hvp(target_flat.view(), rho.view(), direction.view());
+        (
+            penalty.third_decoder_derivative().is_some(),
+            hv.iter().map(|x| x.abs()).fold(0.0_f64, f64::max),
+        )
+    };
+    let (analytic_k, analytic_hv) =
+        refreshed_hvp(Arc::new(PeriodicHarmonicEvaluator::new(3).expect("periodic basis")));
+    let (unavailable_k, unavailable_hv) = refreshed_hvp(Arc::new(SecondOrderOnlyPeriodic));
+    println!(
+        "[#2933 F02] isometry hvp: analytic K = {analytic_k}, max|Hv| = {analytic_hv:.6e}; \
+         unavailable K = {unavailable_k}, max|Hv| = {unavailable_hv:.6e}"
+    );
+    assert!(
+        analytic_k && analytic_hv > 1.0e-6,
+        "premise: the analytic twin installs K and has a nonzero exact isometry hvp \
+         (K = {analytic_k}, max|Hv| = {analytic_hv:.6e})"
+    );
+    assert!(
+        !unavailable_k && unavailable_hv == 0.0,
+        "premise: with no K the exact isometry hvp is its zero default \
+         (K = {unavailable_k}, max|Hv| = {unavailable_hv:.6e})"
+    );
+
+    let corrected = |evaluator: Arc<dyn SaeBasisEvaluator>| {
+        let (term, _target, _rho) = periodic_fixture(evaluator);
+        let iso = Arc::new(IsometryPenalty::new_euclidean(
+            PsiSlice::full(term.assignment.coords[0].len(), Some(1)),
+            2,
+        ));
+        term.corrected_isometry_penalty(&iso, 0, &term.assignment.coords[0])
+    };
+    match corrected(Arc::new(TestPeriodicEvaluator)) {
+        Ok(AnalyticPenaltyKind::Isometry(penalty)) => assert!(
+            penalty.third_decoder_derivative().is_some(),
+            "the analytic twin's corrected isometry penalty must carry K"
+        ),
+        Ok(_) => panic!("corrected_isometry_penalty must return an isometry penalty"),
+        Err(err) => panic!("the analytic twin must admit the isometry penalty, got {err}"),
+    }
+    match corrected(Arc::new(SecondOrderOnlyPeriodic)) {
+        Err(ArrowSchurError::SchurFactorFailed { reason }) => assert!(
+            reason.contains("declares its basis third jet unavailable"),
+            "the isometry refusal must name the missing third jet, got: {reason}"
+        ),
+        Ok(_) => panic!(
+            "an isometry penalty on an evaluator without a third jet must be refused, not built \
+             with a zero-default exact Hessian"
+        ),
+        Err(other) => panic!("expected the third-jet capability refusal, got {other}"),
     }
 }
