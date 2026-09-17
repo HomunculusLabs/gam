@@ -54,6 +54,10 @@ import pytest
 
 import gamfit
 
+# The relative agreement the score paths must reach. A normalizer that one path
+# skips has to lie outside it, or these tests cannot tell the paths apart.
+SCORE_REL = 1e-9
+
 
 def _fit_pair() -> tuple["gamfit.Model", "gamfit.Model"]:
     rng = np.random.default_rng(3)
@@ -61,9 +65,11 @@ def _fit_pair() -> tuple["gamfit.Model", "gamfit.Model"]:
     x = rng.uniform(-3, 3, n)
     y = np.sin(1.5 * x) + rng.normal(scale=0.5, size=n)
     data = dict(y=y, x=x, x2=x**2, x3=x**3, x4=x**4, x5=x**5)
-    # Penalized smooth: penalty null-space dimension >= 1.
+    # Penalized smooth.
     m_smooth = gamfit.fit(data, "y ~ s(x)", family="gaussian")
-    # Purely parametric: no penalty, null-space dimension 0.
+    # Parametric polynomial. Since the empty-penalty normalization (#2627,
+    # 192b2c1ae1) it publishes the same null-space dimension as the smooth, 1 on
+    # this fixture.
     m_poly = gamfit.fit(data, "y ~ x + x2 + x3 + x4 + x5", family="gaussian")
     return m_smooth, m_poly
 
@@ -74,13 +80,24 @@ def _compare_scores() -> dict[str, float]:
     return {row["name"]: row["reml_score"] for row in comparison["score_table"]}
 
 
-def test_compare_models_precondition_null_dims_differ() -> None:
-    # Establish the precondition that makes the normalizer matter: the two fits
-    # have different penalty null-space dimensions. If this ever stops holding,
-    # the consistency test below would be vacuous.
-    m_smooth, m_poly = _fit_pair()
-    assert m_poly.summary().null_dim == 0
-    assert m_smooth.summary().null_dim >= 1
+def test_compare_models_precondition_normalizer_is_resolvable() -> None:
+    # Establish the precondition that keeps the consistency test below non-vacuous.
+    # Each fit's comparable score carries the Tierney-Kadane normalizer
+    # -0.5 * null_dim * ln(2*pi) + 0.5 * null_space_logdet, and that normalizer lies
+    # outside the tolerance the paths must agree to, so a path that skipped it would
+    # disagree. This used to require different null dimensions (poly 0, smooth >= 1).
+    # Since 192b2c1ae1 both fits publish null_dim 1, and the normalizer itself, not a
+    # null-dimension gap, is what distinguishes the paths.
+    for model in _fit_pair():
+        summary = model.summary()
+        normalizer = (
+            -0.5 * summary.null_dim * math.log(2.0 * math.pi)
+            + 0.5 * summary.null_space_logdet
+        )
+        assert summary.reml_score - summary.raw_reml_score == pytest.approx(
+            normalizer, rel=SCORE_REL
+        )
+        assert abs(normalizer) > SCORE_REL * abs(summary.reml_score)
 
 
 def test_compare_models_score_matches_model_own_score() -> None:
@@ -92,15 +109,15 @@ def test_compare_models_score_matches_model_own_score() -> None:
     comparison = gamfit.compare_models([m_smooth, m_poly], names=["smooth", "poly"])
     compare_score = {row["name"]: row["reml_score"] for row in comparison["score_table"]}
 
-    # The null_dim == 0 model is the control: its normalizer is zero, so the two
-    # paths already agree here. This anchors that we are comparing like with like.
-    assert compare_score["poly"] == pytest.approx(m_poly.summary().reml_score, rel=1e-9)
-
-    # The real assertion: the penalized smooth (null_dim >= 1) must also report
-    # the same raw score in both places. Pre-fix, compare_models added the
-    # Tierney-Kadane normalizer (~1.9 nats) that Summary omitted.
+    # Both fits carry a resolvable normalizer (see the precondition test), so each
+    # assertion catches a path that applies it in only one place. Pre-fix,
+    # compare_models added the Tierney-Kadane normalizer (~1.9 nats) that Summary
+    # omitted.
+    assert compare_score["poly"] == pytest.approx(
+        m_poly.summary().reml_score, rel=SCORE_REL
+    )
     assert compare_score["smooth"] == pytest.approx(
-        m_smooth.summary().reml_score, rel=1e-9
+        m_smooth.summary().reml_score, rel=SCORE_REL
     ), (
         "compare_models score "
         f"{compare_score['smooth']!r} disagrees with the model's own "
