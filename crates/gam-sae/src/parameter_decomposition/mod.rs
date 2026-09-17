@@ -110,7 +110,7 @@
 pub mod rewrite;
 
 // Plane-rotation and response-projector recovery with derived eigengaps.
-// [unlanded: spectral]
+pub mod spectral;
 
 // Sufficient-state quotient and realization contracts.
 pub mod state;
