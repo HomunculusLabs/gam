@@ -131,23 +131,30 @@ impl SaeSupportStationarity {
 /// simultaneous change of coordinates and decoder can travel. It is covariant
 /// under reparameterisation and intensive under row replication, because `A` and
 /// `g` scale together.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SaeSupportNewtonDisplacement {
     pub decoder_max_abs: f64,
     pub coordinate_max_abs: f64,
     /// `gᵀA⁻¹g`, the squared Newton decrement; the quadratic model predicts a
     /// decrease of half of it.
     pub decrement_sq: f64,
+    /// The coordinate block of `Δ`, in the compact row layout
+    /// (`assemble_arrow_schur`'s `row_offsets`), so `θ* ≈ θ − Δ`. A consumer that
+    /// bounds a quantity's error at an inexact inner state reads `−Δᵀ ∂_θ(…)` off it.
+    pub coordinates: Array1<f64>,
+    /// The decoder block of `Δ`, in `beta_layout` order:
+    /// `offset(atom) + basis · P + channel`.
+    pub decoder: Array1<f64>,
 }
 
 impl SaeSupportNewtonDisplacement {
-    pub fn max_abs(self) -> f64 {
+    pub fn max_abs(&self) -> f64 {
         self.decoder_max_abs.max(self.coordinate_max_abs)
     }
 
     /// The inner certificate: every parameter's remaining Newton displacement is
     /// within `tolerance` of the iterate scale.
-    pub(crate) fn certifies(self, parameter_scale: f64, tolerance: f64) -> bool {
+    pub(crate) fn certifies(&self, parameter_scale: f64, tolerance: f64) -> bool {
         parameter_scale.is_finite()
             && parameter_scale >= 1.0
             && tolerance.is_finite()
@@ -4039,6 +4046,9 @@ impl SaeSupportSparseTerm {
         lambda_smooth: &[f64],
         ard_precisions: &[Vec<f64>],
     ) -> Result<(SaeSupportNewtonDisplacement, SaeArrowVector), String> {
+        // #2576 — the solve's cost is where a certifying cycle's time goes, so each
+        // certificate reports it, the same telemetry `joint_newton_step` carries.
+        let started = std::time::Instant::now();
         let system = self.assemble_arrow_schur(target, lambda_smooth, ard_precisions)?;
         let (beta_offsets, beta_dim) = self.beta_layout()?;
         if beta_dim != system.k {
@@ -4062,6 +4072,7 @@ impl SaeSupportSparseTerm {
         let factors = CpuBatchedBlockSolver
             .factor_blocks(&system.rows, 0.0, system.d, true)
             .map_err(|error| format!("support Newton displacement row factorization: {error}"))?;
+        let prepared = started.elapsed();
         let displacement = solve_b_preconditioned_gmres_with(
             &gradient,
             |vector| self.support_outer_exact_hessian_apply(&system, &rows, vector),
@@ -4085,14 +4096,24 @@ impl SaeSupportSparseTerm {
         if !decrement_sq.is_finite() {
             return Err("support Newton decrement is non-finite".to_string());
         }
-        Ok((
-            SaeSupportNewtonDisplacement {
-                decoder_max_abs: max_abs(&displacement.beta),
-                coordinate_max_abs: max_abs(&displacement.t),
-                decrement_sq,
-            },
-            displacement,
-        ))
+        let certificate = SaeSupportNewtonDisplacement {
+            decoder_max_abs: max_abs(&displacement.beta),
+            coordinate_max_abs: max_abs(&displacement.t),
+            decrement_sq,
+            coordinates: displacement.t.clone(),
+            decoder: displacement.beta.clone(),
+        };
+        log::info!(
+            "support Newton displacement: max {:.3e} (decoder {:.3e}, coordinate {:.3e}) over \
+             {coordinate_dim} coordinates and border {beta_dim}; assemble, differential rows and \
+             row factors {:.2}s, exact-A FGMRES {:.2}s",
+            certificate.max_abs(),
+            certificate.decoder_max_abs,
+            certificate.coordinate_max_abs,
+            prepared.as_secs_f64(),
+            (started.elapsed() - prepared).as_secs_f64(),
+        );
+        Ok((certificate, displacement))
     }
 
     /// Take the exact Newton step `−Δ` a refused certificate already paid for
