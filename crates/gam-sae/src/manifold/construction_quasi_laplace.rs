@@ -521,13 +521,11 @@ impl SaeManifoldTerm {
         self.streaming_gates_frozen = gates_were_frozen;
         let (cache, log_det) = evidence_root?;
 
-        // 3. Smoothing-penalty Occam term `−½·Σ_k r_k·rank(S_k)·log λ_smooth`
-        //    plus the profiled-frame evidence-dimension correction
-        //    `+½·Σ_k r_k·(p−r_k)·log λ_smooth` (issue #972). On the full-`B` path
-        //    (`r_k == p`, no frames) this is exactly the historical
-        //    `½·p·(Σ rank S_k)·log λ_smooth`, so the small-model criterion is
-        //    unchanged. The single seam is `reml_occam_term`, shared with the
-        //    streaming path so both rank the identical Laplace dimension count.
+        // 3. Smoothing-prior normalizer `−½·Σ_k log|λ_k S_k ⊗ I_{r_k}|_+`
+        //    (issue #972, #2933 F26): the `r_k·rank(S_k)·log λ_smooth` Occam term plus
+        //    the base pseudo-determinant `r_k·log|S_k|_+`, so equivalent splits of one
+        //    precision `λ_k S_k` price one value. The single seam is `reml_occam_term`,
+        //    shared with the streaming path so both rank the identical normalizer.
         let occam = self.reml_occam_term(rho)?;
 
         // Extra penalized-objective energy with no native `loss.*` twin
@@ -4005,15 +4003,26 @@ impl SaeManifoldTerm {
         })
     }
 
-    /// Smoothing-penalty Occam normalizer `−½ Σ_k r_k·rank(S_k)·log λ_smooth`
-    /// (issue #972; #1556 per-atom λ).
+    /// Smoothing-prior normalizer
+    /// `½·Σ_k log|λ_k S_k ⊗ I_{r_k}|_+ = ½·Σ_k r_k·(rank(S_k)·log λ_k + log|S_k|_+)`
+    /// (issue #972; #1556 per-atom λ; #2933 F26).
     ///
-    /// This is the `log λ`-dependent part of the penalty log-determinant
-    /// `−½ log|λ_k S_k|_+` summed over the `r_k` penalized decoder channels: the
-    /// `S_k` roughness penalty acts on `r_k` coordinate channels (`r_k == p` on
-    /// the full-`B` path, the smaller frame rank when a Grassmann frame is
-    /// active), each contributing `rank(S_k)` penalized directions, so the
-    /// `λ_k`-normalizer is `½ r_k·rank(S_k)·log λ_k`.
+    /// Atom `k`'s decoder prior on its penalized subspace is the Gaussian with
+    /// precision `λ_k S_k ⊗ I_{r_k}`: the `S_k` roughness penalty acts on `r_k`
+    /// coordinate channels (`r_k == p` on the full-`B` path, the smaller frame rank
+    /// when a Grassmann frame is active), each contributing `rank(S_k)` penalized
+    /// directions. Its negative-log normalizer is `−½ log|λ_k S_k ⊗ I_{r_k}|_+`, which
+    /// `V = … − occam` carries. Directions in `null(S_k)` carry a flat unit-density
+    /// prior and no normalizer.
+    ///
+    /// #2933 F26 — this used to keep only `½ r_k·rank(S_k)·log λ_k`, which depends on
+    /// how the one precision `λ_k S_k` is split between its factors: `S_k → c·S_k`,
+    /// `λ_k → λ_k/c` leaves the prior, the fitted state and `log|A|` unchanged but
+    /// moved `V` by `½ r_k·rank(S_k)·log c` (4.605 nats at `r_k·rank(S_k) = 2`,
+    /// `c = 100`), and it left `V` blind to a curvature-parameterised `S_k(κ)`.
+    /// `log|S_k|_+` is taken on the eigenspace [`Self::symmetric_rank`] counts. It is
+    /// constant in `log λ_k`, so [`Self::reml_occam_log_lambda_smooth_derivative`] is
+    /// unchanged; its curvature channel is [`Self::reml_occam_kappa_derivative`].
     ///
     /// The profiled frame ORIENTATION `U_k` is NOT penalized by `λ_k` — the
     /// isotropic `⊗ I_{r_k}` penalty is invariant to rotating the frame, so the
@@ -4032,15 +4041,50 @@ impl SaeManifoldTerm {
         self.assignment.validate_rho_domain(rho)?;
         let mut acc = 0.0_f64;
         for (atom_idx, atom) in self.atoms.iter().enumerate() {
-            let rank_s = Self::symmetric_rank(atom.smooth_penalty())?;
-            // Penalized decoder dimension: `r_k` coordinate channels carry the
+            let (rank_s, log_pdet_s) =
+                Self::symmetric_rank_and_log_pseudodeterminant(atom.smooth_penalty())?;
+            // Penalized decoder channels: `r_k` coordinate channels carry the
             // `S_k` roughness penalty (full-`B` path ⇒ `r_k == p`).
-            let penalized_channel_dim = atom.border_frame_rank() * rank_s;
+            let channels = atom.border_frame_rank() as f64;
             let log_lambda = rho.log_lambda_smooth[atom_idx];
-            acc += 0.5 * (penalized_channel_dim as f64) * log_lambda;
+            acc += 0.5 * channels * (rank_s as f64 * log_lambda + log_pdet_s);
         }
         // `V = … − occam`, so the net occam SUBTRACTS the penalty normalizer.
         Ok(acc)
+    }
+
+    /// Per-curvature-coordinate derivative `∂(occam)/∂κ_k = ½·r_k·tr(S_k⁺ ∂S_k/∂κ_k)`
+    /// (#2933 F26). A raw sectional curvature moves `occam` only through
+    /// `log|S_k(κ_k)|_+`. Returns `(flat index, derivative)` for every atom in
+    /// `rho.kappa_atoms` whose penalty is curvature-parameterised, on the stratum
+    /// where `rank(S_k)` is locally constant (the constant-curvature Dirichlet Gram
+    /// keeps the constants null at every κ).
+    pub(crate) fn reml_occam_kappa_derivative(
+        &self,
+        rho: &SaeManifoldRho,
+    ) -> Result<Vec<(usize, f64)>, String> {
+        self.assignment.validate_rho_domain(rho)?;
+        let mut out = Vec::with_capacity(rho.kappa_atoms.len());
+        for &atom_idx in &rho.kappa_atoms {
+            let flat = rho.kappa_flat_index(atom_idx).ok_or_else(|| {
+                format!(
+                    "reml_occam_kappa_derivative: curvature atom {atom_idx} has no flat outer coordinate"
+                )
+            })?;
+            let atom = self.atoms.get(atom_idx).ok_or_else(|| {
+                format!(
+                    "reml_occam_kappa_derivative: curvature coordinate names atom {atom_idx}, outside term K={}",
+                    self.atoms.len()
+                )
+            })?;
+            let Some(ds) = atom.smooth_penalty_kappa_derivative() else {
+                continue;
+            };
+            let differential =
+                Self::symmetric_log_pseudodeterminant_differential(atom.smooth_penalty(), ds)?;
+            out.push((flat, 0.5 * atom.border_frame_rank() as f64 * differential));
+        }
+        Ok(out)
     }
 
     /// Per-atom derivative `∂(occam)/∂log λ_smooth[k]` (#1556): atom `k`'s entry

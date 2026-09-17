@@ -5436,43 +5436,93 @@ impl SaeManifoldTerm {
         (LatentManifold::Product(parts), point)
     }
 
-    /// Numerical rank of a symmetric penalty matrix: the count of eigenvalues
-    /// above the REML positive-eigenspace threshold
+    /// Positive eigenspace of a symmetric penalty matrix: the eigenpairs above the
+    /// REML positive-eigenspace threshold
     /// (`gam_solve::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold`),
-    /// the workspace's one rule for what a positive penalty mode is.
-    ///
-    /// Used to count the penalised dimension of each atom's `smooth_penalty`
-    /// `S_k` so the penalized quasi-Laplace criterion's `−½·p·rank(S)·log λ_smooth` Occam term
-    /// uses the *effective* penalty rank rather than the ambient basis size
-    /// (a thin-plate / B-spline penalty has a non-trivial null space).
-    pub(crate) fn symmetric_rank(s: &Array2<f64>) -> Result<usize, String> {
+    /// the workspace's one rule for what a positive penalty mode is. Returns the
+    /// retained eigenvalues and their eigenvectors as columns.
+    fn symmetric_positive_eigenspace(
+        s: &Array2<f64>,
+        context: &str,
+    ) -> Result<(Vec<f64>, Array2<f64>), String> {
         if s.nrows() != s.ncols() {
             return Err(format!(
-                "SaeManifoldTerm::symmetric_rank: matrix must be square, got {}x{}",
+                "SaeManifoldTerm::{context}: matrix must be square, got {}x{}",
                 s.nrows(),
                 s.ncols()
             ));
         }
         let m = s.ncols();
         if m == 0 {
-            return Ok(0);
+            return Ok((Vec::new(), Array2::zeros((0, 0))));
         }
         // Symmetrize defensively through the shared ndarray helper, then count the
         // positive eigenspace with the threshold the REML pseudo-logdet reads for a
         // penalty, rather than a cutoff local to the SAE evidence.
         let mut sym = s.clone();
         gam_linalg::matrix::symmetrize_in_place(&mut sym);
-        let (evals, _evecs) = sym
+        let (evals, evecs) = sym
             .eigh(Side::Lower)
-            .map_err(|e| format!("SaeManifoldTerm::symmetric_rank: eigh failed: {e}"))?;
+            .map_err(|e| format!("SaeManifoldTerm::{context}: eigh failed: {e}"))?;
         let max_eig = evals.iter().fold(0.0_f64, |acc, &v| acc.max(v));
         if !(max_eig > 0.0) {
-            return Ok(0);
+            return Ok((Vec::new(), Array2::zeros((m, 0))));
         }
         let threshold = gam_solve::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold(
             &evals.to_vec(),
         );
-        Ok(evals.iter().filter(|&&v| v > threshold).count())
+        let retained: Vec<usize> = (0..m).filter(|&i| evals[i] > threshold).collect();
+        let values = retained.iter().map(|&i| evals[i]).collect();
+        let vectors =
+            Array2::from_shape_fn((m, retained.len()), |(row, col)| evecs[[row, retained[col]]]);
+        Ok((values, vectors))
+    }
+
+    /// Numerical rank of a symmetric penalty matrix: the count of eigenvalues
+    /// above the REML positive-eigenspace threshold (see
+    /// [`Self::symmetric_positive_eigenspace`]).
+    ///
+    /// Used to count the penalised dimension of each atom's `smooth_penalty`
+    /// `S_k` so the penalized quasi-Laplace criterion's `−½·p·rank(S)·log λ_smooth` Occam term
+    /// uses the *effective* penalty rank rather than the ambient basis size
+    /// (a thin-plate / B-spline penalty has a non-trivial null space).
+    pub(crate) fn symmetric_rank(s: &Array2<f64>) -> Result<usize, String> {
+        Ok(Self::symmetric_positive_eigenspace(s, "symmetric_rank")?.0.len())
+    }
+
+    /// Rank and log pseudo-determinant `log|S|_+ = Σ_{σ_i > threshold} ln σ_i` of a
+    /// symmetric penalty, on the positive eigenspace [`Self::symmetric_rank`] counts.
+    pub(crate) fn symmetric_rank_and_log_pseudodeterminant(
+        s: &Array2<f64>,
+    ) -> Result<(usize, f64), String> {
+        let (values, _) =
+            Self::symmetric_positive_eigenspace(s, "symmetric_rank_and_log_pseudodeterminant")?;
+        Ok((values.len(), values.iter().map(|value| value.ln()).sum()))
+    }
+
+    /// `tr(S⁺ dS) = Σ_i u_iᵀ dS u_i / σ_i` over the positive eigenspace of `S`: the
+    /// differential of `log|S|_+` along `dS` on a stratum where the rank is constant.
+    pub(crate) fn symmetric_log_pseudodeterminant_differential(
+        s: &Array2<f64>,
+        ds: &Array2<f64>,
+    ) -> Result<f64, String> {
+        if ds.dim() != s.dim() {
+            return Err(format!(
+                "SaeManifoldTerm::symmetric_log_pseudodeterminant_differential: dS {:?} does not match S {:?}",
+                ds.dim(),
+                s.dim()
+            ));
+        }
+        let (values, vectors) = Self::symmetric_positive_eigenspace(
+            s,
+            "symmetric_log_pseudodeterminant_differential",
+        )?;
+        let mut acc = 0.0_f64;
+        for (col, &value) in values.iter().enumerate() {
+            let u = vectors.column(col);
+            acc += u.dot(&ds.dot(&u)) / value;
+        }
+        Ok(acc)
     }
 }
 

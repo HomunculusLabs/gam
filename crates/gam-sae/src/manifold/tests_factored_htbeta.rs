@@ -242,8 +242,8 @@ pub(crate) fn qwen_shape_d2_factored_htbeta_assembly_stays_below_8gib() {
 
 /// A full-rank small-`p` decoder must NOT activate a frame: the factored
 /// border equals the full `M_k·p`, the Grassmann evidence dimension is `0`,
-/// and the Occam normalizer is bit-for-bit the historical
-/// `½·p·rank(S)·log λ` — the small-`p` evidence-equality contract.
+/// and the Occam normalizer is the full-`B` pseudo-determinant
+/// `½·p·log|λS|_+` — the small-`p` evidence-equality contract.
 #[test]
 pub(crate) fn factored_evidence_matches_full_b_at_small_p() {
     let m = 5usize;
@@ -297,10 +297,19 @@ pub(crate) fn factored_evidence_matches_full_b_at_small_p() {
     let activated_n = term.auto_activate_decoder_frames().expect("auto");
     assert_eq!(activated_n, 0, "small-p auto-activation must be a no-op");
 
-    // Occam normalizer equals the historical ½·p·rank(S)·log λ exactly.
+    // Occam normalizer is ½·p·log|λS|_+ = ½·p·(rank(S)·log λ + log|S|_+) (#2933 F26),
+    // read off an independent eigendecomposition of λS. The second-difference
+    // penalty has a two-dimensional null space, so its three largest eigenvalues
+    // span the penalized subspace.
     let rho = SaeManifoldRho::new(0.0, 0.37, vec![array![0.0_f64]]);
     let occam = term.reml_occam_term(&rho).expect("occam");
     let rank_s = SaeManifoldTerm::symmetric_rank(term.atoms[0].smooth_penalty()).unwrap();
-    let expected = 0.5 * (p as f64) * (rank_s as f64) * rho.log_lambda_smooth[0];
-    assert_abs_diff_eq!(occam, expected, epsilon = 1.0e-12);
+    assert_eq!(rank_s, m - 2, "second differences annihilate constants and lines");
+    let precision = term.atoms[0].smooth_penalty() * rho.log_lambda_smooth[0].exp();
+    let (eigenvalues, _) = precision.eigh(Side::Lower).expect("symmetric precision");
+    let mut descending = eigenvalues.to_vec();
+    descending.sort_by(|left, right| right.total_cmp(left));
+    let log_pseudodeterminant: f64 = descending[..rank_s].iter().map(|value| value.ln()).sum();
+    let expected = 0.5 * (p as f64) * log_pseudodeterminant;
+    assert_abs_diff_eq!(occam, expected, epsilon = 1.0e-10);
 }

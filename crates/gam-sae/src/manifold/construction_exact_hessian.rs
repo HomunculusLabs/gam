@@ -3074,6 +3074,14 @@ impl SaeManifoldTerm {
             }
             occam[index] = -smooth_occam[atom_idx];
         }
+        // #2933 F26 — a curvature-parameterised penalty moves the prior normalizer
+        // `½·r·log|S(κ)|_+`, so its κ coordinate carries an Occam channel too.
+        for (index, derivative) in self
+            .reml_occam_kappa_derivative(rho)
+            .map_err(OuterGradientError::internal)?
+        {
+            occam[index] = -derivative;
+        }
 
         let ard_explicit = self
             .ard_log_precision_explicit_derivatives(rho)
