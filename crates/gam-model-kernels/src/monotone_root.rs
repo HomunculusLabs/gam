@@ -176,20 +176,25 @@ mod tests {
         )
         .expect("root");
 
-        let f_mid = (-0.5f64).exp() - 0.5;
-        let f_a_mid = -(-0.5f64).exp();
-        let f_aa_mid = (-0.5f64).exp();
-        let expected_probe =
-            0.5 - (2.0 * f_mid * f_a_mid) / (2.0 * f_a_mid * f_a_mid - f_mid * f_aa_mid);
+        // The Halley step `a − 2FF′/(2F′² − FF″)` from a point the solver has
+        // already evaluated. Which point it steps from is the solver's choice
+        // (since opt#18 the best point, not the bracket midpoint); that it takes
+        // the step for a decreasing `F` is what this pins.
+        let halley_step_from = |a: f64| {
+            let (f, f_a, f_aa) = ((-a).exp() - 0.5, -(-a).exp(), (-a).exp());
+            a - (2.0 * f * f_a) / (2.0 * f_a * f_a - f * f_aa)
+        };
         assert!((root - std::f64::consts::LN_2).abs() < 1e-10);
         assert!((abs_deriv - 0.5).abs() < 1e-10);
         assert!(residual.abs() < 1e-12);
+        let points = eval_points.borrow();
         assert!(
-            eval_points
-                .borrow()
-                .iter()
-                .copied()
-                .any(|a| (a - expected_probe).abs() < 1e-12)
+            points.iter().enumerate().any(|(k, &probe)| {
+                points[..k]
+                    .iter()
+                    .any(|&from| (probe - halley_step_from(from)).abs() < 1e-12)
+            }),
+            "no evaluation is a Halley step from an earlier one: {points:?}"
         );
     }
 
