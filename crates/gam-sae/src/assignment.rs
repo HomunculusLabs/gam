@@ -330,39 +330,6 @@ impl AssignmentMode {
         }
         Ok(())
     }
-
-    /// Resolve the effective ordered independent Beta--Bernoulli concentration `α` for this mode.
-    ///
-    /// `per_fit_override` is the #1777 PER-FIT override (from
-    /// [`SaeAssignment::ordered_beta_bernoulli_alpha_override`]) and is the source of truth when set.
-    /// Otherwise the mode's canonical fixed `α` or learnable schedule is used.
-    pub(crate) fn resolved_ordered_beta_bernoulli_alpha(
-        &self,
-        rho: &SaeManifoldRho,
-        per_fit_override: Option<f64>,
-    ) -> Option<f64> {
-        match *self {
-            AssignmentMode::OrderedBetaBernoulli {
-                alpha,
-                learnable_alpha,
-                ..
-            } => Some(if let Some(over) = per_fit_override {
-                // #1777 — the per-fit override flattens the ordered geometric
-                // prior π_k = (α/(α+1))^{k+1}
-                // so all K atoms can contribute to the reconstruction (the
-                // production α=1 gives a (0.5)^{k+1} schedule that structurally
-                // caps atoms 4..K → effective-K≈3). Forces the fixed value,
-                // bypassing the learnable schedule.
-                over
-            } else if learnable_alpha {
-                resolve_learnable_weight(alpha, rho.log_lambda_sparse)
-                    .expect("ordered Beta--Bernoulli rho must be validated before resolution")
-            } else {
-                alpha
-            }),
-            _ => None,
-        }
-    }
 }
 
 /// A gate configuration the dense assignment state refuses to evaluate, because no
@@ -387,6 +354,25 @@ impl std::fmt::Display for GateConfigurationRefusal {
             ),
         }
     }
+}
+
+/// Which quantity `SaeManifoldRho::log_lambda_sparse` carries for an ordered
+/// Beta--Bernoulli assignment; see [`SaeAssignment::ordered_beta_bernoulli_prior_parameters`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrderedBetaBernoulliSparseCoordinate {
+    /// `log(concentration / α_mode)`: the concentration is an outer parameter and the
+    /// prior weight is one.
+    LogConcentrationOffset,
+    /// `log(weight)`: the concentration is fixed and the coordinate scales the prior.
+    LogPenaltyWeight,
+}
+
+/// The ordered Beta--Bernoulli prior at one `rho` is `weight · P(concentration)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct OrderedBetaBernoulliPriorParameters {
+    pub(crate) concentration: f64,
+    pub(crate) weight: f64,
+    pub(crate) sparse_coordinate: OrderedBetaBernoulliSparseCoordinate,
 }
 
 /// Per-row latent assignment state — the DENSE-CERTIFICATION / debug-and-research
@@ -452,7 +438,7 @@ pub struct SaeAssignment {
     /// #1777 PER-FIT ordered Beta--Bernoulli-α override. `Some(α)` forces a fixed value and bypasses
     /// the learnable schedule for this assignment/fit. `None` uses the
     /// [`AssignmentMode`]'s canonical fixed `α` or learnable schedule. Read via
-    /// `Self::resolved_ordered_beta_bernoulli_alpha`; set from the FFI through the term's
+    /// `Self::ordered_beta_bernoulli_prior_parameters`; set from the FFI through the term's
     /// `set_fit_config`.
     pub ordered_beta_bernoulli_alpha_override: Option<f64>,
 }
@@ -632,24 +618,11 @@ impl SaeAssignment {
         self.try_assignments_row_inner(row)
     }
 
-    /// #1777 — the effective ordered independent Beta--Bernoulli `α` for this assignment at `rho`,
-    /// honoring the PER-FIT [`Self::ordered_beta_bernoulli_alpha_override`] before the mode's
-    /// canonical value or learnable schedule. The single seam every
-    /// gate/jet/prior site reads so the per-fit override is applied consistently.
-    /// `None` for non-ordered Beta--Bernoulli modes.
-    pub(crate) fn resolved_ordered_beta_bernoulli_alpha(
-        &self,
-        rho: &SaeManifoldRho,
-    ) -> Option<f64> {
-        self.mode
-            .resolved_ordered_beta_bernoulli_alpha(rho, self.ordered_beta_bernoulli_alpha_override)
-    }
-
     /// Whether the ordered independent Beta--Bernoulli concentration α is a FREE outer parameter that
     /// varies with ρ (`rho.log_lambda_sparse`). α is learnable ONLY when the mode
     /// requests it AND no per-fit override pins it: an override forces the fixed
     /// value and bypasses the learnable
-    /// schedule (see [`AssignmentMode::resolved_ordered_beta_bernoulli_alpha`]), so α's ρ-derivatives
+    /// schedule (see [`Self::ordered_beta_bernoulli_prior_parameters`]), so α's ρ-derivatives
     /// are then identically zero and every prior / log-det / IFT term must treat α
     /// as a constant to stay consistent with the forward gate. `false` for non-ordered Beta--Bernoulli
     /// modes. (#Bug6)
@@ -660,6 +633,40 @@ impl SaeAssignment {
             } => learnable_alpha && self.ordered_beta_bernoulli_alpha_override.is_none(),
             _ => false,
         }
+    }
+
+    /// The ordered Beta--Bernoulli prior this assignment scores at `rho`,
+    /// `weight · P(concentration)`, with the meaning of `rho.log_lambda_sparse` named.
+    ///
+    /// That one stored coordinate carries two different quantities. While the
+    /// concentration is effectively learnable ([`Self::effective_alpha_is_learnable`]) it is
+    /// `log(concentration / α_mode)` and the weight is one. Otherwise the concentration is
+    /// fixed (the per-fit override when present, else the mode's `α`) and the coordinate is
+    /// `log(weight)`. A transformation of the mode or of that coordinate preserves the
+    /// objective only if both resolved fields are unchanged. `None` for other modes.
+    pub(crate) fn ordered_beta_bernoulli_prior_parameters(
+        &self,
+        rho: &SaeManifoldRho,
+    ) -> Result<Option<OrderedBetaBernoulliPriorParameters>, String> {
+        let AssignmentMode::OrderedBetaBernoulli { alpha, .. } = self.mode else {
+            return Ok(None);
+        };
+        let parameters = if self.effective_alpha_is_learnable() {
+            OrderedBetaBernoulliPriorParameters {
+                concentration: resolve_learnable_weight(alpha, rho.log_lambda_sparse).map_err(
+                    |error| format!("ordered Beta--Bernoulli learnable concentration: {error}"),
+                )?,
+                weight: 1.0,
+                sparse_coordinate: OrderedBetaBernoulliSparseCoordinate::LogConcentrationOffset,
+            }
+        } else {
+            OrderedBetaBernoulliPriorParameters {
+                concentration: self.ordered_beta_bernoulli_alpha_override.unwrap_or(alpha),
+                weight: rho.lambda_sparse()?,
+                sparse_coordinate: OrderedBetaBernoulliSparseCoordinate::LogPenaltyWeight,
+            }
+        };
+        Ok(Some(parameters))
     }
 
     pub(crate) fn validate_rho_domain(&self, rho: &SaeManifoldRho) -> Result<(), String> {
@@ -696,7 +703,7 @@ impl SaeAssignment {
     }
 
     /// #1777 — install (or clear, with `None`) the PER-FIT ordered Beta--Bernoulli-α override on this
-    /// assignment. Source of truth used by `Self::resolved_ordered_beta_bernoulli_alpha`; the FFI
+    /// assignment. Source of truth used by `Self::ordered_beta_bernoulli_prior_parameters`; the FFI
     /// reaches it through the term's `set_fit_config`.
     pub(crate) fn set_ordered_beta_bernoulli_alpha_override(&mut self, alpha: Option<f64>) {
         self.ordered_beta_bernoulli_alpha_override = alpha;
@@ -802,28 +809,6 @@ impl SaeAssignment {
             }
         }
         Ok(())
-    }
-
-    pub(crate) fn persist_resolved_ordered_beta_bernoulli_alpha(
-        &mut self,
-        rho: &SaeManifoldRho,
-    ) -> bool {
-        let AssignmentMode::OrderedBetaBernoulli {
-            temperature,
-            alpha,
-            learnable_alpha: true,
-        } = self.mode
-        else {
-            return false;
-        };
-        let resolved_alpha = resolve_learnable_weight(alpha, rho.log_lambda_sparse)
-            .expect("ordered Beta--Bernoulli rho must be validated before persistence");
-        self.mode = AssignmentMode::OrderedBetaBernoulli {
-            temperature,
-            alpha: resolved_alpha,
-            learnable_alpha: false,
-        };
-        true
     }
 
     pub(crate) fn try_assignments(&self) -> Result<Array2<f64>, String> {
@@ -1269,7 +1254,7 @@ pub(crate) fn flat_logits(logits: ArrayView2<'_, f64>) -> Array1<f64> {
 
 /// Build the ordered Beta--Bernoulli sparsity penalty used by every assignment-prior term at `rho`,
 /// honoring #Bug6 (α is FIXED to the forward-gate value whenever an override
-/// pins it — `effective_alpha_is_learnable`, `resolved_ordered_beta_bernoulli_alpha`) and #Bug4
+/// pins it — see [`SaeAssignment::ordered_beta_bernoulli_prior_parameters`]) and #Bug4
 /// (ungated atoms are inert columns excluded from value/gradient/curvature).
 /// Returns `(penalty, rho_view)`; the fixed-α branch uses the `lambda_sparse`
 /// weight convention with an empty `rho_view`.
@@ -1280,13 +1265,20 @@ fn ordered_beta_bernoulli_prior_penalty(
     temperature: f64,
     row_weights: Option<&[f64]>,
 ) -> Result<(OrderedBetaBernoulliPenalty, Array1<f64>), String> {
-    let learnable = assignment.effective_alpha_is_learnable();
+    let parameters = assignment
+        .ordered_beta_bernoulli_prior_parameters(rho)?
+        .ok_or_else(|| {
+            "ordered Beta--Bernoulli prior requires an ordered Beta--Bernoulli assignment"
+                .to_string()
+        })?;
+    let learnable = parameters.sparse_coordinate
+        == OrderedBetaBernoulliSparseCoordinate::LogConcentrationOffset;
+    // A learnable penalty re-resolves `base · exp(ρ)` from its own rho view, so it keeps
+    // the base; a fixed penalty carries the resolved concentration and weight directly.
     let alpha_eff = if learnable {
         base_alpha
     } else {
-        assignment
-            .resolved_ordered_beta_bernoulli_alpha(rho)
-            .unwrap_or(base_alpha)
+        parameters.concentration
     };
     // #991 design-honesty weights: the ordered Beta--Bernoulli prior is not row-separable (the
     // exact integrated scalar couples rows through the column active mass), so the weights are
@@ -1305,7 +1297,7 @@ fn ordered_beta_bernoulli_prior_penalty(
     let rho_view = if learnable {
         Array1::from_vec(vec![rho.log_lambda_sparse])
     } else {
-        penalty.weight = rho.lambda_sparse()?;
+        penalty.weight = parameters.weight;
         Array1::zeros(0)
     };
     Ok((penalty, rho_view))

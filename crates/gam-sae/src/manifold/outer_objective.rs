@@ -1716,7 +1716,7 @@ impl SaeManifoldOuterObjective {
             terminal_penalized_quasi_laplace_criterion,
             ..
         } = self;
-        let mut fitted_rho = current_rho;
+        let fitted_rho = current_rho;
         let mut fitted = term;
         // #2933 F05 — the declared gates belong to this objective's hyperparameter
         // solve. The minted fit re-derives them at its next assembly, as every term
@@ -1763,12 +1763,11 @@ impl SaeManifoldOuterObjective {
             .iter()
             .zip(pre_canonical_flags.iter())
             .any(|(atom, before)| atom.chart_canonicalized != *before);
-        if fitted
-            .assignment
-            .persist_resolved_ordered_beta_bernoulli_alpha(&fitted_rho)
-        {
-            fitted_rho.log_lambda_sparse = 0.0;
-        }
+        // The certified `(term, ρ)` pair leaves verbatim. For ordered Beta--Bernoulli,
+        // `log_lambda_sparse` is the concentration offset only while the concentration
+        // is effectively learnable, and the prior weight otherwise. Rewriting the mode
+        // and zeroing that coordinate changes the objective under an override, and
+        // decouples the coordinate from the persisted `alpha`/`learnable_alpha` (#2933 F06).
         let fitted_loss = fitted.loss(target.view(), &fitted_rho)?;
         let termination = termination_report;
         log::warn!(

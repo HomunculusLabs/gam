@@ -5508,13 +5508,10 @@ impl SaeManifoldTerm {
         } else {
             Array2::<f64>::zeros((0, 0))
         };
-        let learnable_alpha = matches!(
-            self.assignment.mode,
-            AssignmentMode::OrderedBetaBernoulli {
-                learnable_alpha: true,
-                ..
-            }
-        );
+        // `hdiag` differentiates the prior along whatever `log_lambda_sparse` carries:
+        // the concentration when it is effectively learnable, the weight when an
+        // override pins it. The majorizer derivative must follow the same predicate.
+        let learnable_alpha = self.assignment.effective_alpha_is_learnable();
         let ordered_channels = ordered_beta_bernoulli_psd_majorizer_third_channels_weighted(
             &self.assignment,
             rho,
@@ -5697,13 +5694,8 @@ impl SaeManifoldTerm {
             rho,
             self.row_loss_weights.as_deref(),
         )?;
-        let learnable_alpha = matches!(
-            self.assignment.mode,
-            AssignmentMode::OrderedBetaBernoulli {
-                learnable_alpha: true,
-                ..
-            }
-        );
+        // Same predicate as the dense trace: an override makes the coordinate a weight.
+        let learnable_alpha = self.assignment.effective_alpha_is_learnable();
         if let Some(channels) = ordered_channels.as_ref() {
             for row in 0..self.n_obs() {
                 for atom in 0..k_atoms {

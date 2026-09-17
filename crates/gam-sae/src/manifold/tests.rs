@@ -2212,22 +2212,18 @@ pub(crate) fn per_fit_config_isolates_barrier_and_ordered_beta_bernoulli_alpha()
     assert_eq!(term_a.fit_config().gpu_policy, gam_gpu::GpuPolicy::Off);
     assert_eq!(term_b.fit_config().gpu_policy, gam_gpu::GpuPolicy::Required);
 
-    // ordered Beta--Bernoulli-α: the per-fit override is the resolved α
-    // (bypassing the mode schedule), and the two terms resolve different α
-    // values.  α parameterizes the prior used by the fit; it does not rewrite
-    // an already-materialized assignment matrix.
-    assert_eq!(
-        term_a
-            .assignment
-            .resolved_ordered_beta_bernoulli_alpha(&rho_a),
-        Some(0.2)
-    );
-    assert_eq!(
-        term_b
-            .assignment
-            .resolved_ordered_beta_bernoulli_alpha(&rho_b),
-        Some(5.0)
-    );
+    // ordered Beta--Bernoulli-α: the per-fit override is the resolved concentration
+    // (bypassing the mode schedule), and the two terms resolve different values.
+    // α parameterizes the prior used by the fit; it does not rewrite an
+    // already-materialized assignment matrix.
+    let concentration = |term: &SaeManifoldTerm, rho: &SaeManifoldRho| {
+        term.assignment
+            .ordered_beta_bernoulli_prior_parameters(rho)
+            .expect("fixture rho is inside the prior domain")
+            .map(|parameters| parameters.concentration)
+    };
+    assert_eq!(concentration(&term_a, &rho_a), Some(0.2));
+    assert_eq!(concentration(&term_b, &rho_b), Some(5.0));
 
     // Barrier strength (K=2, so the barrier is live): the per-fit override is the
     // source of truth, distinct per term.
@@ -2237,18 +2233,8 @@ pub(crate) fn per_fit_config_isolates_barrier_and_ordered_beta_bernoulli_alpha()
     // Isolation: clearing term_a's config leaves term_b untouched, and term_a
     // uses the mode's canonical α.
     term_a.set_fit_config(SaeFitConfig::default());
-    assert_eq!(
-        term_a
-            .assignment
-            .resolved_ordered_beta_bernoulli_alpha(&rho_a),
-        Some(1.0)
-    ); // the mode's compiled α
-    assert_eq!(
-        term_b
-            .assignment
-            .resolved_ordered_beta_bernoulli_alpha(&rho_b),
-        Some(5.0)
-    );
+    assert_eq!(concentration(&term_a, &rho_a), Some(1.0)); // the mode's compiled α
+    assert_eq!(concentration(&term_b, &rho_b), Some(5.0));
 }
 
 /// F5 — the per-fit separation-barrier override (#1777) must isolate two

@@ -106,8 +106,10 @@ impl AssignmentStrengthLayout {
 /// REML-selected continuous hyperparameters for SAE-manifold.
 #[derive(Debug, Clone)]
 pub struct SaeManifoldRho {
-    /// `log(lambda_sparse)` for softmax entropy or ThresholdGate gated L1, or the
-    /// learnable `log(alpha)` offset for ordered Beta--Bernoulli assignment.
+    /// `log(lambda_sparse)` for softmax entropy or ThresholdGate gated L1. For ordered
+    /// Beta--Bernoulli it is the concentration offset `log(α/α_mode)` while α is
+    /// effectively learnable, and the log prior weight otherwise; see
+    /// `SaeAssignment::ordered_beta_bernoulli_prior_parameters`.
     pub log_lambda_sparse: f64,
     /// Typed assignment-strength layout. This is assignment-family state, not
     /// an optimizer mask: when the coordinate is structurally absent it is not

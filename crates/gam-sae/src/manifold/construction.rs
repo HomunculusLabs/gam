@@ -899,7 +899,7 @@ impl SaeManifoldTerm {
     /// Distributes the config to its two authorities: the barrier strength override
     /// onto the term (read by `separation_barrier_strength`), and the ordered Beta--Bernoulli-α
     /// override onto the assignment (read by
-    /// `SaeAssignment::resolved_ordered_beta_bernoulli_alpha`). A `None` field selects the canonical
+    /// `SaeAssignment::ordered_beta_bernoulli_prior_parameters`). A `None` field selects the canonical
     /// data-derived or assignment-mode default. Call this after building the term
     /// and before fitting; distinct terms remain isolated by construction.
     pub fn set_fit_config(&mut self, config: SaeFitConfig) {

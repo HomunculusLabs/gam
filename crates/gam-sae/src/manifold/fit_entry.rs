@@ -44,7 +44,7 @@ use crate::structure_harvest;
 use crate::tiered::Tier0Mean;
 
 use super::{
-    AmortizedEncoderConsistency, AssignmentMode, ChartDegeneracyReport,
+    AmortizedEncoderConsistency, ChartDegeneracyReport,
     ChartNondegeneracyCertificate, CoordinateFidelityCertificate, CrossFitConfig,
     CrossFitReport, SaeManifoldFitDiagnostics, SaeManifoldLoss, SaeManifoldOuterObjective,
     SaeInnerKktScaleError, SaeManifoldRho, SaeManifoldTerm, SaeOuterTermination,
@@ -1517,9 +1517,10 @@ fn finalize_sae_fit_report(
         cross_fit_reconstruction_ev(z.view(), CrossFitConfig { k_folds, seed: 0 }, q).ok()
     });
 
-    let reported_log_alpha = match term.assignment.mode {
-        AssignmentMode::OrderedBetaBernoulli { alpha, .. } => alpha.ln(),
-        _ => alpha.ln(),
+    // The concentration the returned `(term, ρ)` actually scores, not the mode's base `α`.
+    let reported_log_alpha = match term.assignment.ordered_beta_bernoulli_prior_parameters(&rho)? {
+        Some(parameters) => parameters.concentration.ln(),
+        None => alpha.ln(),
     };
 
     // A structure certificate is evidence about a structure search, not a
