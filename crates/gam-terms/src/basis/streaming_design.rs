@@ -84,20 +84,58 @@ impl RadialScalarKind {
                 MaternNu::FiveHalves | MaternNu::SevenHalves | MaternNu::NineHalves
             ),
             RadialScalarKind::Duchon { .. } => true,
-            RadialScalarKind::PureDuchon {
-                p_order,
-                s_order,
-                dim,
-                ..
-            } => {
-                let alpha = duchon_scaling_exponent(*p_order, *s_order, *dim);
-                let is_log = (*dim) % 2 == 0 && {
-                    let half = (alpha / 2.0).round();
-                    half >= 0.0 && half * 2.0 == alpha
-                };
+            RadialScalarKind::PureDuchon { .. } => {
+                let (alpha, is_log) = self.polyharmonic_exponent_and_log();
                 !is_log && alpha >= 4.0
             }
             RadialScalarKind::ThinPlate { .. } => false,
+        }
+    }
+
+    /// The raw polyharmonic block's own exponent `α = 2m − d` and whether it is
+    /// the logarithmic case (`d` even and `α` a non-negative even integer), as
+    /// `PolyharmonicBlockCoeff` evaluates `φ(r) = c·r^α (log r)`. It is not the
+    /// ψ-scaling exponent `d − 2(p + s)` of `duchon_scaling_exponent`, which has
+    /// the opposite sign and describes how the kernel moves with `κ`, not how it
+    /// behaves at `r = 0`.
+    fn polyharmonic_exponent_and_log(&self) -> (f64, bool) {
+        let (order, dim) = match self {
+            RadialScalarKind::PureDuchon {
+                block_order, dim, ..
+            } => (*block_order as f64, *dim),
+            RadialScalarKind::ThinPlate { dim, .. } => (thin_plate_penalty_order(*dim) as f64, *dim),
+            RadialScalarKind::Matern { .. } | RadialScalarKind::Duchon { .. } => return (f64::NAN, false),
+        };
+        let alpha = 2.0 * order - dim as f64;
+        let is_log = dim % 2 == 0 && {
+            let half = (alpha / 2.0).round();
+            half >= 0.0 && half * 2.0 == alpha
+        };
+        (alpha, is_log)
+    }
+
+    /// Whether the design row's gradient `∂φ(‖t − c‖)/∂t = φ'(r)·(t − c)/r` has
+    /// the limit 0 at a center collision `t = c`.
+    ///
+    /// Its norm is `|φ'(r)|`, so the limit is 0 exactly when `φ'(0⁺) = 0`. When
+    /// `φ'(0⁺) ≠ 0` the kernel has a cone point at the center: every direction
+    /// has a different one-sided derivative and the gradient does not exist.
+    /// This is a weaker requirement than [`Self::is_smooth_at_collision`], which
+    /// also needs the Hessian scalar `t` to converge, and a first-derivative
+    /// consumer must not borrow that stronger rule. For example `r² log r` has
+    /// `φ'(r) = r(2 log r + 1) → 0` while `q = 2 log r + 1` diverges.
+    ///   - Matérn ν = 1/2: `φ'(0⁺) = −κ ≠ 0`; ν ≥ 3/2: `φ'(0⁺) = 0`.
+    ///   - Duchon hybrid: `q` has a finite limit, so `φ'(r) = q·r → 0`.
+    ///   - PureDuchon and ThinPlate `c·r^α (log r)`: `φ'(0⁺) = 0` iff `α > 1`
+    ///     (`r³` and `r² log r` yes, `−r` in three dimensions no).
+    #[inline]
+    pub(crate) fn design_gradient_vanishes_at_collision(&self) -> bool {
+        match self {
+            RadialScalarKind::Matern { nu, .. } => !matches!(nu, MaternNu::Half),
+            RadialScalarKind::Duchon { .. } => true,
+            RadialScalarKind::PureDuchon { .. } | RadialScalarKind::ThinPlate { .. } => {
+                self.polyharmonic_exponent_and_log().0 > 1.0
+            }
         }
     }
 

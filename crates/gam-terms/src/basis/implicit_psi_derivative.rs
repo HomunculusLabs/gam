@@ -600,12 +600,14 @@ impl LatentCoordDesignDerivative {
         let length_scale = input_scale
             .to_standardized_units(length_scale)
             .standardized_value();
+        let radial_kind = RadialScalarKind::Matern { length_scale, nu };
+        refuse_latent_kernel_without_collision_gradient(&radial_kind, centers.ncols())?;
         Ok(Self::from_local_design_jacobian_provider(Arc::new(
             RadialLatentCoordLocalDesignJacobian {
                 latent,
                 centers,
                 input_scale,
-                radial_kind: RadialScalarKind::Matern { length_scale, nu },
+                radial_kind,
                 ident_transform,
                 full_ident_transform: None,
                 n_poly: usize::from(include_intercept),
@@ -722,6 +724,7 @@ impl LatentCoordDesignDerivative {
             ident_transform = ident_transform.dot(v);
         }
         let n_poly = polynomial_block_from_order(centers.view(), effective_order).ncols();
+        refuse_latent_kernel_without_collision_gradient(&radial_kind, centers.ncols())?;
         Ok(Self::from_local_design_jacobian_provider(Arc::new(
             RadialLatentCoordLocalDesignJacobian {
                 latent,
@@ -871,6 +874,33 @@ impl LatentCoordDesignDerivative {
     }
 }
 
+/// Refuse a latent-coordinate kernel whose design row has no gradient at a
+/// center collision.
+///
+/// Latent rows move freely during the joint REML search, and data-derived
+/// centers start on latent rows, so `t = c` is reachable. A kernel with a cone
+/// point at the center (`φ'(0⁺) ≠ 0`) makes the criterion non-differentiable in
+/// `t` there, which no gradient-based latent search can price. The refusal
+/// happens here, when the operator is built, instead of as a panic in the middle
+/// of an outer evaluation.
+fn refuse_latent_kernel_without_collision_gradient(
+    radial_kind: &RadialScalarKind,
+    latent_dim: usize,
+) -> Result<(), BasisError> {
+    if radial_kind.design_gradient_vanishes_at_collision() {
+        return Ok(());
+    }
+    Err(BasisError::DegenerateAtCollision {
+        kernel: "latent-coordinate radial kernel",
+        dim: latent_dim,
+        m: 0.0,
+        message: "this kernel has a cone point at every center (φ'(0⁺) ≠ 0), so the design \
+                  has no gradient in a latent coordinate that reaches a center; choose a kernel \
+                  that is C¹ at the origin (Matérn ν ≥ 3/2, or a Duchon/polyharmonic order with \
+                  2m − d > 1)",
+    })
+}
+
 impl RadialLatentCoordLocalDesignJacobian {
     pub(crate) fn project_and_pad(
         &self,
@@ -912,20 +942,20 @@ impl RadialLatentCoordLocalDesignJacobian {
         }
         let r = r2.sqrt();
         if r == 0.0 {
-            // At a center collision the axis component s_axis = (t − c)_axis
-            // is exactly zero. The product q · s_axis is therefore 0 for any
-            // kernel whose q has a finite limit; for kernels where q diverges
-            // the value is genuinely indeterminate (0 · ∞) and we must not
-            // pretend it is zero. Defer to the kernel's classification.
-            if self.radial_kind.is_smooth_at_collision() {
+            // At a center collision the axis component q · s_axis has norm
+            // |φ'(r)|, so it tends to 0 whenever φ'(0⁺) = 0, even for kernels
+            // whose q = φ'/r itself diverges (r² log r). Only a kernel with a
+            // cone point at the center (φ'(0⁺) ≠ 0) has no gradient there.
+            if self.radial_kind.design_gradient_vanishes_at_collision() {
                 return Ok(0.0);
             }
             return Err(BasisError::DegenerateAtCollision {
                 kernel: "RadialScalarKind (design axis)",
                 dim: self.latent.latent_dim(),
                 m: 0.0,
-                message: "radial scalar q = φ'/r has no finite limit at r = 0; \
-                          the design row axis component is undefined",
+                message: "the kernel has a cone point at the center (φ'(0⁺) ≠ 0), so the \
+                          design row has no gradient in the latent coordinate at a center \
+                          collision",
             });
         }
         let (_, q, _) = self.radial_kind.eval_design_triplet(r)?;
