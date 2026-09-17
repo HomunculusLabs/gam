@@ -25,6 +25,12 @@
 //!
 //! # What a band does not cover
 //!
+//! The model counts rounded binary64 operations in round-to-nearest. So a band is valid
+//! only for an executor that evaluates the stage in IEEE binary64 with one rounding per
+//! basic operation. A float32 or bfloat16 execution, or TF32 matrix multiplication,
+//! rounds at a coarser precision that no binary64 band covers. A caller holding such an
+//! execution refuses instead of comparing (mpd-verify on #2951).
+//!
 //! Two implementations of a special function (torch's `erf` against gam-math's
 //! `erfc`) share no derivation here. A receipt evaluates the native activation at
 //! the external executor's exported pre-activation, which isolates that difference
@@ -185,8 +191,14 @@ pub fn factored_edit_stage_band(
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StageAgreement {
     /// Every entry has `|external − native| ≤ external_band + native_band`, decided
-    /// with the discrepancy rounded up and the band sum rounded down.
+    /// with the discrepancy rounded up and the band sum rounded down: a certified
+    /// agreement.
     pub agrees: bool,
+    /// Some entry has `|external − native| > external_band + native_band`, decided
+    /// with the discrepancy rounded down and the band sum rounded up: a certified
+    /// violation. When neither `agrees` nor `refutes` holds, an entry sits inside the
+    /// rounding of its own comparison and the stage is unresolved.
+    pub refutes: bool,
     /// `(row, column)` of the entry with the largest discrepancy-to-band ratio.
     pub witness: (usize, usize),
     /// The discrepancy at the witness, rounded up.
@@ -232,6 +244,7 @@ pub fn compare_stage(
     }
     let mut agreement = StageAgreement {
         agrees: true,
+        refutes: false,
         witness: (0, 0),
         discrepancy: 0.0,
         band: 0.0,
@@ -239,11 +252,18 @@ pub fn compare_stage(
     };
     for ((row, column), &native_value) in native.indexed_iter() {
         // A finite difference of floats is zero only when they are equal, and then it
-        // is exact; otherwise rounding it up bounds the exact difference from above.
+        // is exact. Otherwise the exact difference lies between the rounded one's
+        // neighbours, and so does the exact band sum.
         let difference = (external[[row, column]] - native_value).abs();
-        let discrepancy = if difference == 0.0 { 0.0 } else { up(difference) };
-        let band = down(external_band[[row, column]] + native_band[[row, column]]);
+        let band_sum = external_band[[row, column]] + native_band[[row, column]];
+        let (discrepancy, discrepancy_lower) = if difference == 0.0 {
+            (0.0, 0.0)
+        } else {
+            (up(difference), down(difference))
+        };
+        let band = down(band_sum);
         agreement.agrees &= discrepancy <= band;
+        agreement.refutes |= discrepancy_lower > up(band_sum);
         let ratio = if discrepancy == 0.0 { 0.0 } else { discrepancy / band };
         if ratio > agreement.ratio {
             agreement.witness = (row, column);
@@ -306,13 +326,16 @@ mod tests {
         let band = affine_stage_band(weight.view(), None, inputs.view()).expect("shapes compose");
         let agreement = compare_stage(forward.view(), reverse.view(), band.view(), band.view())
             .expect("finite arrays");
-        assert!(agreement.agrees, "{agreement:?}");
+        assert!(agreement.agrees && !agreement.refutes, "{agreement:?}");
 
         let absolute_sum = 2.0_f64.powi(54) + 14.0;
         let shallow = Array2::from_elem((1, 1), evaluation_band(1, absolute_sum));
         let refuted = compare_stage(forward.view(), reverse.view(), shallow.view(), shallow.view())
             .expect("finite arrays");
-        assert!(!refuted.agrees, "a depth-one band must not cover fourteen: {refuted:?}");
+        assert!(
+            !refuted.agrees && refuted.refutes,
+            "a depth-one band must be refuted by fourteen: {refuted:?}"
+        );
     }
 
     /// A factored edit executed densely and matrix-free, under signed and continuous
@@ -361,8 +384,31 @@ mod tests {
         displaced[[2, 1]] += 2.0 * (band[[2, 1]] + band[[2, 1]]);
         let refuted = compare_stage(dense.view(), displaced.view(), band.view(), band.view())
             .expect("finite arrays");
-        assert!(!refuted.agrees);
+        assert!(!refuted.agrees && refuted.refutes);
         assert_eq!(refuted.witness, (2, 1));
+    }
+
+    /// A discrepancy of exactly its band sum is decided by rounding alone, so neither
+    /// agreement nor refutation is certified. Positive controls: a band sum of twice the
+    /// discrepancy agrees, and one of half the discrepancy refutes.
+    #[test]
+    fn compare_stage_leaves_a_boundary_entry_unresolved() {
+        let external = Array2::from_elem((1, 1), 0.0);
+        let native = Array2::from_elem((1, 1), 1.0);
+        let verdict = |half_band: f64| {
+            let band = Array2::from_elem((1, 1), half_band);
+            compare_stage(external.view(), native.view(), band.view(), band.view())
+                .expect("finite arrays")
+        };
+
+        let boundary = verdict(0.5);
+        assert!(!boundary.agrees && !boundary.refutes, "{boundary:?}");
+
+        let wide = verdict(1.0);
+        assert!(wide.agrees && !wide.refutes, "{wide:?}");
+
+        let narrow = verdict(0.25);
+        assert!(!narrow.agrees && narrow.refutes, "{narrow:?}");
     }
 
     /// Mismatched shapes and non-finite entries are refused, never compared.
