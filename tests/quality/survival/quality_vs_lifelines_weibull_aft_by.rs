@@ -443,8 +443,9 @@ fn gam_survival_surface(data: &ArmData, t_grid: &[f64]) -> (Vec<f64>, f64, f64) 
     // survival_likelihood="weibull" selects the parametric Weibull baseline
     // (linear log-cumulative-hazard time basis whose two coefficients recover
     // scale/shape). The covariate side `x + s(x, by=group)` gives each group its
-    // own acceleration curve. The `survmodel(...)` term states the intent
-    // in-formula; the likelihood mode is driven by the config field.
+    // own acceleration curve. `survmodel(spec="net")` names the estimand, the
+    // one-hazard net risk. The likelihood comes from the config field, and the
+    // Weibull likelihood reads no residual distribution, so none is named.
     //
     // `group` MUST be fed to gam as a categorical label ("A"/"B"), not the
     // numeric code: schema inference treats "0"/"1" as a Binary numeric column,
@@ -481,7 +482,7 @@ fn gam_survival_surface(data: &ArmData, t_grid: &[f64]) -> (Vec<f64>, f64, f64) 
         ..FitConfig::default()
     };
     let result = fit_from_formula(
-        "Surv(time, event) ~ x + s(x, by=group) + survmodel(spec=\"transformation\", distribution=\"weibull\")",
+        "Surv(time, event) ~ x + s(x, by=group) + survmodel(spec=\"net\")",
         &ds,
         &cfg,
     )
@@ -955,7 +956,7 @@ fn gam_weibull_aft_by_factor_recovers_true_survival_on_real_data() {
         ..FitConfig::default()
     };
     let result = fit_from_formula(
-        "Surv(time, status) ~ karno + s(karno, by=celltype) + survmodel(spec=\"transformation\", distribution=\"weibull\")",
+        "Surv(time, status) ~ karno + s(karno, by=celltype) + survmodel(spec=\"net\")",
         &train_ds,
         &cfg,
     )
