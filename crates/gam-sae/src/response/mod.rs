@@ -5,3 +5,4 @@
 //! It is a declared intervention: nothing here claims natural activations are Gaussian.
 
 pub mod subspace;
+pub mod reader_gram;
