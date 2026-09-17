@@ -583,7 +583,7 @@
     "evidence": "Measured 2026-09-09 with scripts/source_removal_guard.py: e29e4da1b..8130620c7 = 426 guarded removals; 0ef82308d..8130620c7 = 68. Replacements named per family above; the tree compiles with cargo check --workspace --all-targets --locked at 87c355b12 and after."
   },
   {
-    "base": "7c6a32523b5eb310c48ee841cfed751d6087d935",
+    "base": "71c38292fbfd4b9fe4db8af3401ffc398f111439",
     "items": [
       "crates/gam-solve/src/mixture_link.rs:const:BETA_LOGISTIC_LOG_SHAPE_BOUND",
       "crates/gam-solve/src/mixture_link.rs:fn:beta_logistic_binomial_log_probabilities_at_shapes",

@@ -207,7 +207,7 @@
     "evidence": "Backfilled: d33860630 (the gam-inference slop deletion) removed these public functions and landed its source-removal and test-census entries but omitted this acknowledgement. scripts/public_api_census.py on MSI over 10ac599e4..d33860630 measured exactly this removed map. Each function was re-confirmed with git grep -nw at the tip before deletion as unreferenced, reachable only through other deleted items, or named only by tests that existed to exercise it."
   },
   {
-    "base": "7c6a32523b5eb310c48ee841cfed751d6087d935",
+    "base": "71c38292fbfd4b9fe4db8af3401ffc398f111439",
     "removed": {
       "crates/gam-solve/src/mixture_link.rs::beta_logistic_binomial_log_probabilities_at_shapes": 1
     },
