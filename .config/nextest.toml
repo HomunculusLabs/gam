@@ -152,6 +152,17 @@ slow-timeout = { period = "600s", terminate-after = 4 }
 filter = 'test(/declared_latent_law_2923::/)'
 slow-timeout = { period = "600s", terminate-after = 4 }
 
+# The gam#2927 survival marginal-slope posterior-mean measurement fits the
+# #2765 follow-up-varying-slope fixture once (n = 800, a quadratic time margin
+# on the slope) and then runs 2 × 20,000 full plug-in survival predictions as
+# its Monte Carlo reference — 697 s on 24 shared cores, most of it the fit.
+# The verdict (the published sigma-point posterior mean against the Monte
+# Carlo integral) needs the run to complete; terminate-after = 3 still kills a
+# genuine hang at 1800 s.
+[[profile.default.overrides]]
+filter = 'test(/survival_marginal_slope_posterior_tests::/)'
+slow-timeout = { period = "600s", terminate-after = 3 }
+
 # Two survival integration probes carry a per-test wall-clock that exceeds the
 # default 600s SIGKILL by construction, so at the default budget nextest kills
 # them BEFORE their assertion runs — turning a designed verdict into an opaque

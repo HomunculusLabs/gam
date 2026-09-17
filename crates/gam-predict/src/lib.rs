@@ -4910,6 +4910,9 @@ mod predict_2_2_tests;
 mod anchored_posterior_predictive_tests;
 
 #[cfg(test)]
+mod survival_marginal_slope_posterior_tests;
+
+#[cfg(test)]
 mod test_support;
 
 #[cfg(test)]
