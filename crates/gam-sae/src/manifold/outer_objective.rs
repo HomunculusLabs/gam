@@ -796,7 +796,7 @@ pub struct SaeManifoldOuterObjective {
     /// `L_θθ + L_θw·W_θ` the analytic gradient does not contain; held, that gradient is
     /// the exact derivative of the reported value. A reactive scalar waypoint installs
     /// another objective and chooses again.
-    collapse_prevention_gates: Option<CollapsePreventionGates>,
+    pub(crate) collapse_prevention_gates: Option<CollapsePreventionGates>,
 }
 
 /// #2230/#2087 exact basin-bundle memory admission.

@@ -25,7 +25,7 @@ use std::sync::Arc;
 /// Two periodic atoms whose decoders write nearly the same output direction and
 /// whose softmax routing splits every row between them, so the separation barrier
 /// sees a co-firing, near-collinear pair and the repulsion gate engages.
-fn co_firing_collinear_two_atom_objective() -> SaeManifoldOuterObjective {
+fn co_firing_collinear_two_atom_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
     let n = 8usize;
     let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("periodic evaluator"));
     let coords0 = Array2::<f64>::from_shape_fn((n, 1), |(row, _)| {
@@ -82,6 +82,11 @@ fn co_firing_collinear_two_atom_objective() -> SaeManifoldOuterObjective {
     let target = Array2::<f64>::from_shape_fn(planted.dim(), |(row, column)| {
         planted[[row, column]] + 0.05 * (1.3 * row as f64 + 0.7 * column as f64).sin()
     });
+    (term, target, rho)
+}
+
+fn co_firing_collinear_two_atom_objective() -> SaeManifoldOuterObjective {
+    let (term, target, rho) = co_firing_collinear_two_atom_fixture();
     SaeManifoldOuterObjective::new(term, target, None, rho, 40, 0.4, 1.0e-6, 1.0e-6)
 }
 
@@ -214,5 +219,122 @@ fn outer_gradient_is_the_derivative_of_the_value_production_reports_2933() {
          reports (worst relative gap {worst_treatment:.3e} > {TREATMENT_BUDGET:e}). With the \
          gates re-derived at each root the value is L(θ̂; W(θ̂)), whose derivative carries \
          L_w·W_θ·θ̂_ρ the frozen-gate gradient omits"
+    );
+}
+
+/// A caller that froze a term's gates has declared them, and the objective holds
+/// that set before any drive. A term with no frozen gates leaves the choice to the
+/// first priced root.
+#[test]
+fn a_term_handed_in_with_frozen_gates_declares_them_2933() {
+    let (mut term, target, rho) = co_firing_collinear_two_atom_fixture();
+    term.refresh_decoder_repulsion_gate();
+    term.refresh_barrier_coactivation_gate();
+    term.refresh_amplitude_barrier_gate();
+    term.streaming_gates_frozen = true;
+    let frozen = term.collapse_prevention_gates();
+    assert!(
+        frozen.barrier_coactivation.is_some(),
+        "the co-firing fixture must carry a barrier coactivation support: {frozen:?}"
+    );
+    let objective = SaeManifoldOuterObjective::new(
+        term,
+        target.clone(),
+        None,
+        rho.clone(),
+        40,
+        0.4,
+        1.0e-6,
+        1.0e-6,
+    );
+    assert_eq!(
+        objective.collapse_prevention_gates.as_ref(),
+        Some(&frozen),
+        "an objective built on a term with frozen gates must declare exactly those gates"
+    );
+
+    let (unfrozen, target, rho) = co_firing_collinear_two_atom_fixture();
+    let objective =
+        SaeManifoldOuterObjective::new(unfrozen, target, None, rho, 40, 0.4, 1.0e-6, 1.0e-6);
+    assert!(
+        objective.collapse_prevention_gates.is_none(),
+        "with no frozen gates the objective must leave the choice to its first priced root"
+    );
+}
+
+/// One objective prices every ρ under one gate set. The first finite root chooses
+/// it. A committed analytic sample at another ρ reads it, although that root's own
+/// gates differ. A reset keeps it. A reactive scalar waypoint installs another
+/// objective and clears it, and a rollback restores it.
+#[test]
+fn one_objective_holds_one_gate_set_across_rho_reset_and_waypoint_rollback_2933() {
+    let mut objective = co_firing_collinear_two_atom_objective();
+    let centre = objective.baseline_rho.to_flat();
+    let first = objective
+        .eval(&centre)
+        .expect("the centre evaluation must return a (value, gradient) pair");
+    assert!(first.cost.is_finite(), "the centre must price finitely: {}", first.cost);
+    let declared = objective
+        .collapse_prevention_gates
+        .clone()
+        .expect("the first finite priced root must declare the objective's gates");
+    assert_eq!(objective.term.collapse_prevention_gates(), declared);
+    assert!(
+        objective.term.streaming_gates_frozen,
+        "the driven term must hold the declared gates, not re-derive them"
+    );
+
+    let moved = shifted(&centre, 0, 0.3);
+    let second = objective
+        .eval(&moved)
+        .expect("the moved evaluation must return a (value, gradient) pair");
+    assert!(second.cost.is_finite(), "the moved rho must price finitely: {}", second.cost);
+    assert_eq!(
+        objective.collapse_prevention_gates.as_ref(),
+        Some(&declared),
+        "a second rho must not re-choose the objective's gates"
+    );
+    assert_eq!(
+        objective.term.collapse_prevention_gates(),
+        declared,
+        "the analytic sample at the moved rho must be priced under the declared gates"
+    );
+    // Negative control: the moved root's own gates differ from the declared set, so
+    // the equality above distinguishes holding the gates from re-deriving them.
+    let mut rederived = objective.term.clone();
+    rederived.refresh_decoder_repulsion_gate();
+    rederived.refresh_barrier_coactivation_gate();
+    rederived.refresh_amplitude_barrier_gate();
+    assert_ne!(
+        rederived.collapse_prevention_gates(),
+        declared,
+        "the moved root's own gates must differ from the declared set, or this test \
+         cannot tell holding the gates from re-deriving them"
+    );
+
+    OuterObjective::reset(&mut objective);
+    assert_eq!(
+        objective.collapse_prevention_gates.as_ref(),
+        Some(&declared),
+        "a reset starts another seed of the SAME objective and must keep its gates"
+    );
+
+    let contract = OuterObjective::reactive_domain_scalar_contract(&objective)
+        .expect("the scalar contract must construct")
+        .expect("a dense K=2 objective advertises a reactive scalar contract");
+    OuterObjective::begin_reactive_domain_waypoint(&mut objective)
+        .expect("the objective must open a waypoint transaction");
+    OuterObjective::install_reactive_domain_scalar_state(&mut objective, contract.target())
+        .expect("the objective must install its literal target scalar state");
+    assert!(
+        objective.collapse_prevention_gates.is_none(),
+        "a scalar waypoint installs another objective, whose first root chooses its gates"
+    );
+    OuterObjective::rollback_reactive_domain_waypoint(&mut objective)
+        .expect("the waypoint must roll back");
+    assert_eq!(
+        objective.collapse_prevention_gates.as_ref(),
+        Some(&declared),
+        "a rollback must restore the checkpointed objective's gates"
     );
 }
