@@ -67,6 +67,10 @@
 // Executed-stage receipts against the native lift.
 pub mod receipts;
 
+// Planted-rotation teacher controls (test builds only).
+#[cfg(test)]
+mod teacher_tests;
+
 // Nonlinear separation over the moment zonotope: lower witnesses, derived upper bounds.
 // [unlanded: adversary]
 
