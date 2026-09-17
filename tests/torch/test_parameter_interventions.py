@@ -326,8 +326,35 @@ def test_native_execution_is_the_plain_forward() -> None:
     native = execute_native(model, _TOKENS)
     with torch.no_grad():
         plain = model(_TOKENS)
-    assert native.dtype == "float64"
+    assert (native.dtype, native.device) == ("float64", "cpu")
     assert np.array_equal(native.values, plain.numpy())
+
+
+def test_executed_output_records_the_tf32_matmul_flag_the_forward_ran_under() -> None:
+    model = _model()
+    edit = GlobalParameterEdit("embed.weight", _ramp((7, 4)), None)
+
+    def outputs() -> list:
+        return [
+            execute_native(model, _TOKENS),
+            execute_parameter_edits(model, _TOKENS, [edit]).output,
+            execute_parameter_cotangents(
+                model, _TOKENS, [], [OutputReadout(_EVERY_ROW)], [np.ones((1, 6, 7))],
+                ["body.0.weight#0"],
+            ).execution.output,
+        ]
+
+    previous = torch.backends.cuda.matmul.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        off = outputs()
+        torch.backends.cuda.matmul.allow_tf32 = True
+        on = outputs()
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = previous
+    assert [output.tf32_matmul for output in off] == [False, False, False]
+    # Positive control: the same executions under TF32 matmul say so.
+    assert [output.tf32_matmul for output in on] == [True, True, True]
 
 
 def test_zero_deltas_reproduce_native_bitwise_and_nonzero_deltas_do_not() -> None:

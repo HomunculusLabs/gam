@@ -268,11 +268,14 @@ class UseSiteOutputReadout:
 
 @dataclass(frozen=True)
 class ExecutedOutput:
-    """The model's output, promoted exactly to float64, with its source
-    dtype."""
+    """The model's output, promoted exactly to float64, with the execution
+    facts ``receipts::ExternalExecution`` records: the source dtype, the device,
+    and whether TF32 matrix multiplication was enabled when the forward ran."""
 
     values: np.ndarray
     dtype: str
+    device: str
+    tf32_matmul: bool
 
 
 @dataclass(frozen=True)
@@ -788,6 +791,7 @@ def _run_under_mode(
         for name, module in model.named_modules():
             handles.append(module.register_forward_pre_hook(_push_module(stack, name)))
             handles.append(module.register_forward_hook(_pop_module(stack), always_call=True))
+        mode.tf32_matmul = bool(torch.backends.cuda.matmul.allow_tf32)
         with torch.enable_grad() if requested else torch.no_grad(), mode:
             output = model(inputs)
     finally:
@@ -796,12 +800,19 @@ def _run_under_mode(
     return output, mode
 
 
-def _executed_output(output: Any) -> ExecutedOutput:
+def _executed_output(output: Any, tf32_matmul: bool) -> ExecutedOutput:
+    """``tf32_matmul`` is the flag as read right before the forward that
+    produced ``output``."""
     if not isinstance(output, torch.Tensor) or not output.is_floating_point():
         raise TypeError(
             f"the model must return a floating-point tensor; got {type(output).__name__}"
         )
-    return ExecutedOutput(values=_float64_copy(output), dtype=_dtype_name(output.dtype))
+    return ExecutedOutput(
+        values=_float64_copy(output),
+        dtype=_dtype_name(output.dtype),
+        device=str(output.device),
+        tf32_matmul=tf32_matmul,
+    )
 
 
 def _finished_execution(
@@ -818,7 +829,7 @@ def _finished_execution(
     if unread:
         raise ValueError(f"global edits of {unread} were never read in this forward")
     return EditedExecution(
-        output=_executed_output(output),
+        output=_executed_output(output, mode.tf32_matmul),
         use_sites=tuple(mode.use_sites),
         substituted=tuple(mode.substituted),
     )
@@ -826,9 +837,10 @@ def _finished_execution(
 
 def execute_native(model: torch.nn.Module, inputs: Any) -> ExecutedOutput:
     """The all-on setting: ``model(inputs)`` on the original tensors and path."""
+    tf32_matmul = bool(torch.backends.cuda.matmul.allow_tf32)
     with torch.no_grad():
         output = model(inputs)
-    return _executed_output(output)
+    return _executed_output(output, tf32_matmul)
 
 
 def discover_parameter_use_sites(
