@@ -141,6 +141,11 @@ impl SaeManifoldTerm {
             let edf_is_interior = edf > 0.0 && edf < m as f64;
             let mut gram_differential = Array2::<f64>::zeros((m, m));
             let mut log_lambda_differential = 0.0_f64;
+            // #2935 — a curvature-parameterised penalty moves `basis_edf` through
+            // `S(κ)`: `∂tr((G+λS)⁻¹G)/∂κ = −λ·tr((G+λS)⁻¹G(G+λS)⁻¹ ∂S/∂κ)`.
+            let kappa_penalty_derivative = rho
+                .kappa_flat_index(atom_idx)
+                .zip(atom.smooth_penalty_kappa_derivative());
             if edf_is_interior {
                 // d tr((G+λS)⁻¹G) / dG = A⁻¹ − A⁻¹GA⁻¹.
                 // Writing this identity directly keeps the derivative paired to
@@ -155,6 +160,12 @@ impl SaeManifoldTerm {
                 let edf_log_lambda =
                     -lambda[atom_idx] * (0..m).map(|i| inv_g_inv_s[[i, i]]).sum::<f64>();
                 log_lambda_differential = 0.5 * rank * log_n * edf_log_lambda;
+                if let Some((kappa_index, ds)) = kappa_penalty_derivative {
+                    let inv_g_inv_ds = inverse_gram_inverse.dot(ds);
+                    let edf_kappa =
+                        -lambda[atom_idx] * (0..m).map(|i| inv_g_inv_ds[[i, i]]).sum::<f64>();
+                    direct_rho[kappa_index] += 0.5 * rank * log_n * edf_kappa;
+                }
             }
             direct_rho[rho.smooth_flat_index(atom_idx)] += log_lambda_differential;
             let occupancy_differential = if n_atom > 1.0 {

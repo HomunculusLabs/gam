@@ -3280,6 +3280,37 @@ impl SaeManifoldTerm {
         {
             occam[index] = -derivative;
         }
+        // #2935 — the same curvature moves the penalty energy `½λ<B, S(κ) B>`, so the κ
+        // coordinate carries `½λ<B, ∂S/∂κ B>` on the scale `loss.smoothness` is priced
+        // at (the smoothing entries' scale; an energy that is zero on every atom leaves
+        // that scale unobserved and the entries above unscaled). Off the dense exact-A
+        // route it also carries `½tr(A⁻¹ ∂A/∂κ)` from the one probe bundle; on that
+        // route `dense_exact_a_logdet_channels` supplies it, because its operator map
+        // already carries `λ·∂S/∂κ ⊗ I`.
+        let smooth_energy_scale = if smooth_explicit_sum.abs() > 0.0 {
+            loss.smoothness / smooth_explicit_sum
+        } else {
+            1.0
+        };
+        for (index, derivative) in self
+            .decoder_smoothness_kappa_energy_derivatives(rho, &lambda_smooth_vec)
+            .map_err(OuterGradientError::internal)?
+        {
+            explicit[index] += smooth_energy_scale * derivative;
+        }
+        if let Some((probes, sinv)) = logdet_derivative_bundle {
+            for (index, trace) in self
+                .decoder_kappa_penalty_trace_from_probes(probes, sinv, rho, &lambda_smooth_vec)
+                .map_err(|err| OuterGradientError::InternalInvariant {
+                    reason: format!(
+                        "analytic_outer_rho_gradient_components_with_bundle: curvature logdet \
+                         trace (matrix-free): {err}"
+                    ),
+                })?
+            {
+                logdet_trace[index] = 0.5 * trace;
+            }
+        }
 
         let ard_explicit = self
             .ard_log_precision_explicit_derivatives(rho)

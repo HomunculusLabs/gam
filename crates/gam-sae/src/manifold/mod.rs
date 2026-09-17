@@ -264,6 +264,9 @@ mod tests_factored_htbeta;
 mod tests_penalty_pseudodeterminant_2933;
 
 #[cfg(test)]
+mod tests_kappa_outer_gradient_2935;
+
+#[cfg(test)]
 mod tests_parallelism_invariance_1557;
 
 #[cfg(test)]

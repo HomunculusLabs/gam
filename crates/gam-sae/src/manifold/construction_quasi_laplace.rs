@@ -4081,21 +4081,8 @@ impl SaeManifoldTerm {
     ) -> Result<Vec<(usize, f64)>, String> {
         self.assignment.validate_rho_domain(rho)?;
         let mut out = Vec::with_capacity(rho.kappa_atoms.len());
-        for &atom_idx in &rho.kappa_atoms {
-            let flat = rho.kappa_flat_index(atom_idx).ok_or_else(|| {
-                format!(
-                    "reml_occam_kappa_derivative: curvature atom {atom_idx} has no flat outer coordinate"
-                )
-            })?;
-            let atom = self.atoms.get(atom_idx).ok_or_else(|| {
-                format!(
-                    "reml_occam_kappa_derivative: curvature coordinate names atom {atom_idx}, outside term K={}",
-                    self.atoms.len()
-                )
-            })?;
-            let Some(ds) = atom.smooth_penalty_kappa_derivative() else {
-                continue;
-            };
+        for (flat, atom_idx, ds) in self.kappa_penalty_derivatives(rho)? {
+            let atom = &self.atoms[atom_idx];
             let differential =
                 Self::symmetric_log_pseudodeterminant_differential(atom.smooth_penalty(), ds)?;
             out.push((flat, 0.5 * atom.border_frame_rank() as f64 * differential));
@@ -6875,6 +6862,48 @@ impl SaeManifoldTerm {
         }
     }
 
+    /// `λ·(½(P+Pᵀ) ⊗ I) C_k` written into atom `k`'s β-block of `beta`, in the cache's
+    /// border layout: the IFT right-hand side of a coordinate that scales
+    /// (`P = S_k`) or reshapes (`P = ∂S_k/∂κ`) atom `k`'s penalty Gram (#1556, #2935).
+    fn decoder_penalty_ift_rhs_block(
+        &self,
+        cache: &ArrowFactorCache,
+        target_atom: usize,
+        lambda: f64,
+        penalty: &Array2<f64>,
+        beta: &mut Array1<f64>,
+    ) -> Result<(), String> {
+        let frames_active = self.last_frames_active && cache.k == self.factored_border_dim();
+        let offsets = if frames_active {
+            self.factored_beta_offsets()
+        } else {
+            self.beta_offsets()
+        };
+        let atom = &self.atoms[target_atom];
+        let m = atom.basis_size();
+        let coeffs = if frames_active {
+            match &atom.decoder_frame {
+                Some(frame) => frame.project_decoder(atom.decoder_coefficients().view())?,
+                None => atom.decoder_coefficients().clone(),
+            }
+        } else {
+            atom.decoder_coefficients().clone()
+        };
+        let r = coeffs.ncols();
+        let off = offsets[target_atom];
+        for mu in 0..m {
+            for channel in 0..r {
+                let mut acc = 0.0_f64;
+                for nu in 0..m {
+                    let p_sym = 0.5 * (penalty[[mu, nu]] + penalty[[nu, mu]]);
+                    acc += p_sym * coeffs[[nu, channel]];
+                }
+                beta[off + mu * r + channel] = lambda * acc;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn outer_rho_gradient_ift_rhs(
         &self,
         rho: &SaeManifoldRho,
@@ -6920,34 +6949,20 @@ impl SaeManifoldTerm {
             // atom `k`'s decoder block; every other atom's RHS is zero.
             let target_atom = j - rho.smooth_flat_start();
             let lambda = rho.lambda_smooth_for(target_atom)?;
-            let frames_active = self.last_frames_active && cache.k == self.factored_border_dim();
-            let offsets = if frames_active {
-                self.factored_beta_offsets()
-            } else {
-                self.beta_offsets()
-            };
-            let atom = &self.atoms[target_atom];
-            let m = atom.basis_size();
-            let coeffs = if frames_active {
-                match &atom.decoder_frame {
-                    Some(frame) => frame.project_decoder(atom.decoder_coefficients().view())?,
-                    None => atom.decoder_coefficients().clone(),
-                }
-            } else {
-                atom.decoder_coefficients().clone()
-            };
-            let r = coeffs.ncols();
-            let off = offsets[target_atom];
-            for mu in 0..m {
-                for channel in 0..r {
-                    let mut acc = 0.0_f64;
-                    for nu in 0..m {
-                        let s_sym = 0.5
-                            * (atom.smooth_penalty()[[mu, nu]] + atom.smooth_penalty()[[nu, mu]]);
-                        acc += s_sym * coeffs[[nu, channel]];
-                    }
-                    beta[off + mu * r + channel] = lambda * acc;
-                }
+            let penalty = self.atoms[target_atom].smooth_penalty();
+            self.decoder_penalty_ift_rhs_block(cache, target_atom, lambda, penalty, &mut beta)?;
+        } else if let Some(target_atom) = rho
+            .kappa_atoms
+            .iter()
+            .copied()
+            .find(|&atom| rho.kappa_flat_index(atom) == Some(j))
+        {
+            // #2935 — raw sectional curvature enters the inner gradient only through
+            // the penalty Gram: `∂g/∂κ_k = λ_k·(½(∂S_k/∂κ + ∂S_k/∂κᵀ) ⊗ I) C_k` on atom
+            // `k`'s decoder block. An atom without `∂S/∂κ` has no curvature to move.
+            if let Some(ds) = self.atoms[target_atom].smooth_penalty_kappa_derivative() {
+                let lambda = rho.lambda_smooth_for(target_atom)?;
+                self.decoder_penalty_ift_rhs_block(cache, target_atom, lambda, ds, &mut beta)?;
             }
         } else {
             // ARD coordinate `j`. `ard_flat_index` maps `(atom, axis)` onto the
