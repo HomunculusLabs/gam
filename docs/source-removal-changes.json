@@ -35,6 +35,15 @@
     "evidence": "At the base, git grep -n for each removed name finds only its declaration in flex_jet.rs, the base_moment_jets doc comment in flex_jet.rs and the base_moment_jets paragraph in docs/issue-932-reopening-audit.md, both rewritten in this commit to name the replacement. No other test, bench, example or production source names either function."
   },
   {
+    "base": "31911505dd573d127ccfcfb2d2b621beab6b5303",
+    "items": [
+      "crates/gam-geometry/src/manifold.rs:fn:quad_form",
+      "crates/gam-geometry/src/manifold.rs:fn:tangent_walk_inner"
+    ],
+    "reason": "#2946 matrix-free metric: RiemannianManifold::metric_product applies every manifold metric without forming its dense tensor, and the metric-orthonormal tangent walk carries G·c beside each candidate. quad_form (aᵀ G b against a dense G) and tangent_walk_inner (its dispatch between that and the ambient dot) have no caller left.",
+    "evidence": "At the base, git grep -n quad_form finds its declaration and its one call in tangent_walk_inner (manifold.rs), the ProductManifold::sectional_curvature calls, the parallel-transport isometry test with its import and doc comment (product.rs), and a doc comment in stiefel.rs; tangent_walk_inner is named only by its declaration and its two calls in pivoted_projected_standard_basis. This commit rewrites every one of those sites onto metric_product or dot, so no source names either function."
+  },
+  {
     "base": "994668d561f1c71d075ad388974e86aed7f4b971",
     "items": [
       "crates/gam-models/src/fit_orchestration/fit.rs:fn:crossfit_fold_count",

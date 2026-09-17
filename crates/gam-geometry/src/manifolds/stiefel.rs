@@ -162,7 +162,7 @@ impl RiemannianManifold for StiefelManifold {
 
     /// Gram matrix of the **canonical metric**
     /// `⟨Δ₁, Δ₂⟩ = tr(Δ₁ᵀ(I − ½YYᵀ)Δ₂)`, expressed in the flattened ambient
-    /// basis so that `quad_form(G, vec(Δ₁), vec(Δ₂))` reproduces this inner
+    /// basis so that `vec(Δ₁)ᵀ G vec(Δ₂)` reproduces this inner
     /// product. This is the *same* metric whose geodesic is implemented by
     /// [`exp_map`](Self::exp_map); returning the embedded/Euclidean identity
     /// here would contradict the geodesic for `k ≥ 2` (the two metrics differ
@@ -206,6 +206,25 @@ impl RiemannianManifold for StiefelManifold {
             }
         }
         Ok(g)
+    }
+
+    /// The canonical metric applied without forming it: `M ⊗ I_k` acts on the
+    /// rows of `Δ`, so `G·vec(Δ) = vec(MΔ)` with `MΔ = Δ − ½·Y(YᵀΔ)`, `O(nk²)`
+    /// where the tensor holds `(nk)²` doubles.
+    fn metric_product(
+        &self,
+        point: ArrayView1<'_, f64>,
+        tangent: ArrayView1<'_, f64>,
+    ) -> GeometryResult<Array1<f64>> {
+        if let Some(sphere) = self.as_sphere() {
+            return sphere.metric_product(point, tangent);
+        }
+        use gam_linalg::faer_ndarray::{fast_ab, fast_atb};
+        let y = from_flat(point, self.n, self.k)?;
+        let delta = from_flat(tangent, self.n, self.k)?;
+        // YᵀΔ is k×k; Y·(YᵀΔ) carries the ambient n.
+        let correction = fast_ab(&y, &fast_atb(&y, &delta)) * 0.5;
+        Ok(flatten(&(delta - correction)))
     }
 
     fn sectional_curvature(

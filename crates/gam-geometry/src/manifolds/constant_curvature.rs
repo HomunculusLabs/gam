@@ -831,6 +831,19 @@ impl RiemannianManifold for ConstantCurvature {
         Ok(Array2::eye(self.dim) * (lam * lam))
     }
 
+    /// The conformal metric `λ_x²·I` applied to `v`: `λ_x²·v`.
+    fn metric_product(
+        &self,
+        point: ArrayView1<'_, f64>,
+        tangent: ArrayView1<'_, f64>,
+    ) -> GeometryResult<Array1<f64>> {
+        self.check_len("constant-curvature metric point", point.len())?;
+        self.check_len("constant-curvature metric tangent", tangent.len())?;
+        let lam = self.conformal_factor(point)?;
+        let scale = lam * lam;
+        Ok(tangent.mapv(|value| value * scale))
+    }
+
     /// Conformal-metric Christoffels with `∂_i ln λ = −κ λ x_i`:
     /// `Γ^k_{ij} = δ_{ik} φ_j + δ_{jk} φ_i − δ_{ij} φ_k`.
     fn christoffel_symbols(&self, point: ArrayView1<'_, f64>) -> GeometryResult<Vec<Array2<f64>>> {
@@ -1114,6 +1127,28 @@ pub fn distance_kappa_jet(
 mod tests {
     use super::*;
     use ndarray::array;
+
+    /// `metric_product` is the conformal metric `λ_x²·I` applied. The dense
+    /// tensor's product `Σ_j (λ²·δ_ij)·v_j` rounds only in `λ·λ` and `λ²·v_i`
+    /// (the products with `1` and `0` and the additions of exact zeros are
+    /// exact), and the matrix-free `v_i·(λ·λ)` in the same two operations, so the
+    /// two agree exactly on both curvature signs and at the removable κ = 0.
+    #[test]
+    fn metric_product_is_the_conformal_metric_applied() {
+        let x = array![0.25, -0.1, 0.3];
+        let v = array![0.15, 0.2, -0.4];
+        for &kappa in &[-1.7, -0.6, 0.0, 0.8, 2.3] {
+            let m = ConstantCurvature::new(3, kappa);
+            let dense = m.metric_tensor(x.view()).expect("metric tensor").dot(&v);
+            let product = m
+                .metric_product(x.view(), v.view())
+                .expect("metric product");
+            assert_eq!(
+                dense, product,
+                "κ = {kappa}: dense {dense} != matrix-free {product}"
+            );
+        }
+    }
 
     /// Closed-form pins at the three classical members. κ = −1 reproduces
     /// the Poincaré radial isometry d(0, y) = 2·artanh‖y‖ (the convention

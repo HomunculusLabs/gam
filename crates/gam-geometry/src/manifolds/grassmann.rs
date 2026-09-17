@@ -274,6 +274,18 @@ impl RiemannianManifold for GrassmannManifold {
         Ok(identity(self.ambient_dim()))
     }
 
+    /// The canonical metric is the embedded Frobenius one, so `G·v = v`: `O(nk)`
+    /// where the dense tensor holds `(nk)²` doubles.
+    fn metric_product(
+        &self,
+        point: ArrayView1<'_, f64>,
+        tangent: ArrayView1<'_, f64>,
+    ) -> GeometryResult<Array1<f64>> {
+        check_len("Grassmann metric point", point.len(), self.ambient_dim())?;
+        check_len("Grassmann metric tangent", tangent.len(), self.ambient_dim())?;
+        Ok(tangent.to_owned())
+    }
+
     fn sectional_curvature(
         &self,
         point: ArrayView1<'_, f64>,

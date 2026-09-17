@@ -17,8 +17,8 @@
 //! the only new code is the batched row loop, the base-point dimension wiring,
 //! and a generic Riemannian Karcher (Fréchet) mean shared by all four. There is
 //! no separate per-manifold mean: the SPD safeguarded Karcher iteration is
-//! generalised once, over the metric supplied by
-//! [`RiemannianManifold::metric_tensor`], so adding a curved response geometry
+//! generalised once, over the metric applied by
+//! [`RiemannianManifold::metric_product`], so adding a curved response geometry
 //! is a single resolver arm.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
@@ -388,7 +388,7 @@ impl ResponseManifold {
     /// Squared metric norm `‖v‖²_base` of a tangent at `base`. Used by the
     /// Karcher iteration's stationarity test. Poincaré uses the conformal
     /// factor squared; the matrix manifolds and ConstantCurvature use the trait
-    /// metric tensor.
+    /// metric product.
     fn sq_metric_norm(
         &self,
         base: ArrayView1<'_, f64>,
@@ -403,11 +403,10 @@ impl ResponseManifold {
             | Self::Spd { .. }
             | Self::Grassmann { .. }
             | Self::Stiefel { .. } => {
-                let g = self
+                let gv = self
                     .riemannian()
                     .expect("riemannian response manifold")
-                    .metric_tensor(base)?;
-                let gv = g.dot(&v);
+                    .metric_product(base, v)?;
                 Ok(v.dot(&gv).max(0.0))
             }
         }

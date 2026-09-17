@@ -61,6 +61,17 @@ impl RiemannianManifold for CircleManifold {
         Ok(identity(1))
     }
 
+    /// Flat unit metric: `G·v = v`.
+    fn metric_product(
+        &self,
+        point: ArrayView1<'_, f64>,
+        tangent: ArrayView1<'_, f64>,
+    ) -> GeometryResult<Array1<f64>> {
+        check_len("Circle metric point", point.len(), 1)?;
+        check_len("Circle metric tangent", tangent.len(), 1)?;
+        Ok(tangent.to_owned())
+    }
+
     /// Flat unit metric: the Riemannian gradient is the ambient gradient (the
     /// angular tangent line is the whole 1-D ambient space).
     fn riemannian_gradient(

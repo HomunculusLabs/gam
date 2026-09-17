@@ -1,6 +1,6 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 
-use crate::manifold::{GeometryError, GeometryResult, RiemannianManifold, check_len, quad_form};
+use crate::manifold::{GeometryError, GeometryResult, RiemannianManifold, check_len, dot};
 
 pub struct ProductManifold {
     components: Vec<Box<dyn RiemannianManifold>>,
@@ -169,6 +169,32 @@ impl RiemannianManifold for ProductManifold {
         Ok(out)
     }
 
+    /// The product metric is block-diagonal, so each factor applies its own
+    /// metric to its own block.
+    fn metric_product(
+        &self,
+        point: ArrayView1<'_, f64>,
+        tangent: ArrayView1<'_, f64>,
+    ) -> GeometryResult<Array1<f64>> {
+        check_len("Product metric point", point.len(), self.ambient_dim())?;
+        check_len("Product metric tangent", tangent.len(), self.ambient_dim())?;
+        let mut out = Array1::<f64>::zeros(self.ambient_dim());
+        let mut off = 0usize;
+        for component in &self.components {
+            let m = component.ambient_dim();
+            let part = component.metric_product(
+                point.slice(s![off..off + m]),
+                tangent.slice(s![off..off + m]),
+            )?;
+            check_len("Product factor metric product", part.len(), m)?;
+            for i in 0..m {
+                out[off + i] = part[i];
+            }
+            off += m;
+        }
+        Ok(out)
+    }
+
     fn christoffel_symbols(&self, point: ArrayView1<'_, f64>) -> GeometryResult<Vec<Array2<f64>>> {
         check_len("Product Christoffel point", point.len(), self.ambient_dim())?;
         let ambient = self.ambient_dim();
@@ -239,23 +265,30 @@ impl RiemannianManifold for ProductManifold {
             let m = component.ambient_dim();
             let u_r = u.slice(s![off..off + m]);
             let v_r = v.slice(s![off..off + m]);
-            // Inner products under the factor's own metric g_r; this is the
-            // ambient identity for Sphere/Euclidean/etc. and the
-            // affine-invariant metric for SPD, so the Gram terms are computed
-            // consistently with each factor's curvature definition.
-            let g_r = component.metric_tensor(point.slice(s![off..off + m]))?;
-            let uu_r = quad_form(g_r.view(), u_r, u_r);
-            let vv_r = quad_form(g_r.view(), v_r, v_r);
-            let uv_r = quad_form(g_r.view(), u_r, v_r);
+            // Inner products under the factor's own metric g_r, applied by its
+            // metric product: the ambient identity for Sphere/Euclidean/etc. and
+            // the affine-invariant congruence for SPD, so the Gram terms are
+            // computed consistently with each factor's curvature definition.
+            let point_r = point.slice(s![off..off + m]);
+            let gu_r = component.metric_product(point_r, u_r)?;
+            let gv_r = component.metric_product(point_r, v_r)?;
+            check_len("Product curvature metric product u", gu_r.len(), m)?;
+            check_len("Product curvature metric product v", gv_r.len(), m)?;
+            let uu_r = dot(u_r, gu_r.view());
+            let vv_r = dot(v_r, gv_r.view());
+            let uv_r = dot(u_r, gv_r.view());
             let gram_r = uu_r * vv_r - uv_r * uv_r;
             // Skip factors whose tangent pair spans no area (collinear or zero
             // within this factor): their curvature numerator is identically
             // zero, and calling the factor's `sectional_curvature` on a
             // degenerate plane may legitimately error (e.g. SPD), so a zero
             // contribution must not be allowed to abort the product as a whole.
-            // Each quadratic form under `g_r` is `m²` three-factor products and
-            // their sum, so the cancelling area rounds by at most
-            // `γ_{6m²+3}·(uu·vv + uv²)`; an area inside that band spans no plane.
+            // Each quadratic form is a metric product and an `m`-term inner
+            // product. A factor's metric product rounds no more operations per
+            // accumulated term than the dense `G·v` it replaces, so each form is
+            // at most `m²` three-factor products and their sum, and the
+            // cancelling area rounds by at most `γ_{6m²+3}·(uu·vv + uv²)`; an
+            // area inside that band spans no plane.
             let gram_band = gam_linalg::roundoff::accumulation_growth(6 * m * m + 3)
                 * (uu_r * vv_r + uv_r * uv_r);
             if gram_r > gram_band {
@@ -423,7 +456,6 @@ mod tests {
 #[cfg(test)]
 mod parallel_transport_tests {
     use super::*;
-    use crate::manifold::quad_form;
     use crate::manifolds::euclidean::EuclideanManifold;
     use crate::manifolds::sphere::SphereManifold;
     use ndarray::array;
@@ -472,7 +504,7 @@ mod parallel_transport_tests {
     /// concatenation of each factor's own transport, so it must still be a
     /// linear isometry of the *product* metric — `⟨Γ(U),Γ(V)⟩_Q = ⟨U,V⟩_P` —
     /// even though the two blocks have unrelated (curved vs. flat)
-    /// geometries. `quad_form` against `metric_tensor` (block identity here,
+    /// geometries. `uᵀ G v` through `metric_product` (block identity here,
     /// since both factors carry the embedded/ambient metric) is the
     /// manifold-agnostic inner product, so this genuinely checks the
     /// splitting/re-stitching in `ProductManifold::parallel_transport`
@@ -493,10 +525,8 @@ mod parallel_transport_tests {
             .parallel_transport(path.view(), v.view())
             .expect("Γ(V)");
 
-        let g_p = product.metric_tensor(p.view()).expect("G(P)");
-        let g_q = product.metric_tensor(q.view()).expect("G(Q)");
-        let before = quad_form(g_p.view(), u.view(), v.view());
-        let after = quad_form(g_q.view(), tu.view(), tv.view());
+        let before = u.dot(&product.metric_product(p.view(), v.view()).expect("G(P)·V"));
+        let after = tu.dot(&product.metric_product(q.view(), tv.view()).expect("G(Q)·ΓV"));
         assert!(
             (before - after).abs() <= 1e-10 * before.abs().max(1.0),
             "product parallel transport is not an isometry: ⟨U,V⟩_P={before:.12e}, ⟨ΓU,ΓV⟩_Q={after:.12e}"

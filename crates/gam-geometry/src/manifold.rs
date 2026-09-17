@@ -109,7 +109,29 @@ pub trait RiemannianManifold: Send + Sync {
         vec: ArrayView1<'_, f64>,
     ) -> GeometryResult<Array1<f64>>;
 
+    /// The metric's Gram matrix `G(x)` in flattened ambient coordinates.
+    ///
+    /// It holds `ambient_dim()²` doubles, so it is for callers that want the
+    /// tensor itself: small manifolds, the Python `metric_tensor`, and the tests
+    /// that check [`Self::metric_product`] against it. No solver in this crate
+    /// forms it.
     fn metric_tensor(&self, point: ArrayView1<'_, f64>) -> GeometryResult<Array2<f64>>;
+
+    /// The metric product `G(x)·v` for an ambient vector `v` at `point`: the
+    /// linear map [`Self::metric_tensor`] materializes, applied without forming
+    /// it.
+    ///
+    /// Every metric inner product a solver takes goes through here, and each
+    /// manifold applies its own structure: the embedded identity, the canonical
+    /// Stiefel `Δ − ½Y(YᵀΔ)`, the affine-invariant SPD congruence `P⁻¹UP⁻¹`.
+    /// There is no default through the dense tensor: for a Grassmann frame
+    /// `Gr(16, 2560)` stored as a `40960`-vector that tensor is `40960²` doubles,
+    /// 13.4 GB per product (#2946).
+    fn metric_product(
+        &self,
+        point: ArrayView1<'_, f64>,
+        tangent: ArrayView1<'_, f64>,
+    ) -> GeometryResult<Array1<f64>>;
 
     fn christoffel_symbols(&self, point: ArrayView1<'_, f64>) -> GeometryResult<Vec<Array2<f64>>> {
         check_len("Christoffel point", point.len(), self.ambient_dim())?;
@@ -172,7 +194,7 @@ pub trait RiemannianManifold: Send + Sync {
     /// Armijo slope built from it is not even first-order accurate (issue #955).
     ///
     /// The default raises `e` in a tangent basis `B = tangent_basis(x)` against
-    /// the metric `G = metric_tensor(x)`:
+    /// the metric, applied to the basis columns by [`Self::metric_product`]:
     ///
     /// ```text
     ///   v = B (Bᵀ G B)⁻¹ Bᵀ e.
@@ -189,7 +211,8 @@ pub trait RiemannianManifold: Send + Sync {
     /// *embedded* manifold carrying the induced metric — Euclidean, Sphere,
     /// Circle, Torus, Grassmann) override with the O(m) `project_tangent`;
     /// manifolds with a slick closed form (SPD: `P·sym(E)·P`; Stiefel:
-    /// `E − Y Eᵀ Y`) override with that, avoiding the dense `m×m` metric tensor.
+    /// `E − Y Eᵀ Y`) override with that, avoiding the `m × d` basis and its `d`
+    /// metric products.
     fn riemannian_gradient(
         &self,
         point: ArrayView1<'_, f64>,
@@ -203,16 +226,20 @@ pub trait RiemannianManifold: Send + Sync {
             m,
         )?;
         let b = self.tangent_basis(point)?; // m × d
-        let g = self.metric_tensor(point)?; // m × m
-        // Bᵀ e  (length d) and the Gram matrix Bᵀ G B  (d × d).
-        let bt = b.t();
-        let bte = bt.dot(&euclidean_grad.to_owned());
-        let gb = g.dot(&b);
-        let btgb = bt.dot(&gb);
-        if btgb.nrows() == 0 {
+        let d = b.ncols();
+        if d == 0 {
             // A zero-dimensional tangent space (no degrees of freedom): the only
             // tangent vector is 0.
             return Ok(Array1::<f64>::zeros(m));
+        }
+        // Bᵀ e (length d) and the Gram matrix Bᵀ G B (d × d), whose column j is
+        // Bᵀ (G b_j): one metric product per basis column, never the m × m metric.
+        let bte = b.t().dot(&euclidean_grad.to_owned());
+        let mut btgb = Array2::<f64>::zeros((d, d));
+        for j in 0..d {
+            let gb_j = self.metric_product(point, b.column(j))?;
+            check_len("riemannian_gradient metric product", gb_j.len(), m)?;
+            btgb.column_mut(j).assign(&b.t().dot(&gb_j));
         }
         // Solve (BᵀGB) c = Bᵀ e for the basis coordinates of v, then v = B c.
         let c = inverse(&btgb)?.dot(&bte);
@@ -455,29 +482,6 @@ pub(crate) fn norm(a: ArrayView1<'_, f64>) -> f64 {
     dot(a, a).sqrt()
 }
 
-/// Metric inner product `aᵀ G b` for a (symmetric) metric tensor `G`.
-///
-/// For a manifold whose `metric_tensor` is the ambient identity this reduces
-/// to the Euclidean `dot`; for one with a genuine Riemannian metric (e.g. the
-/// affine-invariant SPD metric) it evaluates the correct geometric inner
-/// product on the tangent space.
-pub(crate) fn quad_form(
-    g: ArrayView2<'_, f64>,
-    a: ArrayView1<'_, f64>,
-    b: ArrayView1<'_, f64>,
-) -> f64 {
-    let n = a.len();
-    assert_eq!(g.nrows(), n);
-    assert_eq!(g.ncols(), b.len());
-    // aᵀ G b: the inner matrix–vector product G·b is the O(n²) cost and is the
-    // hot kernel of every metric inner product (g_inner / g_norm) and of the
-    // metric Gram–Schmidt tangent basis. Route it through the GPU-dispatched
-    // fast_av shim so large-ambient metrics (SPD/Stiefel/Grassmann n²×n²) offload
-    // to the GPU; the trailing a·(Gb) is an O(n) dot.
-    let gb = gam_linalg::faer_ndarray::fast_av(&g, &b);
-    dot(a, gb.view())
-}
-
 pub(crate) fn identity(n: usize) -> Array2<f64> {
     let mut out = Array2::<f64>::zeros((n, n));
     for i in 0..n {
@@ -543,7 +547,7 @@ pub(crate) fn flatten(a: &Array2<f64>) -> Array1<f64> {
 /// (Stiefel's canonical metric `⟨Δ₁,Δ₂⟩ = tr(Δ₁ᵀ(I−½YYᵀ)Δ₂)`, or SPD's
 /// affine-invariant metric): for those, use
 /// [`tangent_basis_metric_orthonormal`], which Gram–Schmidts under the
-/// manifold's own `metric_tensor`.
+/// manifold's own metric.
 ///
 /// This is the shared engine behind [`tangent_basis`](RiemannianManifold::tangent_basis)
 /// for the matrix manifolds whose tangent space has no closed-form basis. It
@@ -559,20 +563,7 @@ pub(crate) fn projected_standard_basis_tangent<M: RiemannianManifold + ?Sized>(
     n: usize,
     k: usize,
 ) -> GeometryResult<Array2<f64>> {
-    pivoted_projected_standard_basis(m, point, n, k, None)
-}
-
-/// The inner product a tangent-basis walk orthonormalizes under: the metric
-/// `aᵀ W b` when a metric is given, the ambient `aᵀ b` otherwise.
-fn tangent_walk_inner(
-    metric: Option<ArrayView2<'_, f64>>,
-    a: ArrayView1<'_, f64>,
-    b: ArrayView1<'_, f64>,
-) -> f64 {
-    match metric {
-        Some(w) => quad_form(w, a, b),
-        None => dot(a, b),
-    }
+    pivoted_projected_standard_basis(m, point, n, k, false)
 }
 
 /// Gram–Schmidt with column pivoting over the projected standard basis.
@@ -588,12 +579,18 @@ fn tangent_walk_inner(
 /// tr R_j = dim − j`, and the chosen residual is at least `(n·k)^{-1/2}`: a
 /// genuine direction, never rounding. A largest residual that is not positive
 /// means the projection spans fewer than `m.dim()` directions, which is refused.
+///
+/// Under the manifold metric (`metric`), every candidate carries its image
+/// `G·c` beside it. Gram–Schmidt updates are linear, so the image of
+/// `c − ⟨q,c⟩_G q` is `G c − ⟨q,c⟩_G G q`, and every inner product
+/// `⟨a,c⟩_G = aᵀ(G c)` is a dot against a carried image: one metric product per
+/// candidate in total, and the `m × m` metric is never formed.
 fn pivoted_projected_standard_basis<M: RiemannianManifold + ?Sized>(
     m: &M,
     point: ArrayView1<'_, f64>,
     n: usize,
     k: usize,
-    metric: Option<ArrayView2<'_, f64>>,
+    metric: bool,
 ) -> GeometryResult<Array2<f64>> {
     let mut candidates: Vec<Array1<f64>> = Vec::with_capacity(n * k);
     for col in 0..k {
@@ -603,15 +600,28 @@ fn pivoted_projected_standard_basis<M: RiemannianManifold + ?Sized>(
             candidates.push(m.project_tangent(point, flatten(&e).view())?);
         }
     }
+    // `images[i] = G·candidates[i]` under the metric; empty under the ambient
+    // inner product, where each candidate is its own image.
+    let mut images: Vec<Array1<f64>> = Vec::with_capacity(if metric { candidates.len() } else { 0 });
+    if metric {
+        for candidate in &candidates {
+            let image = m.metric_product(point, candidate.view())?;
+            check_len("tangent basis metric product", image.len(), candidate.len())?;
+            images.push(image);
+        }
+    }
     let dim = m.dim();
     let mut out = Array2::<f64>::zeros((m.ambient_dim(), dim));
     for j in 0..dim {
         let mut best = 0usize;
         let mut best_norm = 0.0_f64;
         for (index, candidate) in candidates.iter().enumerate() {
-            let candidate_norm = tangent_walk_inner(metric, candidate.view(), candidate.view())
-                .max(0.0)
-                .sqrt();
+            let image = if metric {
+                images[index].view()
+            } else {
+                candidate.view()
+            };
+            let candidate_norm = dot(candidate.view(), image).max(0.0).sqrt();
             if candidate_norm > best_norm {
                 best = index;
                 best_norm = candidate_norm;
@@ -623,9 +633,18 @@ fn pivoted_projected_standard_basis<M: RiemannianManifold + ?Sized>(
             ));
         }
         let q = candidates.swap_remove(best) / best_norm;
-        for candidate in &mut candidates {
-            let proj = tangent_walk_inner(metric, q.view(), candidate.view());
-            *candidate -= &(&q * proj);
+        if metric {
+            let gq = images.swap_remove(best) / best_norm;
+            for (candidate, image) in candidates.iter_mut().zip(images.iter_mut()) {
+                let proj = dot(q.view(), image.view());
+                *candidate -= &(&q * proj);
+                *image -= &(&gq * proj);
+            }
+        } else {
+            for candidate in &mut candidates {
+                let proj = dot(q.view(), candidate.view());
+                *candidate -= &(&q * proj);
+            }
         }
         out.column_mut(j).assign(&q);
     }
@@ -633,8 +652,8 @@ fn pivoted_projected_standard_basis<M: RiemannianManifold + ?Sized>(
 }
 
 /// Build a **metric-orthonormal** basis of the tangent space at `point`, i.e. a
-/// set of columns `Q` satisfying `Qᵀ W Q = I` where `W = m.metric_tensor(point)`
-/// is the manifold's Riemannian metric in flattened ambient coordinates.
+/// set of columns `Q` satisfying `Qᵀ W Q = I` where `W` is the manifold's
+/// Riemannian metric in flattened ambient coordinates.
 ///
 /// This is the correct tangent basis for a manifold whose metric is **not** the
 /// embedded Euclidean inner product — Stiefel's canonical metric
@@ -643,10 +662,11 @@ fn pivoted_projected_standard_basis<M: RiemannianManifold + ?Sized>(
 /// [`projected_standard_basis_tangent`].)
 ///
 /// Same pivoted projected-standard-basis walk as the Euclidean routine, but
-/// every inner product is the metric inner product `⟨u,v⟩_W = uᵀ W v` (via
-/// [`quad_form`]): pivots are chosen by `‖v‖_W = sqrt(⟨v,v⟩_W)`, Gram–Schmidt
-/// projections subtract `⟨q,v⟩_W · q`, and the chosen columns are normalized by
-/// `‖v‖_W`, so the resulting `Q` is orthonormal *in the manifold's metric*.
+/// every inner product is the metric inner product `⟨u,v⟩_W = uᵀ W v`, taken
+/// against images carried from [`RiemannianManifold::metric_product`]: pivots
+/// are chosen by `‖v‖_W = sqrt(⟨v,v⟩_W)`, Gram–Schmidt projections subtract
+/// `⟨q,v⟩_W · q`, and the chosen columns are normalized by `‖v‖_W`, so the
+/// resulting `Q` is orthonormal *in the manifold's metric*.
 ///
 /// Concretely on `St(3, 2)` at `Y = [e₁, e₂]`, the vertical tangent
 /// `Δ = Y·[[0,−1],[1,0]]` has Euclidean norm² 2 but canonical-metric norm² 1, so
@@ -658,8 +678,7 @@ pub(crate) fn tangent_basis_metric_orthonormal<M: RiemannianManifold + ?Sized>(
     n: usize,
     k: usize,
 ) -> GeometryResult<Array2<f64>> {
-    let w = m.metric_tensor(point)?;
-    pivoted_projected_standard_basis(m, point, n, k, Some(w.view()))
+    pivoted_projected_standard_basis(m, point, n, k, true)
 }
 
 /// Thin/compact Gram–Schmidt QR factorization `A = Q·R` for an `n×k` input

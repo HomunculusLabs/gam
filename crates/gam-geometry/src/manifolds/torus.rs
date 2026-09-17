@@ -71,6 +71,17 @@ impl RiemannianManifold for TorusManifold {
         Ok(identity(self.dim))
     }
 
+    /// Flat product metric: `G·v = v`.
+    fn metric_product(
+        &self,
+        point: ArrayView1<'_, f64>,
+        tangent: ArrayView1<'_, f64>,
+    ) -> GeometryResult<Array1<f64>> {
+        check_len("Torus metric point", point.len(), self.dim)?;
+        check_len("Torus metric tangent", tangent.len(), self.dim)?;
+        Ok(tangent.to_owned())
+    }
+
     /// Flat product metric: the Riemannian gradient is the ambient gradient (the
     /// per-angle tangent lines fill the whole ambient space).
     fn riemannian_gradient(

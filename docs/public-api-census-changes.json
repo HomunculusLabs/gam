@@ -1,5 +1,13 @@
 [
   {
+    "base": "31911505dd573d127ccfcfb2d2b621beab6b5303",
+    "removed": {
+      "crates/gam-geometry/src/manifold.rs::quad_form": 1
+    },
+    "reason": "#2946 matrix-free metric: RiemannianManifold::metric_product applies every manifold metric without forming its dense tensor, so the crate-private quad_form (aᵀ G b against a dense G) has no caller left.",
+    "evidence": "At the base, git grep -n quad_form finds its declaration and its call in tangent_walk_inner (manifold.rs), the ProductManifold::sectional_curvature calls and the parallel-transport isometry test (product.rs), and a doc comment in stiefel.rs. This commit rewrites every one onto metric_product or dot; tangent_walk_inner is deleted with it (docs/source-removal-changes.json)."
+  },
+  {
     "base": "994668d561f1c71d075ad388974e86aed7f4b971",
     "removed": {
       "crates/gam-models/src/fit_orchestration/fit.rs::crossfit_score_calibration": 1,

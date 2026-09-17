@@ -145,6 +145,21 @@ impl RiemannianManifold for SpdManifold {
         Ok(g)
     }
 
+    /// The affine-invariant metric applied without forming it: the tensor
+    /// `P⁻¹ ⊗ P⁻¹` acts as the congruence `G·vec(U) = vec(P⁻¹ U P⁻¹)`, `O(n³)`
+    /// where the tensor holds `n⁴` doubles.
+    fn metric_product(
+        &self,
+        point: ArrayView1<'_, f64>,
+        tangent: ArrayView1<'_, f64>,
+    ) -> GeometryResult<Array1<f64>> {
+        use gam_linalg::faer_ndarray::fast_ab;
+        let p = self.matrix(point)?;
+        let pinv = inverse(&p)?;
+        let u = from_flat(tangent, self.n, self.n)?;
+        Ok(flatten(&fast_ab(&fast_ab(&pinv, &u), &pinv)))
+    }
+
     fn christoffel_symbols(&self, point: ArrayView1<'_, f64>) -> GeometryResult<Vec<Array2<f64>>> {
         let p = self.matrix(point)?;
         let pinv = inverse(&p)?;

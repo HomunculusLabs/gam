@@ -244,6 +244,18 @@ impl RiemannianManifold for SphereManifold {
         Ok(identity(self.ambient_dim()))
     }
 
+    /// Induced metric: `G·v = v` at a unit base point.
+    fn metric_product(
+        &self,
+        point: ArrayView1<'_, f64>,
+        tangent: ArrayView1<'_, f64>,
+    ) -> GeometryResult<Array1<f64>> {
+        check_len("Sphere metric point", point.len(), self.ambient_dim())?;
+        check_len("Sphere metric tangent", tangent.len(), self.ambient_dim())?;
+        self.require_unit(point)?;
+        Ok(tangent.to_owned())
+    }
+
     fn sectional_curvature(
         &self,
         point: ArrayView1<'_, f64>,

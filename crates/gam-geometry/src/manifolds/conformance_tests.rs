@@ -61,7 +61,7 @@ use ndarray::{Array1, Array2, ArrayView1};
 
 use crate::manifold::{
     GeometryError, GeometryResult, ManifoldSpec, RiemannianManifold, cholesky_spd, dot, flatten,
-    from_flat, symmetric_eigen, norm, qr_thin,
+    from_flat, inverse, symmetric_eigen, norm, qr_thin,
 };
 
 // ---------------------------------------------------------------------------
@@ -640,6 +640,143 @@ fn riemannian_gradient_is_the_metric_riesz_representative() {
         }
     }
     assert!(verified > 0, "no Riemannian gradient was actually checked");
+}
+
+/// Entrywise rounding band between the two evaluations of `G·v` that
+/// [`metric_product_is_the_dense_metric_tensor_applied`] compares: the dense
+/// tensor applied by a matrix–vector product, and the manifold's matrix-free
+/// [`RiemannianManifold::metric_product`].
+///
+/// Both evaluate one exact linear map as sums of elementary products, so each
+/// lies within `γ_k·Σ|terms|` of the exact value (Higham, Lemma 3.1), with `k`
+/// the rounded operations on a term's accumulation path, and the two lie within
+/// twice that of each other.
+///
+/// * Identity and conformal metrics (Euclidean, Circle, Torus, Sphere,
+///   Grassmann, `St(n, 1)`): both sides return `v` through multiplications by
+///   `1` and `0` and additions of exact zeros, all exact, so the band is `0`.
+/// * Canonical Stiefel, `(G v)_{ij} = Δ_ij − ½·Σ_{p,r} Y_ir Y_pr Δ_pj` with
+///   `Σ|terms| = (|Δ| + ½|Y|(|Y|ᵀ|Δ|))_ij`. The dense side forms `M = I − ½YYᵀ`
+///   (one product, at most `k − 1` additions, one subtraction) and then sums the
+///   row's `n` non-zero products with `v` (one product, at most `n − 1` rounded
+///   additions: adding the row's exact zeros rounds nothing). The matrix-free
+///   side sums `n` products for `YᵀΔ`, `k` products for `Y·(YᵀΔ)`, and subtracts
+///   once. Either path is at most `n + k + 1` operations.
+/// * SPD, `(G v)_{ij} = Σ_{k,l} W_ik U_kl W_lj`, both sides holding the same
+///   computed `W = P⁻¹`, with `Σ|terms| = (|W||U||W|)_ij`. The dense side forms
+///   `W_ik·W_lj`, multiplies by `v` and sums `n²` terms (`n² + 1` operations);
+///   the matrix-free side takes two `n`-term matrix products (`2n`).
+/// * Product: each block carries its factor's band.
+fn metric_product_rounding_band(
+    spec: &ManifoldSpec,
+    p: &Array1<f64>,
+    v: &Array1<f64>,
+) -> Array1<f64> {
+    use gam_linalg::roundoff::accumulation_growth;
+    match spec {
+        ManifoldSpec::Stiefel { k, n } if *k > 1 => {
+            let y = from_flat(p.view(), *n, *k)
+                .expect("frame shape")
+                .mapv(f64::abs);
+            let delta = from_flat(v.view(), *n, *k)
+                .expect("tangent shape")
+                .mapv(f64::abs);
+            let absolute = &delta + &(y.dot(&y.t().dot(&delta)) * 0.5);
+            flatten(&absolute) * (2.0 * accumulation_growth(n + k + 1))
+        }
+        ManifoldSpec::Spd { n } => {
+            let w = inverse(&from_flat(p.view(), *n, *n).expect("spd shape"))
+                .expect("an SPD point inverts")
+                .mapv(f64::abs);
+            let u = from_flat(v.view(), *n, *n)
+                .expect("tangent shape")
+                .mapv(f64::abs);
+            flatten(&w.dot(&u).dot(&w)) * (2.0 * accumulation_growth(n * n + 1))
+        }
+        ManifoldSpec::Product(parts) => {
+            let mut out: Vec<f64> = Vec::with_capacity(v.len());
+            let mut offset = 0usize;
+            for part in parts {
+                let width = part.build().expect("component builds").ambient_dim();
+                let p_part = p.slice(ndarray::s![offset..offset + width]).to_owned();
+                let v_part = v.slice(ndarray::s![offset..offset + width]).to_owned();
+                out.extend(
+                    metric_product_rounding_band(part, &p_part, &v_part)
+                        .iter()
+                        .copied(),
+                );
+                offset += width;
+            }
+            Array1::from(out)
+        }
+        ManifoldSpec::Euclidean(_)
+        | ManifoldSpec::Circle
+        | ManifoldSpec::Sphere { .. }
+        | ManifoldSpec::Torus { .. }
+        | ManifoldSpec::Grassmann { .. }
+        | ManifoldSpec::Stiefel { .. } => Array1::zeros(v.len()),
+    }
+}
+
+#[test]
+fn metric_product_is_the_dense_metric_tensor_applied() {
+    // The trust region, the tangent-basis walk and the default gradient see the
+    // metric only through `metric_product`; `metric_tensor` is the independently
+    // written dense form of the same map. The two must agree on every ambient
+    // vector, not only on tangents, because solvers pair products with vectors
+    // that carry a retraction's off-manifold roundoff.
+    //
+    // Positive control: the embedded product `G·v = v`, the classic wrong metric
+    // for canonical Stiefel and affine-invariant SPD (issue #955), must fall
+    // outside the same band, or the band could not tell a correct product from a
+    // plausible one.
+    let mut verified = 0usize;
+    let mut controls = 0usize;
+    for (label, spec) in inventory() {
+        let manifold = spec.build().expect("build");
+        let ambient = manifold.ambient_dim();
+        let non_embedded_metric = matches!(spec, ManifoldSpec::Stiefel { k, .. } if k > 1)
+            || matches!(spec, ManifoldSpec::Spd { .. });
+        let mut rng = Rng::new(SEED);
+        for trial in 0..TRIALS {
+            let p = random_point(&spec, &mut rng);
+            let v = rng.gaussian_vec(ambient);
+            let dense = manifold
+                .metric_tensor(p.view())
+                .expect("metric_tensor")
+                .dot(&v);
+            let product = manifold
+                .metric_product(p.view(), v.view())
+                .expect("metric_product");
+            assert_eq!(
+                product.len(),
+                ambient,
+                "{label} trial {trial}: metric_product has the wrong length"
+            );
+            let band = metric_product_rounding_band(&spec, &p, &v);
+            for i in 0..ambient {
+                assert!(
+                    (dense[i] - product[i]).abs() <= band[i],
+                    "{label} trial {trial}: (G·v)[{i}] dense {} != matrix-free {} (band {:.3e})",
+                    dense[i],
+                    product[i],
+                    band[i]
+                );
+            }
+            if non_embedded_metric {
+                let rejected = (0..ambient).any(|i| (dense[i] - v[i]).abs() > band[i]);
+                assert!(
+                    rejected,
+                    "{label} trial {trial}: the embedded product v passes the band, so the band \
+                     cannot tell a wrong metric from the right one"
+                );
+                controls += 1;
+            }
+            verified += 1;
+        }
+    }
+    assert!(verified > 0, "no metric product was actually compared");
+    assert!(controls > 0, "no positive control was actually run");
 }
 
 #[test]

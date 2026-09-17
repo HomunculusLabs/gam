@@ -62,6 +62,17 @@ impl RiemannianManifold for EuclideanManifold {
         Ok(identity(self.dim))
     }
 
+    /// Identity metric: `G·v = v`.
+    fn metric_product(
+        &self,
+        point: ArrayView1<'_, f64>,
+        tangent: ArrayView1<'_, f64>,
+    ) -> GeometryResult<Array1<f64>> {
+        check_len("Euclidean metric point", point.len(), self.dim)?;
+        check_len("Euclidean metric tangent", tangent.len(), self.dim)?;
+        Ok(tangent.to_owned())
+    }
+
     /// Identity metric: the Riemannian gradient is the ambient gradient itself
     /// (the whole space is tangent). Overriding the metric-raising default keeps
     /// this O(d) instead of materializing the `d×d` identity basis and metric.

@@ -1,4 +1,3 @@
-use gam_linalg::faer_ndarray::fast_av;
 use ndarray::{Array1, ArrayView1};
 
 use crate::manifold::{GeometryError, GeometryResult, RiemannianManifold, check_len};
@@ -160,8 +159,8 @@ impl RiemannianTrustRegion {
 }
 
 /// A manifold of this crate as the geometry `opt`'s Riemannian trust region runs
-/// on. The metric product goes through the GPU-dispatched `fast_av`, as every
-/// metric inner product in this crate does.
+/// on. Every metric inner product the solver takes is the manifold's own
+/// matrix-free [`RiemannianManifold::metric_product`], never its dense tensor.
 struct ManifoldGeometry<'a>(&'a dyn RiemannianManifold);
 
 impl opt::RiemannianGeometry for ManifoldGeometry<'_> {
@@ -184,9 +183,7 @@ impl opt::RiemannianGeometry for ManifoldGeometry<'_> {
         point: ArrayView1<'_, f64>,
         tangent: ArrayView1<'_, f64>,
     ) -> GeometryResult<Array1<f64>> {
-        let metric = self.0.metric_tensor(point)?;
-        check_len("metric product tangent", tangent.len(), metric.ncols())?;
-        Ok(fast_av(&metric.view(), &tangent))
+        self.0.metric_product(point, tangent)
     }
 
     fn retract(
@@ -316,6 +313,15 @@ mod tests {
         fn metric_tensor(&self, point: ArrayView1<'_, f64>) -> GeometryResult<Array2<f64>> {
             assert_eq!(point.len(), 1, "IndefiniteLine points are one-dimensional");
             Ok(ndarray::array![[-1.0]])
+        }
+
+        fn metric_product(
+            &self,
+            point: ArrayView1<'_, f64>,
+            tangent: ArrayView1<'_, f64>,
+        ) -> GeometryResult<Array1<f64>> {
+            assert_eq!(point.len(), 1, "IndefiniteLine points are one-dimensional");
+            Ok(tangent.mapv(|value| -value))
         }
 
         fn sectional_curvature(
@@ -586,6 +592,15 @@ mod tests {
                 Ok(Array2::from_diag(&ndarray::array![
                     9.0e307, -9.0e307, 9.0e307, -9.0e307
                 ]))
+            }
+
+            fn metric_product(
+                &self,
+                point: ArrayView1<'_, f64>,
+                tangent: ArrayView1<'_, f64>,
+            ) -> GeometryResult<Array1<f64>> {
+                assert_eq!(point.len(), 4, "OverflowingMetric points are four-dimensional");
+                Ok(ndarray::array![9.0e307, -9.0e307, 9.0e307, -9.0e307] * &tangent)
             }
 
             fn sectional_curvature(
