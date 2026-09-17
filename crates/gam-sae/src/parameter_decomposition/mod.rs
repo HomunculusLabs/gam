@@ -113,7 +113,7 @@
 // [unlanded: spectral]
 
 // Sufficient-state quotient and realization contracts.
-// [unlanded: state]
+pub mod state;
 
 // Evidence status, failure hypergraph and robust supports.
 // [unlanded: supports]
