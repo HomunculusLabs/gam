@@ -278,7 +278,9 @@ impl WorkflowError {
             | Self::FormulaDsl { .. }
             | Self::ColumnNotFound { .. }
             // A marginal-slope link the fit cannot declare: a configuration refusal.
-            | Self::MarginalSlopeLink { .. } => FailureCategory::Input,
+            | Self::MarginalSlopeLink { .. }
+            // Controls that select another response model: a configuration refusal.
+            | Self::TransformationNormalConflict { .. } => FailureCategory::Input,
         }
     }
 
@@ -304,6 +306,9 @@ impl WorkflowError {
             Self::FormulaDsl { .. } => "WorkflowError::FormulaDsl",
             Self::ColumnNotFound { .. } => "WorkflowError::ColumnNotFound",
             Self::MarginalSlopeLink { .. } => "WorkflowError::MarginalSlopeLink",
+            Self::TransformationNormalConflict { .. } => {
+                "WorkflowError::TransformationNormalConflict"
+            }
         }
     }
 }
