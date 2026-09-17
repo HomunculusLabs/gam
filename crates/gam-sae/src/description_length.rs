@@ -16,7 +16,6 @@
 //! [`manifold_fit_description_length`].
 
 use crate::atom_codes::SparseAtomCodes;
-use crate::basis::SaeBasisEvaluator;
 use crate::manifold::SaeAtomGeometryPlan;
 use ndarray::ArrayView2;
 
@@ -678,7 +677,7 @@ pub fn persisted_decoder_dictionary_code(
     let plan_bytes = serde_json::to_vec(geometry_plans)
         .map_err(|error| format!("persisted decoder dictionary code: plan encoding failed: {error}"))?;
     let header_bits = f64::from(u8::BITS) * plan_bytes.len() as f64
-        + f64::from(f64::BITS) * (2 * k_atoms + output_side_scalars) as f64;
+        + f64::from(u64::BITS) * (2 * k_atoms + output_side_scalars) as f64;
     Ok(DictionaryCode::Quantized {
         blocks,
         header_bits,
