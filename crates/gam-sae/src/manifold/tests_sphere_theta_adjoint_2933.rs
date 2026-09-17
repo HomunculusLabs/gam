@@ -12,6 +12,10 @@
 //! - a coordinate moves along a unit geodesic `cos s·x + sin s·v`, `v ⟂ x`, and
 //!   the tower's slot functional contracts `v`;
 //! - a decoder coefficient moves along its own axis.
+//!
+//! The F07 metric channel contracts `dB_raw` through the same tower, so its sphere rows
+//! read the row residual as well. Its oracle is the central difference of `⟨X, Φ(θ)⟩`
+//! for the conditioned evidence factor `Φ`, along the same directions.
 
 use super::tests_recovery_split_780::FiniteDifferenceStratumCertificate;
 use super::tests_sphere_ard_logdet_trace_2933::{
@@ -50,17 +54,17 @@ fn exact_log_det(
     (log_det, FiniteDifferenceStratumCertificate::from_arrow_cache(&cache))
 }
 
-/// Richardson-extrapolated central difference of `log|A|` along `endpoint(s)`.
-fn richardson_log_det_slope(
+/// Richardson-extrapolated central difference of `functional` along `endpoint(s)`, with
+/// every endpoint in the anchor's stratum.
+fn richardson_slope(
     label: &str,
     stratum: &FiniteDifferenceStratumCertificate,
-    target: &Array2<f64>,
-    rho: &SaeManifoldRho,
     endpoint: &dyn Fn(f64) -> SaeManifoldTerm,
+    functional: &dyn Fn(&SaeManifoldTerm) -> (f64, FiniteDifferenceStratumCertificate),
 ) -> (f64, f64) {
     let central = |h: f64| {
-        let (plus, plus_stratum) = exact_log_det(&endpoint(h), target, rho);
-        let (minus, minus_stratum) = exact_log_det(&endpoint(-h), target, rho);
+        let (plus, plus_stratum) = functional(&endpoint(h));
+        let (minus, minus_stratum) = functional(&endpoint(-h));
         stratum.assert_same_stratum(&format!("{label} (+{h:e})"), &plus_stratum);
         stratum.assert_same_stratum(&format!("{label} (-{h:e})"), &minus_stratum);
         (plus - minus) / (2.0 * h)
@@ -70,21 +74,19 @@ fn richardson_log_det_slope(
     ((4.0 * fine - coarse) / 3.0, fine - coarse)
 }
 
-#[test]
-fn sphere_exact_a_theta_adjoint_matches_fd_of_the_log_det_2933_f24() {
-    let (term, target, rho) = sphere_logdet_fixture();
-    let anchor = converged_anchor(&term, &target, &rho);
-    let (state, cache) = fixed_state_cache(&anchor, &target, &rho);
-    assert!(
-        !state.last_frames_active,
-        "the fixture's border must be the full decoder, so a channel index is a flat β index"
-    );
-    let gamma = state
-        .exact_a_theta_adjoint_joint(&rho, target.view(), &cache)
-        .expect("exact-A joint θ-adjoint at the converged mode");
-    let stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
+/// The worst relative gap between the θ-adjoint `gamma` and the Richardson slope of
+/// `functional`, over two unit tangent geodesics at rows 1 and 6 and two decoder
+/// coefficients, with the largest analytic tangent value and the per-direction report.
+fn sphere_direction_gaps(
+    state: &SaeManifoldTerm,
+    cache: &ArrowFactorCache,
+    gamma: &SaeArrowVector,
+    functional: &dyn Fn(&SaeManifoldTerm) -> (f64, FiniteDifferenceStratumCertificate),
+) -> (f64, f64, Vec<String>) {
+    let stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(cache);
     let mut report = Vec::new();
     let mut worst = 0.0_f64;
+    let mut tangent_signal = 0.0_f64;
     let mut record = |label: String, fd: f64, change: f64, analytic: f64| {
         let gap = (fd - analytic).abs() / analytic.abs().max(1.0);
         worst = worst.max(gap);
@@ -95,7 +97,7 @@ fn sphere_exact_a_theta_adjoint_matches_fd_of_the_log_det_2933_f24() {
 
     for row in [1_usize, 6] {
         let vars = state
-            .row_vars_for_cache_row(row, &cache)
+            .row_vars_for_cache_row(row, cache)
             .expect("row layout of the cache");
         let slots: Vec<usize> = (0..3)
             .map(|axis| {
@@ -115,7 +117,7 @@ fn sphere_exact_a_theta_adjoint_matches_fd_of_the_log_det_2933_f24() {
             let v = raw.map(|value| value / norm);
             let analytic: f64 = (0..3).map(|axis| v[axis] * gamma.t[base + slots[axis]]).sum();
             let endpoint = |s: f64| {
-                edited_state(&state, |edited| {
+                edited_state(state, |edited| {
                     let mut flat = edited.assignment.coords[0].as_flat().clone();
                     for axis in 0..3 {
                         flat[row * 3 + axis] = s.cos() * x[axis] + s.sin() * v[axis];
@@ -123,21 +125,17 @@ fn sphere_exact_a_theta_adjoint_matches_fd_of_the_log_det_2933_f24() {
                     edited.assignment.coords[0].set_flat(flat.view());
                 })
             };
-            let (fd, change) = richardson_log_det_slope(
-                &format!("row {row} tangent {seed}"),
-                &stratum,
-                &target,
-                &rho,
-                &endpoint,
-            );
-            record(format!("row {row} tangent {seed}"), fd, change, analytic);
+            let label = format!("row {row} tangent {seed}");
+            let (fd, change) = richardson_slope(&label, &stratum, &endpoint, functional);
+            tangent_signal = tangent_signal.max(analytic.abs());
+            record(label, fd, change, analytic);
         }
     }
 
     let beta = state.flatten_beta();
     for index in [0_usize, beta.len() / 2] {
         let endpoint = |s: f64| {
-            edited_state(&state, |edited| {
+            edited_state(state, |edited| {
                 let mut moved = beta.clone();
                 moved[index] += s;
                 edited
@@ -145,19 +143,77 @@ fn sphere_exact_a_theta_adjoint_matches_fd_of_the_log_det_2933_f24() {
                     .expect("decoder coefficients at the endpoint");
             })
         };
-        let (fd, change) = richardson_log_det_slope(
-            &format!("decoder {index}"),
-            &stratum,
-            &target,
-            &rho,
-            &endpoint,
-        );
-        record(format!("decoder {index}"), fd, change, gamma.beta[index]);
+        let label = format!("decoder {index}");
+        let (fd, change) = richardson_slope(&label, &stratum, &endpoint, functional);
+        record(label, fd, change, gamma.beta[index]);
     }
+    (worst, tangent_signal, report)
+}
 
+#[test]
+fn sphere_exact_a_theta_adjoint_matches_fd_of_the_log_det_2933_f24() {
+    let (term, target, rho) = sphere_logdet_fixture();
+    let anchor = converged_anchor(&term, &target, &rho);
+    let (state, cache) = fixed_state_cache(&anchor, &target, &rho);
+    assert!(
+        !state.last_frames_active,
+        "the fixture's border must be the full decoder, so a channel index is a flat β index"
+    );
+    let gamma = state
+        .exact_a_theta_adjoint_joint(&rho, target.view(), &cache)
+        .expect("exact-A joint θ-adjoint at the converged mode");
+    let (worst, _, report) = sphere_direction_gaps(&state, &cache, &gamma, &|endpoint| {
+        exact_log_det(endpoint, &target, &rho)
+    });
     assert!(
         worst <= 1.0e-5,
         "the sphere-row exact-A θ-adjoint must be the derivative of the priced log|A|: {}",
+        report.join("; ")
+    );
+}
+
+/// The θ half of the F07 metric channel on sphere rows, against `⟨X, Φ(θ)⟩` with a fresh
+/// evidence factor at every endpoint and ρ held fixed. Without the target, the tower
+/// refused every sphere row here.
+#[test]
+fn sphere_evidence_metric_theta_channel_matches_fd_of_the_evidence_factor_2933_f24() {
+    let (term, target, rho) = sphere_logdet_fixture();
+    let anchor = converged_anchor(&term, &target, &rho);
+    let (state, cache) = fixed_state_cache(&anchor, &target, &rho);
+    assert!(
+        !state.last_frames_active,
+        "the fixture's border must be the full decoder, so a channel index is a flat β index"
+    );
+    let layout = (cache.delta_t_len(), cache.k);
+    let dim = layout.0 + layout.1;
+    let weight = Array2::from_shape_fn((dim, dim), |(i, j)| {
+        ((i + 2 * j + 1) as f64 * 0.19).sin() + ((2 * i + j + 1) as f64 * 0.19).sin()
+    });
+    let (_, gamma) = state
+        .evidence_metric_derivative_channels(&rho, target.view(), &cache, &weight)
+        .expect("the metric θ-channel converts the sphere rows");
+    let (worst, tangent_signal, report) =
+        sphere_direction_gaps(&state, &cache, &gamma, &|endpoint| {
+            let (_, moved) = fixed_state_cache(endpoint, &target, &rho);
+            assert_eq!(
+                (moved.delta_t_len(), moved.k),
+                layout,
+                "an endpoint must keep the row layout"
+            );
+            let metric = crate::manifold::tests::dense_evidence_metric(&moved);
+            (
+                (&weight * &metric).sum(),
+                FiniteDifferenceStratumCertificate::from_arrow_cache(&moved),
+            )
+        });
+    assert!(
+        tangent_signal > 1.0e-4,
+        "non-vacuity: the metric θ-channel must carry signal along a sphere tangent: {}",
+        report.join("; ")
+    );
+    assert!(
+        worst <= 1.0e-5,
+        "the sphere-row metric θ-channel must be the derivative of ⟨X, Φ⟩: {}",
         report.join("; ")
     );
 }

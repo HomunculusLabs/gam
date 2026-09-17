@@ -5620,6 +5620,7 @@ impl SaeManifoldTerm {
         // value moves with the evidence factor there as well.
         let (metric_trace, metric_gamma) = self.evidence_metric_derivative_channels(
             rho,
+            target,
             cache,
             &geometry.joint_pricing.metric_derivative,
         )?;
@@ -5648,9 +5649,12 @@ impl SaeManifoldTerm {
     /// curvature operators, the ordered Beta--Bernoulli majorized diagonal, and the θ legs
     /// of [`Self::logdet_theta_adjoint_dense`] with the decoder priors' border and the
     /// ordered Beta--Bernoulli shared-mass leg added, as the majorizer channels add them.
-    fn evidence_metric_derivative_channels(
+    /// `target` reaches that tower's embedded-sphere rows, whose Riemannian conversion
+    /// reads the row residual (#2933 F24).
+    pub(crate) fn evidence_metric_derivative_channels(
         &self,
         rho: &SaeManifoldRho,
+        target: ArrayView2<'_, f64>,
         cache: &ArrowFactorCache,
         weight: &Array2<f64>,
     ) -> Result<(Array1<f64>, SaeArrowVector), String> {
@@ -5719,7 +5723,7 @@ impl SaeManifoldTerm {
         // θ: both conditionings are already folded into `raw_weight`, so the dense
         // adjoint's own row Daleckii--Krein correction is skipped.
         let mut gamma =
-            self.logdet_theta_adjoint_dense(rho, cache, &raw_weight, true, false, None)?;
+            self.logdet_theta_adjoint_dense(rho, cache, &raw_weight, true, false, Some(target))?;
         if cache.k > 0 {
             // `B_ββ` carries the decoder priors' majorizer, `A_ββ + E_ββ`.
             let border = raw_weight.slice(s![total_t.., total_t..]);
@@ -7009,6 +7013,7 @@ mod test_support {
             )?;
             let (_, metric_gamma) = self.evidence_metric_derivative_channels(
                 rho,
+                target,
                 cache,
                 &geometry.joint_pricing.metric_derivative,
             )?;
