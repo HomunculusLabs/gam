@@ -359,8 +359,10 @@ mod tests_streamed_curvature_2757;
 #[cfg(test)]
 mod tests_persistence_engine_2757;
 
+/// #2933 F36 — the joint fitted-response divergence against direct re-solves of
+/// the perturbed inner problem in the same basin.
 #[cfg(test)]
-mod tests_sure_dispersion_2133;
+mod tests_fitted_response_divergence_2933;
 
 /// #2933 F37/F38 — the dispersion is conditional on the fitted routing and its
 /// scale equation is explicit.
@@ -573,7 +575,9 @@ pub fn rank_charge_dof(
 
 pub use construction::{SaeCriterionError, VanishedAtoms};
 // #2515 — the bundle-routed outer gradient's evidence geometry, named by variant.
-pub(crate) use construction::{BundleEvidenceGeometry, EvidenceOperator};
+pub(crate) use construction::{
+    BundleEvidenceGeometry, EvidenceOperator, FittedResponseDivergenceEstimator,
+};
 
 pub use crate::inference::atlas_nerve::AtlasCoveringSide;
 pub use atlas_topology::*;

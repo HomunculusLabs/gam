@@ -9354,5 +9354,20 @@
     ],
     "reason": "#2933 F37/F38. basin_selection_deflation_correction added an observed-margin plug-in as an exact Stein boundary term to the reconstruction dispersion. For fixed candidates +-a and y ~ N(mu, sigma^2) the search dof of a·sign(y) is (2a/sigma)·phi(mu/sigma), while the plug-in's mean is (2a/sigma)·phi(mu/(sqrt2 sigma))/sqrt2, 1/sqrt2 of it at the boundary and larger once |mu| > sigma·sqrt(2 ln 2). No single-draw statistic is unbiased for the boundary term, and the production selection (seeded TopK routing logits, softmax basins) has no closed-form boundary. SOFTMAX_HARD_SELECTION_MIN_TOP_WEIGHT treated a softmax winner weight of 0.9 as a discontinuity of a smooth map. The dispersion is now conditional on the fitted routing, and no EDF term depends on phi, so its scale equation is explicit (the one-pass fixed-point claim is gone with the charge).",
     "evidence": "At the base, git grep -n for both names finds only their declarations and doc comments in construction_ard.rs and the single call in reconstruction_dispersion (construction_reconstruction.rs), which this commit removes. No test, bench, example, Python or FFI source names either. The new tests in crates/gam-sae/src/manifold/tests_selection_boundary_dispersion_2933.rs pin the conditional contract, the smooth softmax, and the explicit scale equation."
+  },
+  {
+    "base": "bd1d96965134459c792332a740bdffc58eaa2356",
+    "items": [
+      "crates/gam-sae/src/manifold/construction_ard.rs:const:SURE_DIVERGENCE_PD_FLOOR",
+      "crates/gam-sae/src/manifold/construction_ard.rs:fn:coordinate_sure_deflation_correction",
+      "crates/gam-sae/src/manifold/tests_sure_dispersion_2133.rs:fn:fitted_circle",
+      "crates/gam-sae/src/manifold/tests_sure_dispersion_2133.rs:fn:hand_correction",
+      "crates/gam-sae/src/manifold/tests_sure_dispersion_2133.rs:fn:lcg",
+      "crates/gam-sae/src/manifold/tests_sure_dispersion_2133.rs:fn:lcg_normal",
+      "crates/gam-sae/src/manifold/tests_sure_dispersion_2133.rs:fn:sure_correction_matches_fd_divergence_2133",
+      "crates/gam-sae/src/manifold/tests_sure_dispersion_2133.rs:fn:sure_correction_wiring_and_stability_2133"
+    ],
+    "reason": "#2933 F36. coordinate_sure_deflation_correction added per-row, per-axis scalar fractions htt/(htt+c+V'') - htt/(htt+V'') to the reconstruction dispersion as the exact within-basin SURE completion, and SURE_DIVERGENCE_PD_FLOOR floored its denominator. The within-basin response of a coupled fit is the implicit-function derivative of the joint stationarity, so its divergence is tr(A+ G) with A the exact observed information and G the data Gauss-Newton curvature. With J = B = I and A = [[1, c], [c, 1]] the axiswise sum is 0 while the trace correction is 2/(1-c^2) - 2. The routine also skipped atoms without ARD, returned 0 when a basis had no second jet, and used the clamped prior majorizer instead of the prior curvature. fitted_response_divergence replaces it. tests_sure_dispersion_2133.rs pinned the routine against its own hand replica and against a coordinate-only one-dimensional MAP with the decoder and gates frozen, which is the same per-axis approximation, and its helpers had no other user.",
+    "evidence": "At the base, git grep -n for coordinate_sure_deflation_correction and SURE_DIVERGENCE_PD_FLOOR finds only their declarations and doc comments in construction_ard.rs, the single call in reconstruction_dispersion (construction_reconstruction.rs), and tests_sure_dispersion_2133.rs. This commit removes that call, the test module and its mod declaration in manifold/mod.rs. No bench, example, Python or FFI source names either. fitted_circle, hand_correction, lcg, lcg_normal and the two test functions are declared in tests_sure_dispersion_2133.rs and used only there. The replacement tests are in crates/gam-sae/src/manifold/tests_fitted_response_divergence_2933.rs."
   }
 ]

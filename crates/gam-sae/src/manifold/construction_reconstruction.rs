@@ -516,13 +516,14 @@ impl SaeManifoldTerm {
     /// `[0,n_active_k]` parameter space, which cannot increase squared error.
     /// The residual dof is floored at 1 so `φ̂` stays finite and positive.
     /// `residual` is the per-row reconstruction residual `f(θ̂) − y` (n×p) at the
-    /// same state that produced `cache`. When supplied it engages the #2133 SURE
-    /// within-basin second-order deflation correction
-    /// ([`Self::coordinate_sure_deflation_correction`]) — the exact-Newton
-    /// completion of the Gauss-Newton `coord_edf`, which removes the
-    /// incidental-parameters under-dispersion of the per-row coordinate MAP.
-    /// `None` reproduces the historical Gauss-Newton dispersion exactly (used by
-    /// callers with no residual in hand — the correction is then simply absent).
+    /// same state that produced `cache`. When supplied, the block count above is
+    /// NOT used: the effective parameter count is the joint fitted-response
+    /// divergence `tr(∂f̂/∂y) = tr(A⁺G)` ([`Self::fitted_response_divergence`],
+    /// #2933 F36), through the exact observed information of the logits,
+    /// coordinates, and decoder border together, plus the profiled frame
+    /// dimension. `None` prices the block count, an approximation that omits the
+    /// gates, the non-smoothing penalties, the residual curvature, and every
+    /// coupling between blocks.
     ///
     /// # Selection is conditioned on, not charged
     ///
@@ -565,6 +566,90 @@ impl SaeManifoldTerm {
         // multiplier of the metric-weighted Hessian. See the fn doc.
         let (raw_rss, likelihood_rss, likelihood_frame) =
             self.reconstruction_residual_energies(loss, residual)?;
+        let edf = match residual {
+            Some(residual) => {
+                // #2933 F36 — the effective degrees of freedom are the joint
+                // fitted-response divergence `tr(∂f̂/∂y) = tr(A⁺G)` of the converged
+                // inner state, taken through the exact observed information of every
+                // estimated block at once. The per-axis completion this replaced
+                // summed `htt/(htt+c+V'') − htt/(htt+V'')` from diagonal curvatures
+                // and a clamped prior majorizer. An off-diagonal residual curvature
+                // `A = [[1, c], [c, 1]]` gave it zero where the trace correction is
+                // `2/(1−c²) − 2`, and it went silent on atoms without ARD and on atoms
+                // without a second jet.
+                let fitted = self.try_fitted_for_rho(rho)?;
+                if fitted.dim() != residual.dim() {
+                    return Err(format!(
+                        "reconstruction_dispersion: fitted {:?} != residual {:?}",
+                        fitted.dim(),
+                        residual.dim()
+                    ));
+                }
+                let target = &fitted - &residual;
+                let response = self
+                    .fitted_response_divergence(target.view(), rho, cache)
+                    .map_err(|refusal| format!("reconstruction_dispersion: {refusal}"))?;
+                match response.estimator {
+                    FittedResponseDivergenceEstimator::ExactSpectral => log::debug!(
+                        "[SAE-DISPERSION] exact spectral fitted-response divergence {:.6e}",
+                        response.divergence
+                    ),
+                    FittedResponseDivergenceEstimator::Hutchinson {
+                        probes,
+                        standard_error,
+                    } => log::debug!(
+                        "[SAE-DISPERSION] Hutchinson fitted-response divergence {:.6e} \
+                         (standard error {standard_error:.3e}) from {probes} probes",
+                        response.divergence
+                    ),
+                }
+                // The divergence holds the decoder frames at their fitted orientation;
+                // the profiled Grassmann directions are counted by dimension, as the
+                // block count counts them.
+                let frame_dof = if self.frames_active() {
+                    self.grassmann_evidence_dimension() as f64
+                } else {
+                    0.0
+                };
+                (response.divergence + frame_dof).clamp(0.0, n_scalar)
+            }
+            None => self.block_count_reconstruction_edf(cache, rho)?,
+        };
+        let resid_dof = (n_scalar - edf).max(1.0);
+        let raw_output_noise_variance = raw_rss / resid_dof;
+        let likelihood_resid_dof = (self.likelihood_scalar_count(likelihood_frame) - edf).max(1.0);
+        let likelihood_dispersion = likelihood_rss / likelihood_resid_dof;
+        for (label, phi) in [
+            ("raw output noise variance", raw_output_noise_variance),
+            ("likelihood dispersion", likelihood_dispersion),
+        ] {
+            if !phi.is_finite() || phi < 0.0 {
+                return Err(format!(
+                    "reconstruction_dispersion: non-finite/negative {label} {phi} \
+                     (raw RSS={raw_rss}, likelihood RSS={likelihood_rss}, resid_dof={resid_dof}, \
+                     likelihood resid_dof={likelihood_resid_dof}, edf={edf})"
+                ));
+            }
+        }
+        Ok(SaeReconstructionDispersion {
+            raw_output_noise_variance: raw_output_noise_variance.max(f64::MIN_POSITIVE),
+            likelihood_dispersion: likelihood_dispersion.max(f64::MIN_POSITIVE),
+            likelihood_frame,
+        })
+    }
+
+    /// The block-count effective degrees of freedom `beta_edf + coord_edf` that
+    /// [`Self::reconstruction_dispersion`] prices when no residual is in hand, and
+    /// so no observed information can be formed. It is an approximation to the
+    /// fitted-response divergence, not that divergence: it omits the gate logits,
+    /// every non-smoothing penalty, the residual curvature, and the couplings
+    /// between blocks.
+    fn block_count_reconstruction_edf(
+        &self,
+        cache: &ArrowFactorCache,
+        rho: &SaeManifoldRho,
+    ) -> Result<f64, String> {
+        let n = self.n_obs();
         let smooth_edf: f64 = self
             .decoder_smoothness_effective_dof_per_atom(cache, &rho.lambda_smooth_vec()?)
             .map_err(|e| format!("reconstruction_dispersion: smooth edf: {e}"))?
@@ -627,37 +712,7 @@ impl SaeManifoldTerm {
                 coord_edf += edf_kj;
             }
         }
-        // #2133 — restore the second-order residual-curvature term the
-        // Gauss-Newton `coord_edf` above drops, turning the per-row GN divergence
-        // into the exact within-basin SURE divergence of the coordinate MAP. Pure
-        // additive readout; only engaged when the caller supplies the residual.
-        if let Some(residual) = residual {
-            coord_edf = (coord_edf + self.coordinate_sure_deflation_correction(residual, rho)?)
-                .clamp(0.0, n_scalar);
-        }
-        let resid_dof = (n_scalar - beta_edf - coord_edf).max(1.0);
-        let raw_output_noise_variance = raw_rss / resid_dof;
-        let likelihood_resid_dof =
-            (self.likelihood_scalar_count(likelihood_frame) - beta_edf - coord_edf).max(1.0);
-        let likelihood_dispersion = likelihood_rss / likelihood_resid_dof;
-        for (label, phi) in [
-            ("raw output noise variance", raw_output_noise_variance),
-            ("likelihood dispersion", likelihood_dispersion),
-        ] {
-            if !phi.is_finite() || phi < 0.0 {
-                return Err(format!(
-                    "reconstruction_dispersion: non-finite/negative {label} {phi} \
-                     (raw RSS={raw_rss}, likelihood RSS={likelihood_rss}, resid_dof={resid_dof}, \
-                     likelihood resid_dof={likelihood_resid_dof}, beta_edf={beta_edf}, \
-                     coord_edf={coord_edf})"
-                ));
-            }
-        }
-        Ok(SaeReconstructionDispersion {
-            raw_output_noise_variance: raw_output_noise_variance.max(f64::MIN_POSITIVE),
-            likelihood_dispersion: likelihood_dispersion.max(f64::MIN_POSITIVE),
-            likelihood_frame,
-        })
+        Ok(beta_edf + coord_edf)
     }
 
     /// The border range of each atom's decoder block in the joint cache layout:

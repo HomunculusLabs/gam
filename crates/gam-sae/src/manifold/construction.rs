@@ -706,6 +706,10 @@ include!("softmax_entropy_majorizer.rs");
 // gate.
 include!("construction_exact_hessian.rs");
 
+// [#2933 F36] The joint fitted-response divergence reads the exact stationarity
+// eigensystem above, so it shares this module scope.
+include!("construction_fitted_response.rs");
+
 // [#2253] Exact hard-rank-charge direct and implicit-response derivatives.
 include!("construction_rank_charge_derivative.rs");
 
