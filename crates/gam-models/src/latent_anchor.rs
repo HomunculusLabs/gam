@@ -32,13 +32,14 @@
 //!
 //! and the second and third orders likewise.
 //!
-//! This module owns three things and nothing else: the root itself
+//! This module owns two things and nothing else: the root itself
 //! ([`solve_anchor`], and [`solve_anchor_in_slot`] through a row's warm-start
-//! slot), its closed-form derivatives through order three
-//! ([`AnchorDerivatives`]) for the direct order-two lowering, and its Taylor
-//! table through order five ([`AnchorTaylor`]) with that table's lift onto any
-//! [`JetField`] for the higher-order carriers (gam#2928). The Gaussian
-//! closed form is the special case of every one of them: on a Gaussian
+//! slot), and its Taylor table through order five ([`AnchorTaylor`], and
+//! [`anchor_taylor_in_slot`] through the same slot), whose orders through
+//! three are the implicit derivatives the direct order-two lowering reads
+//! ([`AnchorDerivatives`]) and whose lift onto any [`JetField`] serves the
+//! higher-order carriers (gam#2928). The Gaussian closed form is the special
+//! case of both: on a Gaussian
 //! quadrature grid the root is `q·√(1 + b²)` to quadrature tolerance, which is
 //! what `anchor_tests::gaussian_grid_reproduces_the_closed_form` pins.
 
@@ -127,12 +128,13 @@ pub(crate) fn gaussian_anchor(q: f64, observed_slope: f64) -> f64 {
 /// Entries in a global law's cross-row root table: a power of two.
 const SHARED_ROOT_SLOTS: usize = 256;
 
-/// The implicit derivatives an [`AnchorDerivatives`] carries beside `α`.
-const IMPLICIT_DERIVATIVES: usize = 9;
+/// The Taylor coefficients a [`RootSlot`] carries beside `α`: `c[i][j]` for
+/// `1 ≤ i + j ≤ 5` ([`AnchorTaylor::stored_entries`]).
+const TABLE_COEFFICIENTS: usize = 20;
 
 /// One stored anchor: the exact inputs of the equation it solved, its root,
 /// and — once a consumer that reads them has differentiated that root — its
-/// implicit derivatives, published under a sequence lock so a reader sees one
+/// Taylor table, published under a sequence lock so a reader sees one
 /// completed write or nothing.
 #[derive(Debug)]
 struct RootSlot {
@@ -140,9 +142,9 @@ struct RootSlot {
     q: AtomicU64,
     slope: AtomicU64,
     root: AtomicU64,
-    /// `[α_q, α_b, α_qq, α_qb, α_bb, α_qqq, α_qqb, α_qbb, α_bbb]` at `root`,
-    /// `NaN` while no consumer has differentiated it.
-    derivatives: [AtomicU64; IMPLICIT_DERIVATIVES],
+    /// The table's coefficients at `root` in [`AnchorTaylor::stored_entries`]
+    /// order, `NaN` while no consumer has differentiated it.
+    table: [AtomicU64; TABLE_COEFFICIENTS],
 }
 
 /// A completed read of a [`RootSlot`].
@@ -151,7 +153,7 @@ struct StoredAnchor {
     q: u64,
     slope: u64,
     root: f64,
-    derivatives: Option<AnchorDerivatives>,
+    taylor: Option<AnchorTaylor>,
 }
 
 impl RootSlot {
@@ -162,7 +164,7 @@ impl RootSlot {
             q: AtomicU64::new(nan),
             slope: AtomicU64::new(nan),
             root: AtomicU64::new(nan),
-            derivatives: std::array::from_fn(|_| AtomicU64::new(nan)),
+            table: std::array::from_fn(|_| AtomicU64::new(nan)),
         }
     }
 
@@ -176,38 +178,30 @@ impl RootSlot {
         let q = self.q.load(Ordering::Acquire);
         let slope = self.slope.load(Ordering::Acquire);
         let root = f64::from_bits(self.root.load(Ordering::Acquire));
-        let implicit: [f64; IMPLICIT_DERIVATIVES] = std::array::from_fn(|index| {
-            f64::from_bits(self.derivatives[index].load(Ordering::Acquire))
-        });
+        let mut coefficients = [[0.0; TAYLOR_SLOTS]; TAYLOR_SLOTS];
+        coefficients[0][0] = root;
+        for (cell, (i, j)) in self.table.iter().zip(AnchorTaylor::stored_entries()) {
+            coefficients[i][j] = f64::from_bits(cell.load(Ordering::Acquire));
+        }
         if self.sequence.load(Ordering::Acquire) != before {
             return None;
         }
-        let derivatives = implicit
+        let taylor = coefficients
             .iter()
+            .flatten()
             .all(|value| value.is_finite())
-            .then_some(AnchorDerivatives {
-                alpha: root,
-                a_q: implicit[0],
-                a_b: implicit[1],
-                a_qq: implicit[2],
-                a_qb: implicit[3],
-                a_bb: implicit[4],
-                a_qqq: implicit[5],
-                a_qqb: implicit[6],
-                a_qbb: implicit[7],
-                a_bbb: implicit[8],
-            });
+            .then_some(AnchorTaylor { coefficients });
         Some(StoredAnchor {
             q,
             slope,
             root,
-            derivatives,
+            taylor,
         })
     }
 
-    /// Publish a solved anchor, with its derivatives where the writer has
-    /// them. A writer that finds the slot held skips it: the slot is a cache,
-    /// and the other writer's anchor serves as well.
+    /// Publish a solved anchor, with its table where the writer has one. A
+    /// writer that finds the slot held skips it: the slot is a cache, and the
+    /// other writer's anchor serves as well.
     fn write(&self, anchor: &StoredAnchor) {
         let before = self.sequence.load(Ordering::Acquire);
         if before & 1 == 1
@@ -221,10 +215,8 @@ impl RootSlot {
         self.q.store(anchor.q, Ordering::Release);
         self.slope.store(anchor.slope, Ordering::Release);
         self.root.store(anchor.root.to_bits(), Ordering::Release);
-        let implicit = anchor.derivatives.map_or([f64::NAN; IMPLICIT_DERIVATIVES], |d| {
-            [d.a_q, d.a_b, d.a_qq, d.a_qb, d.a_bb, d.a_qqq, d.a_qqb, d.a_qbb, d.a_bbb]
-        });
-        for (cell, value) in self.derivatives.iter().zip(implicit) {
+        for (cell, (i, j)) in self.table.iter().zip(AnchorTaylor::stored_entries()) {
+            let value = anchor.taylor.map_or(f64::NAN, |taylor| taylor.coefficients[i][j]);
             cell.store(value.to_bits(), Ordering::Release);
         }
         self.sequence.store(before + 2, Ordering::Release);
@@ -240,7 +232,10 @@ impl RootSlot {
 /// already applied), and the row's grid, which is fixed for the life of the
 /// law that owns this cache — a re-estimated law is a new law with a new
 /// cache. A hash selects a cross-row entry; equality of the stored inputs
-/// decides a hit, and any other stored root is only a seed.
+/// decides a hit, and any other stored root is only a seed. The cross-row
+/// table keeps its own entries per slot kind: every row entering at the time
+/// origin asks one entry equation, and the row-specific exit equation every
+/// row publishes at each iterate would otherwise evict it (gam#2928).
 #[derive(Debug)]
 pub(crate) struct AnchorRootCache {
     /// Row `r`'s slot `s` at `r·slots_per_row + s`.
@@ -248,6 +243,7 @@ pub(crate) struct AnchorRootCache {
     slots_per_row: usize,
     /// `Some` for a global law, on which every row solves the same equation
     /// for the same inputs; a per-row law gives each row its own equation.
+    /// Slot kind `s`'s entries at `s·SHARED_ROOT_SLOTS + hash`.
     shared: Option<Vec<RootSlot>>,
     shared_index: fn(u64, u64) -> u64,
 }
@@ -270,7 +266,7 @@ impl AnchorRootCache {
         Self {
             slots: slots(rows * slots_per_row),
             slots_per_row,
-            shared: shared_across_rows.then(|| slots(SHARED_ROOT_SLOTS)),
+            shared: shared_across_rows.then(|| slots(slots_per_row * SHARED_ROOT_SLOTS)),
             shared_index,
         }
     }
@@ -283,9 +279,15 @@ impl AnchorRootCache {
         self.slots.get(row * self.slots_per_row + slot)
     }
 
-    fn shared_slot(&self, q: u64, slope: u64) -> Option<&RootSlot> {
+    /// Slot kind `slot`'s cross-row entry for `(q, slope)`; `None` on a per-row
+    /// law or for a slot the cache does not keep.
+    fn shared_slot(&self, slot: usize, q: u64, slope: u64) -> Option<&RootSlot> {
+        if slot >= self.slots_per_row {
+            return None;
+        }
         let table = self.shared.as_ref()?;
-        table.get((self.shared_index)(q, slope) as usize & (SHARED_ROOT_SLOTS - 1))
+        let entry = (self.shared_index)(q, slope) as usize & (SHARED_ROOT_SLOTS - 1);
+        table.get(slot * SHARED_ROOT_SLOTS + entry)
     }
 }
 
@@ -298,8 +300,9 @@ impl AnchorRootCache {
 /// equation — every row entering at the time origin shares its entry index —
 /// find one row's root in the cross-row table. At a new iterate the slot's
 /// anchor seeds the solve: its root moved to the new inputs along its stored
-/// first derivatives where a consumer has differentiated it, the bare root
-/// otherwise. A seed stored by a rejected trial far from this iterate can
+/// table where a consumer has differentiated it ([`AnchorTaylor::predict`]),
+/// the bare root otherwise. A seed stored by a rejected trial far from this
+/// iterate can
 /// mislead the solve, so a refused warm solve retries from the closed form,
 /// which depends only on `(q, b)` and cannot be poisoned; however it is
 /// seeded, a solve returns only a root meeting [`anchor_residual_resolution`].
@@ -313,14 +316,31 @@ pub(crate) fn solve_anchor_in_slot(
     anchor_in_slot(q, observed_slope, context, row, slot, false).map(|anchor| anchor.root)
 }
 
-/// [`AnchorDerivatives`] through the law's root slots (gam#2928).
+/// [`AnchorTaylor`] through the law's root slots (gam#2928).
 ///
-/// A slot whose stored inputs are bitwise `(q, b)` and that holds derivatives
-/// answers with them: they are what [`AnchorDerivatives::at`] returned at the
-/// stored root, so the order-two lowering and the value path read the same
-/// bits they would compute. Otherwise the root comes through the path of
+/// A slot whose stored inputs are bitwise `(q, b)` and that holds a table
+/// answers with it: it is what [`AnchorTaylor::at`] returned at the stored
+/// root, so every consumer of the row at one iterate — the direct order-two
+/// lowering, the value path and each directional jet — reads the same bits it
+/// would compute. Otherwise the root comes through the path of
 /// [`solve_anchor_in_slot`], is differentiated once, and is published with its
-/// derivatives.
+/// table.
+pub(crate) fn anchor_taylor_in_slot(
+    q: f64,
+    observed_slope: f64,
+    context: AnchorRowContext<'_>,
+    row: usize,
+    slot: usize,
+) -> Result<AnchorTaylor, String> {
+    let anchor = anchor_in_slot(q, observed_slope, context, row, slot, true)?;
+    match anchor.taylor {
+        Some(taylor) => Ok(taylor),
+        None => AnchorTaylor::at(anchor.root, q, observed_slope, context.grid),
+    }
+}
+
+/// [`AnchorDerivatives`] through the law's root slots: the orders through
+/// three of [`anchor_taylor_in_slot`]'s table.
 pub(crate) fn anchor_derivatives_in_slot(
     q: f64,
     observed_slope: f64,
@@ -328,28 +348,20 @@ pub(crate) fn anchor_derivatives_in_slot(
     row: usize,
     slot: usize,
 ) -> Result<AnchorDerivatives, String> {
-    let anchor = anchor_in_slot(q, observed_slope, context, row, slot, true)?;
-    match anchor.derivatives {
-        Some(derivatives) => Ok(derivatives),
-        None => AnchorDerivatives::at(anchor.root, q, observed_slope, context.grid),
-    }
+    anchor_taylor_in_slot(q, observed_slope, context, row, slot).map(|taylor| taylor.derivatives())
 }
 
-/// The warm seed a stored anchor gives for `(q, b)`: its root moved along its
-/// stored first derivatives, or the bare root while it holds none. It is only
-/// a seed — the solve certifies whatever it starts from.
+/// The warm seed a stored anchor gives for `(q, b)`: its table's series at the
+/// new inputs ([`AnchorTaylor::predict`]), or the bare root while it holds
+/// none. It is only a seed — the solve certifies whatever it starts from.
 fn predicted_seed(stored: &StoredAnchor, q: f64, observed_slope: f64) -> f64 {
-    let Some(derivatives) = stored.derivatives else {
+    let Some(taylor) = stored.taylor else {
         return stored.root;
     };
-    let predicted = stored.root
-        + derivatives.a_q * (q - f64::from_bits(stored.q))
-        + derivatives.a_b * (observed_slope - f64::from_bits(stored.slope));
-    if predicted.is_finite() {
-        predicted
-    } else {
-        stored.root
-    }
+    taylor.predict(
+        q - f64::from_bits(stored.q),
+        observed_slope - f64::from_bits(stored.slope),
+    )
 }
 
 /// The slot path both entries share: the anchor for `(q, b)`, carrying
@@ -363,9 +375,9 @@ fn anchor_in_slot(
     differentiate: bool,
 ) -> Result<StoredAnchor, String> {
     let inputs = (q.to_bits(), observed_slope.to_bits());
-    let differentiated = |root: f64| -> Result<Option<AnchorDerivatives>, String> {
+    let differentiated = |root: f64| -> Result<Option<AnchorTaylor>, String> {
         if differentiate {
-            AnchorDerivatives::at(root, q, observed_slope, context.grid).map(Some)
+            AnchorTaylor::at(root, q, observed_slope, context.grid).map(Some)
         } else {
             Ok(None)
         }
@@ -376,14 +388,14 @@ fn anchor_in_slot(
             q: inputs.0,
             slope: inputs.1,
             root,
-            derivatives: differentiated(root)?,
+            taylor: differentiated(root)?,
         });
     };
     let own = cache.slot(row, slot);
     let own_stored = own
         .and_then(RootSlot::read)
         .filter(|stored| stored.root.is_finite());
-    let shared = cache.shared_slot(inputs.0, inputs.1);
+    let shared = cache.shared_slot(slot, inputs.0, inputs.1);
     let own_match = own_stored.filter(|stored| (stored.q, stored.slope) == inputs);
     let shared_match = if own_match.is_some() {
         None
@@ -393,7 +405,7 @@ fn anchor_in_slot(
             .filter(|stored| stored.root.is_finite() && (stored.q, stored.slope) == inputs)
     };
     let root = match own_match.or(shared_match) {
-        Some(stored) if stored.derivatives.is_some() || !differentiate => {
+        Some(stored) if stored.taylor.is_some() || !differentiate => {
             if shared_match.is_some()
                 && let Some(own) = own
             {
@@ -423,7 +435,7 @@ fn anchor_in_slot(
         q: inputs.0,
         slope: inputs.1,
         root,
-        derivatives: differentiated(root)?,
+        taylor: differentiated(root)?,
     };
     if let Some(own) = own {
         own.write(&anchor);
@@ -513,12 +525,18 @@ fn solve_anchor_with(
             above = alpha;
         }
         let toward = if root_is_above { 1.0 } else { -1.0 };
-        // Halley's step where it agrees in direction with Newton's, else
-        // Newton's; a step that does not point at the root is replaced by the
-        // capped search step.
+        // Halley's step is Newton's divided by `1 − L/2`, `L = F·F″/F′²`, and
+        // is taken only where that correction is a model of the residual,
+        // `|L| ≤ 1`; else Newton's. A step that does not point at the root is
+        // replaced by the capped search step. On a plateau — the marginal tail
+        // near one, `F′` vanishing while `F` does not — `L` is huge and
+        // Halley's step collapses to `2F′/F″`, a fraction of a unit per
+        // evaluation however far away the root is: a trial at `b = 8.7`
+        // seeded 55 away crawled 206 evaluations to it (gam#2928). Newton's
+        // step there is the doubling search, or bisection once bracketed.
         let newton = -value / first;
         let halley = -2.0 * value * first / (2.0 * first * first - value * second);
-        let mut step = if halley.is_finite() && halley * newton > 0.0 {
+        let mut step = if halley.is_finite() && (value * second).abs() <= first * first {
             halley
         } else {
             newton
@@ -739,13 +757,12 @@ fn anchor_log_residual_in_log_space(
     Ok((value, first, second))
 }
 
-/// The anchor and its derivatives in `(q, b)` through order three, by implicit
-/// differentiation of `G(α, q, b) = Σ_k w_k Φ(−(α + b u_k)) − Φ(−q) = 0`.
-///
-/// Third order is the highest the direct order-two lowering of the anchored
-/// frame reads: the exit-time rate feature is `α̇₁ = α_q(q₁, b)·q̇₁`, whose
-/// curvature in the primaries is a third derivative of `α`. Everything above
-/// that comes through [`AnchorTaylor`].
+/// The anchor and its derivatives in `(q, b)` through order three: the orders
+/// of its Taylor table ([`AnchorTaylor::derivatives`]) the direct order-two
+/// lowering of the anchored frame reads. Third order is the highest it reads:
+/// the exit-time rate feature is `α̇₁ = α_q(q₁, b)·q̇₁`, whose curvature in the
+/// primaries is a third derivative of `α`. Everything above that comes through
+/// the table's lift.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct AnchorDerivatives {
     pub(crate) alpha: f64,
@@ -758,13 +775,6 @@ pub(crate) struct AnchorDerivatives {
     pub(crate) a_qqb: f64,
     pub(crate) a_qbb: f64,
     pub(crate) a_bbb: f64,
-}
-
-/// Which of `(q, b)` an implicit-derivative index names.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Var {
-    Q,
-    B,
 }
 
 /// The law's density weights at an anchor, normalized in log space (gam#2941):
@@ -848,119 +858,6 @@ impl AnchorDensity {
     }
 }
 
-impl AnchorDerivatives {
-    /// Differentiate at an already solved anchor.
-    pub(crate) fn at(
-        alpha: f64,
-        q: f64,
-        observed_slope: f64,
-        grid: AnchorGrid<'_>,
-    ) -> Result<Self, String> {
-        // Moments of the law against the derivatives of `F(x) = Φ(−x)`:
-        //   F′ = −φ, F″ = xφ, F‴ = (1 − x²)φ,
-        // each weighted by `u_k^j` for the `b`-derivatives. Every implicit
-        // derivative is homogeneous of degree zero in `G`, so `G` is divided
-        // through by `Σ_k w_k φ(η_k)` (gam#2941): the moments read the
-        // normalized weights `ω_k`, and `φ(q)` becomes the finite ratio `ρ`.
-        let density = AnchorDensity::at(alpha, observed_slope, grid)?;
-        let mut p = [0.0_f64; 4];
-        let mut s2 = [0.0_f64; 4];
-        let mut s3 = [0.0_f64; 4];
-        for (&u, &omega) in grid.nodes.iter().zip(density.weights().iter()) {
-            let eta = alpha + observed_slope * u;
-            let mut power = 1.0;
-            for j in 0..4 {
-                p[j] += omega * power;
-                s2[j] += omega * eta * power;
-                s3[j] += omega * (1.0 - eta * eta) * power;
-                power *= u;
-            }
-        }
-        let rho = density.log_density_ratio(q).exp();
-        // Partial derivatives of G by order. In `q` alone: `−F^{(n)}(q) =
-        // −(−1)^n He_{n−1}(q) φ(q)`; in `(α, b)` the law's moments above, by
-        // total order and by the number of `b`'s. Order zero is never read.
-        let g_q = [0.0, rho, -q * rho, -(1.0 - q * q) * rho];
-        let g_ab = [[0.0; 4], [-p[0], -p[1], -p[2], -p[3]], s2, s3];
-        // `na` in α, `nq` in q, `nb` in b; mixed q/(α, b) derivatives vanish.
-        let g = |na: usize, nq: usize, nb: usize| -> f64 {
-            if nq > 0 {
-                if na + nb > 0 { 0.0 } else { g_q[nq] }
-            } else {
-                g_ab[na + nb][nb]
-            }
-        };
-        let g_alpha = g(1, 0, 0);
-        if !(g_alpha.is_finite() && g_alpha < 0.0) {
-            return Err(format!(
-                "survival marginal-slope anchor has no finite gradient: G_α={g_alpha:e} at α={alpha}, q={q}, b={observed_slope}"
-            ));
-        }
-        let idx = |v: Var| -> (usize, usize) {
-            match v {
-                Var::Q => (1, 0),
-                Var::B => (0, 1),
-            }
-        };
-        // G with `na` α-derivatives and the listed (q, b) variables.
-        let gp = |na: usize, vars: &[Var]| -> f64 {
-            let mut nq = 0;
-            let mut nb = 0;
-            for v in vars {
-                let (dq, db) = idx(*v);
-                nq += dq;
-                nb += db;
-            }
-            g(na, nq, nb)
-        };
-        let first = |x: Var| -> f64 { -gp(0, &[x]) / g_alpha };
-        let a1 = |x: Var| first(x);
-        let second = |x: Var, y: Var| -> f64 {
-            -(gp(0, &[x, y]) + gp(1, &[x]) * a1(y) + gp(1, &[y]) * a1(x) + gp(2, &[]) * a1(x) * a1(y))
-                / g_alpha
-        };
-        let third = |x: Var, y: Var, z: Var| -> f64 {
-            let ax = a1(x);
-            let ay = a1(y);
-            let az = a1(z);
-            let axy = second(x, y);
-            let axz = second(x, z);
-            let ayz = second(y, z);
-            -(gp(0, &[x, y, z])
-                + gp(1, &[x, y]) * az
-                + (gp(1, &[x, z]) + gp(2, &[x]) * az) * ay
-                + gp(1, &[x]) * ayz
-                + (gp(1, &[y, z]) + gp(2, &[y]) * az) * ax
-                + gp(1, &[y]) * axz
-                + (gp(2, &[z]) + gp(3, &[]) * az) * ax * ay
-                + gp(2, &[]) * (axz * ay + ax * ayz)
-                + (gp(1, &[z]) + gp(2, &[]) * az) * axy)
-                / g_alpha
-        };
-        let out = Self {
-            alpha,
-            a_q: first(Var::Q),
-            a_b: first(Var::B),
-            a_qq: second(Var::Q, Var::Q),
-            a_qb: second(Var::Q, Var::B),
-            a_bb: second(Var::B, Var::B),
-            a_qqq: third(Var::Q, Var::Q, Var::Q),
-            a_qqb: third(Var::Q, Var::Q, Var::B),
-            a_qbb: third(Var::Q, Var::B, Var::B),
-            a_bbb: third(Var::B, Var::B, Var::B),
-        };
-        let implicit = [
-            out.a_q, out.a_b, out.a_qq, out.a_qb, out.a_bb, out.a_qqq, out.a_qqb, out.a_qbb, out.a_bbb,
-        ];
-        if !implicit.iter().all(|value| value.is_finite()) {
-            return Err(format!(
-                "survival marginal-slope anchor derivatives are not representable at α={alpha}, q={q}, b={observed_slope}: {implicit:?}"
-            ));
-        }
-        Ok(out)
-    }
-}
-
 /// The order of the anchor's Taylor table. The order-≤4 carriers read `α`
 /// through order four and the exit rate `α̇₁ = α_q·q̇₁` through order four,
 /// which is `α` through order five.
@@ -991,64 +888,27 @@ fn survival_cdf_derivative_stack(x: f64, density: f64) -> [f64; TAYLOR_SLOTS] {
     ]
 }
 
-/// A polynomial in `(δq, δb)` truncated at total degree five: `0[i][j]` is the
-/// coefficient of `δq^i·δb^j`, and every slot with `i + j > 5` stays zero.
-#[derive(Clone, Copy)]
-struct TruncatedBivariate([[f64; TAYLOR_SLOTS]; TAYLOR_SLOTS]);
-
-impl TruncatedBivariate {
-    const ZERO: Self = Self([[0.0; TAYLOR_SLOTS]; TAYLOR_SLOTS]);
-
-    const ONE: Self = {
-        let mut one = [[0.0; TAYLOR_SLOTS]; TAYLOR_SLOTS];
-        one[0][0] = 1.0;
-        Self(one)
-    };
-
-    /// The product, truncated at total degree five.
-    fn mul(&self, other: &Self) -> Self {
-        let mut out = Self::ZERO;
-        for i in 0..TAYLOR_SLOTS {
-            for j in 0..TAYLOR_SLOTS - i {
-                let left = self.0[i][j];
-                for k in 0..TAYLOR_SLOTS - i - j {
-                    for l in 0..TAYLOR_SLOTS - i - j - k {
-                        out.0[i + k][j + l] += left * other.0[k][l];
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    /// `self += scale·other·δb^shift`, truncated at total degree five.
-    fn add_scaled_shifted(&mut self, scale: f64, other: &Self, shift: usize) {
-        for i in 0..TAYLOR_SLOTS - shift {
-            for j in 0..TAYLOR_SLOTS - shift - i {
-                self.0[i][j + shift] += scale * other.0[i][j];
-            }
-        }
-    }
-}
-
 /// The anchor's Taylor table at a solved root (gam#2928): `c[i][j] =
 /// ∂_q^i ∂_b^j α / (i!·j!)` through total order five.
 ///
 /// Implicit differentiation of `H(α, b) = Σ_k w_k F(α + b u_k) = F(q)`,
-/// `F(x) = Φ(−x)`, in the truncated polynomial algebra. Every partial of `H`
-/// is a moment of the law, `H_{rs} = ∂_α^r ∂_b^s H = Σ_k w_k u_k^s
-/// F^{(r+s)}(η_k)`, so one pass over the nodes gives the equation's whole
-/// Taylor polynomial, and the fixed point
+/// `F(x) = Φ(−x)`, degree by degree. Every partial of `H` is a moment of the
+/// law, `H_{rs} = ∂_α^r ∂_b^s H = Σ_k w_k u_k^s F^{(r+s)}(η_k)`, so one pass
+/// over the nodes gives the equation's whole Taylor polynomial. With `A_d` the
+/// degree-`d` part of `δα`, the degree-`d` part of the expanded equation is
 ///
 /// ```text
-///     δα ← −[ Σ_{(r,s) ∉ {(0,0),(1,0)}} H_{rs}·δα^r·δb^s / (r!·s!) − Σ_n F^{(n)}(q)·δq^n / n! ] / H_{10}
+///     H_{10}·A_d = F^{(d)}(q)·δq^d / d! − Σ_{(r,s) ∉ {(0,0),(1,0)}} H_{rs}·[δα^r]_{d−s}·δb^s / (r!·s!),
 /// ```
 ///
-/// fixes one more total degree per pass, so five passes are exact through
-/// order five. [`AnchorDerivatives`] is the same object through order three
-/// in closed form; `anchor_tests` pins the two against each other and against
-/// Newton's iteration in the jet algebra.
-#[derive(Clone, Copy, Debug)]
+/// whose right side reads only `A_1, …, A_{d−1}`: `[δα^r]_e` for `r ≥ 2` is
+/// built from parts below degree `e`, and `r = 1` enters only with `s ≥ 1`.
+/// Five steps on homogeneous polynomials of at most six terms solve the table
+/// through order five. Its orders through three are the implicit derivatives
+/// the direct order-two lowering reads ([`AnchorTaylor::derivatives`]);
+/// `anchor_tests` pins them against the closed-form implicit derivatives, and
+/// the table's lift against Newton's iteration in the jet algebra.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct AnchorTaylor {
     coefficients: [[f64; TAYLOR_SLOTS]; TAYLOR_SLOTS],
 }
@@ -1062,7 +922,7 @@ impl AnchorTaylor {
         grid: AnchorGrid<'_>,
     ) -> Result<Self, String> {
         // moments[n][s] = Σ_k w_k u_k^s F^{(n)}(η_k), 1 ≤ n ≤ 5, s ≤ n, divided
-        // through by `Σ_k w_k φ(η_k)` like `G` in [`AnchorDerivatives::at`]: the
+        // through by `Σ_k w_k φ(η_k)` like `G` of the implicit derivatives: the
         // table is homogeneous of degree zero in `H`, and the normalized form
         // stays finite where every node's density underflows (gam#2941).
         let density = AnchorDensity::at(alpha, observed_slope, grid)?;
@@ -1084,31 +944,55 @@ impl AnchorTaylor {
             ));
         }
         let target = survival_cdf_derivative_stack(q, density.log_density_ratio(q).exp());
-        let mut delta = TruncatedBivariate::ZERO;
-        for _ in 0..ANCHOR_TAYLOR_ORDER {
-            let mut rest = TruncatedBivariate::ZERO;
-            for n in 1..TAYLOR_SLOTS {
-                rest.0[n][0] = -target[n] / FACTORIAL[n];
-            }
-            let mut power = TruncatedBivariate::ONE;
-            for r in 0..TAYLOR_SLOTS {
-                if r > 0 {
-                    power = power.mul(&delta);
+        // parts[d][i]: the coefficient of δq^i·δb^(d−i) in δα. powers[r][e]:
+        // the degree-e part of δα^r, for r ≥ 2.
+        let mut parts = [[0.0_f64; TAYLOR_SLOTS]; TAYLOR_SLOTS];
+        let mut powers = [[[0.0_f64; TAYLOR_SLOTS]; TAYLOR_SLOTS]; TAYLOR_SLOTS];
+        for degree in 1..TAYLOR_SLOTS {
+            // [δα^r]_degree = Σ_j A_j·[δα^(r−1)]_(degree−j) reads parts below
+            // `degree` only.
+            for r in 2..=degree {
+                let mut power = [0.0_f64; TAYLOR_SLOTS];
+                for j in 1..=degree + 1 - r {
+                    let lower = degree - j;
+                    let right = if r == 2 { &parts[lower] } else { &powers[r - 1][lower] };
+                    for i1 in 0..=j {
+                        for i2 in 0..=lower {
+                            power[i1 + i2] += parts[j][i1] * right[i2];
+                        }
+                    }
                 }
-                for s in 0..TAYLOR_SLOTS - r {
-                    if (r, s) != (0, 0) && (r, s) != (1, 0) {
-                        let scale = moments[r + s][s] / (FACTORIAL[r] * FACTORIAL[s]);
-                        rest.add_scaled_shifted(scale, &power, s);
+                powers[r][degree] = power;
+            }
+            // Everything of degree `degree` in the expanded equation except
+            // `H_10·A_degree`: the slope moment `H_{0,degree}·δb^degree / degree!`,
+            // the target's `δq^degree` term, and `H_rs·[δα^r]_(degree−s)·δb^s`.
+            let mut rest = [0.0_f64; TAYLOR_SLOTS];
+            rest[0] = moments[degree][degree] / FACTORIAL[degree];
+            rest[degree] -= target[degree] / FACTORIAL[degree];
+            for s in 0..degree {
+                let lower = degree - s;
+                for r in 1..=lower {
+                    if (r, s) == (1, 0) {
+                        continue;
+                    }
+                    let scale = moments[r + s][s] / (FACTORIAL[r] * FACTORIAL[s]);
+                    let source = if r == 1 { &parts[lower] } else { &powers[r][lower] };
+                    for i in 0..=lower {
+                        rest[i] += scale * source[i];
                     }
                 }
             }
-            for i in 0..TAYLOR_SLOTS {
-                for j in 0..TAYLOR_SLOTS - i {
-                    delta.0[i][j] = -rest.0[i][j] / h_alpha;
-                }
+            for i in 0..=degree {
+                parts[degree][i] = -rest[i] / h_alpha;
             }
         }
-        let mut coefficients = delta.0;
+        let mut coefficients = [[0.0_f64; TAYLOR_SLOTS]; TAYLOR_SLOTS];
+        for (degree, part) in parts.iter().enumerate().skip(1) {
+            for i in 0..=degree {
+                coefficients[i][degree - i] = part[i];
+            }
+        }
         coefficients[0][0] = alpha;
         if !coefficients.iter().flatten().all(|c| c.is_finite()) {
             return Err(format!(
@@ -1116,6 +1000,64 @@ impl AnchorTaylor {
             ));
         }
         Ok(Self { coefficients })
+    }
+
+    /// The anchor and its implicit derivatives through order three, from the
+    /// table: `∂_q^i ∂_b^j α = i!·j!·c[i][j]`.
+    pub(crate) fn derivatives(&self) -> AnchorDerivatives {
+        let c = &self.coefficients;
+        AnchorDerivatives {
+            alpha: c[0][0],
+            a_q: c[1][0],
+            a_b: c[0][1],
+            a_qq: 2.0 * c[2][0],
+            a_qb: c[1][1],
+            a_bb: 2.0 * c[0][2],
+            a_qqq: 6.0 * c[3][0],
+            a_qqb: 2.0 * c[2][1],
+            a_qbb: 2.0 * c[1][2],
+            a_bbb: 6.0 * c[0][3],
+        }
+    }
+
+    /// The root the table's series gives at `(q* + δq, b* + δb)`, summed by
+    /// total degree and stopped before the first degree whose part exceeds
+    /// the largest part already summed: where the step outruns the series the
+    /// parts grow, and a longer sum only extrapolates further. One part that
+    /// cancels to near zero does not end the sum. The bare root where nothing
+    /// finite remains.
+    pub(crate) fn predict(&self, delta_q: f64, delta_b: f64) -> f64 {
+        let mut q_powers = [1.0; TAYLOR_SLOTS];
+        let mut b_powers = [1.0; TAYLOR_SLOTS];
+        for degree in 1..TAYLOR_SLOTS {
+            q_powers[degree] = q_powers[degree - 1] * delta_q;
+            b_powers[degree] = b_powers[degree - 1] * delta_b;
+        }
+        let root = self.coefficients[0][0];
+        let mut sum = root;
+        let mut largest = f64::INFINITY;
+        for degree in 1..TAYLOR_SLOTS {
+            let mut part = 0.0;
+            for i in 0..=degree {
+                part += self.coefficients[i][degree - i] * q_powers[i] * b_powers[degree - i];
+            }
+            if !(part.abs() <= largest) {
+                break;
+            }
+            sum += part;
+            largest = if degree == 1 { part.abs() } else { largest.max(part.abs()) };
+        }
+        if sum.is_finite() {
+            sum
+        } else {
+            root
+        }
+    }
+
+    /// `(i, j)` of each coefficient a [`RootSlot`] stores beside the root, by
+    /// total degree: `c[d][0], c[d−1][1], …, c[0][d]` for `d = 1..=5`.
+    fn stored_entries() -> impl Iterator<Item = (usize, usize)> {
+        (1..TAYLOR_SLOTS).flat_map(|degree| (0..=degree).rev().map(move |i| (i, degree - i)))
     }
 
     /// `α` over any carrier: the table composed with `(q − q*, b − b*)`.
@@ -1161,6 +1103,130 @@ mod anchor_tests {
     use super::*;
     use gam_math::jet_scalar::{JetScalar, Order2};
     use gam_math::jet_tower::Tower4;
+
+    // ── The closed-form implicit derivatives the table's orders ≤ 3 are pinned against ──
+
+    /// Which of `(q, b)` an implicit-derivative index names.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Var {
+        Q,
+        B,
+    }
+
+    impl AnchorDerivatives {
+        /// The implicit derivatives through order three in closed form, at an
+        /// already solved anchor: implicit differentiation of `G(α, q, b) =
+        /// Σ_k w_k Φ(−(α + b u_k)) − Φ(−q) = 0` written out order by order.
+        pub(crate) fn at(
+            alpha: f64,
+            q: f64,
+            observed_slope: f64,
+            grid: AnchorGrid<'_>,
+        ) -> Result<Self, String> {
+            // Moments of the law against the derivatives of `F(x) = Φ(−x)`:
+            //   F′ = −φ, F″ = xφ, F‴ = (1 − x²)φ,
+            // each weighted by `u_k^j` for the `b`-derivatives. Every implicit
+            // derivative is homogeneous of degree zero in `G`, so `G` is divided
+            // through by `Σ_k w_k φ(η_k)` (gam#2941): the moments read the
+            // normalized weights `ω_k`, and `φ(q)` becomes the finite ratio `ρ`.
+            let density = AnchorDensity::at(alpha, observed_slope, grid)?;
+            let mut p = [0.0_f64; 4];
+            let mut s2 = [0.0_f64; 4];
+            let mut s3 = [0.0_f64; 4];
+            for (&u, &omega) in grid.nodes.iter().zip(density.weights().iter()) {
+                let eta = alpha + observed_slope * u;
+                let mut power = 1.0;
+                for j in 0..4 {
+                    p[j] += omega * power;
+                    s2[j] += omega * eta * power;
+                    s3[j] += omega * (1.0 - eta * eta) * power;
+                    power *= u;
+                }
+            }
+            let rho = density.log_density_ratio(q).exp();
+            // Partial derivatives of G by order. In `q` alone: `−F^{(n)}(q) =
+            // −(−1)^n He_{n−1}(q) φ(q)`; in `(α, b)` the law's moments above, by
+            // total order and by the number of `b`'s. Order zero is never read.
+            let g_q = [0.0, rho, -q * rho, -(1.0 - q * q) * rho];
+            let g_ab = [[0.0; 4], [-p[0], -p[1], -p[2], -p[3]], s2, s3];
+            // `na` in α, `nq` in q, `nb` in b; mixed q/(α, b) derivatives vanish.
+            let g = |na: usize, nq: usize, nb: usize| -> f64 {
+                if nq > 0 {
+                    if na + nb > 0 { 0.0 } else { g_q[nq] }
+                } else {
+                    g_ab[na + nb][nb]
+                }
+            };
+            let g_alpha = g(1, 0, 0);
+            if !(g_alpha.is_finite() && g_alpha < 0.0) {
+                return Err(format!(
+                    "survival marginal-slope anchor has no finite gradient: G_α={g_alpha:e} at α={alpha}, q={q}, b={observed_slope}"
+                ));
+            }
+            let idx = |v: Var| -> (usize, usize) {
+                match v {
+                    Var::Q => (1, 0),
+                    Var::B => (0, 1),
+                }
+            };
+            // G with `na` α-derivatives and the listed (q, b) variables.
+            let gp = |na: usize, vars: &[Var]| -> f64 {
+                let mut nq = 0;
+                let mut nb = 0;
+                for v in vars {
+                    let (dq, db) = idx(*v);
+                    nq += dq;
+                    nb += db;
+                }
+                g(na, nq, nb)
+            };
+            let first = |x: Var| -> f64 { -gp(0, &[x]) / g_alpha };
+            let a1 = |x: Var| first(x);
+            let second = |x: Var, y: Var| -> f64 {
+                -(gp(0, &[x, y]) + gp(1, &[x]) * a1(y) + gp(1, &[y]) * a1(x) + gp(2, &[]) * a1(x) * a1(y))
+                    / g_alpha
+            };
+            let third = |x: Var, y: Var, z: Var| -> f64 {
+                let ax = a1(x);
+                let ay = a1(y);
+                let az = a1(z);
+                let axy = second(x, y);
+                let axz = second(x, z);
+                let ayz = second(y, z);
+                -(gp(0, &[x, y, z])
+                    + gp(1, &[x, y]) * az
+                    + (gp(1, &[x, z]) + gp(2, &[x]) * az) * ay
+                    + gp(1, &[x]) * ayz
+                    + (gp(1, &[y, z]) + gp(2, &[y]) * az) * ax
+                    + gp(1, &[y]) * axz
+                    + (gp(2, &[z]) + gp(3, &[]) * az) * ax * ay
+                    + gp(2, &[]) * (axz * ay + ax * ayz)
+                    + (gp(1, &[z]) + gp(2, &[]) * az) * axy)
+                    / g_alpha
+            };
+            let out = Self {
+                alpha,
+                a_q: first(Var::Q),
+                a_b: first(Var::B),
+                a_qq: second(Var::Q, Var::Q),
+                a_qb: second(Var::Q, Var::B),
+                a_bb: second(Var::B, Var::B),
+                a_qqq: third(Var::Q, Var::Q, Var::Q),
+                a_qqb: third(Var::Q, Var::Q, Var::B),
+                a_qbb: third(Var::Q, Var::B, Var::B),
+                a_bbb: third(Var::B, Var::B, Var::B),
+            };
+            let implicit = [
+                out.a_q, out.a_b, out.a_qq, out.a_qb, out.a_bb, out.a_qqq, out.a_qqb, out.a_qbb, out.a_bbb,
+            ];
+            if !implicit.iter().all(|value| value.is_finite()) {
+                return Err(format!(
+                    "survival marginal-slope anchor derivatives are not representable at α={alpha}, q={q}, b={observed_slope}: {implicit:?}"
+                ));
+            }
+            Ok(out)
+        }
+    }
 
     // ── The jet-algebra oracle the Taylor table is pinned against ──────────
 
@@ -1555,7 +1621,7 @@ mod anchor_tests {
             q: q.to_bits(),
             slope: b.to_bits(),
             root,
-            derivatives: None,
+            taylor: None,
         };
         own.write(&sentinel(q, b, 123.0));
         assert_eq!(solve_anchor_in_slot(q, b, context, 2, slot).expect("reuse"), 123.0);
@@ -1788,13 +1854,15 @@ mod anchor_tests {
 
     /// A slot keeps derivatives for exactly the equation its root solved
     /// (gam#2928): a root-only consumer stores none, the first differentiating
-    /// consumer adds `AnchorDerivatives::at` of that root, a sentinel table
-    /// stored under `(q, b)` answers for `(q, b)` alone, and a one-bit change in
-    /// either input is solved and differentiated afresh. A seed predicted from
-    /// stored derivatives — sound or poisoned — reaches a root meeting the
-    /// resolution criterion, within what the residuals allow of a cold solve.
+    /// consumer adds `AnchorTaylor::at` of that root and the order-two lowering
+    /// reads its derivatives from it, a sentinel table stored under `(q, b)`
+    /// answers for `(q, b)` alone, and a one-bit change in either input is
+    /// solved and differentiated afresh. The table's series lands near the
+    /// root a small step away, and a seed predicted from a stored table —
+    /// sound or poisoned — reaches a root meeting the resolution criterion,
+    /// within what the residuals allow of a cold solve.
     #[test]
-    fn anchor_slot_keeps_derivatives_of_exactly_its_own_equation() {
+    fn anchor_slot_keeps_the_table_of_exactly_its_own_equation() {
         let grid = skewed_grid();
         let cache = AnchorRootCache::new(3, 2, false);
         let context = AnchorRowContext {
@@ -1806,50 +1874,65 @@ mod anchor_tests {
 
         let root = solve_anchor_in_slot(q, b, context, 0, slot).expect("root");
         let stored = cache.slot(0, slot).and_then(RootSlot::read).expect("stored root");
-        assert!(stored.derivatives.is_none(), "a root-only consumer stores no derivatives");
-        let derivatives = anchor_derivatives_in_slot(q, b, context, 0, slot).expect("derivatives");
-        assert_eq!(derivatives, AnchorDerivatives::at(root, q, b, grid.view()).expect("reference"));
+        assert!(stored.taylor.is_none(), "a root-only consumer stores no table");
+        let taylor = anchor_taylor_in_slot(q, b, context, 0, slot).expect("table");
+        assert_eq!(taylor, AnchorTaylor::at(root, q, b, grid.view()).expect("reference"));
         assert_eq!(
-            cache.slot(0, slot).and_then(RootSlot::read).and_then(|stored| stored.derivatives),
-            Some(derivatives),
-            "the differentiated root is published with its derivatives"
+            anchor_derivatives_in_slot(q, b, context, 0, slot).expect("derivatives"),
+            taylor.derivatives(),
+            "the order-two lowering reads the published table"
+        );
+        assert_eq!(
+            cache.slot(0, slot).and_then(RootSlot::read).and_then(|stored| stored.taylor),
+            Some(taylor),
+            "the differentiated root is published with its table"
         );
 
-        let mut sentinel = derivatives;
-        sentinel.a_qq = 42.0;
+        let mut sentinel = taylor;
+        sentinel.coefficients[2][0] = 42.0;
         let own = cache.slot(0, slot).expect("row 0 slot");
-        let store = |derivatives: AnchorDerivatives| StoredAnchor {
+        let store = |taylor: AnchorTaylor| StoredAnchor {
             q: q.to_bits(),
             slope: b.to_bits(),
             root,
-            derivatives: Some(derivatives),
+            taylor: Some(taylor),
         };
         own.write(&store(sentinel));
-        assert_eq!(anchor_derivatives_in_slot(q, b, context, 0, slot).expect("hit"), sentinel);
+        assert_eq!(anchor_taylor_in_slot(q, b, context, 0, slot).expect("hit"), sentinel);
         for (nudged_q, nudged_b) in [
             (f64::from_bits(q.to_bits() + 1), b),
             (q, f64::from_bits(b.to_bits() + 1)),
         ] {
             own.write(&store(sentinel));
-            let fresh = anchor_derivatives_in_slot(nudged_q, nudged_b, context, 0, slot).expect("nudged");
+            let fresh = anchor_taylor_in_slot(nudged_q, nudged_b, context, 0, slot).expect("nudged");
             assert_ne!(fresh, sentinel, "a one-bit-different equation is not a hit");
             assert_eq!(
                 fresh,
-                AnchorDerivatives::at(fresh.alpha, nudged_q, nudged_b, grid.view()).expect("nudged reference")
+                AnchorTaylor::at(fresh.derivatives().alpha, nudged_q, nudged_b, grid.view())
+                    .expect("nudged reference")
             );
         }
 
-        // A seed predicted from sound and from poisoned derivatives.
+        // The series at a step of 1e-2 carries the sixth-order remainder of a
+        // table whose coefficients are O(1) on this law: within 1e-8 of the
+        // root, four orders above it, where the first order alone misses by
+        // the curvature term `c[2][0]·δq²`.
+        let (near_q, near_b) = (q + 0.01, b - 0.01);
+        let near = solve_anchor(near_q, near_b, grid.view()).expect("near root");
+        let series = taylor.predict(near_q - q, near_b - b);
+        assert!((series - near).abs() <= 1e-8, "series {series:+.17e} vs root {near:+.17e}");
+
+        // A seed predicted from a sound and from a poisoned table.
         let (warm_q, warm_b) = (1.05_f64, 1.21_f64);
         let log_target = normal_logcdf(-warm_q);
         let residual = |alpha: f64| {
             anchor_log_residual(alpha, warm_b, grid.view(), true, log_target).expect("residual")
         };
         let cold = solve_anchor(warm_q, warm_b, grid.view()).expect("cold");
-        let mut poisoned = derivatives;
-        poisoned.a_q = 1e6;
-        poisoned.a_b = -1e6;
-        for (row, table) in [(1, derivatives), (2, poisoned)] {
+        let mut poisoned = taylor;
+        poisoned.coefficients[1][0] = 1e6;
+        poisoned.coefficients[0][1] = -1e6;
+        for (row, table) in [(1, taylor), (2, poisoned)] {
             cache.slot(row, slot).expect("slot").write(&store(table));
             let warm = solve_anchor_in_slot(warm_q, warm_b, context, row, slot).expect("predicted warm solve");
             let (f_warm, d_warm, _) = residual(warm);
@@ -1863,8 +1946,16 @@ mod anchor_tests {
                     ),
                 "row {row}: warm root {warm:+.17e} has residual {f_warm:.3e}"
             );
+            // `F` is monotone, so by the mean value theorem the roots differ by
+            // at most their residuals over the smallest slope between them,
+            // each residual allowed the rounding of its own evaluation — a sum
+            // of `m` positive terms and a logarithm — as in
+            // `linear_space_roots_match_the_log_space_roots_across_both_tails`:
+            // two roots a float apart can both evaluate to a residual of zero.
+            let noise = (grid.view().len() as f64 + 4.0) * f64::EPSILON * (1.0 + log_target.abs());
             let (_, d_mid, _) = residual(warm + 0.5 * (cold - warm));
-            let bound = (f_warm.abs() + f_cold.abs()) / d_warm.abs().min(d_cold.abs()).min(d_mid.abs());
+            let bound =
+                (f_warm.abs() + f_cold.abs() + 2.0 * noise) / d_warm.abs().min(d_cold.abs()).min(d_mid.abs());
             assert!(
                 (warm - cold).abs() <= bound,
                 "row {row}: warm {warm:+.17e} vs cold {cold:+.17e} exceeds the residual bound {bound:.3e}"
@@ -1891,13 +1982,13 @@ mod anchor_tests {
         // A sentinel stored for (q, b) reaches row 1 asking the same equation
         // without a solve, and is published into row 1's own slot.
         cache
-            .shared_slot(q.to_bits(), b.to_bits())
+            .shared_slot(slot, q.to_bits(), b.to_bits())
             .expect("global law table")
             .write(&StoredAnchor {
                 q: q.to_bits(),
                 slope: b.to_bits(),
                 root: 77.0,
-                derivatives: None,
+                taylor: None,
             });
         assert_eq!(solve_anchor_in_slot(q, b, context, 1, slot).expect("row 1"), 77.0);
         assert_eq!(
@@ -1915,8 +2006,33 @@ mod anchor_tests {
         assert_eq!(colliding.to_bits(), reference.to_bits(), "a colliding entry is never a hit");
         assert!((first - reference).abs() > 1e-3, "the two equations have different roots");
 
+        // Each slot kind keeps its own entries (gam#2928): a sentinel this kind
+        // holds for (q, b) is no hit for the other kind asking the same
+        // equation onto the same hash, and the other kind's publish does not
+        // evict it.
+        let other_kind = 1;
+        cache
+            .shared_slot(slot, q.to_bits(), b.to_bits())
+            .expect("this kind's table")
+            .write(&StoredAnchor {
+                q: q.to_bits(),
+                slope: b.to_bits(),
+                root: 55.0,
+                taylor: None,
+            });
+        let other = solve_anchor_in_slot(q, b, context, 3, other_kind).expect("other kind");
+        assert_eq!(other.to_bits(), first.to_bits(), "the other kind solves afresh");
+        assert_eq!(
+            cache
+                .shared_slot(slot, q.to_bits(), b.to_bits())
+                .and_then(RootSlot::read)
+                .map(|stored| stored.root),
+            Some(55.0),
+            "the other kind's publish left this kind's entry alone"
+        );
+
         assert!(
-            AnchorRootCache::new(4, 2, false).shared_slot(q.to_bits(), b.to_bits()).is_none(),
+            AnchorRootCache::new(4, 2, false).shared_slot(slot, q.to_bits(), b.to_bits()).is_none(),
             "a per-row law keeps no cross-row table"
         );
     }

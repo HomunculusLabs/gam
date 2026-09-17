@@ -667,26 +667,45 @@ impl AnchoredStaticSlopeGeometry {
         )
     }
 
+    /// One location channel's Taylor table, through the row's slot: every
+    /// consumer of the row at one iterate reads the one table the first of
+    /// them differentiated.
+    #[inline]
+    fn taylor(
+        q: f64,
+        observed_slope: f64,
+        inputs: &RigidRowInputs,
+        slot: SurvivalInterceptSlotKind,
+    ) -> Result<AnchorTaylor, String> {
+        anchor_taylor_in_slot(
+            q,
+            observed_slope,
+            Self::context(inputs),
+            inputs.row,
+            survival_anchor_slot(slot),
+        )
+    }
+
     /// `[α(q₀, b), α(q₁, b), α_q(q₁, b)·q̇₁]` over any jet (gam#2928).
     ///
     /// The roots are solved on the real values. A carrier with derivative
     /// channels then receives each anchor's Taylor table through order five
-    /// ([`AnchorTaylor`]) composed with its own primaries: a few carrier
-    /// products per anchor, where Newton's iteration in the jet algebra (the
-    /// test oracle `anchor_jet`) walked the whole law three times.
+    /// ([`AnchorTaylor`]), read through the row's slot and composed with its
+    /// own primaries: a few carrier products per anchor, where Newton's
+    /// iteration in the jet algebra (the test oracle `anchor_jet`) walked the
+    /// whole law three times.
     fn anchored_channels<T: JetField + Clone>(
         primaries: &[T; STATIC_SLOPE_PRIMARIES],
         observed: &T,
         inputs: &RigidRowInputs,
     ) -> Result<[T; 3], String> {
-        let grid = Self::context(inputs).grid;
         let q0 = &primaries[PRIMARY_Q0];
         let q1 = &primaries[PRIMARY_Q1];
         let qd1 = &primaries[PRIMARY_QD1];
         let b = observed.value();
-        let alpha0 = Self::anchor(q0.value(), b, inputs, SurvivalInterceptSlotKind::Entry)?;
-        let alpha1 = Self::anchor(q1.value(), b, inputs, SurvivalInterceptSlotKind::Exit)?;
         if std::mem::size_of::<T>() == std::mem::size_of::<f64>() {
+            let alpha0 = Self::anchor(q0.value(), b, inputs, SurvivalInterceptSlotKind::Entry)?;
+            let alpha1 = Self::anchor(q1.value(), b, inputs, SurvivalInterceptSlotKind::Exit)?;
             // A carrier the size of one `f64` has no derivative channel: the
             // roots and `α_q(q₁, b)` are the whole answer, read from the exit
             // slot's derivatives (the same bits `φ(q₁)/Σ_k w_k φ(η_k)` gives).
@@ -699,8 +718,8 @@ impl AnchoredStaticSlopeGeometry {
             ]);
         }
         let delta_b = observed.compose_unary([0.0, 1.0, 0.0, 0.0, 0.0]);
-        let entry = AnchorTaylor::at(alpha0, q0.value(), b, grid)?;
-        let exit = AnchorTaylor::at(alpha1, q1.value(), b, grid)?;
+        let entry = Self::taylor(q0.value(), b, inputs, SurvivalInterceptSlotKind::Entry)?;
+        let exit = Self::taylor(q1.value(), b, inputs, SurvivalInterceptSlotKind::Exit)?;
         Ok([
             entry.lift(q0, &delta_b),
             exit.lift(q1, &delta_b),
