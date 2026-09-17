@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! #2933 F11/F12: the native code sources are measured in the output metric,
 //! over transmitted coordinates only, and are invariant to representations that
 //! preserve the decoded model.
