@@ -210,8 +210,8 @@ fn converged_anchor(
 fn dense_kappa_gradient_factors_are_derivatives_of_the_criterion_2935() {
     let (term, target, rho) = curvature_fixture();
     let (mut state, anchor, flat) = converged_anchor(term, &target, rho);
-    let (cost, loss, cache) = state
-        .penalized_quasi_laplace_criterion_with_cache(
+    let (cost, loss, cache, geometry) = state
+        .penalized_quasi_laplace_criterion_with_geometry(
             target.view(),
             &anchor,
             None,
@@ -219,8 +219,10 @@ fn dense_kappa_gradient_factors_are_derivatives_of_the_criterion_2935() {
             0.4,
             1.0e-6,
             1.0e-6,
+            true,
         )
         .expect("the criterion prices the converged state");
+    let geometry = geometry.expect("the dense criterion hands out the block it priced");
     let residual = inner_gradient(&state, target.view(), &anchor);
     let lambda_smooth = anchor.lambda_smooth_vec().expect("smoothing strengths");
     let solver = state
@@ -235,6 +237,7 @@ fn dense_kappa_gradient_factors_are_derivatives_of_the_criterion_2935() {
             &solver,
             None,
             None,
+            Some(&geometry),
         )
         .expect("dense κ gradient components at the converged state");
     let partial = components.explicit[flat] + components.logdet_trace[flat] + components.occam[flat];

@@ -158,8 +158,14 @@ fn priced_ard_direct_gradient_matches_fixed_state_value_2434() {
         "#2434 gate is invalid: the fixture contains no clamp-attributable switched direction"
     );
 
+    let geometry = term
+        .materialize_dense_exact_a_geometry(&rho, target.view(), &cache)
+        .expect("the priced state's exact-A spectral block");
+    let rank_charge = term
+        .production_rank_charge_derivative(target.view(), &rho, &loss, &cache, Some(&geometry))
+        .expect("the priced state's rank-charge derivative");
     let analytic = term
-        .dense_exact_a_logdet_channels(target.view(), &rho, &loss, &cache)
+        .dense_exact_a_logdet_channels(target.view(), &rho, &cache, &geometry, &rank_charge.theta)
         .expect("complete priced exact-A derivative")
         .logdet_trace;
     let fixed_state_priced_logdet =

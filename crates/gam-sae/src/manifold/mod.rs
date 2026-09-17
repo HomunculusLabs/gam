@@ -522,6 +522,11 @@ mod tests_gauge_posterior_flatness_2720;
 #[cfg(test)]
 mod tests_chart_gauge_structural_null_2267;
 
+/// #2267 — a dense outer evaluation decomposes its state's exact observed information once,
+/// and the block it hands its derivative prices what a fresh decomposition prices.
+#[cfg(test)]
+mod tests_dense_exact_a_one_decomposition_2267;
+
 #[cfg(test)]
 mod tests_gauge_geometry_2720;
 #[cfg(test)]
@@ -606,8 +611,10 @@ pub fn rank_charge_dof(
 
 pub use construction::{SaeCriterionError, VanishedAtoms};
 // #2515 — the bundle-routed outer gradient's evidence geometry, named by variant.
+// #2267 — the dense evaluation's spectral block, which its derivative reads.
 pub(crate) use construction::{
-    BundleEvidenceGeometry, EvidenceOperator, FittedResponseDivergenceEstimator,
+    BundleEvidenceGeometry, DenseExactAGeometry, EvidenceOperator,
+    FittedResponseDivergenceEstimator,
 };
 
 pub use crate::inference::atlas_nerve::AtlasCoveringSide;

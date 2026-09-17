@@ -338,12 +338,14 @@ fn threshold_gate_route_gradients_differentiate_the_reconverged_criterion_2933()
 }
 
 /// #2933 F03 — the outer-gradient assembler accepts only the two routes that
-/// differentiate the `½log|A|` value: the dense exact-A route (no bundle, no
-/// matrix-free system) and the streaming exact-A route (an
+/// differentiate the `½log|A|` value: the dense exact-A route (the evaluation's spectral
+/// block, no bundle, no matrix-free system) and the streaming exact-A route (an
 /// `ExactObservedInformation` bundle together with its system). Every other pairing
 /// would contract `B` channels, or two operators' inverses, against an A-valued score,
-/// and has to be refused before any channel is produced. The legal dense pairing on the
-/// same converged state is the control: the refusals are not a blanket failure.
+/// and has to be refused before any channel is produced. #2267 — a dense route without
+/// its block would decompose `A` again for each consumer, so it is refused too. The legal
+/// dense pairing on the same converged state is the control: the refusals are not a
+/// blanket failure.
 #[test]
 fn threshold_gate_gradient_refuses_every_pairing_that_is_not_an_exact_a_route_2933() {
     let (mut term, target, rho) = threshold_gate_tiny_fixture(false);
@@ -367,6 +369,9 @@ fn threshold_gate_gradient_refuses_every_pairing_that_is_not_an_exact_a_route_29
     let solver = term
         .outer_gradient_arrow_solver(&cache, &lambda_smooth)
         .expect("#2933 F03: the converged state's outer solver factors");
+    let geometry = term
+        .materialize_dense_exact_a_geometry(&rho, target.view(), &cache)
+        .expect("#2267: the converged state's exact-A spectral block");
     let bundle = |operator: EvidenceOperator| BundleEvidenceGeometry {
         operator,
         cache: &cache,
@@ -374,7 +379,8 @@ fn threshold_gate_gradient_refuses_every_pairing_that_is_not_an_exact_a_route_29
         sinv: &[],
     };
     let assemble = |evidence: Option<BundleEvidenceGeometry<'_>>,
-                    matrix_free_system: Option<&ArrowSchurSystem>| {
+                    matrix_free_system: Option<&ArrowSchurSystem>,
+                    dense_geometry: Option<&DenseExactAGeometry>| {
         term.analytic_outer_rho_gradient_components_with_bundle(
             target.view(),
             &rho,
@@ -383,23 +389,39 @@ fn threshold_gate_gradient_refuses_every_pairing_that_is_not_an_exact_a_route_29
             &solver,
             evidence,
             matrix_free_system,
+            dense_geometry,
         )
     };
-    let control = assemble(None, None);
+    let control = assemble(None, None, Some(&geometry));
     assert!(
         control.is_ok(),
         "#2933 F03 control: the dense exact-A pairing must assemble a gradient: {:?}",
         control.err()
     );
     let illegal = [
-        ("system without its bundle", assemble(None, Some(&system))),
+        (
+            "system without its bundle",
+            assemble(None, Some(&system), Some(&geometry)),
+        ),
         (
             "majorizer bundle with its system",
-            assemble(Some(bundle(EvidenceOperator::Majorizer)), Some(&system)),
+            assemble(Some(bundle(EvidenceOperator::Majorizer)), Some(&system), None),
         ),
         (
             "exact-A bundle without its system",
-            assemble(Some(bundle(EvidenceOperator::ExactObservedInformation)), None),
+            assemble(Some(bundle(EvidenceOperator::ExactObservedInformation)), None, None),
+        ),
+        (
+            "dense route without its spectral block",
+            assemble(None, None, None),
+        ),
+        (
+            "exact-A bundle and system with a dense spectral block",
+            assemble(
+                Some(bundle(EvidenceOperator::ExactObservedInformation)),
+                Some(&system),
+                Some(&geometry),
+            ),
         ),
     ];
     let mut failures = Vec::new();

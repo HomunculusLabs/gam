@@ -147,6 +147,18 @@ pub(crate) struct ExactHessianSpectralBlock {
     band_metric_images: Array2<f64>,
 }
 
+thread_local! {
+    /// #2267 — dense exact-`A` pencil decompositions this thread has performed. A dense outer
+    /// evaluation decomposes its state once and hands the block to every derivative consumer,
+    /// so the count rises by one per evaluated state; the `[SAE-EXACT-DENSE]` line prints it.
+    static EXACT_A_PENCIL_DECOMPOSITIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many dense exact-`A` pencil decompositions this thread has performed (#2267).
+pub(crate) fn exact_a_pencil_decompositions_on_this_thread() -> u64 {
+    EXACT_A_PENCIL_DECOMPOSITIONS.with(std::cell::Cell::get)
+}
+
 /// The positive-definite metric an exact-`A` pencil is classified in (#2673,
 /// #2933 F07).
 ///
@@ -766,13 +778,18 @@ impl EvidenceRootTelemetry {
     }
 }
 
-/// One coherent dense exact-A quotient geometry.  The joint eigensystem owns
-/// the stationarity pseudoinverse; the priced joint inverse owns the exact-A
-/// log-determinant derivative.  Both are derived from the same materialized
-/// block and classification floor.
-struct ExactHessianQuotientGeometry {
-    joint: ExactHessianSpectralBlock,
-    joint_pricing: ExactHessianPricing,
+/// #2267 — the dense exact-`A` spectral block one evaluation priced `½log|A|` on, with the
+/// half of `E = B − A` its pricing reads. The dense criterion produces it once per state and
+/// every dense derivative consumer reads it: the rank-charge dispersion's divergence, the
+/// priced log-determinant differential and the stationarity adjoint all derive from this one
+/// materialized block and classification floor, so an evaluation decomposes `A` once.
+pub(crate) struct DenseExactAGeometry {
+    block: ExactHessianSpectralBlock,
+    /// `E`'s coordinate diagonal, the ARD concave clamp.
+    e_diag: Array1<f64>,
+    /// `E`'s decoder-prior border block (#2828).
+    e_beta: Option<Array2<f64>>,
+    total_t: usize,
 }
 
 /// Value and classified basin spectrum, without realizing a dense differential.
@@ -4008,6 +4025,10 @@ impl SaeManifoldTerm {
     /// adjoint (the direct-logdet-admitted route). Both produce the same complete
     /// derivative; the from-probes trace channels and the matrix-free adjoint
     /// convert together as one all-or-nothing matrix-free cluster (invariant #1).
+    ///
+    /// #2267 — the dense route differentiates the value its evaluation priced off
+    /// `dense_geometry`, the spectral block that value was classified on, and reads every
+    /// eigensystem it needs from it. The streaming route carries no dense block.
     pub(crate) fn analytic_outer_rho_gradient_components_with_bundle(
         &self,
         target: ArrayView2<'_, f64>,
@@ -4017,6 +4038,7 @@ impl SaeManifoldTerm {
         solver: &DeflatedArrowSolver<'_>,
         evidence: Option<BundleEvidenceGeometry<'_>>,
         matrix_free_system: Option<&ArrowSchurSystem>,
+        dense_geometry: Option<&DenseExactAGeometry>,
     ) -> Result<SaeOuterRhoGradientComponents, OuterGradientError> {
         self.assignment
             .validate_rho_domain(rho)
@@ -4041,24 +4063,29 @@ impl SaeManifoldTerm {
         // #2933 F03 — the derivative accepts only the identity of the value it
         // differentiates. Both production value routes rank the exact observed
         // information `½log|A|`: the dense direct-logdet criterion off one joint
-        // eigensystem (no bundle, no system), and the streaming criterion off
-        // `exact_a_evidence_system`, whose artifact hands this assembler a bundle
-        // naming that operator TOGETHER with its matrix-free system. Every other
-        // pairing — a system without its bundle, a bundle without its system, or a
-        // bundle naming the majorizer — would contract `B` channels, or the inverses
-        // of two different operators, against an `A`-valued score. Refuse it.
-        match (evidence.as_ref(), matrix_free_system) {
-            (None, None) => {}
-            (Some(geometry), Some(_)) if geometry.operator.is_exact_a() => {}
-            (bundle, system) => {
+        // eigensystem, which its evaluation hands here as `dense_geometry` (no bundle,
+        // no system), and the streaming criterion off `exact_a_evidence_system`, whose
+        // artifact hands this assembler a bundle naming that operator TOGETHER with its
+        // matrix-free system. Every other pairing — a system without its bundle, a
+        // bundle without its system, or a bundle naming the majorizer — would contract
+        // `B` channels, or the inverses of two different operators, against an
+        // `A`-valued score. A dense route without its block (#2267) would decompose `A`
+        // again for each consumer. Refuse them.
+        match (evidence.as_ref(), matrix_free_system, dense_geometry) {
+            (None, None, Some(_)) => {}
+            (Some(geometry), Some(_), None) if geometry.operator.is_exact_a() => {}
+            (bundle, system, dense) => {
                 return Err(OuterGradientError::internal(format!(
                     "analytic_outer_rho_gradient_components_with_bundle: the criterion value \
                      ranks the exact observed information ½log|A|, but this derivative route \
-                     pairs evidence operator {:?} with matrix-free system present = {}. Only \
-                     the dense exact-A route (neither) and the streaming exact-A route (both, \
-                     the bundle naming ExactObservedInformation) differentiate that value.",
+                     pairs evidence operator {:?} with matrix-free system present = {} and \
+                     dense spectral block present = {}. Only the dense exact-A route (the \
+                     evaluation's spectral block, no bundle, no system) and the streaming \
+                     exact-A route (the bundle naming ExactObservedInformation with its \
+                     system, no dense block) differentiate that value.",
                     bundle.map(|geometry| geometry.operator),
                     system.is_some(),
+                    dense.is_some(),
                 )));
             }
         }
@@ -4068,7 +4095,7 @@ impl SaeManifoldTerm {
         let mut occam = Array1::<f64>::zeros(n_params);
         let mut third_order_correction = Array1::<f64>::zeros(n_params);
         let rank_charge = self
-            .production_rank_charge_derivative(target, rho, loss, cache)
+            .production_rank_charge_derivative(target, rho, loss, cache, dense_geometry)
             .map_err(OuterGradientError::internal)?;
         // #2330 Phase-2 / #2333 — which operator the logdet channels belong to
         // is a property of the ROUTE, and it is known here, before any of them is
@@ -4461,12 +4488,19 @@ impl SaeManifoldTerm {
         let (gamma, dense_stationarity_adjoint) = match majorizer_gamma {
             Some(gamma) => (gamma, None),
             None => {
+                let geometry = dense_geometry.ok_or_else(|| {
+                    OuterGradientError::internal(
+                        "analytic_outer_rho_gradient_components_with_bundle: the dense exact-A \
+                         log-determinant channels need the evaluation's spectral block"
+                            .to_string(),
+                    )
+                })?;
                 let DenseExactALogdetChannels {
                     logdet_trace: exact_logdet_trace,
                     theta_adjoint: exact_gamma,
                     stationarity_adjoint,
                 } = self
-                    .dense_exact_a_logdet_channels(target, rho, loss, cache)
+                    .dense_exact_a_logdet_channels(target, rho, cache, geometry, &rank_charge.theta)
                     .map_err(OuterGradientError::internal)?;
                 logdet_trace = exact_logdet_trace;
                 (exact_gamma, Some(stationarity_adjoint))
@@ -4567,34 +4601,29 @@ impl SaeManifoldTerm {
     /// negative spectral subspace. The same owner supplies the differential
     /// consumed by the outer gradient.
     ///
-    /// The eigensystem the value was priced on is returned beside it: it is
-    /// [`Self::materialize_exact_stationarity_geometry`] at `cache`, so the dense
-    /// criterion hands it to the dispersion's fitted-response divergence instead
-    /// of materializing and decomposing `A` a second time (#2933 F36).
+    /// The spectral block the value was priced on is returned beside it, with the pricing
+    /// inputs it was classified with, so the dense evaluation hands it to the dispersion's
+    /// fitted-response divergence and to every derivative consumer instead of materializing
+    /// and decomposing `A` again (#2933 F36, #2267).
     pub(crate) fn exact_observed_information_log_dets_with_saddle_directions(
         &self,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
         cache: &ArrowFactorCache,
         saddle_directions: &mut Vec<(Array1<f64>, f64)>,
-    ) -> Result<(f64, ExactHessianSpectralBlock), SaeCriterionError> {
-        let total_t = cache.delta_t_len();
-        // #2828 — the border half of `E = B − A`, read off the same border probes
-        // that build `A` (#2731).
-        let (a, e_beta) =
-            self.materialize_exact_hessian_dense_with_gap_border(rho, target, cache)?;
-        let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
-        let joint = Self::exact_hessian_spectral_block(a, &ArrowMetric::Joint(cache).prepare()?)?;
+    ) -> Result<(f64, DenseExactAGeometry), SaeCriterionError> {
+        let geometry = self.materialize_dense_exact_a_geometry(rho, target, cache)?;
+        let joint = &geometry.block;
         // #2080/#2267 — a refused basin pushes its refused directions here: `Φ`-normalized
         // vectors in the joint `(t, β)` cache layout, each with its basin curvature, most
         // negative first. The evidence root descends them before it concludes the state
         // has no Laplace normaliser, off this same eigensystem, so a refusal pays one dense
         // materialization and eigendecomposition, not two.
         let joint_pricing = Self::classify_exact_hessian_basin(
-            &joint,
-            &e_diag,
-            e_beta.as_ref(),
-            total_t,
+            joint,
+            &geometry.e_diag,
+            geometry.e_beta.as_ref(),
+            geometry.total_t,
             "joint",
             Some(saddle_directions),
         )?;
@@ -4643,7 +4672,7 @@ impl SaeManifoldTerm {
             min_retained_over_floor,
             max_band_over_floor,
         );
-        Ok((joint_pricing.log_det, joint))
+        Ok((joint_pricing.log_det, geometry))
     }
 
     /// The generalized eigensystem of one already-materialized exact-Hessian block in the
@@ -4711,9 +4740,12 @@ impl SaeManifoldTerm {
                 .assign(&metric.lower_transpose_solve(rotation.column(column))?);
         }
         drop(rotation);
+        EXACT_A_PENCIL_DECOMPOSITIONS.with(|count| count.set(count.get() + 1));
         log::info!(
-            "[SAE-EXACT-DENSE] pencil eigendecomposition DONE: dim={dimension}, {:.3} s",
+            "[SAE-EXACT-DENSE] pencil eigendecomposition DONE: dim={dimension}, {:.3} s, \
+             decomposition {} on this thread",
             eigh_started.elapsed().as_secs_f64(),
+            exact_a_pencil_decompositions_on_this_thread(),
         );
         let curvature_norm = eigenvalues
             .iter()
@@ -5142,29 +5174,28 @@ impl SaeManifoldTerm {
         Self::exact_hessian_spectral_block(a, &ArrowMetric::Joint(cache).prepare()?)
     }
 
-    /// #2330 Phase-2/#2653 — one coherent quotient geometry for the exact-A
-    /// outer-ρ derivative.  The priced pseudo-inverse `A⁺` and the raw signed
-    /// stationarity pseudoinverse are derived from the SAME joint eigensystem
-    /// and floor.  A genuine saddle still refuses
-    /// the log-determinant derivative; resolved negative directions remain live
-    /// in the stationarity solve when the value's clamp pricing admits them.
-    fn materialize_exact_hessian_quotient_geometry(
+    /// #2267 — materialize `A` at `cache` with the half of `E = B − A` its pricing reads,
+    /// and decompose it once. The dense criterion prices `½log|A|` off the result and hands
+    /// it to the evaluation, whose derivative reads the priced pseudo-inverse `A⁺` and the
+    /// raw signed stationarity pseudoinverse off the SAME joint eigensystem and floor.
+    pub(crate) fn materialize_dense_exact_a_geometry(
         &self,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
         cache: &ArrowFactorCache,
-    ) -> Result<ExactHessianQuotientGeometry, String> {
+    ) -> Result<DenseExactAGeometry, String> {
         let total_t = cache.delta_t_len();
+        // #2828 — the border half of `E = B − A`, read off the same border probes
+        // that build `A` (#2731).
         let (a, e_beta) =
             self.materialize_exact_hessian_dense_with_gap_border(rho, target, cache)?;
         let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
-        let joint = Self::exact_hessian_spectral_block(a, &ArrowMetric::Joint(cache).prepare()?)?;
-        let joint_pricing =
-            Self::price_exact_hessian_block(&joint, &e_diag, e_beta.as_ref(), total_t, "joint")
-                .map_err(|error| error.to_string())?;
-        Ok(ExactHessianQuotientGeometry {
-            joint,
-            joint_pricing,
+        let block = Self::exact_hessian_spectral_block(a, &ArrowMetric::Joint(cache).prepare()?)?;
+        Ok(DenseExactAGeometry {
+            block,
+            e_diag,
+            e_beta,
+            total_t,
         })
     }
 
@@ -5566,16 +5597,36 @@ impl SaeManifoldTerm {
         &self,
         target: ArrayView2<'_, f64>,
         rho: &SaeManifoldRho,
-        loss: &SaeManifoldLoss,
         cache: &ArrowFactorCache,
+        geometry: &DenseExactAGeometry,
+        rank_charge_theta: &SaeArrowVector,
     ) -> Result<DenseExactALogdetChannels, String> {
         let n_params = rho.flat_coordinates().len();
-        let geometry = self.materialize_exact_hessian_quotient_geometry(rho, target, cache)?;
+        // #2267 — the channels price the block the evaluation's value was classified on, so
+        // that block must have been materialized at this cache.
+        let dim = sae_exact_stationarity_dim(cache.delta_t_len(), cache.k);
+        if geometry.total_t != cache.delta_t_len() || geometry.block.eigenvalues.len() != dim {
+            return Err(format!(
+                "dense_exact_a_logdet_channels: the spectral block (dim {}, {} coordinate slots) \
+                 was not materialized at this cache (dim {dim}, {} coordinate slots)",
+                geometry.block.eigenvalues.len(),
+                geometry.total_t,
+                cache.delta_t_len(),
+            ));
+        }
+        let pricing = Self::price_exact_hessian_block(
+            &geometry.block,
+            &geometry.e_diag,
+            geometry.e_beta.as_ref(),
+            geometry.total_t,
+            "joint",
+        )
+        .map_err(|error| error.to_string())?;
         // The common basin owner includes the negative-subspace response in
         // dA. Chain its remaining explicit dE term to rho and theta here.
         let (priced_joint_trace, priced_joint_gamma) =
-            self.priced_clamp_adjoint_extras(rho, cache, &geometry.joint_pricing)?;
-        let a_pinv = &geometry.joint_pricing.a_derivative;
+            self.priced_clamp_adjoint_extras(rho, cache, &pricing)?;
+        let a_pinv = &pricing.a_derivative;
         // This value diagonalizes `A_raw = B_raw + ΔC`; differentiate that raw
         // operator, not the row-conditioned operator carried by arrow factors.
         let da_by_flat = self.exact_stationarity_penalty_derivatives_by_flat(rho, cache)?;
@@ -5611,7 +5662,7 @@ impl SaeManifoldTerm {
         logdet_trace.scaled_add(0.5, &priced_joint_trace);
         gamma.t += &priced_joint_gamma;
         gamma.beta += &self.decoder_prior_gap_theta_trace(
-            cache, geometry.joint_pricing.clamp_border_derivative.view(),
+            cache, pricing.clamp_border_derivative.view(),
         )?;
         // #2933 F07 — in-band pencil directions are priced at `Φ`'s own curvature, so the
         // value moves with the evidence factor there as well.
@@ -5619,15 +5670,15 @@ impl SaeManifoldTerm {
             rho,
             target,
             cache,
-            &geometry.joint_pricing.metric_derivative,
+            &pricing.metric_derivative,
         )?;
         logdet_trace += &metric_trace;
         gamma.t += &metric_gamma.t;
         gamma.beta += &metric_gamma.beta;
-        let rank_charge = self.production_rank_charge_derivative(target, rho, loss, cache)?;
-        gamma.t.scaled_add(2.0, &rank_charge.theta.t);
-        gamma.beta.scaled_add(2.0, &rank_charge.theta.beta);
-        let stationarity_adjoint = geometry.joint.solve_stationarity(&gamma)?.step;
+        // #2267 — the caller's rank-charge derivative, read off the same block.
+        gamma.t.scaled_add(2.0, &rank_charge_theta.t);
+        gamma.beta.scaled_add(2.0, &rank_charge_theta.beta);
+        let stationarity_adjoint = geometry.block.solve_stationarity(&gamma)?.step;
         Ok(DenseExactALogdetChannels {
             logdet_trace,
             theta_adjoint: gamma,
@@ -6778,12 +6829,20 @@ mod test_support {
             )
             .expect("fixed-state clamp fixture");
         let geometry = term
-            .materialize_exact_hessian_quotient_geometry(&rho, target.view(), &cache)
+            .materialize_dense_exact_a_geometry(&rho, target.view(), &cache)
             .expect("priced spectral geometry");
+        let pricing = super::SaeManifoldTerm::price_exact_hessian_block(
+            &geometry.block,
+            &geometry.e_diag,
+            geometry.e_beta.as_ref(),
+            geometry.total_t,
+            "joint",
+        )
+        .expect("priced spectral pricing");
         let h = 1.0e-6;
         let mut live = 0;
         {
-            let (block, pricing) = (&geometry.joint, &geometry.joint_pricing);
+            let (block, pricing) = (&geometry.block, &pricing);
             let (_, analytic) = term
                 .priced_clamp_adjoint_extras(&rho, &cache, pricing)
                 .expect("explicit clamp derivative");
@@ -6990,26 +7049,33 @@ mod test_support {
             target: ndarray::ArrayView2<'_, f64>,
             cache: &ArrowFactorCache,
         ) -> Result<SaeArrowVector, String> {
-            let geometry = self.materialize_exact_hessian_quotient_geometry(rho, target, cache)?;
-            let (_, clamp_gamma) =
-                self.priced_clamp_adjoint_extras(rho, cache, &geometry.joint_pricing)?;
+            let geometry = self.materialize_dense_exact_a_geometry(rho, target, cache)?;
+            let pricing = Self::price_exact_hessian_block(
+                &geometry.block,
+                &geometry.e_diag,
+                geometry.e_beta.as_ref(),
+                geometry.total_t,
+                "joint",
+            )
+            .map_err(|error| error.to_string())?;
+            let (_, clamp_gamma) = self.priced_clamp_adjoint_extras(rho, cache, &pricing)?;
             let mut gamma = self.logdet_theta_adjoint_dense(
                 rho,
                 cache,
-                &geometry.joint_pricing.a_derivative,
+                &pricing.a_derivative,
                 true,
                 true,
                 Some(target),
             )?;
             gamma.t += &clamp_gamma;
             gamma.beta += &self.decoder_prior_gap_theta_trace(
-                cache, geometry.joint_pricing.clamp_border_derivative.view(),
+                cache, pricing.clamp_border_derivative.view(),
             )?;
             let (_, metric_gamma) = self.evidence_metric_derivative_channels(
                 rho,
                 target,
                 cache,
-                &geometry.joint_pricing.metric_derivative,
+                &pricing.metric_derivative,
             )?;
             gamma.t += &metric_gamma.t;
             gamma.beta += &metric_gamma.beta;

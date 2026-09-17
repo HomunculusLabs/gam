@@ -362,7 +362,7 @@ fn second_order_only_evaluator_refuses_the_exact_a_theta_adjoint_2933() {
 /// succeeds, so the refusal is the capability and not the fixture.
 #[test]
 fn production_exact_a_logdet_channels_refuse_an_unavailable_third_jet_2933() {
-    let channels = |evaluator: Arc<dyn SaeBasisEvaluator>| {
+    let channels = |evaluator: Arc<dyn SaeBasisEvaluator>| -> Result<SaeArrowVector, String> {
         let (mut term, target, rho) = periodic_fixture(evaluator);
         let (_value, loss, cache) = term
             .penalized_quasi_laplace_criterion_with_cache(
@@ -375,8 +375,22 @@ fn production_exact_a_logdet_channels_refuse_an_unavailable_third_jet_2933() {
                 1.0e-6,
             )
             .expect("fixed-state criterion cache");
-        term.dense_exact_a_logdet_channels(target.view(), &rho, &loss, &cache)
-            .map(|channels| channels.theta_adjoint)
+        let geometry = term.materialize_dense_exact_a_geometry(&rho, target.view(), &cache)?;
+        let rank_charge = term.production_rank_charge_derivative(
+            target.view(),
+            &rho,
+            &loss,
+            &cache,
+            Some(&geometry),
+        )?;
+        term.dense_exact_a_logdet_channels(
+            target.view(),
+            &rho,
+            &cache,
+            &geometry,
+            &rank_charge.theta,
+        )
+        .map(|channels| channels.theta_adjoint)
     };
     let analytic = channels(Arc::new(TestPeriodicEvaluator))
         .expect("the analytic twin admits the exact-A channels");

@@ -60,17 +60,29 @@ impl SaeManifoldTerm {
     /// direct `log λ_smooth` channel and the implicit `(logit, t)` response.
     /// Decoder coefficients affect only the discrete production-rank branch, so the
     /// within-branch beta differential is exactly zero.
+    ///
+    /// #2267 — `geometry` is the spectral block the dense evaluation priced `½log|A|` on, so
+    /// the dispersion's fitted-response divergence reads it instead of decomposing `A` a
+    /// second time. `None` is the streaming route, whose value routes the divergence by
+    /// admission; the dense gradient refuses to assemble without its evaluation's block.
     pub(crate) fn production_rank_charge_derivative(
         &self,
         target: ArrayView2<'_, f64>,
         rho: &SaeManifoldRho,
         loss: &SaeManifoldLoss,
         cache: &ArrowFactorCache,
+        geometry: Option<&DenseExactAGeometry>,
     ) -> Result<ProductionRankChargeDerivative, String> {
         self.assignment.validate_rho_domain(rho)?;
         let residual = self.reconstruction_residual(target, rho)?;
         let dispersion = self
-            .reconstruction_dispersion(loss, cache, rho, residual.view())?
+            .reconstruction_dispersion_with_geometry(
+                loss,
+                cache,
+                rho,
+                residual.view(),
+                geometry.map(|geometry| &geometry.block),
+            )?
             .raw_output_noise_variance;
         let mut grams = self.empty_decoder_gram_accumulator();
         self.accumulate_decoder_gram(&mut grams)?;

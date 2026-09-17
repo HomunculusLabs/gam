@@ -340,6 +340,42 @@ impl SaeManifoldTerm {
         ridge_beta: f64,
         refine_progress_extension: bool,
     ) -> Result<(f64, SaeManifoldLoss, ArrowFactorCache), SaeCriterionError> {
+        self.penalized_quasi_laplace_criterion_with_geometry(
+            target,
+            rho,
+            registry,
+            inner_max_iter,
+            learning_rate,
+            ridge_ext_coord,
+            ridge_beta,
+            refine_progress_extension,
+        )
+        .map(|(value, loss, cache, ..)| (value, loss, cache))
+    }
+
+    /// [`Self::penalized_quasi_laplace_criterion_with_cache_refine_policy`] with the dense
+    /// exact-`A` spectral block the value was priced on (#2267), which the dense outer
+    /// evaluation hands to its derivative. `None` on the streaming route, which materializes
+    /// no `A`.
+    pub(crate) fn penalized_quasi_laplace_criterion_with_geometry(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+        inner_max_iter: usize,
+        learning_rate: f64,
+        ridge_ext_coord: f64,
+        ridge_beta: f64,
+        refine_progress_extension: bool,
+    ) -> Result<
+        (
+            f64,
+            SaeManifoldLoss,
+            ArrowFactorCache,
+            Option<DenseExactAGeometry>,
+        ),
+        SaeCriterionError,
+    > {
         let criterion_entered = std::time::Instant::now();
         self.assignment.validate_rho_domain(rho)?;
         // #976 evidence-ledger scope (see `penalized_quasi_laplace_criterion_with_refine_policy_
@@ -363,15 +399,17 @@ impl SaeManifoldTerm {
             // cache for traces and recomputes the reduced-Schur logdet by
             // chunks / matrix-free matvecs, keeping peak memory at the admitted
             // streaming working set rather than the dense n·k·p floor.
-            return self.penalized_quasi_laplace_criterion_streaming_exact_with_cache(
-                target,
-                rho,
-                registry,
-                inner_max_iter,
-                learning_rate,
-                ridge_ext_coord,
-                ridge_beta,
-            );
+            return self
+                .penalized_quasi_laplace_criterion_streaming_exact_with_cache(
+                    target,
+                    rho,
+                    registry,
+                    inner_max_iter,
+                    learning_rate,
+                    ridge_ext_coord,
+                    ridge_beta,
+                )
+                .map(|(value, loss, cache)| (value, loss, cache, None));
         }
         // 1. Run the inner (t, β) Newton solve to its numerical fixed point at
         //    FIXED ρ. Evidence uses the idempotence polish rather than stopping
@@ -587,7 +625,7 @@ impl SaeManifoldTerm {
                     &cache,
                     rho,
                     residual.view(),
-                    Some(&geometry),
+                    Some(&geometry.block),
                 )
                 .map_err(|e| {
                     format!(
@@ -624,7 +662,7 @@ impl SaeManifoldTerm {
             );
             value
         };
-        Ok((v, loss, cache))
+        Ok((v, loss, cache, Some(geometry)))
     }
 
     pub(crate) fn is_undamped_evidence_row_non_pd(err: &ArrowSchurError) -> bool {

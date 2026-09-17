@@ -687,11 +687,19 @@ struct MatrixFreeOuterArtifacts {
     efs_inverse_probe_bundle: Option<(Vec<Array1<f64>>, Vec<Array1<f64>>)>,
 }
 
+/// What an outer evaluation's derivative reads beside its factor cache, by storage route.
+enum OuterEvaluationArtifacts {
+    /// #2267 — the spectral block the dense criterion priced `½log|A|` on. The gradient reads
+    /// it, so one dense evaluation decomposes its state once.
+    Dense(DenseExactAGeometry),
+    MatrixFree(MatrixFreeOuterArtifacts),
+}
+
 pub(crate) struct OuterCriterionEvaluation {
     pub(crate) cost: f64,
     loss: SaeManifoldLoss,
     cache: ArrowFactorCache,
-    matrix_free: Option<MatrixFreeOuterArtifacts>,
+    artifacts: OuterEvaluationArtifacts,
 }
 
 pub struct SaeManifoldOuterObjective {
@@ -1149,15 +1157,26 @@ impl SaeManifoldOuterObjective {
     ) -> Result<OuterCriterionEvaluation, SaeCriterionError> {
         self.declare_collapse_prevention_gates_on_term();
         if direct_logdet_admitted {
-            let (cost, loss, cache) = self.term.penalized_quasi_laplace_criterion_with_cache(
-                self.target.view(),
-                rho,
-                self.registry.as_ref(),
-                self.inner_max_iter,
-                self.learning_rate,
-                self.ridge_ext_coord,
-                self.ridge_beta,
-            )?;
+            let (cost, loss, cache, geometry) =
+                self.term.penalized_quasi_laplace_criterion_with_geometry(
+                    self.target.view(),
+                    rho,
+                    self.registry.as_ref(),
+                    self.inner_max_iter,
+                    self.learning_rate,
+                    self.ridge_ext_coord,
+                    self.ridge_beta,
+                    true,
+                )?;
+            // #2267 — the dense derivative reads the block its value priced, so a criterion
+            // its admission routed to the streaming evaluation has nothing to hand it.
+            let geometry = geometry.ok_or_else(|| {
+                SaeCriterionError::Numerical(
+                    "dense outer evaluation: the criterion priced no dense exact-A spectral \
+                     block; its admission routed it to the streaming evaluation"
+                        .to_string(),
+                )
+            })?;
             if cost.is_finite() {
                 self.adopt_collapse_prevention_gates_from_root();
             }
@@ -1165,7 +1184,7 @@ impl SaeManifoldOuterObjective {
                 cost,
                 loss,
                 cache,
-                matrix_free: None,
+                artifacts: OuterEvaluationArtifacts::Dense(geometry),
             });
         }
 
@@ -1195,7 +1214,7 @@ impl SaeManifoldOuterObjective {
             cost: evaluated.cost,
             loss: evaluated.loss,
             cache: evaluated.cache,
-            matrix_free: Some(MatrixFreeOuterArtifacts {
+            artifacts: OuterEvaluationArtifacts::MatrixFree(MatrixFreeOuterArtifacts {
                 system: evaluated.system,
                 exact_a_cache: evaluated.exact_a_cache,
                 logdet_derivative_bundle: evaluated.logdet_derivative_bundle,
@@ -1213,52 +1232,57 @@ impl SaeManifoldOuterObjective {
         rho: &SaeManifoldRho,
         evaluation: &OuterCriterionEvaluation,
     ) -> Result<Array1<f64>, OuterGradientError> {
-        let components = if let Some(matrix_free) = evaluation.matrix_free.as_ref() {
-            let derivative_vectors = &matrix_free.logdet_derivative_bundle.vectors;
-            let solver = DeflatedArrowSolver::plain(&evaluation.cache);
-            self.term
-                .analytic_outer_rho_gradient_components_with_bundle(
-                    self.target.view(),
-                    rho,
-                    &evaluation.loss,
-                    &evaluation.cache,
-                    &solver,
-                    // #2515/#2668 — the ranked criterion on this lane is
-                    // `½log|A| + rank_charge`, coordinate block included
-                    // (`rank_adjusted_quasi_laplace_complexity` takes `½log_det`, and
-                    // `log_det = log|A_tt| + log|S_A|` comes off
-                    // `exact_a_evidence_system`). Its derivative is
-                    // `½tr(A⁻¹ ∂A/∂ρ)`, which the from-probes channels
-                    // reconstruct only if the row geometry and the `S⁻¹` come from
-                    // the same operator. `cache` stays `B`: it is the Newton/IFT
-                    // scale that `solve_exact_stationarity_matrix_free` rebuilds
-                    // `A = B + ΔC` on top of, and promoting it would double-count
-                    // `ΔC`.
-                    Some(BundleEvidenceGeometry {
-                        operator: EvidenceOperator::ExactObservedInformation,
-                        cache: &matrix_free.exact_a_cache,
-                        probes: derivative_vectors,
-                        sinv: derivative_vectors,
-                    }),
-                    Some(&matrix_free.system),
-                )?
-        } else {
-            let lambda_smooth = rho
-                .lambda_smooth_vec()
-                .map_err(OuterGradientError::internal)?;
-            let solver = self
-                .term
-                .outer_gradient_arrow_solver(&evaluation.cache, &lambda_smooth)?;
-            self.term
-                .analytic_outer_rho_gradient_components_with_bundle(
-                    self.target.view(),
-                    rho,
-                    &evaluation.loss,
-                    &evaluation.cache,
-                    &solver,
-                    None,
-                    None,
-                )?
+        let components = match &evaluation.artifacts {
+            OuterEvaluationArtifacts::MatrixFree(matrix_free) => {
+                let derivative_vectors = &matrix_free.logdet_derivative_bundle.vectors;
+                let solver = DeflatedArrowSolver::plain(&evaluation.cache);
+                self.term
+                    .analytic_outer_rho_gradient_components_with_bundle(
+                        self.target.view(),
+                        rho,
+                        &evaluation.loss,
+                        &evaluation.cache,
+                        &solver,
+                        // #2515/#2668 — the ranked criterion on this lane is
+                        // `½log|A| + rank_charge`, coordinate block included
+                        // (`rank_adjusted_quasi_laplace_complexity` takes `½log_det`, and
+                        // `log_det = log|A_tt| + log|S_A|` comes off
+                        // `exact_a_evidence_system`). Its derivative is
+                        // `½tr(A⁻¹ ∂A/∂ρ)`, which the from-probes channels
+                        // reconstruct only if the row geometry and the `S⁻¹` come from
+                        // the same operator. `cache` stays `B`: it is the Newton/IFT
+                        // scale that `solve_exact_stationarity_matrix_free` rebuilds
+                        // `A = B + ΔC` on top of, and promoting it would double-count
+                        // `ΔC`.
+                        Some(BundleEvidenceGeometry {
+                            operator: EvidenceOperator::ExactObservedInformation,
+                            cache: &matrix_free.exact_a_cache,
+                            probes: derivative_vectors,
+                            sinv: derivative_vectors,
+                        }),
+                        Some(&matrix_free.system),
+                        None,
+                    )?
+            }
+            OuterEvaluationArtifacts::Dense(geometry) => {
+                let lambda_smooth = rho
+                    .lambda_smooth_vec()
+                    .map_err(OuterGradientError::internal)?;
+                let solver = self
+                    .term
+                    .outer_gradient_arrow_solver(&evaluation.cache, &lambda_smooth)?;
+                self.term
+                    .analytic_outer_rho_gradient_components_with_bundle(
+                        self.target.view(),
+                        rho,
+                        &evaluation.loss,
+                        &evaluation.cache,
+                        &solver,
+                        None,
+                        None,
+                        Some(geometry),
+                    )?
+            }
         };
         let mut gradient = components.gradient();
         if let Some(block_grad) = self
@@ -2643,10 +2667,12 @@ impl SaeManifoldOuterObjective {
             ));
         }
         let cache = &evaluation.cache;
-        let inverse_probe_bundle = evaluation
-            .matrix_free
-            .as_ref()
-            .and_then(|artifacts| artifacts.efs_inverse_probe_bundle.as_ref());
+        let inverse_probe_bundle = match &evaluation.artifacts {
+            OuterEvaluationArtifacts::MatrixFree(artifacts) => {
+                artifacts.efs_inverse_probe_bundle.as_ref()
+            }
+            OuterEvaluationArtifacts::Dense(_) => None,
+        };
         let traces = if let Some((probes, sinv)) = inverse_probe_bundle.as_ref() {
             self.term
                 .ard_inverse_traces_from_probes(cache, probes, sinv)

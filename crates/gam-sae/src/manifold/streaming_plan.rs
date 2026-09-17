@@ -58,7 +58,7 @@ pub(crate) const SAE_DIRECT_ALWAYS_ADMIT_BYTES: usize = 16 * 1024 * 1024;
 //
 // The three functions below are the ONE size expression shared by the code that
 // ALLOCATES the dense route's blocks (`materialize_exact_hessian_dense`,
-// `materialize_exact_hessian_quotient_geometry`, `dense_exact_a_logdet_channels`
+// `materialize_dense_exact_a_geometry`, `dense_exact_a_logdet_channels`
 // in `construction_exact_hessian.rs`) and by the code that PRICES it here. They
 // exist because those two drifted: the plan priced `border_dim²` (40.5 KiB on
 // the measured `dim = 7692` witness) for a route whose real resident set is

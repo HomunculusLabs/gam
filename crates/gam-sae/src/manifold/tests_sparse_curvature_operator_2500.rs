@@ -390,8 +390,20 @@ fn threshold_gate_dense_exact_a_sparse_logdet_trace_matches_finite_difference_25
         let (term, target, rho) = threshold_gate_tiny_fixture(straddle);
         let (loss, cache) = frozen_cache(&term, &target, &rho);
         let sparse = rho.sparse_flat_index().expect("sparse coordinate");
+        let geometry = term
+            .materialize_dense_exact_a_geometry(&rho, target.view(), &cache)
+            .expect("#2500: the frozen state's exact-A spectral block");
+        let rank_charge = term
+            .production_rank_charge_derivative(target.view(), &rho, &loss, &cache, Some(&geometry))
+            .expect("#2500: the frozen state's rank-charge derivative");
         let trace = term
-            .dense_exact_a_logdet_channels(target.view(), &rho, &loss, &cache)
+            .dense_exact_a_logdet_channels(
+                target.view(),
+                &rho,
+                &cache,
+                &geometry,
+                &rank_charge.theta,
+            )
             .expect("#2500: the dense exact-A logdet channels must assemble")
             .logdet_trace;
         assert!(
