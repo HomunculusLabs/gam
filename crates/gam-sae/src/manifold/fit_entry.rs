@@ -1342,8 +1342,7 @@ fn finalize_sae_fit_report(
             &uncertainty.band_sd,
         ) {
             (None, None, None) => {
-                if uncertainty.decoder_covariance.is_some() || uncertainty.band_sd_robust.is_some()
-                {
+                if uncertainty.decoder_covariance.is_some() || uncertainty.band_sd_robust.is_ok() {
                     return Err(SaeFitError::Fit(format!(
                         "atom {atom_idx} has a partial unavailable shape-uncertainty payload"
                     )));
@@ -1369,12 +1368,21 @@ fn finalize_sae_fit_report(
                         "atom {atom_idx} has non-finite decoder covariance"
                     )));
                 }
-                if let Some(robust) = &uncertainty.band_sd_robust
-                    && (robust.dim() != sd.dim() || robust.iter().any(|value| !value.is_finite()))
-                {
-                    return Err(SaeFitError::Fit(format!(
-                        "atom {atom_idx} has inconsistent robust shape uncertainty"
-                    )));
+                match &uncertainty.band_sd_robust {
+                    Ok(robust)
+                        if robust.dim() != sd.dim()
+                            || robust.iter().any(|value| !value.is_finite()) =>
+                    {
+                        return Err(SaeFitError::Fit(format!(
+                            "atom {atom_idx} has inconsistent robust shape uncertainty"
+                        )));
+                    }
+                    Ok(_) => {}
+                    Err(reason) => {
+                        return Err(SaeFitError::Fit(format!(
+                            "atom {atom_idx} has a joint shape band but no robust band: {reason:?}"
+                        )));
+                    }
                 }
             }
             _ => {

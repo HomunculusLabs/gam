@@ -811,12 +811,33 @@ impl SaeManifoldTerm {
                 }
                 Some(cov)
             };
+            // Row-sandwich band from this atom's block of `[A⁺]_ββ J [A⁺]_ββ`,
+            // pushed forward in its own border layout (through `U_k` on a framed
+            // atom) with no dispersion multiplier.
+            let robust_block = covariance
+                .robust_blocks
+                .get(k)
+                .filter(|block| block.dim() == (width, width))
+                .ok_or_else(|| {
+                    format!(
+                        "assemble_shape_uncertainty: atom {k} has no robust block matching its \
+                         border range of width {width}"
+                    )
+                })?;
+            let mut band_sd_robust = Array2::<f64>::zeros((g, p));
+            for (gi, &row) in eval_rows.iter().enumerate() {
+                let basis = atom.basis_values.row(row);
+                for c in 0..p {
+                    let var = frame_projection.output_variance(k, robust_block.view(), basis, c);
+                    band_sd_robust[[gi, c]] = var.max(0.0).sqrt();
+                }
+            }
             atoms.push(SaeAtomShapeUncertainty {
                 decoder_covariance: cov,
                 band_coords: Some(band_coords),
                 band_mean: Some(band_mean),
                 band_sd: Some(band_sd),
-                band_sd_robust: None,
+                band_sd_robust: Ok(band_sd_robust),
             });
         }
         Ok(SaeShapeUncertainty {
@@ -915,7 +936,7 @@ impl SaeManifoldTerm {
                 band_coords: None,
                 band_mean: None,
                 band_sd: None,
-                band_sd_robust: None,
+                band_sd_robust: Err(reason.clone()),
             })
             .collect();
         SaeShapeUncertainty {

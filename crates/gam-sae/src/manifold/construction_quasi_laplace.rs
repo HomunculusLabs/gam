@@ -7977,6 +7977,10 @@ impl SaeManifoldTerm {
     /// path may still price such a basin through the majorizer's concave clamp,
     /// but a clamped operator is not an observed information, and inverting it
     /// would report a regularized band under a posterior label.
+    ///
+    /// The same `A⁺` is the bread of the row-sandwich companion
+    /// [`SaeAtomShapeUncertainty::band_sd_robust`], whose meat is the outer
+    /// product of the per-row data scores at `target`.
     pub(crate) fn exact_observed_information_shape_covariance(
         &self,
         rho: &SaeManifoldRho,
@@ -7994,7 +7998,12 @@ impl SaeManifoldTerm {
             total_t,
             ArrowMetric::Joint(cache),
         )?;
-        joint.border_selected_inverse_blocks(total_t, &self.shape_covariance_border_ranges())
+        let meat = self.reconstruction_border_score_meat(target)?;
+        joint.border_selected_inverse_blocks(
+            total_t,
+            &self.shape_covariance_border_ranges(),
+            meat.view(),
+        )
     }
 
     // [#780 line-count gate] reconstruction_dispersion + assemble_shape_uncertainty
@@ -8013,12 +8022,14 @@ impl ExactHessianSpectralBlock {
     /// differential and the stationarity solve read: `λᵢ < −floor(i)` is a
     /// negative direction, `|λᵢ| ≤ floor(i)` is unidentified and carries no
     /// variance, `λᵢ > floor(i)` is retained. With `W = V_β[:, retained]·Λ^{−½}`
-    /// each block is the Gram `W_r W_rᵀ`, positive semidefinite by construction,
-    /// at `|r|²·rank` per atom beside the decomposition already paid.
+    /// each block is the Gram `W_r W_rᵀ`, positive semidefinite by construction.
+    /// The robust blocks are those of `(W Wᵀ) J (W Wᵀ)` for the border meat `J`;
+    /// the whole border inverse is formed once, because `J` couples atoms.
     fn border_selected_inverse_blocks(
         &self,
         total_t: usize,
         ranges: &[std::ops::Range<usize>],
+        meat: ArrayView2<'_, f64>,
     ) -> Result<SaeShapeInformation, String> {
         let dim = self.eigenvalues.len();
         if self.eigenvectors.dim() != (dim, dim) || total_t > dim {
@@ -8050,38 +8061,16 @@ impl ExactHessianSpectralBlock {
             ));
         }
         let border_dim = dim - total_t;
-        let mut blocks = Vec::with_capacity(ranges.len());
-        for (atom, range) in ranges.iter().enumerate() {
-            if range.end > border_dim {
-                return Err(format!(
-                    "exact observed-information shape covariance: atom {atom} border range \
-                     {range:?} exceeds the border dimension {border_dim}"
-                ));
-            }
-            let scaled = Array2::from_shape_fn((range.len(), retained.len()), |(row, col)| {
-                let index = retained[col];
-                self.eigenvectors[[total_t + range.start + row, index]]
-                    / self.eigenvalues[index].sqrt()
-            });
-            let mut block = scaled.dot(&scaled.t());
-            let width = block.nrows();
-            for row in 0..width {
-                for col in (row + 1)..width {
-                    let average = 0.5 * (block[[row, col]] + block[[col, row]]);
-                    block[[row, col]] = average;
-                    block[[col, row]] = average;
-                }
-            }
-            if !block.iter().all(|value| value.is_finite()) {
-                return Err(format!(
-                    "exact observed-information shape covariance: atom {atom} block is non-finite"
-                ));
-            }
-            blocks.push(block);
-        }
+        let border_factor = Array2::from_shape_fn((border_dim, retained.len()), |(row, col)| {
+            let index = retained[col];
+            self.eigenvectors[[total_t + row, index]] / self.eigenvalues[index].sqrt()
+        });
+        let (blocks, robust_blocks) =
+            observed_information_border_blocks(border_factor.view(), meat, ranges)?;
         Ok(SaeShapeInformation::ObservedInformation(
             SaeObservedInformationCovariance {
                 blocks,
+                robust_blocks,
                 identified_rank: retained.len(),
                 ambient_dim: dim,
             },
