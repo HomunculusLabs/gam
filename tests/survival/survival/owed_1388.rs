@@ -72,7 +72,7 @@ fn channel_spec(
 ) -> ParameterBlockSpec {
     let n = design.nrows();
     let cb = Arc::new(AdditiveBlockJacobian {
-        design: design.clone(),
+        design: Arc::new(design.clone()),
         own_output: own_channel,
         n_family_outputs: K,
     });

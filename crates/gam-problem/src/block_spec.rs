@@ -199,13 +199,16 @@ pub trait BlockEffectiveJacobian: Send + Sync {
 ///
 /// `own_output` is the zero-based output index that this block drives.
 /// `n_family_outputs` is the total number of outputs (e.g. 2 for location-scale).
-/// `design` is the block's effective design matrix (n × p_block).
+/// `design` is the block's effective design matrix (n × p_block). It is shared,
+/// so blocks that drive different outputs through one design (the causes of a
+/// competing-risks fit, the classes of a multinomial fit) hold one allocation
+/// rather than a row-scaled copy each.
 ///
 /// The returned Jacobian has shape `(n_family_outputs * n, p_block)`:
 /// rows `own_output * n .. (own_output + 1) * n` contain `design`,
 /// all other rows are zero.
 pub struct AdditiveBlockJacobian {
-    pub design: Array2<f64>,
+    pub design: Arc<Array2<f64>>,
     pub own_output: usize,
     pub n_family_outputs: usize,
 }

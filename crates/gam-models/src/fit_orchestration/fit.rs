@@ -2397,31 +2397,32 @@ fn fit_cause_specific_survival_transformation_custom(
         .into());
     }
 
-    let dense_time_entry = prepared.time_design_entry.to_dense();
-    let dense_time_exit = prepared.time_design_exit.to_dense();
-    let dense_time_derivative = prepared.time_design_derivative_exit.to_dense();
-    let mut x_entry = Array2::<f64>::zeros((n, p));
-    let mut x_exit = Array2::<f64>::zeros((n, p));
-    let mut x_derivative = Array2::<f64>::zeros((n, p));
-    if p_time_total > 0 {
-        x_entry
-            .slice_mut(s![.., ..p_time_total])
-            .assign(&dense_time_entry);
-        x_exit
-            .slice_mut(s![.., ..p_time_total])
-            .assign(&dense_time_exit);
-        x_derivative
-            .slice_mut(s![.., ..p_time_total])
-            .assign(&dense_time_derivative);
-    }
-    if p_cov > 0 {
-        x_entry
-            .slice_mut(s![.., p_time_total..])
-            .assign(dense_cov_design);
-        x_exit
-            .slice_mut(s![.., p_time_total..])
-            .assign(dense_cov_design);
-    }
+    // The joint designs are `[time | covariates]` at entry and exit, and `[time | 0]`
+    // for the time derivative, where covariates do not enter. Each is written once,
+    // straight from the time design's row chunks, and charged on the memory governor's
+    // ledger for the life of the fit. Every cause's family block, block spec and channel
+    // Jacobian shares them. C causes used to hold 5C + 6 row-scaled copies outside the
+    // ledger (#2900).
+    let joint_design_charge = gam_runtime::resource::MemoryGovernor::global()
+        .try_reserve_dense_f64_copies(n, p, 3, "cause-specific survival joint designs")
+        .map_err(|error| {
+            format!("cause-specific survival: refusing three {n}x{p} joint designs: {error}")
+        })?;
+    let x_entry = std::sync::Arc::new(joint_time_covariate_design(
+        &prepared.time_design_entry,
+        Some(dense_cov_design),
+        p,
+    )?);
+    let x_exit = std::sync::Arc::new(joint_time_covariate_design(
+        &prepared.time_design_exit,
+        Some(dense_cov_design),
+        p,
+    )?);
+    let x_derivative = std::sync::Arc::new(joint_time_covariate_design(
+        &prepared.time_design_derivative_exit,
+        None,
+        p,
+    )?);
 
     let mut family_blocks = Vec::with_capacity(cause_count);
     let mut block_specs = Vec::with_capacity(cause_count);
@@ -2435,9 +2436,9 @@ fn fit_cause_specific_survival_transformation_custom(
             age_exit: spec.age_exit.clone(),
             event_target,
             sampleweight: spec.weights.clone(),
-            x_entry: x_entry.clone(),
-            x_exit: x_exit.clone(),
-            x_derivative: x_derivative.clone(),
+            x_entry: std::sync::Arc::clone(&x_entry),
+            x_exit: std::sync::Arc::clone(&x_exit),
+            x_derivative: std::sync::Arc::clone(&x_derivative),
             offset_eta_entry: prepared.eta_offset_entry.clone() + &spec.covariate_offset,
             offset_eta_exit: prepared.eta_offset_exit.clone() + &spec.covariate_offset,
             offset_derivative_exit: prepared.derivative_offset_exit.clone(),
@@ -2521,13 +2522,13 @@ fn fit_cause_specific_survival_transformation_custom(
         let cause_priority =
             100u8.saturating_add(u8::try_from(cause_count - cause).unwrap_or(u8::MAX));
         let cause_jacobian = std::sync::Arc::new(AdditiveBlockJacobian {
-            design: x_exit.clone(),
+            design: std::sync::Arc::clone(&x_exit),
             own_output: cause,
             n_family_outputs: cause_count,
         });
         block_specs.push(ParameterBlockSpec {
             name: format!("time_cause_{}", cause + 1),
-            design: gam_linalg::matrix::DesignMatrix::from(x_exit.clone()),
+            design: gam_linalg::matrix::DesignMatrix::from(std::sync::Arc::clone(&x_exit)),
             offset: prepared.eta_offset_exit.clone() + &spec.covariate_offset,
             penalties,
             nullspace_dims,
@@ -2602,6 +2603,7 @@ fn fit_cause_specific_survival_transformation_custom(
     } else {
         baseline_cfg
     };
+    drop(joint_design_charge);
     Ok(SurvivalTransformationFitResult {
         fit,
         resolvedspec,
@@ -2611,6 +2613,29 @@ fn fit_cause_specific_survival_transformation_custom(
         time_base_ncols: spec.time_build.x_exit_time.ncols(),
         baseline_timewiggle: prepared.timewiggle_block,
     })
+}
+
+/// `[time | covariates]`, or `[time | 0]` when `covariates` is `None`, written straight
+/// from the time design's row chunks, with no dense copy of the time design in between.
+fn joint_time_covariate_design(
+    time_design: &gam_linalg::matrix::DesignMatrix,
+    covariates: Option<&Array2<f64>>,
+    p: usize,
+) -> Result<Array2<f64>, String> {
+    let n = time_design.nrows();
+    let p_time = time_design.ncols();
+    let mut joint = Array2::<f64>::zeros((n, p));
+    let chunk_rows = gam_runtime::resource::byte_balanced_row_chunk(p_time, n);
+    for start in (0..n).step_by(chunk_rows) {
+        let end = (start + chunk_rows).min(n);
+        time_design
+            .row_chunk_into(start..end, joint.slice_mut(s![start..end, ..p_time]))
+            .map_err(|error| format!("survival time design rows {start}..{end}: {error}"))?;
+    }
+    if let Some(covariates) = covariates {
+        joint.slice_mut(s![.., p_time..]).assign(covariates);
+    }
+    Ok(joint)
 }
 
 fn cause_specific_survival_rho_prior(
@@ -2728,9 +2753,28 @@ fn hash_workflow_array2(
 fn hash_workflow_design_matrix(
     hasher: &mut gam_runtime::warm_start::Fingerprinter,
     matrix: &gam_linalg::matrix::DesignMatrix,
-) {
-    let dense = matrix.to_dense();
-    hash_workflow_array2(hasher, dense.view());
+) -> Result<(), String> {
+    // The byte stream `hash_workflow_array2` writes for the dense matrix, read one row
+    // chunk at a time so the key never densifies the design (#2900).
+    let n = matrix.nrows();
+    let p = matrix.ncols();
+    hasher.write_usize(n);
+    hasher.write_usize(p);
+    let chunk_rows = gam_runtime::resource::byte_balanced_row_chunk(p, n);
+    let mut chunk = Array2::<f64>::zeros((chunk_rows.min(n), p));
+    for start in (0..n).step_by(chunk_rows) {
+        let end = (start + chunk_rows).min(n);
+        let mut rows = chunk.slice_mut(s![..end - start, ..]);
+        matrix
+            .row_chunk_into(start..end, rows.view_mut())
+            .map_err(|error| format!("survival warm-start key design rows {start}..{end}: {error}"))?;
+        for row in rows.rows() {
+            for &value in row {
+                hasher.write_f64(value);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn survival_transformation_log_lambdas(
@@ -2754,7 +2798,7 @@ fn persistent_survival_transformation_key(
     penalty_blocks: &[crate::survival::PenaltyBlock],
     opts: &gam_solve::pirls::WorkingModelPirlsOptions,
     n_cols: usize,
-) -> String {
+) -> Result<String, String> {
     let mut hasher = gam_runtime::warm_start::Fingerprinter::new();
     hasher.write_str("gamfit-persistent-survival-transformation-working-pirls");
     // Use the cache schema tag (NOT CARGO_PKG_VERSION) so routine
@@ -2816,9 +2860,9 @@ fn persistent_survival_transformation_key(
     hash_workflow_array_view(&mut hasher, prepared.eta_offset_entry.view());
     hash_workflow_array_view(&mut hasher, prepared.eta_offset_exit.view());
     hash_workflow_array_view(&mut hasher, prepared.derivative_offset_exit.view());
-    hash_workflow_design_matrix(&mut hasher, &prepared.time_design_entry);
-    hash_workflow_design_matrix(&mut hasher, &prepared.time_design_exit);
-    hash_workflow_design_matrix(&mut hasher, &prepared.time_design_derivative_exit);
+    hash_workflow_design_matrix(&mut hasher, &prepared.time_design_entry)?;
+    hash_workflow_design_matrix(&mut hasher, &prepared.time_design_exit)?;
+    hash_workflow_design_matrix(&mut hasher, &prepared.time_design_derivative_exit)?;
     hasher.write_usize(penalty_blocks.len());
     for block in penalty_blocks {
         hasher.write_f64(block.lambda);
@@ -2836,7 +2880,7 @@ fn persistent_survival_transformation_key(
         hash_workflow_array_view(&mut hasher, bounds.view());
     }
     hasher.write_bool(opts.linear_constraints.is_some());
-    format!("surv-transform-{}", hasher.finish_hex())
+    Ok(format!("surv-transform-{}", hasher.finish_hex()))
 }
 
 fn load_survival_transformation_persistent_warm_start(
@@ -2921,7 +2965,13 @@ pub(crate) fn fit_survival_transformation_model(
         &covariate_design,
     )
     .map_err(|err| err.to_string())?;
-    let dense_cov_design = covariate_design.design.to_dense();
+    // Densified once, on the governor's ledger, and shared by every working model
+    // the baseline search builds rather than copied into each one (#2900).
+    let dense_cov_design = std::sync::Arc::new(
+        covariate_design
+            .design
+            .try_to_dense_by_chunks("survival transformation covariate design")?,
+    );
     let p_cov = dense_cov_design.ncols();
     let cause_count = crate::survival::cause_count_from_event_codes(spec.event_target.view())
         .into_workflow_result()?;
@@ -3024,9 +3074,18 @@ pub(crate) fn fit_survival_transformation_model(
             // is not positive definite) instead of being silently pinned by a
             // `1e-6` prior — a construction defect belongs to the identifiability
             // audit, not to the objective.
-            let dense_time_entry = prepared.time_design_entry.to_dense();
-            let dense_time_exit = prepared.time_design_exit.to_dense();
-            let dense_time_derivative = prepared.time_design_derivative_exit.to_dense();
+            // The time designs are densified on the governor's ledger and moved into
+            // the working model, and the covariate design is shared. The model used
+            // to copy each view again on every baseline-search evaluation (#2900).
+            let dense_time_entry = prepared
+                .time_design_entry
+                .try_to_dense_by_chunks("survival transformation entry time design")?;
+            let dense_time_exit = prepared
+                .time_design_exit
+                .try_to_dense_by_chunks("survival transformation exit time design")?;
+            let dense_time_derivative = prepared
+                .time_design_derivative_exit
+                .try_to_dense_by_chunks("survival transformation derivative time design")?;
             let event_competing = Array1::<u8>::zeros(spec.event_target.len());
             // `spec.event_target` carries *cause labels* (0 = censored, k = cause k).
             // The shared baseline working model is a single-hazard Royston-Parmar
@@ -3048,10 +3107,10 @@ pub(crate) fn fit_survival_transformation_model(
                         event_target: baseline_event_indicator.view(),
                         event_competing: event_competing.view(),
                         weights: spec.weights.view(),
-                        time_entry: dense_time_entry.view(),
-                        time_exit: dense_time_exit.view(),
-                        time_derivative: dense_time_derivative.view(),
-                        covariates: dense_cov_design.view(),
+                        time_entry: dense_time_entry,
+                        time_exit: dense_time_exit,
+                        time_derivative: dense_time_derivative,
+                        covariates: std::sync::Arc::clone(&dense_cov_design),
                         monotonicity_constraint_rows: None,
                         monotonicity_constraint_offsets: None,
                         eta_offset_entry: Some(eta_offset_entry.view()),
@@ -3283,7 +3342,7 @@ pub(crate) fn fit_survival_transformation_model(
         &penalty_blocks,
         &opts,
         expected_beta_len,
-    );
+    )?;
     let mut opts = opts;
     // The final fixed-λ solve is the inner problem at the selected ρ, which
     // the selector has just solved and certified: start from that mode so the
@@ -3583,5 +3642,55 @@ mod survival_edf_tests {
             "total EDF {:.9} != 26/11",
             edf_total
         );
+    }
+}
+
+#[cfg(test)]
+mod survival_design_sharing_2900_tests {
+    use super::{hash_workflow_array2, hash_workflow_design_matrix, joint_time_covariate_design};
+    use gam_linalg::matrix::DesignMatrix;
+    use gam_runtime::warm_start::Fingerprinter;
+    use ndarray::{Array2, s};
+
+    fn time_design(n: usize, p_time: usize) -> Array2<f64> {
+        Array2::from_shape_fn((n, p_time), |(i, j)| ((i * 7 + j * 3) % 11) as f64 / 11.0 - 0.3)
+    }
+
+    /// #2900 — the cause-specific joint designs are written from the time design's row
+    /// chunks instead of densifying the time design first. They equal the concatenation
+    /// they replaced: `[time | covariates]` with covariates and `[time | 0]` without.
+    #[test]
+    fn joint_design_matches_the_densified_concatenation_2900() {
+        let n = 1300;
+        let p_time = 4;
+        let p_cov = 3;
+        let time = time_design(n, p_time);
+        let covariates = Array2::from_shape_fn((n, p_cov), |(i, j)| (i as f64).sin() + j as f64);
+        let design = DesignMatrix::from(time.clone());
+
+        let joint = joint_time_covariate_design(&design, Some(&covariates), p_time + p_cov)
+            .expect("joint design with covariates");
+        assert_eq!(joint.dim(), (n, p_time + p_cov));
+        assert_eq!(joint.slice(s![.., ..p_time]), time);
+        assert_eq!(joint.slice(s![.., p_time..]), covariates);
+
+        let derivative = joint_time_covariate_design(&design, None, p_time + p_cov)
+            .expect("joint derivative design");
+        assert_eq!(derivative.slice(s![.., ..p_time]), time);
+        assert!(derivative.slice(s![.., p_time..]).iter().all(|&v| v == 0.0));
+    }
+
+    /// #2900 — the survival warm-start key reads the time design one row chunk at a
+    /// time instead of densifying it. It writes the same byte stream the dense hash
+    /// wrote, so every key already in a persistent store still matches.
+    #[test]
+    fn streamed_design_hash_matches_the_dense_hash_2900() {
+        let time = time_design(1300, 5);
+        let mut dense = Fingerprinter::new();
+        hash_workflow_array2(&mut dense, time.view());
+        let mut streamed = Fingerprinter::new();
+        hash_workflow_design_matrix(&mut streamed, &DesignMatrix::from(time.clone()))
+            .expect("streamed design hash");
+        assert_eq!(streamed.finish_hex(), dense.finish_hex());
     }
 }

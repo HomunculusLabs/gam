@@ -31,7 +31,7 @@ fn canonical_dead_column_callback_block_is_not_reduced_1590() {
                 102 - cause as u8,
             );
             spec.jacobian_callback = Some(Arc::new(AdditiveBlockJacobian {
-                design: design.clone(),
+                design: Arc::new(design.clone()),
                 own_output: cause,
                 n_family_outputs: 2,
             }));

@@ -2,7 +2,8 @@ use crate::survival::{
     PenaltyBlocks, SurvivalBaselineOffsets, SurvivalEngineInputs, SurvivalMonotonicityPenalty,
     SurvivalSpec, SurvivalTimeCovarInputs, WorkingModelSurvival,
 };
-use ndarray::{ArrayView1, ArrayView2};
+use ndarray::{Array2, ArrayView1, ArrayView2};
+use std::sync::Arc;
 
 /// Flattened engine inputs for Royston-Parmar likelihood evaluation.
 pub struct RoystonParmarInputs<'a> {
@@ -30,17 +31,19 @@ pub struct RoystonParmarInputs<'a> {
 /// `monotonicity_constraint_*` views describe the linear constraint
 /// `A·β + offset ≥ 0` enforcing dη/da ≥ 0; the `*_offset_*` views carry the
 /// fixed (non-coefficient) addends to η at entry, η at exit, and dη/da at
-/// exit.  All views are zero-copy borrows of caller-owned storage.
+/// exit.  The views are zero-copy borrows of caller-owned storage. The time
+/// designs are moved in and the covariate design is shared, so the working model
+/// holds them without a second row-scaled copy.
 pub(crate) struct RoystonParmarSharedTimeCovariateInputs<'a> {
     pub age_entry: ArrayView1<'a, f64>,
     pub age_exit: ArrayView1<'a, f64>,
     pub event_target: ArrayView1<'a, u8>,
     pub event_competing: ArrayView1<'a, u8>,
     pub weights: ArrayView1<'a, f64>,
-    pub time_entry: ArrayView2<'a, f64>,
-    pub time_exit: ArrayView2<'a, f64>,
-    pub time_derivative: ArrayView2<'a, f64>,
-    pub covariates: ArrayView2<'a, f64>,
+    pub time_entry: Array2<f64>,
+    pub time_exit: Array2<f64>,
+    pub time_derivative: Array2<f64>,
+    pub covariates: Arc<Array2<f64>>,
     pub monotonicity_constraint_rows: Option<ArrayView2<'a, f64>>,
     pub monotonicity_constraint_offsets: Option<ArrayView1<'a, f64>>,
     pub eta_offset_entry: Option<ArrayView1<'a, f64>>,

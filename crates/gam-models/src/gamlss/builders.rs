@@ -341,7 +341,7 @@ pub(crate) fn build_location_scale_block(
     };
     let dense = spec.effective_design(caller)?;
     spec.jacobian_callback = Some(std::sync::Arc::new(AdditiveBlockJacobian {
-        design: dense,
+        design: std::sync::Arc::new(dense),
         own_output,
         n_family_outputs,
     }));
@@ -378,7 +378,7 @@ pub(crate) fn build_location_scale_wiggle_block(
         stacked_offset: None,
     };
     spec.jacobian_callback = Some(std::sync::Arc::new(AdditiveBlockJacobian {
-        design: ndarray::Array2::<f64>::zeros((n_rows, p_w)),
+        design: std::sync::Arc::new(ndarray::Array2::<f64>::zeros((n_rows, p_w))),
         own_output: 0,
         n_family_outputs: LOCATION_SCALE_N_OUTPUTS,
     }));

@@ -506,7 +506,7 @@ pub(crate) fn wire_output_channels<F: CustomFamily + ?Sized>(
             }
         })?;
         spec.jacobian_callback = Some(Arc::new(AdditiveBlockJacobian {
-            design: dense,
+            design: Arc::new(dense),
             own_output,
             n_family_outputs,
         }));

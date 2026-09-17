@@ -1274,7 +1274,7 @@ impl MultinomialFamily {
                 };
                 spec.jacobian_callback = Some(Arc::new(MultinomialClassChannelJacobian::new(
                     AdditiveBlockJacobian {
-                        design: (*self.design).clone(),
+                        design: Arc::clone(&self.design),
                         own_output: a,
                         n_family_outputs: m,
                     },

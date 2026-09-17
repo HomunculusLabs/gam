@@ -40,9 +40,9 @@ fn fit_constant_exposure_cause_specific(event_counts: &[usize], n: usize) -> Arr
     let age_entry = Array1::zeros(n);
     let age_exit = Array1::ones(n);
     let weights = Array1::ones(n);
-    let x_entry = Array2::ones((n, 1));
-    let x_exit = Array2::ones((n, 1));
-    let x_derivative = Array2::zeros((n, 1));
+    let x_entry = Arc::new(Array2::ones((n, 1)));
+    let x_exit = Arc::new(Array2::ones((n, 1)));
+    let x_derivative = Arc::new(Array2::zeros((n, 1)));
     let offset_entry = Array1::zeros(n);
     let offset_exit = Array1::zeros(n);
     let offset_derivative = Array1::ones(n);
@@ -56,9 +56,9 @@ fn fit_constant_exposure_cause_specific(event_counts: &[usize], n: usize) -> Arr
             age_exit: age_exit.clone(),
             event_target: events.mapv(|event| u8::from(event == cause_code)),
             sampleweight: weights.clone(),
-            x_entry: x_entry.clone(),
-            x_exit: x_exit.clone(),
-            x_derivative: x_derivative.clone(),
+            x_entry: Arc::clone(&x_entry),
+            x_exit: Arc::clone(&x_exit),
+            x_derivative: Arc::clone(&x_derivative),
             offset_eta_entry: offset_entry.clone(),
             offset_eta_exit: offset_exit.clone(),
             offset_derivative_exit: offset_derivative.clone(),
@@ -83,13 +83,13 @@ fn fit_constant_exposure_cause_specific(event_counts: &[usize], n: usize) -> Arr
         let cause_priority =
             100u8.saturating_add(u8::try_from(cause_count - cause).unwrap_or(u8::MAX));
         let cause_jacobian = Arc::new(AdditiveBlockJacobian {
-            design: x_exit.clone(),
+            design: Arc::clone(&x_exit),
             own_output: cause,
             n_family_outputs: cause_count,
         });
         specs.push(ParameterBlockSpec {
             name: format!("cause_{}", cause + 1),
-            design: DesignMatrix::from(x_exit.clone()),
+            design: DesignMatrix::from(Arc::clone(&x_exit)),
             offset: Array1::zeros(n),
             penalties: Vec::new(),
             nullspace_dims: Vec::new(),

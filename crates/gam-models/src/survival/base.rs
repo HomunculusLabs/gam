@@ -15,6 +15,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3, Axis};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -95,10 +96,12 @@ pub(crate) struct SurvivalTimeCovarInputs<'a> {
     pub event_target: ArrayView1<'a, u8>,
     pub event_competing: ArrayView1<'a, u8>,
     pub sampleweight: ArrayView1<'a, f64>,
-    pub time_entry: ArrayView2<'a, f64>,
-    pub time_exit: ArrayView2<'a, f64>,
-    pub time_derivative: ArrayView2<'a, f64>,
-    pub covariates: ArrayView2<'a, f64>,
+    /// The time designs are moved in and the covariate design is shared, so the
+    /// working model holds no second row-scaled copy of either.
+    pub time_entry: Array2<f64>,
+    pub time_exit: Array2<f64>,
+    pub time_derivative: Array2<f64>,
+    pub covariates: Arc<Array2<f64>>,
     /// Optional global monotonicity collocation rows for the full coefficient vector.
     /// Non-structural survival models should pass these explicitly instead of
     /// relying on observed derivative rows.
@@ -216,9 +219,11 @@ pub struct CauseSpecificRoystonParmarBlock {
     pub age_exit: Array1<f64>,
     pub event_target: Array1<u8>,
     pub sampleweight: Array1<f64>,
-    pub x_entry: Array2<f64>,
-    pub x_exit: Array2<f64>,
-    pub x_derivative: Array2<f64>,
+    /// The three designs are shared: every cause of one fit reads the same
+    /// `n × p` allocation instead of holding a copy of its own.
+    pub x_entry: Arc<Array2<f64>>,
+    pub x_exit: Arc<Array2<f64>>,
+    pub x_derivative: Arc<Array2<f64>>,
     pub offset_eta_entry: Array1<f64>,
     pub offset_eta_exit: Array1<f64>,
     pub offset_derivative_exit: Array1<f64>,
@@ -589,7 +594,7 @@ fn cause_specific_pullback_hessian(
     block: &CauseSpecificRoystonParmarBlock,
     weights: &[Array1<f64>; 6],
 ) -> Array2<f64> {
-    let designs = [&block.x_exit, &block.x_entry, &block.x_derivative];
+    let designs = [&*block.x_exit, &*block.x_entry, &*block.x_derivative];
     let p = block.x_exit.ncols();
     let mut hessian = Array2::<f64>::zeros((p, p));
     for (slot, &(left, right)) in CAUSE_SPECIFIC_PRIMARY_PAIRS.iter().enumerate() {
@@ -619,9 +624,9 @@ fn evaluate_cause_specific_block(
             reason: format!("beta length mismatch: got {}, expected {p}", beta.len()),
         });
     }
-    let eta_entry = fast_av(&block.x_entry, beta) + &block.offset_eta_entry;
-    let eta_exit = fast_av(&block.x_exit, beta) + &block.offset_eta_exit;
-    let derivative = fast_av(&block.x_derivative, beta) + &block.offset_derivative_exit;
+    let eta_entry = fast_av(&*block.x_entry, beta) + &block.offset_eta_entry;
+    let eta_exit = fast_av(&*block.x_exit, beta) + &block.offset_eta_exit;
+    let derivative = fast_av(&*block.x_derivative, beta) + &block.offset_derivative_exit;
     let mut log_likelihood = 0.0;
     let mut gradient_weights: [Array1<f64>; 3] = std::array::from_fn(|_| Array1::<f64>::zeros(n));
     let mut hessian_weights: [Array1<f64>; 6] = std::array::from_fn(|_| Array1::<f64>::zeros(n));
@@ -650,7 +655,7 @@ fn evaluate_cause_specific_block(
         }
     }
 
-    let designs = [&block.x_exit, &block.x_entry, &block.x_derivative];
+    let designs = [&*block.x_exit, &*block.x_entry, &*block.x_derivative];
     let mut gradient = Array1::<f64>::zeros(p);
     for axis in 0..3 {
         gradient += &fast_atv(designs[axis], &gradient_weights[axis]);
@@ -692,13 +697,13 @@ fn time_block_linear_constraint_system(
     let structural_cols = block.structural_time_columns.min(p);
     if structural_cols == 0 {
         return LinearInequalityConstraints {
-            a: block.x_derivative.clone(),
+            a: (*block.x_derivative).clone(),
             b: rhs,
         };
     }
     let mut a = Array2::<f64>::zeros((n_rows + structural_cols, p));
     a.slice_mut(ndarray::s![..n_rows, ..])
-        .assign(&block.x_derivative);
+        .assign(&*block.x_derivative);
     for j in 0..structural_cols {
         a[[n_rows + j, j]] = 1.0;
     }
@@ -999,10 +1004,10 @@ fn cause_specific_hessian_third_directional_all_axes(
             reason: "cause-specific third Hessian derivative dimension mismatch".to_string(),
         });
     }
-    let entry = fast_av(&block.x_entry, beta) + &block.offset_eta_entry;
-    let exit = fast_av(&block.x_exit, beta) + &block.offset_eta_exit;
-    let derivative = fast_av(&block.x_derivative, beta) + &block.offset_derivative_exit;
-    let designs = [&block.x_exit, &block.x_entry, &block.x_derivative];
+    let entry = fast_av(&*block.x_entry, beta) + &block.offset_eta_entry;
+    let exit = fast_av(&*block.x_exit, beta) + &block.offset_eta_exit;
+    let derivative = fast_av(&*block.x_derivative, beta) + &block.offset_derivative_exit;
+    let designs = [&*block.x_exit, &*block.x_entry, &*block.x_derivative];
     let du = designs.map(|design| fast_av(design, u));
     let dv = designs.map(|design| fast_av(design, v));
     let n = block.event_target.len();
@@ -1047,12 +1052,12 @@ fn cause_specific_hessian_directional_derivative(
             reason: "cause-specific survival Hessian derivative dimension mismatch".to_string(),
         });
     }
-    let eta_entry = fast_av(&block.x_entry, beta) + &block.offset_eta_entry;
-    let eta_exit = fast_av(&block.x_exit, beta) + &block.offset_eta_exit;
-    let derivative = fast_av(&block.x_derivative, beta) + &block.offset_derivative_exit;
-    let d_eta_entry = fast_av(&block.x_entry, d_beta);
-    let d_eta_exit = fast_av(&block.x_exit, d_beta);
-    let d_derivative = fast_av(&block.x_derivative, d_beta);
+    let eta_entry = fast_av(&*block.x_entry, beta) + &block.offset_eta_entry;
+    let eta_exit = fast_av(&*block.x_exit, beta) + &block.offset_eta_exit;
+    let derivative = fast_av(&*block.x_derivative, beta) + &block.offset_derivative_exit;
+    let d_eta_entry = fast_av(&*block.x_entry, d_beta);
+    let d_eta_exit = fast_av(&*block.x_exit, d_beta);
+    let d_derivative = fast_av(&*block.x_derivative, d_beta);
     let n = block.event_target.len();
     let mut weights: [Array1<f64>; 6] = std::array::from_fn(|_| Array1::zeros(n));
 
@@ -1098,15 +1103,15 @@ fn cause_specific_hessian_second_directional_derivative(
                 .to_string(),
         });
     }
-    let eta_entry = fast_av(&block.x_entry, beta) + &block.offset_eta_entry;
-    let eta_exit = fast_av(&block.x_exit, beta) + &block.offset_eta_exit;
-    let derivative = fast_av(&block.x_derivative, beta) + &block.offset_derivative_exit;
-    let u_eta_entry = fast_av(&block.x_entry, d_beta_u);
-    let u_eta_exit = fast_av(&block.x_exit, d_beta_u);
-    let u_derivative = fast_av(&block.x_derivative, d_beta_u);
-    let v_eta_entry = fast_av(&block.x_entry, d_beta_v);
-    let v_eta_exit = fast_av(&block.x_exit, d_beta_v);
-    let v_derivative = fast_av(&block.x_derivative, d_beta_v);
+    let eta_entry = fast_av(&*block.x_entry, beta) + &block.offset_eta_entry;
+    let eta_exit = fast_av(&*block.x_exit, beta) + &block.offset_eta_exit;
+    let derivative = fast_av(&*block.x_derivative, beta) + &block.offset_derivative_exit;
+    let u_eta_entry = fast_av(&*block.x_entry, d_beta_u);
+    let u_eta_exit = fast_av(&*block.x_exit, d_beta_u);
+    let u_derivative = fast_av(&*block.x_derivative, d_beta_u);
+    let v_eta_entry = fast_av(&*block.x_entry, d_beta_v);
+    let v_eta_exit = fast_av(&*block.x_exit, d_beta_v);
+    let v_derivative = fast_av(&*block.x_derivative, d_beta_v);
     let n = block.event_target.len();
     let mut weights: [Array1<f64>; 6] = std::array::from_fn(|_| Array1::zeros(n));
 
@@ -1292,7 +1297,7 @@ enum SurvivalDesign {
         time_entry: Array2<f64>,
         time_exit: Array2<f64>,
         time_derivative: Array2<f64>,
-        covariates: Array2<f64>,
+        covariates: Arc<Array2<f64>>,
     },
 }
 
@@ -1598,15 +1603,15 @@ impl WorkingModelSurvival {
                 if p_cov > 0 {
                     // time-cov block: T_exit^T W_exit C - T_entry^T W_entry C
                     let tc = {
-                        let mut block = fast_xt_diag_y(time_exit, w_exit, covariates);
-                        block -= &fast_xt_diag_y(time_entry, w_entry, covariates);
+                        let mut block = fast_xt_diag_y(time_exit, w_exit, &**covariates);
+                        block -= &fast_xt_diag_y(time_entry, w_entry, &**covariates);
                         block
                     };
                     h.slice_mut(ndarray::s![..p_time, p_time..]).assign(&tc);
                     h.slice_mut(ndarray::s![p_time.., ..p_time]).assign(&tc.t());
                     // cov-cov block: C^T (W_exit - W_entry) C
                     let w_diff = w_exit - w_entry;
-                    let cc = fast_xt_diag_x(covariates, &w_diff);
+                    let cc = fast_xt_diag_x(&**covariates, &w_diff);
                     h.slice_mut(ndarray::s![p_time.., p_time..]).assign(&cc);
                 }
                 h
@@ -2060,10 +2065,10 @@ impl WorkingModelSurvival {
             inputs.event_target,
             inputs.sampleweight,
             SurvivalDesign::TimeCovariateShared {
-                time_entry: inputs.time_entry.to_owned(),
-                time_exit: inputs.time_exit.to_owned(),
-                time_derivative: inputs.time_derivative.to_owned(),
-                covariates: inputs.covariates.to_owned(),
+                time_entry: inputs.time_entry,
+                time_exit: inputs.time_exit,
+                time_derivative: inputs.time_derivative,
+                covariates: inputs.covariates,
             },
             offset_eta_entry,
             offset_eta_exit,
@@ -2213,12 +2218,19 @@ impl WorkingModelSurvival {
                 covariates,
                 ..
             } => {
-                let full = ndarray::concatenate(
-                    ndarray::Axis(1),
-                    &[time_exit.view(), covariates.view()],
-                )
-                .expect("time and covariate designs share their row count");
-                full.t().dot(&full)
+                // The Gram of `[time | covariates]` block by block, without
+                // concatenating the two designs into one more row-scaled copy.
+                let p_time = time_exit.ncols();
+                let p = p_time + covariates.ncols();
+                let mut gram = Array2::<f64>::zeros((p, p));
+                gram.slice_mut(ndarray::s![..p_time, ..p_time])
+                    .assign(&time_exit.t().dot(time_exit));
+                let cross = time_exit.t().dot(&**covariates);
+                gram.slice_mut(ndarray::s![..p_time, p_time..]).assign(&cross);
+                gram.slice_mut(ndarray::s![p_time.., ..p_time]).assign(&cross.t());
+                gram.slice_mut(ndarray::s![p_time.., p_time..])
+                    .assign(&covariates.t().dot(&**covariates));
+                gram
             }
         };
         let active: Vec<&PenaltyBlock> = self
@@ -3642,9 +3654,9 @@ mod tests {
                 age_exit: array![2.0],
                 event_target: array![if event { 1u8 } else { 0u8 }],
                 sampleweight: array![w],
-                x_entry: array![[0.0, 1.0, 0.0]],
-                x_exit: array![[1.0, 0.0, 0.0]],
-                x_derivative: array![[0.0, 0.0, 1.0]],
+                x_entry: Arc::new(array![[0.0, 1.0, 0.0]]),
+                x_exit: Arc::new(array![[1.0, 0.0, 0.0]]),
+                x_derivative: Arc::new(array![[0.0, 0.0, 1.0]]),
                 offset_eta_entry: array![0.0],
                 offset_eta_exit: array![0.0],
                 offset_derivative_exit: array![0.0],
