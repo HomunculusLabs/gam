@@ -1381,8 +1381,11 @@ impl SaeManifoldOuterObjective {
         let pristine_blocks = self.target.slice(s![.., p_x..]).to_owned();
         // Mirror the spans onto the term so the outer-ρ gradient assembler can
         // build the block coordinates' IFT RHS (the −½·Γᵀθ̂_ρ adjoint channel
-        // completing the analytic block gradient).
+        // completing the analytic block gradient). The reset baseline carries
+        // them too: `reset` reinstalls `baseline_term`, which `new` cloned before
+        // pricing existed, and the outer driver resets before it installs a seed.
         self.term.crosscoder_pricing_spans = Some((p_x, block_dims.clone()));
+        self.baseline_term.crosscoder_pricing_spans = Some((p_x, block_dims.clone()));
         self.crosscoder_blocks = Some(CrosscoderBlockPricing {
             p_x,
             last_log_lambda: vec![0.0; block_dims.len()],
@@ -5123,5 +5126,87 @@ mod probe_refusal_classification_2593_tests {
         assert!(!SaeManifoldOuterObjective::is_recoverable_value_probe_refusal(
             defect
         ));
+    }
+}
+
+#[cfg(test)]
+mod crosscoder_reset_baseline_2627_tests {
+    //! #2627 — `gam crosscoder` (docs/cli.md) refused every seed with the internal
+    //! invariant "rho carries block coordinates but no crosscoder pricing spans are
+    //! installed". `with_crosscoder_blocks` gave the spans to the live term only, and
+    //! `reset` reinstalls the baseline term `new` cloned before pricing existed.
+
+    use super::*;
+
+    /// Crosscoder pricing survives `reset`, and the analytic gradient prices the
+    /// block coordinate from the restored term.
+    #[test]
+    fn crosscoder_pricing_spans_survive_reset_2627() {
+        let n = 40usize;
+        let p_x = 3usize;
+        let block_dims = vec![3usize];
+        let p = p_x + block_dims[0];
+        let zf: Vec<f64> = (0..n)
+            .map(|i| ((i as f64 + 1.0) * 0.23).sin() + 0.3 * ((i * 3) as f64).cos())
+            .collect();
+        let c0 = Array1::from_shape_fn(p, |c| 1.0 + 0.5 * (c as f64) - 0.2 * ((c % 3) as f64));
+        let c1 = Array1::from_shape_fn(p, |c| (((c * 2 + 1) % 5) as f64 - 2.0) * 0.7);
+        let target = Array2::from_shape_fn((n, p), |(i, c)| c0[c] + zf[i] * c1[c]);
+        let coords = Array2::from_shape_fn((n, 1), |(i, _)| zf[i]);
+        let logits =
+            Array2::from_shape_fn((n, 1), |(i, _)| -3.0 + 6.0 * (i as f64) / (n as f64 - 1.0));
+        let evaluator = std::sync::Arc::new(EuclideanPatchEvaluator::new(1, 1).unwrap());
+        let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+        let m = phi.ncols();
+        let atom = SaeManifoldAtom::new_with_provided_function_gram(
+            "lin_bg",
+            SaeAtomBasisKind::Linear,
+            1,
+            phi,
+            jet,
+            Array2::<f64>::zeros((m, p)),
+            Array2::<f64>::eye(m),
+        )
+        .unwrap()
+        .with_basis_evaluator(evaluator);
+        let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+            logits,
+            vec![coords],
+            vec![LatentManifold::Euclidean],
+            AssignmentMode::ordered_beta_bernoulli(0.5, 1.0, false),
+        )
+        .unwrap();
+        let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+        let mut init_rho = SaeManifoldRho::new(
+            (1.0e-4_f64).ln(),
+            (1.0e-2_f64).ln(),
+            vec![Array1::<f64>::zeros(1)],
+        );
+        // #2822 — the data least-squares decoder at the fixture's chart; an entry refuses a zero decoder.
+        term.refit_decoder_least_squares_at_current_state(target.view(), Some(&init_rho))
+            .expect("the planted line spans a nonzero least-squares decoder");
+        init_rho.log_lambda_block = vec![0.0; block_dims.len()];
+        let mut obj =
+            SaeManifoldOuterObjective::new(term, target, None, init_rho, 60, 0.5, 1e-4, 1e-4)
+                .with_crosscoder_blocks(p_x, block_dims.clone())
+                .expect("crosscoder pricing installs on the stacked fixture");
+        let spans = Some((p_x, block_dims.clone()));
+        assert_eq!(obj.term.crosscoder_pricing_spans, spans);
+        obj.reset();
+        assert_eq!(
+            obj.term.crosscoder_pricing_spans, spans,
+            "reset must reinstall a term that still carries the crosscoder pricing spans"
+        );
+        let rho_flat = obj.baseline_rho.flat_coordinates();
+        let evaluation = obj
+            .eval_with_order(&rho_flat, OuterEvalOrder::ValueGradientHessian)
+            .expect("value+gradient eval at the reset seed prices the block coordinate");
+        assert_eq!(evaluation.gradient.len(), rho_flat.len());
+        assert!(
+            evaluation.gradient.iter().all(|value| value.is_finite()),
+            "every analytic outer gradient coordinate, the block one included, must be \
+             finite: {:?}",
+            evaluation.gradient
+        );
     }
 }
