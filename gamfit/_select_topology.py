@@ -574,7 +574,7 @@ def _default_topology_candidate(name: str, feature_dim: int) -> _Candidate:
     if name == "sphere":
         return _Candidate("sphere", topology.Sphere(name="omega"))
     if name == "torus":
-        return _Candidate("torus", topology.Torus(n_knots=(12, 12), name="theta_phi"))
+        return _Candidate("torus", topology.Torus(name="theta_phi"))
     if name == "cylinder":
         return _Candidate("cylinder", topology.Cylinder(name="cyl"))
     raise AssertionError(name)
