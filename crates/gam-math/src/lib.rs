@@ -1,4 +1,5 @@
 pub mod bivariate_normal;
+pub mod categorical;
 pub mod constrained_partition;
 pub mod fast_channel;
 pub mod gaussian_activation;
