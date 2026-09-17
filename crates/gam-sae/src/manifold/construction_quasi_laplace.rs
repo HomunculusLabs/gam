@@ -8077,3 +8077,462 @@ impl ExactHessianSpectralBlock {
         ))
     }
 }
+
+#[cfg(test)]
+mod shape_covariance_observed_information_tests_2933_f33 {
+    use super::*;
+    use crate::manifold::arrow_solver::apply_cached_arrow_hessian;
+    use crate::manifold::{FaerEigh, Side};
+
+    /// The moderate-penalty softmax basin `recompute_reproduces_joint_shape_band`
+    /// fits: a genuine reconstruction residual with both atoms alive, so the
+    /// residual curvature `Σ (WMr)·∇²f` that separates `A` from `B` is live.
+    fn converged_basin() -> (
+        SaeManifoldTerm,
+        Array2<f64>,
+        SaeManifoldRho,
+        SaeManifoldLoss,
+        ArrowFactorCache,
+    ) {
+        let (mut term, target, mut rho) =
+            crate::manifold::tests_recovery_split_780::gamma_fd_tiny_fixture();
+        rho.log_lambda_sparse = 0.0;
+        for value in rho.log_lambda_smooth.iter_mut() {
+            *value = -1.0;
+        }
+        for axis in rho.log_ard.iter_mut() {
+            for value in axis.iter_mut() {
+                *value = -1.0;
+            }
+        }
+        let (_value, loss, cache) = term
+            .penalized_quasi_laplace_criterion_with_cache(
+                target.view(),
+                &rho,
+                None,
+                40,
+                0.4,
+                1.0e-6,
+                1.0e-6,
+            )
+            .expect("the moderate-penalty basin converges with both atoms alive");
+        (term, target, rho, loss, cache)
+    }
+
+    /// The analytic joint KKT gradient in the cache's `(t, β)` layout.
+    fn joint_gradient(
+        term: &mut SaeManifoldTerm,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+    ) -> Array1<f64> {
+        let system = term
+            .assemble_arrow_schur(target, rho, None)
+            .expect("joint gradient assembly");
+        let mut flat = Vec::new();
+        for row in &system.rows {
+            flat.extend(row.gt.iter().copied());
+        }
+        flat.extend(system.gb.iter().copied());
+        Array1::from_vec(flat)
+    }
+
+    /// Central difference of the analytic joint gradient along every joint
+    /// coordinate, with the collapse-prevention gates held at the root as the
+    /// criterion holds them. Shares no code with the exact-Hessian applies, the
+    /// majorizer, or the selected-inverse producer.
+    fn finite_difference_hessian(
+        term: &SaeManifoldTerm,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        total_t: usize,
+        k: usize,
+        step: f64,
+    ) -> Array2<f64> {
+        let dim = total_t + k;
+        let mut hessian = Array2::<f64>::zeros((dim, dim));
+        for column in 0..dim {
+            let mut dt = Array1::<f64>::zeros(total_t);
+            let mut db = Array1::<f64>::zeros(k);
+            if column < total_t {
+                dt[column] = 1.0;
+            } else {
+                db[column - total_t] = 1.0;
+            }
+            let mut plus = term.clone();
+            plus.streaming_gates_frozen = true;
+            plus.apply_newton_step(dt.view(), db.view(), step)
+                .expect("forward perturbation");
+            let forward = joint_gradient(&mut plus, target, rho);
+            let mut minus = term.clone();
+            minus.streaming_gates_frozen = true;
+            let (neg_t, neg_b) = (-&dt, -&db);
+            minus
+                .apply_newton_step(neg_t.view(), neg_b.view(), step)
+                .expect("backward perturbation");
+            let backward = joint_gradient(&mut minus, target, rho);
+            assert_eq!(forward.len(), dim, "gradient layout must match the joint cache layout");
+            hessian
+                .column_mut(column)
+                .assign(&((&forward - &backward) / (2.0 * step)));
+        }
+        (&hessian + &hessian.t()) * 0.5
+    }
+
+    /// An independent spectral classification of a dense operator: plain `eigh`
+    /// and the shared scalar band rule with this oracle's own operands.
+    struct OracleSpectrum {
+        values: Array1<f64>,
+        vectors: Array2<f64>,
+        retained: Vec<usize>,
+        negative: usize,
+        in_band: usize,
+    }
+
+    fn classify(operator: &Array2<f64>, cache: &ArrowFactorCache) -> OracleSpectrum {
+        let dim = operator.nrows();
+        let (values, vectors) = operator.eigh(Side::Lower).expect("oracle eigendecomposition");
+        let spectral_norm = values.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+        let metric = ArrowMetric::Joint(cache);
+        let mut retained = Vec::new();
+        let mut negative = 0usize;
+        let mut in_band = 0usize;
+        for index in 0..dim {
+            let direction = vectors.column(index);
+            let edge = sae_exact_a_band_edge(
+                values[index],
+                dim,
+                spectral_norm,
+                metric.quadratic_form(direction).expect("B quadratic form"),
+                metric
+                    .substituted_stiffness(direction)
+                    .expect("substituted stiffness"),
+            );
+            if values[index] < -edge {
+                negative += 1;
+            } else if values[index] > edge {
+                retained.push(index);
+            } else {
+                in_band += 1;
+            }
+        }
+        OracleSpectrum {
+            values,
+            vectors,
+            retained,
+            negative,
+            in_band,
+        }
+    }
+
+    /// `[A⁺]_ββ[r, r]` from an oracle spectrum.
+    fn border_block(
+        spectrum: &OracleSpectrum,
+        total_t: usize,
+        range: &std::ops::Range<usize>,
+    ) -> Array2<f64> {
+        let width = range.len();
+        let mut block = Array2::<f64>::zeros((width, width));
+        for &index in &spectrum.retained {
+            let inverse = 1.0 / spectrum.values[index];
+            for row in 0..width {
+                let left = spectrum.vectors[[total_t + range.start + row, index]] * inverse;
+                for col in 0..width {
+                    block[[row, col]] += left * spectrum.vectors[[total_t + range.start + col, index]];
+                }
+            }
+        }
+        block
+    }
+
+    fn frobenius(matrix: ArrayView2<'_, f64>) -> f64 {
+        matrix.iter().map(|value| value * value).sum::<f64>().sqrt()
+    }
+
+    /// The majorizer `B` the cache factors, materialized by columns.
+    fn majorizer_by_columns(cache: &ArrowFactorCache) -> Array2<f64> {
+        let total_t = cache.delta_t_len();
+        let k = cache.k;
+        let dim = total_t + k;
+        let mut b = Array2::<f64>::zeros((dim, dim));
+        for column in 0..dim {
+            let mut dt = Array1::<f64>::zeros(total_t);
+            let mut db = Array1::<f64>::zeros(k);
+            if column < total_t {
+                dt[column] = 1.0;
+            } else {
+                db[column - total_t] = 1.0;
+            }
+            let applied = apply_cached_arrow_hessian(cache, dt.view(), db.view()).expect("B apply");
+            for row in 0..total_t {
+                b[[row, column]] = applied.t[row];
+            }
+            for row in 0..k {
+                b[[total_t + row, column]] = applied.beta[row];
+            }
+        }
+        (&b + &b.t()) * 0.5
+    }
+
+    /// Central-difference step for the gradient oracle, in the Newton-step units
+    /// of the joint state (chart coordinates of period one, decoder coefficients
+    /// of order 0.1).
+    const GRADIENT_ORACLE_STEP: f64 = 1.0e-4;
+
+    /// #2933 F33 — the reported shape covariance is the border block of the
+    /// pseudo-inverse of the observed information `A`, not of the majorizer `B`.
+    ///
+    /// The oracle is a central difference of the analytic joint gradient, which
+    /// shares no code with the exact-Hessian applies, the majorizer or the
+    /// selected-inverse producer. Central error is `O(h²)`, so at steps `h` and
+    /// `h/2`, `H(h) − H(h/2) ≈ ¾·err(h)` and the finer Hessian's error is about
+    /// `‖H(h) − H(h/2)‖/3`. The Neumann bound
+    /// `‖δ(A⁻¹)‖_F ≤ ‖A⁻¹‖₂²‖δA‖_F / (1 − ‖A⁻¹‖₂‖δA‖_F)` turns that into a
+    /// covariance tolerance with no tuned constant. The majorizer's Schur block
+    /// must miss the same oracle by more than that tolerance, so the fixture can
+    /// tell `A` from `B` and the assertion is free to fail against the inverse it
+    /// replaced.
+    #[test]
+    fn shape_covariance_is_the_observed_information_selected_inverse_2933_f33() {
+        let (term, target, rho, loss, cache) = converged_basin();
+        let total_t = cache.delta_t_len();
+        let k = cache.k;
+        let ranges = term.shape_covariance_border_ranges();
+        let information = term
+            .exact_observed_information_shape_covariance(&rho, target.view(), &cache)
+            .expect("exact observed information at the converged basin");
+        let SaeShapeInformation::ObservedInformation(covariance) = &information else {
+            panic!(
+                "the converged PD basin must yield an observed-information covariance; got \
+                 {information:?}"
+            );
+        };
+
+        let coarse =
+            finite_difference_hessian(&term, target.view(), &rho, total_t, k, GRADIENT_ORACLE_STEP);
+        let fine = finite_difference_hessian(
+            &term,
+            target.view(),
+            &rho,
+            total_t,
+            k,
+            0.5 * GRADIENT_ORACLE_STEP,
+        );
+        let step_error = frobenius((&coarse - &fine).view()) / 3.0;
+        let oracle = classify(&fine, &cache);
+        assert_eq!(
+            (oracle.negative, oracle.in_band),
+            (0, 0),
+            "the oracle Hessian must be positive definite at the converged basin"
+        );
+        let smallest = oracle
+            .retained
+            .iter()
+            .map(|&index| oracle.values[index])
+            .fold(f64::INFINITY, f64::min);
+        let inverse_norm = 1.0 / smallest;
+        let contraction = inverse_norm * step_error;
+        assert!(
+            contraction < 1.0,
+            "the gradient oracle's step error {step_error:.3e} must be inside the Neumann \
+             radius of the smallest curvature {smallest:.3e}"
+        );
+        let tolerance = inverse_norm * inverse_norm * step_error / (1.0 - contraction);
+        assert_eq!(covariance.identified_rank, oracle.retained.len());
+        assert_eq!(covariance.ambient_dim, total_t + k);
+
+        let mut majorizer_gap = 0.0_f64;
+        for (atom, range) in ranges.iter().enumerate() {
+            let expected = border_block(&oracle, total_t, range);
+            let miss = frobenius((&covariance.blocks[atom] - &expected).view());
+            assert!(
+                miss <= tolerance,
+                "atom {atom}: ‖[A⁺]_ββ − oracle‖_F = {miss:.3e} exceeds the gradient-oracle \
+                 tolerance {tolerance:.3e} (‖oracle‖_F = {:.3e})",
+                frobenius(expected.view())
+            );
+            let majorizer = cache
+                .schur_inverse_block(range.clone())
+                .expect("majorizer Schur inverse block");
+            majorizer_gap = majorizer_gap.max(frobenius((&majorizer - &expected).view()));
+        }
+        assert!(
+            majorizer_gap > tolerance,
+            "the majorizer's Schur inverse misses the observed-information oracle by only \
+             {majorizer_gap:.3e} against the tolerance {tolerance:.3e}: this fixture cannot tell \
+             A from B"
+        );
+
+        let residual = term
+            .reconstruction_residual(target.view(), &rho)
+            .expect("reconstruction residual");
+        let dispersion = term
+            .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))
+            .expect("dispersion");
+        let uncertainty = term
+            .assemble_shape_uncertainty(&information, dispersion)
+            .expect("shape uncertainty");
+        assert_eq!(
+            uncertainty.operator,
+            SaeShapeCovarianceOperator::ObservedInformation {
+                identified_rank: covariance.identified_rank,
+                ambient_dim: covariance.ambient_dim,
+            }
+        );
+        let scale = dispersion.posterior_covariance_scale();
+        for (atom, entry) in uncertainty.atoms.iter().enumerate() {
+            let reported = entry
+                .decoder_covariance
+                .as_ref()
+                .expect("un-framed fixture exports its decoder covariance");
+            let expected = covariance.blocks[atom].mapv(|value| scale * value);
+            assert!(
+                frobenius((reported - &expected).view())
+                    <= f64::EPSILON * frobenius(expected.view()) * reported.len() as f64,
+                "atom {atom}: the exported decoder covariance must be φ̂·[A⁺]_ββ"
+            );
+        }
+    }
+
+    /// #2933 F33 — where the information coincides with the majorizer, the
+    /// selected inverse reduces to the historical Schur covariance.
+    ///
+    /// `B` materialized by columns goes through the same spectral block and
+    /// selected-inverse producer as `A`; the result must equal
+    /// `cache.schur_inverse_block`, an arrow Schur-complement Cholesky solve that
+    /// shares no code with the eigendecomposition. Both are backward stable, so
+    /// they agree to the eigendecomposition's backward error amplified by the
+    /// conditioning: `dim·ε·κ(B)` relative.
+    #[test]
+    fn observed_information_covariance_reduces_to_the_schur_inverse_when_a_equals_b_2933_f33() {
+        let (term, _target, _rho, _loss, cache) = converged_basin();
+        let total_t = cache.delta_t_len();
+        let dim = total_t + cache.k;
+        let b = majorizer_by_columns(&cache);
+        let (values, _) = b.eigh(Side::Lower).expect("B eigendecomposition");
+        let smallest = values.iter().copied().fold(f64::INFINITY, f64::min);
+        let largest = values.iter().copied().fold(0.0_f64, f64::max);
+        assert!(smallest > 0.0, "the majorizer is positive definite");
+        let tolerance = dim as f64 * f64::EPSILON * (largest / smallest);
+        let block = SaeManifoldTerm::exact_hessian_spectral_block(
+            b,
+            &Array1::<f64>::zeros(total_t),
+            None,
+            total_t,
+            ArrowMetric::Joint(&cache),
+        )
+        .expect("spectral block of B");
+        let information = block
+            .border_selected_inverse_blocks(total_t, &term.shape_covariance_border_ranges())
+            .expect("selected inverse of B");
+        let SaeShapeInformation::ObservedInformation(covariance) = information else {
+            panic!("a positive definite operator must yield a covariance; got {information:?}");
+        };
+        assert_eq!(covariance.identified_rank, dim, "every direction of B is identified");
+        for (atom, range) in term.shape_covariance_border_ranges().iter().enumerate() {
+            let schur = cache
+                .schur_inverse_block(range.clone())
+                .expect("Schur inverse block");
+            let relative =
+                frobenius((&covariance.blocks[atom] - &schur).view()) / frobenius(schur.view());
+            assert!(
+                relative <= tolerance,
+                "atom {atom}: selected inverse of B misses the Schur inverse by {relative:.3e} \
+                 relative against dim·ε·κ = {tolerance:.3e}"
+            );
+        }
+    }
+
+    /// #2933 F33 — an observed information with resolved negative curvature has
+    /// no Laplace covariance.
+    ///
+    /// The #2336 saddle specimen converges to a state the value path prices
+    /// through the ARD concave clamp. The covariance must refuse it, naming the
+    /// oracle's negative directions, with explicit `None` bands, rather than
+    /// invert either the clamped basin operator or the majorizer.
+    #[test]
+    fn shape_covariance_refuses_indefinite_observed_information_2933_f33() {
+        let (mut term, mut target, mut rho) =
+            crate::manifold::tests_recovery_split_780::gamma_fd_tiny_fixture();
+        let (n, p) = target.dim();
+        for row in 0..n {
+            for col in 0..p {
+                let theta = std::f64::consts::TAU * (row as f64 + 0.35) / n as f64;
+                target[[row, col]] += 0.6 * (3.0 * theta + 0.5 * col as f64).sin();
+            }
+        }
+        rho.log_lambda_sparse = -0.5;
+        for value in rho.log_lambda_smooth.iter_mut() {
+            *value = -1.0;
+        }
+        for axis in rho.log_ard.iter_mut() {
+            for value in axis.iter_mut() {
+                *value = -0.5;
+            }
+        }
+        let (value, loss, cache) = term
+            .penalized_quasi_laplace_criterion_with_cache(
+                target.view(),
+                &rho,
+                None,
+                40,
+                0.4,
+                1.0e-6,
+                1.0e-6,
+            )
+            .expect("the saddle specimen prices finite");
+        assert!(value.is_finite());
+        let a = term
+            .materialize_exact_hessian_dense_by_columns(&rho, target.view(), &cache)
+            .expect("column-loop A");
+        let oracle = classify(&((&a + &a.t()) * 0.5), &cache);
+        assert!(
+            oracle.negative > 0,
+            "the specimen must carry resolved negative observed curvature"
+        );
+        let most_negative = oracle.values.iter().copied().fold(f64::INFINITY, f64::min);
+        let information = term
+            .exact_observed_information_shape_covariance(&rho, target.view(), &cache)
+            .expect("exact observed information");
+        match &information {
+            SaeShapeInformation::Unavailable(
+                SaeShapeCovarianceUnavailable::IndefiniteObservedInformation {
+                    negative_directions,
+                    most_negative_curvature,
+                },
+            ) => {
+                assert_eq!(*negative_directions, oracle.negative);
+                assert!(
+                    (most_negative_curvature - most_negative).abs()
+                        <= f64::EPSILON.sqrt() * most_negative.abs(),
+                    "most negative curvature {most_negative_curvature:.6e} against the oracle \
+                     {most_negative:.6e}"
+                );
+            }
+            other => panic!("an indefinite observed information must be refused; got {other:?}"),
+        }
+        let residual = term
+            .reconstruction_residual(target.view(), &rho)
+            .expect("reconstruction residual");
+        let dispersion = term
+            .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))
+            .expect("dispersion");
+        let uncertainty = term
+            .assemble_shape_uncertainty(&information, dispersion)
+            .expect("explicit unavailability");
+        assert!(matches!(
+            uncertainty.operator,
+            SaeShapeCovarianceOperator::Unavailable(
+                SaeShapeCovarianceUnavailable::IndefiniteObservedInformation { .. }
+            )
+        ));
+        for entry in &uncertainty.atoms {
+            assert!(
+                entry.decoder_covariance.is_none()
+                    && entry.band_coords.is_none()
+                    && entry.band_mean.is_none()
+                    && entry.band_sd.is_none(),
+                "a refused covariance reports no band"
+            );
+        }
+    }
+}
