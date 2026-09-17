@@ -77,7 +77,7 @@ pub mod receipts;
 mod teacher_tests;
 
 // Nonlinear separation over the moment zonotope: lower witnesses, derived upper bounds.
-// [unlanded: adversary]
+pub mod adversary;
 
 // Matrix-free structured edits applied to the current intervened input.
 pub mod apply;
