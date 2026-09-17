@@ -71,7 +71,7 @@
 // [unlanded: apply]
 
 // Component query-key kernel under the source's joint softmax and causal mask.
-// [unlanded: attention]
+pub mod attention;
 
 // KL oscillation bound, whole-set composition containment, conservation conditioning.
 // [unlanded: bounds]
