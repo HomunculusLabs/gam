@@ -664,6 +664,21 @@ pub(crate) fn primary_capability_for_config(
         );
         cap.disable_fixed_point = true;
     }
+    if config.curvature_search_latched
+        && cap.prefer_gradient_only
+        && cap.gradient == Derivative::Analytic
+        && cap.declared_hessian_for_planning() == Derivative::Analytic
+    {
+        // A positive-definite secant model cannot follow the negative curvature
+        // the mint just measured, and restarted inside its own gradient band it
+        // stops at iteration 0 (#2939). The declared Hessian takes over the
+        // search for the rest of this solve.
+        log::info!(
+            "[OUTER] {context}: a certified strict saddle latched the declared analytic \
+             Hessian into the search; planning ARC instead of gradient-only BFGS (#2939)"
+        );
+        cap.prefer_gradient_only = false;
+    }
     cap
 }
 

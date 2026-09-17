@@ -1253,3 +1253,371 @@ fn outer_search_reaches_a_corner_minimum_that_needs_more_than_one_escape_2612() 
         "with every concave coordinate railed the reduced Hessian is [1], PSD",
     );
 }
+
+// ─── #2939 a certified strict saddle latches the declared curvature into the search ──
+
+// A curved valley `ρ₀ = ρ₁²` through a strict saddle at the origin, on a criterion
+// of natural magnitude `V₀`:
+//
+//   f(ρ) = V₀ + ½·A·u² + ρ₁⁴/(4s²) − ½·ρ₁²,    u = ρ₀ − ρ₁²,   A = 16, s = 3
+//   ∇f    = (A·u,  −2A·ρ₁·u + ρ₁³/s² − ρ₁)
+//   H     = [[A, −2A·ρ₁], [−2A·ρ₁, A·(4ρ₁² − 2u) + 3ρ₁²/s² − 1]]
+//
+// Every band is production's, derived at production's default tolerance
+// `τ = 1e−5` and the declared scale `V₀ = 3e4`: the solver band `τ·(1 + V₀) ≈ 0.30`
+// and the certificate band `τ·(1 + |V|)`. That is #2939's regime, where a
+// score-relative band (1.958) is wide against the curvature the escape follows
+// (λ_min = −4.2e−2).
+//
+// At ρ = 0 the gradient vanishes and H = diag(A, −1). The escape ray along ρ₁
+// climbs the valley wall, `f(0, t) − V₀ = (A/2 + 1/(4s²))·t⁴ − t²/2`. The ladder's
+// first descending rung is t = ⅛ (−5.86e−3, above the criterion resolution
+// `1e−7·(1 + V₀) = 3.0e−3`), and doubling to ¼ buys nothing (+1.1e−4). At the
+// escape point ρ = (0, ⅛), |∇f| = 0.258 is inside the solver band, and
+// H = [[16, −4], [−4, 0.505]] is still indefinite (det −7.9), so a gradient-only
+// restart stops at iteration 0 and the next mint finds another saddle: #2939's
+// loop in miniature. The minima are ρ = (s², ±s), with f = V₀ − s²/4.
+const VALLEY_WALL: f64 = 16.0;
+const VALLEY_SCALE: f64 = 3.0;
+const VALLEY_OFFSET: f64 = 3.0e4;
+
+fn valley_cost(rho: &Array1<f64>) -> f64 {
+    let u = rho[0] - rho[1] * rho[1];
+    VALLEY_OFFSET
+        + 0.5 * VALLEY_WALL * u * u
+        + rho[1].powi(4) / (4.0 * VALLEY_SCALE * VALLEY_SCALE)
+        - 0.5 * rho[1] * rho[1]
+}
+
+fn valley_hessian(rho: &Array1<f64>) -> ndarray::Array2<f64> {
+    let r1 = rho[1];
+    let u = rho[0] - r1 * r1;
+    let cross = -2.0 * VALLEY_WALL * r1;
+    array![
+        [VALLEY_WALL, cross],
+        [
+            cross,
+            VALLEY_WALL * (4.0 * r1 * r1 - 2.0 * u) + 3.0 * r1 * r1 / (VALLEY_SCALE * VALLEY_SCALE)
+                - 1.0
+        ],
+    ]
+}
+
+fn valley_eval(rho: &Array1<f64>) -> OuterEval {
+    let r1 = rho[1];
+    let u = rho[0] - r1 * r1;
+    let s2 = VALLEY_SCALE * VALLEY_SCALE;
+    let cross = -2.0 * VALLEY_WALL * r1;
+    OuterEval {
+        cost: valley_cost(rho),
+        gradient: array![VALLEY_WALL * u, cross * u + r1.powi(3) / s2 - r1],
+        hessian: HessianValue::Dense(valley_hessian(rho)),
+        inner_beta_hint: None,
+    }
+}
+
+/// The #2898 lifecycle (the exact Hessian declared, gradient-only search
+/// preferred) at production's default tolerance and the criterion's declared
+/// scale.
+fn valley_problem(initial_rho: Array1<f64>) -> OuterProblem {
+    OuterProblem::new(2)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense)
+        .with_prefer_gradient_only(true)
+        .with_tolerance(OuterConfig::default().tolerance)
+        .with_objective_scale(Some(VALLEY_OFFSET))
+        .with_bounds(Array1::from_elem(2, -20.0), Array1::from_elem(2, 20.0))
+        .with_initial_rho(initial_rho)
+        .with_screen_initial_rho(false)
+        .with_seed_config(gam_problem::SeedConfig {
+            max_seeds: 1,
+            seed_budget: 1,
+            ..Default::default()
+        })
+}
+
+/// One request the valley objective served, in the order it was served.
+enum ValleyRequest {
+    Cost,
+    Legacy(Array1<f64>),
+    Ordered(OuterEvalOrder, Array1<f64>),
+    Finalize(Array1<f64>),
+}
+
+/// The valley as an objective that records every request, so a test can read the
+/// certify-last loop's rounds off what the search actually asked for.
+struct RecordingValley {
+    requests: Vec<ValleyRequest>,
+}
+
+impl OuterObjective for RecordingValley {
+    fn capability(&self) -> OuterCapability {
+        OuterCapability {
+            gradient: Derivative::Analytic,
+            hessian: DeclaredHessianForm::Dense,
+            n_params: 2,
+            psi_dim: 0,
+            fixed_point_available: false,
+            barrier_config: None,
+            prefer_gradient_only: true,
+            disable_fixed_point: true,
+        }
+    }
+    fn eval_cost(&mut self, rho: &Array1<f64>) -> Result<f64, EstimationError> {
+        self.requests.push(ValleyRequest::Cost);
+        Ok(valley_cost(rho))
+    }
+    fn eval(&mut self, rho: &Array1<f64>) -> Result<OuterEval, EstimationError> {
+        self.requests.push(ValleyRequest::Legacy(rho.clone()));
+        Ok(valley_eval(rho))
+    }
+    fn eval_with_order(
+        &mut self,
+        rho: &Array1<f64>,
+        order: OuterEvalOrder,
+    ) -> Result<OuterEval, EstimationError> {
+        let hessian_requested = matches!(order, OuterEvalOrder::ValueGradientHessian);
+        self.requests.push(ValleyRequest::Ordered(order, rho.clone()));
+        let mut eval = valley_eval(rho);
+        if !hessian_requested {
+            eval.hessian = HessianValue::Unavailable;
+        }
+        Ok(eval)
+    }
+    fn finalize_outer_result(
+        &mut self,
+        rho: &Array1<f64>,
+        plan: &OuterPlan,
+    ) -> Result<(), EstimationError> {
+        if matches!(plan.solver, Solver::Efs | Solver::HybridEfs) {
+            return Err(EstimationError::RemlOptimizationFailed(format!(
+                "the recording valley declares no fixed point, yet finalize ran under {:?}",
+                plan.solver
+            )));
+        }
+        // Stateless: installing a point is recording it.
+        self.requests.push(ValleyRequest::Finalize(rho.clone()));
+        Ok(())
+    }
+    fn reset(&mut self) {}
+    fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
+        if beta.iter().any(|value| !value.is_finite()) {
+            return Err(EstimationError::RemlOptimizationFailed(format!(
+                "the recording valley was offered a non-finite inner seed of length {}",
+                beta.len()
+            )));
+        }
+        Ok(SeedOutcome::NoSlot)
+    }
+}
+
+/// What the certify-last loop did, read off the requests.
+///
+/// Every search ends by finalizing its selected point, and the loop finalizes the
+/// same point again before certifying it, so a round is a distinct finalized point.
+/// A round whose point is a strict saddle (det H < 0) was refused. A restart that
+/// stopped at iteration 0 is a finalize at a new point `q` whose search requested
+/// derivatives nowhere else: every gradient- or Hessian-order request since the
+/// previous finalize, other than the certificate's at that previous point, was at
+/// `q`. The ladder's probes are value-only, so they never count, and a search that
+/// moved requested derivatives at the points it moved through (BFGS at gradient
+/// order, ARC at Hessian order).
+#[derive(Debug)]
+struct ValleyRounds {
+    saddle_rounds: usize,
+    iteration_zero_restarts: usize,
+}
+
+fn valley_rounds(requests: &[ValleyRequest]) -> ValleyRounds {
+    let mut saddle_points: Vec<Array1<f64>> = Vec::new();
+    let mut derivative_points: Vec<Array1<f64>> = Vec::new();
+    let mut previous_finalize: Option<Array1<f64>> = None;
+    let mut iteration_zero_restarts = 0usize;
+    for request in requests {
+        match request {
+            ValleyRequest::Cost | ValleyRequest::Ordered(OuterEvalOrder::Value, _) => {}
+            ValleyRequest::Legacy(rho)
+            | ValleyRequest::Ordered(OuterEvalOrder::ValueAndGradient, rho)
+            | ValleyRequest::Ordered(OuterEvalOrder::ValueGradientHessian, rho) => {
+                if previous_finalize.as_ref() != Some(rho) && !derivative_points.contains(rho) {
+                    derivative_points.push(rho.clone());
+                }
+            }
+            ValleyRequest::Finalize(rho) => {
+                let h = valley_hessian(rho);
+                if h[[0, 0]] * h[[1, 1]] - h[[0, 1]] * h[[1, 0]] < 0.0 && !saddle_points.contains(rho) {
+                    saddle_points.push(rho.clone());
+                }
+                if let Some(previous) = previous_finalize.as_ref()
+                    && previous != rho
+                    && !derivative_points.is_empty()
+                    && derivative_points.iter().all(|point| point == rho)
+                {
+                    iteration_zero_restarts += 1;
+                }
+                previous_finalize = Some(rho.clone());
+                derivative_points.clear();
+            }
+        }
+    }
+    ValleyRounds {
+        saddle_rounds: saddle_points.len(),
+        iteration_zero_restarts,
+    }
+}
+
+/// The request mix served before each finalize, so a run's rounds can be
+/// re-derived from its log.
+fn valley_trace(requests: &[ValleyRequest]) -> String {
+    let mut segments: Vec<String> = Vec::new();
+    let (mut value, mut gradient, mut hessian) = (0usize, 0usize, 0usize);
+    for request in requests {
+        match request {
+            ValleyRequest::Cost | ValleyRequest::Ordered(OuterEvalOrder::Value, _) => value += 1,
+            ValleyRequest::Legacy(_) | ValleyRequest::Ordered(OuterEvalOrder::ValueAndGradient, _) => {
+                gradient += 1
+            }
+            ValleyRequest::Ordered(OuterEvalOrder::ValueGradientHessian, _) => hessian += 1,
+            ValleyRequest::Finalize(rho) => {
+                segments.push(format!(
+                    "value={value} gradient={gradient} hessian={hessian} -> finalize({:.6}, {:.6})",
+                    rho[0], rho[1]
+                ));
+                (value, gradient, hessian) = (0, 0, 0);
+            }
+        }
+    }
+    segments.push(format!(
+        "value={value} gradient={gradient} hessian={hessian} after the last finalize"
+    ));
+    segments.join(" | ")
+}
+
+fn run_valley(initial_rho: Array1<f64>, context: &str) -> (OuterResult, ValleyRounds) {
+    let problem = valley_problem(initial_rho);
+    let mut obj = RecordingValley {
+        requests: Vec::new(),
+    };
+    let result = problem
+        .run(&mut obj, context)
+        .expect("the curved valley has a certifiable minimum at (s², ±s)");
+    let rounds = valley_rounds(&obj.requests);
+    eprintln!(
+        "[#2939 valley] {context}: rho={:?} f-V0={:.9e} iterations={} plan={:?} psd={:?} rounds={rounds:?} \
+         requests={} trace: {}",
+        result.rho.to_vec(),
+        result.final_value - VALLEY_OFFSET,
+        result.iterations,
+        result.plan_used,
+        result
+            .criterion_certificate
+            .as_ref()
+            .and_then(|c| c.hessian_psd()),
+        obj.requests.len(),
+        valley_trace(&obj.requests),
+    );
+    (result, rounds)
+}
+
+/// The valley's minimum value, and the excess a certified point may carry above
+/// it. A point whose gradient clears the certificate band `b` sits within
+/// `b²/(2·λ_min)` of the minimum under the minimum's quadratic model (the
+/// Polyak–Łojasiewicz bound), with `λ_min` the smallest eigenvalue of H at
+/// `(s², s)`. The band comes from production's own function at the minimum's value.
+fn valley_minimum_and_slack() -> (f64, f64) {
+    let minimum = array![VALLEY_SCALE * VALLEY_SCALE, VALLEY_SCALE];
+    let value = valley_cost(&minimum);
+    let h = valley_hessian(&minimum);
+    let trace = h[[0, 0]] + h[[1, 1]];
+    let det = h[[0, 0]] * h[[1, 1]] - h[[0, 1]] * h[[1, 0]];
+    let lambda_min = 0.5 * (trace - (trace * trace - 4.0 * det).sqrt());
+    let band =
+        outer_stationarity_band_and_rung_at(&valley_problem(minimum).config(), value).bound;
+    (value, band * band / (2.0 * lambda_min))
+}
+
+#[test]
+fn a_certified_saddle_latches_the_declared_curvature_into_the_retry_2939() {
+    // The fixture premise, from production's own solver band: the escape point
+    // is indefinite and its gradient is already inside the band, so a
+    // gradient-only restart cannot move.
+    let solver_band = outer_gradient_tolerance(&valley_problem(array![0.0, 0.0]).config()).abs;
+    let escape = valley_eval(&array![0.0, 0.125]);
+    let escape_gradient = escape.gradient.dot(&escape.gradient).sqrt();
+    let escape_hessian = valley_hessian(&array![0.0, 0.125]);
+    let escape_det = escape_hessian[[0, 0]] * escape_hessian[[1, 1]]
+        - escape_hessian[[0, 1]] * escape_hessian[[1, 0]];
+    assert!(
+        escape_gradient < solver_band && escape_det < 0.0,
+        "fixture premise: the escape point must be indefinite (det {escape_det:.3e}) with |∇f| \
+         {escape_gradient:.3e} inside the solver band {solver_band:.3e}"
+    );
+    let (result, rounds) = run_valley(array![0.0, 0.0], "curved-valley saddle #2939");
+    // #2939's loop: without the latch every retry from an escape point stops at
+    // iteration 0 and the next mint finds another saddle, so the loop takes more
+    // than one saddle round. With the latch the retry searches on the Hessian from
+    // the first escape point and certifies without re-finding a saddle.
+    assert!(
+        rounds.saddle_rounds == 1 && rounds.iteration_zero_restarts == 0,
+        "a certified strict saddle must be the only saddle round the search takes, with no retry \
+         stopping at iteration 0: {rounds:?}"
+    );
+    assert!(
+        result.converged(),
+        "must converge at a minimum: rho={:?}",
+        result.rho
+    );
+    assert!(
+        result
+            .criterion_certificate
+            .as_ref()
+            .is_some_and(|c| c.certifies() && c.hessian_psd() == Some(true)),
+        "the certified point must carry a measured PSD Hessian: rho={:?}",
+        result.rho,
+    );
+    let (minimum_value, slack) = valley_minimum_and_slack();
+    assert!(
+        result.final_value < minimum_value + slack,
+        "must certify the valley's minimum within the band-derived slack: f − V₀ = {:.9e} at {:?}, \
+         minimum {:.6e}, slack {slack:.6e}",
+        result.final_value - VALLEY_OFFSET,
+        result.rho,
+        minimum_value - VALLEY_OFFSET,
+    );
+    assert_eq!(
+        result.plan_used.solver,
+        Solver::Arc,
+        "after the mint certified the strict saddle at the origin, the retry from its escape \
+         point (still indefinite, |∇f| inside the band) must search on the declared Hessian"
+    );
+}
+
+#[test]
+fn a_search_that_certifies_no_saddle_keeps_the_gradient_only_plan_2939() {
+    // The same objective seeded inside the minimum's basin: no mint refuses, so
+    // nothing latches, and the #2898 preference stands.
+    let (result, rounds) = run_valley(array![8.8, 2.95], "curved-valley basin #2939");
+    assert!(
+        rounds.saddle_rounds == 0 && rounds.iteration_zero_restarts == 0,
+        "a basin seed certifies without a saddle round or a restart: {rounds:?}"
+    );
+    assert!(
+        result.converged(),
+        "the basin seed must certify: rho={:?}",
+        result.rho
+    );
+    let (minimum_value, slack) = valley_minimum_and_slack();
+    assert!(
+        result.final_value < minimum_value + slack,
+        "the basin seed must certify the minimum within the band-derived slack: f − V₀ = {:.9e} \
+         at {:?}, minimum {:.6e}, slack {slack:.6e}",
+        result.final_value - VALLEY_OFFSET,
+        result.rho,
+        minimum_value - VALLEY_OFFSET,
+    );
+    assert_eq!(
+        result.plan_used.solver,
+        Solver::Bfgs,
+        "with no certified saddle the search must keep the gradient-only plan"
+    );
+}

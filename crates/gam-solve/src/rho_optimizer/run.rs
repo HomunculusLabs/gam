@@ -280,6 +280,27 @@ pub(crate) struct OuterConfig {
     /// recovery loop escape/re-optimize instead of contradicting the certificate
     /// later during fit assembly.
     pub(crate) require_measured_psd: bool,
+    /// A strict saddle was CERTIFIED earlier in this solve, so every later run
+    /// searches on the declared analytic Hessian (#2939).
+    ///
+    /// A gradient-only preference (`OuterCapability::prefer_gradient_only`)
+    /// keeps the order-four Hessian out of the search and prices it once at the
+    /// mint, which is the right trade while the search is descending. Once the
+    /// mint has measured an interior strict saddle and published its escape it
+    /// is not. Along the escape ray the gradient grows only as `α·|λ_min|`, so
+    /// the escape point still sits inside the solver's gradient band, and a
+    /// positive-definite secant restart stops at iteration 0. The next mint
+    /// finds the saddle again, and every round pays a whole certification. On
+    /// #2939's survival marginal-slope fit the retry stopped at `|g| = 1.881`
+    /// against a band of `1.958` after an escape at `λ_min = −4.185e−2`, and two
+    /// rounds cost 5 m 10 s and 4 m 39 s. ARC stops only on a PSD free Hessian,
+    /// so a curvature search from the escape point keeps following the negative
+    /// curvature.
+    ///
+    /// Set only by the certify-last reseed loop and never cleared inside the
+    /// solve, so the search route does not flip back to BFGS once a saddle is on
+    /// record.
+    pub(crate) curvature_search_latched: bool,
 }
 
 /// The outer search's iteration count when a caller declares none: no count.
@@ -331,6 +352,7 @@ impl Default for OuterConfig {
                 crate::rho_uncertainty::RhoUncertaintyProblemSize::default(),
             warm_start_outer_hessian: None,
             rho_canonical_keys: None,
+            curvature_search_latched: false,
         }
     }
 }
@@ -772,6 +794,8 @@ impl OuterProblem {
             // a warm-start hit decodes a converged outer Hessian.
             warm_start_outer_hessian: None,
             rho_canonical_keys: self.rho_canonical_keys.clone(),
+            // Latched only by the certify-last reseed loop (#2939).
+            curvature_search_latched: false,
         }
     }
 
@@ -7598,6 +7622,9 @@ pub(crate) fn run_outer(
     // a 9016 s fit. Accumulated across rounds and handed to the retry so the
     // cascade replays the recorded verdict instead of re-deriving it.
     let mut refused_seed_points: Vec<Array1<f64>> = Vec::new();
+    // #2939 — once a mint has certified a strict saddle, every later run in this
+    // solve searches on the declared curvature (`OuterConfig::curvature_search_latched`).
+    let mut curvature_search_latched = config.curvature_search_latched;
     let certificate = loop {
         match certify_diagnose_and_install(obj, &mut result) {
             Ok(certificate) => break certificate,
@@ -7676,6 +7703,14 @@ pub(crate) fn run_outer(
                 // transferred into the restart.
                 retry_cfg.operator_initial_trust_radius = None;
                 retry_cfg.warm_start_outer_hessian = None;
+                // A certified strict saddle latches the declared analytic Hessian into
+                // the search: its escape point is still inside the gradient band, so a
+                // gradient-only restart would stop at iteration 0 (#2939). The latch
+                // survives every later reseed kind in this solve.
+                if reseed.kind == CertifyReseedKind::SaddleEscape {
+                    curvature_search_latched = true;
+                }
+                retry_cfg.curvature_search_latched = curvature_search_latched;
                 obj.reset();
                 match run_outer_uncertified(obj, &retry_cfg, context) {
                     Ok(mut retried) => {
