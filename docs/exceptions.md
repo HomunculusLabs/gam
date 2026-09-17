@@ -172,7 +172,7 @@ exception:
 
 Use it as a one-line user-facing message:
 
-```python
+```python no-exec
 try:
     model.predict(bad_df)
 except Exception as e:
@@ -194,6 +194,11 @@ def safe_predict(model, data):
 ### Catch every mapped gamfit error
 
 ```python
+import logging
+
+log = logging.getLogger("my_app")
+formula = "y ~ s(x)"
+
 try:
     model = gamfit.fit(df, formula)
 except gamfit.GamError as e:

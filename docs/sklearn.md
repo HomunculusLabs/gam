@@ -49,6 +49,8 @@ bound to `X` under the response name implied by the formula (defaulting to
 `y`). If `y` is `None`, `X` must already contain the response.
 
 ```python
+from gamfit.sklearn import GAMRegressor
+
 GAMRegressor(formula="y ~ s(x)").fit(X, y)        # array y
 GAMRegressor(formula="y ~ s(x)").fit(df)          # df contains "y"
 GAMRegressor(formula="y ~ s(x)").fit(df, y="y")   # name a column
@@ -76,6 +78,12 @@ the fit is a scalar GAM.
 
 ```python
 from gamfit.sklearn import GAMClassifier
+import pandas as pd
+import numpy as np
+
+rng = np.random.default_rng(0)
+X = pd.DataFrame({"x": np.linspace(0, 10, 50)})
+y = (X["x"] + rng.normal(0, 2, len(X)) > 5).astype(int)   # binary labels
 
 est = GAMClassifier(formula="y ~ s(x)", family="binomial")
 est.fit(X, y)
@@ -104,6 +112,7 @@ delegating to the underlying `gamfit.Model` (scalar models only).
 ## Pipeline
 
 ```python
+from gamfit.sklearn import GAMRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -123,6 +132,7 @@ sequence. Numpy arrays and 2-D row sequences use generated feature names
 ## Cross-validation
 
 ```python
+from gamfit.sklearn import GAMRegressor
 from sklearn.model_selection import cross_val_score
 
 scores = cross_val_score(
@@ -134,6 +144,7 @@ scores = cross_val_score(
 ## Grid search
 
 ```python
+from gamfit.sklearn import GAMRegressor
 from sklearn.model_selection import GridSearchCV
 
 grid = GridSearchCV(
