@@ -276,6 +276,41 @@ impl ExactFactor {
         coordinates *= &mask;
         Ok(coordinates.dot(&self.write.t()))
     }
+
+    /// The pullback of [`Self::apply_masked`]. For a loss `ℓ` of `y = U M R x`
+    /// with row cotangents `ȳ = ∂ℓ/∂y`, it returns each input row's cotangent
+    /// `x̄ = Rᵀ (m ⊙ Uᵀ ȳ)` and the mask cotangent `m̄_c = Σ_rows (Uᵀ ȳ)_c (R x)_c`.
+    /// The map is linear in `x` and in `m`, so both are exact adjoints. Like the
+    /// forward, the pullback never forms `U M R`.
+    pub fn apply_masked_pullback(
+        &self,
+        inputs: ArrayView2<'_, f64>,
+        mask: ArrayView1<'_, f64>,
+        output_cotangent: ArrayView2<'_, f64>,
+    ) -> Result<MaskedFactorCotangents, ShapeMismatch> {
+        check("factor input width", self.read.ncols(), inputs.ncols())?;
+        check("component mask length", self.components(), mask.len())?;
+        check("output cotangent width", self.write.nrows(), output_cotangent.ncols())?;
+        check("output cotangent rows", inputs.nrows(), output_cotangent.nrows())?;
+        let written = output_cotangent.dot(&self.write);
+        let coordinates = inputs.dot(&self.read.t());
+        let mask_cotangent = (&written * &coordinates).sum_axis(ndarray::Axis(0));
+        let mut scaled = written;
+        scaled *= &mask;
+        Ok(MaskedFactorCotangents {
+            inputs: scaled.dot(&self.read),
+            mask: mask_cotangent,
+        })
+    }
+}
+
+/// The cotangents [`ExactFactor::apply_masked_pullback`] returns.
+#[derive(Clone, Debug)]
+pub struct MaskedFactorCotangents {
+    /// `x̄ = Rᵀ (m ⊙ Uᵀ ȳ)` for each input row, `n × d`.
+    pub inputs: Array2<f64>,
+    /// `m̄_c = Σ_rows (Uᵀ ȳ)_c (R x)_c`, one entry per component.
+    pub mask: Array1<f64>,
 }
 
 /// One of the two weights of a residual MLP block.
@@ -972,6 +1007,67 @@ mod tests {
                 "the comparison must see the residual, under {mask:?}"
             );
         }
+    }
+
+    /// A hand-built factor in small integers, so every product and sum below is
+    /// exact in floating point. The masked apply is linear in its inputs and in its
+    /// mask, so its pullback must be the exact adjoint: `⟨ȳ, U M R e_{rj}⟩ = x̄_{rj}`
+    /// for every input entry, and `⟨ȳ, U (e_c ⊙ R x)⟩ = m̄_c` for every component.
+    #[test]
+    fn masked_factor_pullback_is_the_exact_adjoint_of_the_masked_apply() {
+        let factor = ExactFactor {
+            write: array![[1.0, 2.0, -1.0], [0.0, 3.0, 1.0]],
+            read: array![[2.0, 1.0], [-1.0, 1.0], [1.0, 3.0]],
+            resolution_margin: f64::INFINITY,
+        };
+        let mask = array![2.0, -1.0, 3.0];
+        let inputs = array![[1.0, -2.0], [3.0, 1.0]];
+        let output_cotangent = array![[1.0, -1.0], [2.0, 1.0]];
+        let pairing = |left: &Array2<f64>, right: &Array2<f64>| (left * right).sum();
+
+        let mut adjoint_inputs = Array2::<f64>::zeros(inputs.raw_dim());
+        for row in 0..inputs.nrows() {
+            for column in 0..inputs.ncols() {
+                let mut direction = Array2::<f64>::zeros(inputs.raw_dim());
+                direction[[row, column]] = 1.0;
+                let pushed = factor
+                    .apply_masked(direction.view(), mask.view())
+                    .expect("forward along an input direction");
+                adjoint_inputs[[row, column]] = pairing(&output_cotangent, &pushed);
+            }
+        }
+        let mut adjoint_mask = Array1::<f64>::zeros(factor.components());
+        for component in 0..factor.components() {
+            let mut indicator = Array1::<f64>::zeros(factor.components());
+            indicator[component] = 1.0;
+            let pushed = factor
+                .apply_masked(inputs.view(), indicator.view())
+                .expect("forward along one component");
+            adjoint_mask[component] = pairing(&output_cotangent, &pushed);
+        }
+
+        let cotangents = factor
+            .apply_masked_pullback(inputs.view(), mask.view(), output_cotangent.view())
+            .expect("pullback shapes compose");
+        assert_eq!(
+            cotangents.inputs, adjoint_inputs,
+            "the input cotangent must be the exact adjoint of the masked apply"
+        );
+        assert_eq!(
+            cotangents.mask, adjoint_mask,
+            "the mask cotangent must be the exact derivative of the pairing along each component"
+        );
+
+        // Positive control: pulled back under the all-ones mask, the input cotangent
+        // is not the adjoint under `m`, so the check sees the mask.
+        let ones = Array1::<f64>::ones(factor.components());
+        let unmasked = factor
+            .apply_masked_pullback(inputs.view(), ones.view(), output_cotangent.view())
+            .expect("all-ones pullback");
+        assert_ne!(
+            unmasked.inputs, adjoint_inputs,
+            "the adjoint check must distinguish the mask"
+        );
     }
 
     /// A hand-built exact factor in small integers, so every operation is exact in
