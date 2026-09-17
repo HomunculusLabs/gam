@@ -25,6 +25,7 @@
 // crate root.
 mod event_history_ffi;
 mod ffi;
+mod parameter_decomposition_ffi;
 
 mod inference;
 

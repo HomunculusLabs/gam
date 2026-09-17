@@ -86,6 +86,9 @@ pub(crate) enum Command {
     Fit(FitArgs),
     /// Fit a row-aligned manifold crosscoder and write its GAM-SAE report.
     Crosscoder(CrosscoderArgs),
+    /// Run one manifold parameter decomposition request (`gam.mpd-request`) and
+    /// write its report and the arrays it names.
+    ParameterDecomposition(ParameterDecompositionArgs),
     /// Build an HTML report (coefficients, smooths, optional diagnostics).
     Report(ReportArgs),
     /// Predict on a new dataset using a fitted model.
@@ -228,6 +231,24 @@ pub(crate) struct CrosscoderArgs {
 
     /// GAM-SAE-owned wire report JSON output path.
     #[arg(long, value_name = "REPORT.json")]
+    pub(crate) out: PathBuf,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ParameterDecompositionArgs {
+    /// Versioned `gam.mpd-request` JSON document: the same bytes
+    /// `gamfit.run_parameter_decomposition` sends.
+    #[arg(long, value_name = "REQUEST.json")]
+    pub(crate) request: PathBuf,
+
+    /// Named input array, an NPY with any number of axes. Repeat once per array id
+    /// the request names.
+    #[arg(long, value_name = "ID=FILE")]
+    pub(crate) tensor: Vec<NamedNpyInput>,
+
+    /// Output directory: `report.json`, and `<id>.npy` for every array id the report
+    /// names.
+    #[arg(long, value_name = "DIR")]
     pub(crate) out: PathBuf,
 }
 

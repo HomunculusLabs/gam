@@ -153,4 +153,4 @@ pub mod response_metric;
 pub mod supports;
 
 // Versioned request and report document shared by pyffi and the CLI.
-// [unlanded: surface]
+pub mod surface;
