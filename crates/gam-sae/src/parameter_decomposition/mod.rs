@@ -92,7 +92,7 @@ pub mod codec;
 // [unlanded: lift]
 
 // Mask moments, the admissible zonotope, support function and affine-logit adversary.
-// [unlanded: moments]
+pub mod moments;
 
 // Global versus use-specific edits and occurrence scopes.
 // [unlanded: occurrence]
