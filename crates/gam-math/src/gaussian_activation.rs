@@ -33,6 +33,13 @@
 //!
 //! Both smoothings solve the heat equation `∂_v T = ½ ∂_t² T`.
 //!
+//! The same towers give the normalized Hermite coefficients
+//! `a_n = E[σ(t + s E) h_n(E)] = sⁿ T⁽ⁿ⁾_{s²}σ(t)/√(n!)`, `h_n = He_n/√(n!)`, through
+//! the orthonormal recurrence `h_{k+1} = (x h_k − √k h_{k−1})/√(k+1)`:
+//! ReLU `a_n = (−1)ⁿ s φ(β) h_{n−2}(β)/√(n(n−1))` with `β = t/s`, and exact GELU
+//! `a_n = (−1)ⁿ φ(x) (s/S)ⁿ [A h_{n−2}(x)/√(n(n−1)) − h_n(x)]/S` with
+//! `A = 1 + s²`, `S = √A` and `x = t/S`, for `n ≥ 2`.
+//!
 //! Left of the origin (`u < 0`) the values and slopes are formed from the
 //! log-CDF slope `λ(u) = φ(u)/Φ(u)` and its correction `q(u) = λ(u) + u`, as
 //! `Φ(u) = φ(u)/λ` and `1 + u/λ = q/λ`: ReLU `T = s φ(u) q/λ`, `T' = φ(u)/λ`;
@@ -40,6 +47,30 @@
 //! `t Φ(u) + s φ(u)` cancels like `u²`, and `Φ(u) = ½ erfc(−u/√2)` multiplies
 //! the rounding of its argument by `u²`; `λ` and `q = −f''/λ` (`f = ln Φ`, so
 //! `f'' = −λ q`) come from the log-CDF owner at full relative precision.
+//!
+//! # Rounding bounds
+//!
+//! [`gaussian_hermite_coefficients`] returns next to every coefficient a
+//! first-order bound on its absolute error, by running error analysis of the
+//! evaluation itself under the standard model: every `+ − × ÷ √` rounds by at
+//! most `u = ε/2` of its result, and a libm `exp` or `erfc` by at most one ulp.
+//! - The standardized argument `x = t/s` (or `t/√(1 + s²)`) carries its own
+//!   rounding, which moves `φ(x) h_j(x)` by at most `φ (√j |h_{j−1}| + |x| |h_j|)`
+//!   per unit of argument error.
+//! - `φ` rounds by at most `5u` of itself; `Φ = ½ erfc(−x/√2)` by
+//!   `2u Φ + 2u |x| φ`, the second term from the rounding of `−x/√2`.
+//! - The left-tail forms read `λ` and `q` from the log-CDF owner; `1/λ` carries
+//!   `10u` of itself and `q/λ` at most `33u q/λ + 9u` (derived at
+//!   `bounded_left_tail_mills`).
+//! - Each orthonormal step adds `3u (|x h_k| + √k |h_{k−1}|)/√(k+1) + 2u |h_{k+1}|`
+//!   to the propagated `(|x| e_k + √k e_{k−1})/√(k+1)`.
+//! - Where `φ(x)` underflows, the coefficients of order ≥ 2 are returned as zero
+//!   with Cramér's inequality `|h_j(x)| e^{−x²/4} ≤ 1.0865`, so
+//!   `φ |h_j| ≤ 1.0865 (2π)^{−1/4} √φ` with `φ` below the smallest subnormal.
+//!
+//! It relies on its owners' contracts: `erfcx` within `5e-16`, `exp` and `erfc`
+//! within one ulp, and a continued fraction that only divides positive
+//! quantities.
 //!
 //! # Pair kernel
 //!
@@ -121,6 +152,10 @@ impl GaussianActivation {
 pub enum GaussianActivationError {
     /// A pre-activation variance must be finite and nonnegative.
     InvalidVariance { variance: f64 },
+    /// A pre-activation scale must be finite and nonnegative.
+    InvalidScale { scale: f64 },
+    /// Coefficients and their bounds must have one entry per order.
+    MismatchedBoundsLength { coefficients: usize, bounds: usize },
     /// A mean, covariance or evaluation point must be finite.
     NonFiniteArgument { value: f64 },
     /// A covariance rounding bound must be finite and nonnegative.
@@ -151,6 +186,17 @@ impl fmt::Display for GaussianActivationError {
             Self::InvalidVariance { variance } => write!(
                 formatter,
                 "a Gaussian pre-activation variance must be finite and nonnegative, got {variance}"
+            ),
+            Self::InvalidScale { scale } => write!(
+                formatter,
+                "a Gaussian pre-activation scale must be finite and nonnegative, got {scale}"
+            ),
+            Self::MismatchedBoundsLength {
+                coefficients,
+                bounds,
+            } => write!(
+                formatter,
+                "coefficients and their bounds need one entry per order, got {coefficients} and {bounds}"
             ),
             Self::NonFiniteArgument { value } => write!(
                 formatter,
@@ -203,6 +249,7 @@ impl std::error::Error for GaussianActivationError {}
 /// higher derivatives are zero away from the kink and refused at it. Once
 /// `φ(u)` underflows, the derivatives of order ≥ 2, each `φ(u)` times a
 /// polynomial in `u`, are returned as the zero it underflows to.
+#[inline]
 pub fn gaussian_smoothing_derivatives(
     activation: GaussianActivation,
     t: f64,
@@ -219,6 +266,51 @@ pub fn gaussian_smoothing_derivatives(
         }
         GaussianActivation::Silu => Err(GaussianActivationError::NoClosedForm { activation }),
     }
+}
+
+/// Fills `coefficients[n]` with the normalized Hermite coefficient
+/// `a_n = E[σ(t + s E) h_n(E)] = sⁿ ∂ⁿ_t T_{s²}σ(t)/√(n!)`, `h_n = He_n/√(n!)`, for
+/// every `n < coefficients.len()`, with `s = scale`.
+///
+/// `σ(t + s E) = Σ_n a_n h_n(E)` in `L²(φ)`, so Mehler's formula gives
+/// `E[σ(X) σ(Y)] = Σ_n ρⁿ a_n(b, s) a_n(c, s')` for `X = b + s E₁`, `Y = c + s' E₂`
+/// with `corr(E₁, E₂) = ρ`. The scale is folded into the orthonormal recurrence
+/// step by step, so the coefficients stay representable where the raw
+/// derivatives `T⁽ⁿ⁾ ~ s^{1−n}` of [`gaussian_smoothing_derivatives`] overflow.
+/// At `s = 0` the smoothed activation is the constant `σ(t)`: `a_0 = σ(t)` and
+/// every other coefficient is zero, the kink included.
+///
+/// `bounds[n]` receives a first-order bound on the absolute rounding error of
+/// `coefficients[n]` (see the module's rounding bounds); both slices need one
+/// entry per order.
+#[inline]
+pub fn gaussian_hermite_coefficients(
+    activation: GaussianActivation,
+    t: f64,
+    scale: f64,
+    coefficients: &mut [f64],
+    bounds: &mut [f64],
+) -> Result<(), GaussianActivationError> {
+    validate_finite(t)?;
+    if !(scale.is_finite() && scale >= 0.0) {
+        return Err(GaussianActivationError::InvalidScale { scale });
+    }
+    if coefficients.len() != bounds.len() {
+        return Err(GaussianActivationError::MismatchedBoundsLength {
+            coefficients: coefficients.len(),
+            bounds: bounds.len(),
+        });
+    }
+    match activation {
+        GaussianActivation::Relu => relu_hermite_coefficients(t, scale, coefficients, bounds),
+        GaussianActivation::ExactGelu => {
+            exact_gelu_hermite_coefficients(t, scale, coefficients, bounds)
+        }
+        GaussianActivation::Silu => {
+            return Err(GaussianActivationError::NoClosedForm { activation });
+        }
+    }
+    Ok(())
 }
 
 /// The joint law of two Gaussian pre-activations: `X ~ N(mean_x, variance_x)`,
@@ -254,6 +346,7 @@ pub struct PairKernel {
 /// A zero-variance pre-activation is constant. For ReLU at zero mean it sits
 /// on the kink, where the slope is its Gaussian limit `½`, as in
 /// [`gaussian_smoothing_derivatives`].
+#[inline]
 pub fn pair_kernel(
     activation: GaussianActivation,
     pair: PreactivationPair,
@@ -312,6 +405,7 @@ pub struct ProjectedCovariance {
 /// The projection moves `K` by at most `sup|σ'|² β`, because
 /// `|∂_r K| = |E σ'(X) σ'(Y)| ≤ sup|σ'|²`: `1` for ReLU and
 /// `(Φ(√2) + √2 φ(√2))² < 1.28` for the exact GELU.
+#[inline]
 pub fn project_covariance(
     variance_x: f64,
     variance_y: f64,
@@ -396,23 +490,302 @@ fn relu_smoothing(
         return Ok(());
     }
     let scale = variance.sqrt();
-    let u = t / scale;
-    let density = normal_pdf(u);
-    let (value, probability) = if u < 0.0 {
-        let (reciprocal_slope, correction) = left_tail_mills(u);
-        (scale * density * correction, density * reciprocal_slope)
-    } else {
-        let probability = normal_cdf(u);
-        (t * probability + scale * density, probability)
-    };
+    let unit = relu_smoothed_unit(t, scale);
     if let Some(slot) = derivatives.get_mut(0) {
-        *slot = value;
+        *slot = unit.value.value;
     }
     if let Some(slot) = derivatives.get_mut(1) {
-        *slot = probability;
+        *slot = unit.slope.value;
     }
-    fill_relu_curvature(derivatives, u, density, scale);
+    fill_relu_curvature(
+        derivatives,
+        unit.argument.value,
+        unit.density.value,
+        scale,
+    );
     Ok(())
+}
+
+/// `u = ε/2`: under round-to-nearest every `+ − × ÷ √` errs by at most `u` of its
+/// result, and a libm `exp` or `erfc` by at most one ulp, `2u`.
+const UNIT_ROUNDOFF: f64 = f64::EPSILON / 2.0;
+
+/// Cramér's inequality `|h_n(x)| e^{−x²/4} ≤ K` for the orthonormal Hermite
+/// polynomials: Abramowitz and Stegun 22.14.17 give `K ≈ 1.086435`, rounded up.
+const CRAMER_BOUND: f64 = 1.0865;
+
+/// A computed value with a first-order bound on its absolute error: each
+/// operation adds its inputs' propagated bounds to its own rounding `u |result|`.
+#[derive(Clone, Copy, Debug)]
+struct Bounded {
+    value: f64,
+    bound: f64,
+}
+
+impl Bounded {
+    fn exact(value: f64) -> Self {
+        Self { value, bound: 0.0 }
+    }
+
+    fn rounded(value: f64, propagated: f64) -> Self {
+        Self {
+            value,
+            bound: propagated + UNIT_ROUNDOFF * value.abs(),
+        }
+    }
+
+    fn negated(self) -> Self {
+        Self {
+            value: -self.value,
+            bound: self.bound,
+        }
+    }
+
+    fn add(self, other: Self) -> Self {
+        Self::rounded(self.value + other.value, self.bound + other.bound)
+    }
+
+    fn sub(self, other: Self) -> Self {
+        Self::rounded(self.value - other.value, self.bound + other.bound)
+    }
+
+    fn mul(self, other: Self) -> Self {
+        Self::rounded(
+            self.value * other.value,
+            self.value.abs() * other.bound + other.value.abs() * self.bound,
+        )
+    }
+
+    fn div(self, other: Self) -> Self {
+        let value = self.value / other.value;
+        Self::rounded(
+            value,
+            (self.bound + value.abs() * other.bound) / other.value.abs(),
+        )
+    }
+
+    fn sqrt(self) -> Self {
+        let value = self.value.sqrt();
+        let propagated = if value > 0.0 {
+            self.bound / (2.0 * value)
+        } else {
+            self.bound.sqrt()
+        };
+        Self::rounded(value, propagated)
+    }
+}
+
+/// The rounding of `normal_pdf` at its computed argument: the `exp` ulp (`2u`),
+/// the constant and its product (`2u`), and the fused square-residual correction
+/// (`u`).
+fn density_rounding(density: f64) -> f64 {
+    5.0 * UNIT_ROUNDOFF * density
+}
+
+/// `φ(x)`, with the argument's bound entering through `|φ'(x)| = |x| φ(x)`.
+fn bounded_normal_pdf(argument: Bounded) -> Bounded {
+    let value = normal_pdf(argument.value);
+    Bounded {
+        value,
+        bound: density_rounding(value) + value * argument.value.abs() * argument.bound,
+    }
+}
+
+/// `Φ(x) = ½ erfc(−x/√2)`: the `erfc` ulp, and the two rounded operations forming
+/// `−x/√2` (`2u` relative), which move `Φ` by at most `2u |x| φ(x)`.
+fn bounded_normal_cdf(argument: Bounded) -> Bounded {
+    let value = normal_cdf(argument.value);
+    let density = normal_pdf(argument.value);
+    Bounded {
+        value,
+        bound: 2.0 * UNIT_ROUNDOFF * value
+            + density * (2.0 * UNIT_ROUNDOFF * argument.value.abs() + argument.bound),
+    }
+}
+
+/// `(1/λ(x), q(x)/λ(x))` of [`left_tail_mills`] for `x < 0`, with bounds.
+///
+/// On `(−4, 0)` the log-CDF owner forms `λ = √(2/π)/erfcx(−x/√2)`:
+/// - `erfcx` errs by less than `5e-16 < 5u`;
+/// - the rounding of its argument (`2u` relative) moves it by at most `2u`,
+///   because `|z ∂_z ln erfcx(z)| = 2z |1/(√π erfcx(z)) − z| ≤ 1` for `z ≥ 0`;
+/// - the constant and the division add `2u`.
+///
+/// So `λ` carries `ρ = 9u`. Then `q = λ + x` errs by `9uλ + uq`, and `f'' = −λq`
+/// by `9uλ² + 11uλq`. `1/λ` errs by `10u/λ`, and the two products forming
+/// `q/λ = −f''/λ²` leave at most `33u q/λ + 9u`.
+///
+/// Below `−4` the owner takes `q` from the Laplace continued fraction, whose every
+/// level divides positive quantities. Its values err by a few `u` of themselves,
+/// and `f'' = −(1 + q')` by under `2u`, inside the same bounds.
+///
+/// The argument's bound enters through `∂_x(1/λ) = q/λ` and
+/// `∂_x(q/λ) = 1/λ + x q/λ`.
+fn bounded_left_tail_mills(argument: Bounded) -> (Bounded, Bounded) {
+    let (reciprocal_slope, correction) = left_tail_mills(argument.value);
+    (
+        Bounded {
+            value: reciprocal_slope,
+            bound: 10.0 * UNIT_ROUNDOFF * reciprocal_slope + correction * argument.bound,
+        },
+        Bounded {
+            value: correction,
+            bound: UNIT_ROUNDOFF * (33.0 * correction + 9.0)
+                + (reciprocal_slope + argument.value.abs() * correction) * argument.bound,
+        },
+    )
+}
+
+/// What a Hermite coefficient loses when `φ(x)` underflows to zero: by Cramér's
+/// inequality `φ(x) |h_j(x)| ≤ K (2π)^{−1/4} √φ(x)`, and the true `φ(x)` is then
+/// below the smallest subnormal.
+fn underflowed_hermite_function_bound() -> f64 {
+    CRAMER_BOUND * TAU.sqrt().sqrt().recip() * f64::from_bits(1).sqrt()
+}
+
+/// The orthonormal Hermite recurrence `h_{k+1} = (x h_k − √k h_{k−1})/√(k+1)` at
+/// a computed argument, with a running first-order bound on each value's
+/// rounding.
+///
+/// A step rounds two products, the root `√k`, the subtraction, the root `√(k+1)`
+/// and the division. That is at most `3u (|x h_k| + √k |h_{k−1}|)` on the numerator
+/// and `2u |h_{k+1}|` on the quotient, on top of the propagated
+/// `(|x| e_k + √k e_{k−1})/√(k+1)`.
+#[derive(Clone, Copy, Debug)]
+struct HermiteRecurrence {
+    argument: f64,
+    /// The order `k` of `current`.
+    degree: usize,
+    previous: f64,
+    previous_error: f64,
+    current: f64,
+    current_error: f64,
+}
+
+impl HermiteRecurrence {
+    fn start(argument: f64) -> Self {
+        Self {
+            argument,
+            degree: 0,
+            previous: 0.0,
+            previous_error: 0.0,
+            current: 1.0,
+            current_error: 0.0,
+        }
+    }
+
+    fn advance(&mut self) {
+        let degree = self.degree as f64;
+        let root = degree.sqrt();
+        let next_root = (degree + 1.0).sqrt();
+        let next = (self.argument * self.current - root * self.previous) / next_root;
+        let numerator_magnitude =
+            self.argument.abs() * self.current.abs() + root * self.previous.abs();
+        let next_error = (self.argument.abs() * self.current_error
+            + root * self.previous_error
+            + 3.0 * UNIT_ROUNDOFF * numerator_magnitude)
+            / next_root
+            + 2.0 * UNIT_ROUNDOFF * next.abs();
+        self.previous = self.current;
+        self.previous_error = self.current_error;
+        self.current = next;
+        self.current_error = next_error;
+        self.degree += 1;
+    }
+}
+
+/// A smoothed unit at its standardized argument: `x`, `φ(x)`, `T` and `T'`, each
+/// with its bound.
+#[derive(Clone, Copy, Debug)]
+struct SmoothedUnit {
+    argument: Bounded,
+    density: Bounded,
+    value: Bounded,
+    slope: Bounded,
+}
+
+fn write_bounded(values: &mut [f64], bounds: &mut [f64], order: usize, entry: Bounded) {
+    if let (Some(value), Some(bound)) = (values.get_mut(order), bounds.get_mut(order)) {
+        *value = entry.value;
+        *bound = entry.bound;
+    }
+}
+
+/// ReLU at scale `s > 0`: `x = t/s`, `T = t Φ(x) + s φ(x)` and `T' = Φ(x)`, and for
+/// `x < 0` the left-tail forms `T = s φ q/λ` and `T' = φ/λ`.
+fn relu_smoothed_unit(t: f64, scale: f64) -> SmoothedUnit {
+    let location = Bounded::exact(t);
+    let spread = Bounded::exact(scale);
+    let argument = location.div(spread);
+    let density = bounded_normal_pdf(argument);
+    let (value, slope) = if argument.value < 0.0 {
+        let (reciprocal, corrected) = bounded_left_tail_mills(argument);
+        (spread.mul(density).mul(corrected), density.mul(reciprocal))
+    } else {
+        let probability = bounded_normal_cdf(argument);
+        (
+            location.mul(probability).add(spread.mul(density)),
+            probability,
+        )
+    };
+    SmoothedUnit {
+        argument,
+        density,
+        value,
+        slope,
+    }
+}
+
+/// `a_0 = T`, `a_1 = s T'` and `a_n = (−1)ⁿ s φ(x) h_{n−2}(x)/√(n(n−1))`, `x = t/s`,
+/// each with its bound.
+fn relu_hermite_coefficients(t: f64, scale: f64, coefficients: &mut [f64], bounds: &mut [f64]) {
+    if scale == 0.0 {
+        for (order, (slot, bound)) in coefficients.iter_mut().zip(bounds.iter_mut()).enumerate() {
+            *slot = if order == 0 { t.max(0.0) } else { 0.0 };
+            *bound = 0.0;
+        }
+        return;
+    }
+    let unit = relu_smoothed_unit(t, scale);
+    write_bounded(coefficients, bounds, 0, unit.value);
+    write_bounded(
+        coefficients,
+        bounds,
+        1,
+        Bounded::exact(scale).mul(unit.slope),
+    );
+    let density = unit.density.value;
+    let pairs = coefficients.iter_mut().zip(bounds.iter_mut()).enumerate().skip(2);
+    if density == 0.0 {
+        let lost = scale * underflowed_hermite_function_bound();
+        for (order, (slot, bound)) in pairs {
+            *slot = 0.0;
+            *bound = lost / ((order * (order - 1)) as f64).sqrt();
+        }
+        return;
+    }
+    let argument = unit.argument.value;
+    let argument_bound = unit.argument.bound;
+    let factor = scale * density;
+    let mut recurrence = HermiteRecurrence::start(argument);
+    for (order, (slot, bound)) in pairs {
+        let sign = if order % 2 == 0 { 1.0 } else { -1.0 };
+        let normalizer = ((order * (order - 1)) as f64).sqrt();
+        let value = sign * factor * recurrence.current / normalizer;
+        *slot = value;
+        // ∂_x (φ h_j) = φ (√j h_{j−1} − x h_j) with j = n − 2.
+        let argument_term = density
+            * ((recurrence.degree as f64).sqrt() * recurrence.previous.abs()
+                + argument.abs() * recurrence.current.abs())
+            * argument_bound;
+        *bound = scale
+            * (density * recurrence.current_error
+                + recurrence.current.abs() * density_rounding(density)
+                + argument_term)
+            / normalizer
+            + 4.0 * UNIT_ROUNDOFF * value.abs();
+        recurrence.advance();
+    }
 }
 
 /// `(1/λ(u), q(u)/λ(u))` for `u < 0`, with the log-CDF slope `λ = φ/Φ` and its
@@ -448,30 +821,129 @@ fn fill_relu_curvature(derivatives: &mut [f64], u: f64, density: f64, scale: f64
 }
 
 fn exact_gelu_smoothing(t: f64, variance: f64, derivatives: &mut [f64]) {
-    let total = 1.0 + variance;
-    let root_total = total.sqrt();
-    let u = t / root_total;
-    let density = normal_pdf(u);
-    let (value, slope) = if u < 0.0 {
-        let (reciprocal_slope, correction) = left_tail_mills(u);
-        (
-            root_total * density * (correction - total.recip()),
-            density * (reciprocal_slope + u / total),
-        )
-    } else {
-        let probability = normal_cdf(u);
-        (
-            t * probability + variance / root_total * density,
-            probability + u * density / total,
-        )
-    };
+    let (unit, total, root_total) = exact_gelu_smoothed_unit(t, Bounded::exact(variance));
     if let Some(slot) = derivatives.get_mut(0) {
-        *slot = value;
+        *slot = unit.value.value;
     }
     if let Some(slot) = derivatives.get_mut(1) {
-        *slot = slope;
+        *slot = unit.slope.value;
     }
-    fill_exact_gelu_curvature(derivatives, u, density, total, root_total);
+    fill_exact_gelu_curvature(
+        derivatives,
+        unit.argument.value,
+        unit.density.value,
+        total.value,
+        root_total.value,
+    );
+}
+
+/// The exact GELU with `A = 1 + v`, `S = √A` and `x = t/S`:
+/// `T = t Φ(x) + (v/S) φ(x)` and `T' = Φ(x) + x φ(x)/A`, and for `x < 0` the
+/// left-tail forms `T = S φ (q/λ − 1/A)` and `T' = φ (1/λ + x/A)`. Returns the
+/// unit together with `A` and `S`.
+fn exact_gelu_smoothed_unit(t: f64, variance: Bounded) -> (SmoothedUnit, Bounded, Bounded) {
+    let location = Bounded::exact(t);
+    let total = Bounded::exact(1.0).add(variance);
+    let root_total = total.sqrt();
+    let argument = location.div(root_total);
+    let density = bounded_normal_pdf(argument);
+    let (value, slope) = if argument.value < 0.0 {
+        let (reciprocal, corrected) = bounded_left_tail_mills(argument);
+        (
+            root_total
+                .mul(density)
+                .mul(corrected.sub(Bounded::exact(1.0).div(total))),
+            density.mul(reciprocal.add(argument.div(total))),
+        )
+    } else {
+        let probability = bounded_normal_cdf(argument);
+        (
+            location
+                .mul(probability)
+                .add(variance.div(root_total).mul(density)),
+            probability.add(argument.mul(density).div(total)),
+        )
+    };
+    (
+        SmoothedUnit {
+            argument,
+            density,
+            value,
+            slope,
+        },
+        total,
+        root_total,
+    )
+}
+
+/// `a_0 = T`, `a_1 = s T'` and
+/// `a_n = (−1)ⁿ φ(x) (s/S)ⁿ [A h_{n−2}(x)/√(n(n−1)) − h_n(x)]/S`, `x = t/S`, each with
+/// its bound.
+fn exact_gelu_hermite_coefficients(
+    t: f64,
+    scale: f64,
+    coefficients: &mut [f64],
+    bounds: &mut [f64],
+) {
+    let spread = Bounded::exact(scale);
+    let (unit, total, root_total) = exact_gelu_smoothed_unit(t, spread.mul(spread));
+    write_bounded(coefficients, bounds, 0, unit.value);
+    write_bounded(coefficients, bounds, 1, spread.mul(unit.slope));
+    if scale == 0.0 {
+        for (slot, bound) in coefficients.iter_mut().zip(bounds.iter_mut()).skip(2) {
+            *slot = 0.0;
+            *bound = 0.0;
+        }
+        return;
+    }
+    let density = unit.density.value;
+    let ratio = spread.div(root_total);
+    let pairs = coefficients.iter_mut().zip(bounds.iter_mut()).enumerate().skip(2);
+    if density == 0.0 {
+        let lost = underflowed_hermite_function_bound() / root_total.value;
+        let mut power = ratio.value * ratio.value;
+        for (order, (slot, bound)) in pairs {
+            *slot = 0.0;
+            *bound = power
+                * lost
+                * (total.value / ((order * (order - 1)) as f64).sqrt() + 1.0);
+            power *= ratio.value;
+        }
+        return;
+    }
+    let argument = unit.argument.value;
+    let argument_bound = unit.argument.bound;
+    let mut factor = unit.density.mul(ratio).mul(ratio).div(root_total);
+    let mut recurrence = HermiteRecurrence::start(argument);
+    recurrence.advance();
+    recurrence.advance();
+    // `(h, e)` of orders n − 3 and n − 2; the recurrence holds n − 1 and n.
+    let mut lowest = (0.0_f64, 0.0_f64);
+    let mut lower = (1.0_f64, 0.0_f64);
+    for (order, (slot, bound)) in pairs {
+        let degree = order as f64;
+        let normalizer = (degree * (degree - 1.0)).sqrt();
+        let bracket = total.value * lower.0 / normalizer - recurrence.current;
+        let value = factor.value * bracket;
+        *slot = value;
+        let bracket_error = (total.value * lower.1
+            + lower.0.abs() * total.bound
+            + 3.0 * UNIT_ROUNDOFF * total.value * lower.0.abs())
+            / normalizer
+            + recurrence.current_error
+            + UNIT_ROUNDOFF * bracket.abs();
+        // ∂_x [A h_{n−2}/√(n(n−1)) − h_n] = A √(n−2) h_{n−3}/√(n(n−1)) − √n h_{n−1}.
+        let argument_term = (total.value * (degree - 2.0).sqrt() * lowest.0.abs() / normalizer
+            + degree.sqrt() * recurrence.previous.abs())
+            * argument_bound;
+        *bound = factor.value.abs() * (bracket_error + argument_term)
+            + bracket.abs() * factor.bound
+            + UNIT_ROUNDOFF * value.abs();
+        lowest = lower;
+        lower = (recurrence.previous, recurrence.previous_error);
+        recurrence.advance();
+        factor = factor.negated().mul(ratio);
+    }
 }
 
 /// `derivatives[k] = (−1)ᵏ φ(u) (A He_{k−2}(u) − He_k(u))/(A Sᵏ⁻¹)` for `k ≥ 2`.
@@ -738,6 +1210,92 @@ mod tests {
             covariance,
             covariance_rounding: 0.0,
         }
+    }
+
+    /// `(h_n(x), A_n(|x|)/√(n!))` for `n ≤ degree`: the orthonormal Hermite
+    /// polynomials by their recurrence, and the magnitude their absolute-coefficient
+    /// counterpart rounds against.
+    fn normalized_hermite(degree: usize, x: f64) -> Vec<(f64, f64)> {
+        let mut values = Vec::with_capacity(degree + 1);
+        let mut previous = 0.0;
+        let mut current = 1.0;
+        let mut previous_magnitude = 0.0;
+        let mut current_magnitude = 1.0;
+        for index in 0..=degree {
+            values.push((current, current_magnitude));
+            let root = (index as f64).sqrt();
+            let next_root = (index as f64 + 1.0).sqrt();
+            let next = (x * current - root * previous) / next_root;
+            let next_magnitude = (x.abs() * current_magnitude + root * previous_magnitude) / next_root;
+            previous = current;
+            current = next;
+            previous_magnitude = current_magnitude;
+            current_magnitude = next_magnitude;
+        }
+        values
+    }
+
+    /// A double-double `high + low` for reference recurrences: every operation errs
+    /// by `O(ε²)` of its result.
+    #[derive(Clone, Copy, Debug)]
+    struct DoubleDouble {
+        high: f64,
+        low: f64,
+    }
+
+    impl DoubleDouble {
+        fn from(value: f64) -> Self {
+            Self {
+                high: value,
+                low: 0.0,
+            }
+        }
+
+        fn two_sum(left: f64, right: f64) -> Self {
+            let high = left + right;
+            let virtual_right = high - left;
+            let low = (left - (high - virtual_right)) + (right - virtual_right);
+            Self { high, low }
+        }
+
+        fn add(self, other: Self) -> Self {
+            let sum = Self::two_sum(self.high, other.high);
+            Self::two_sum(sum.high, sum.low + self.low + other.low)
+        }
+
+        fn negated(self) -> Self {
+            Self {
+                high: -self.high,
+                low: -self.low,
+            }
+        }
+
+        fn mul(self, other: Self) -> Self {
+            let high = self.high * other.high;
+            let low = self.high.mul_add(other.high, -high)
+                + (self.high * other.low + self.low * other.high);
+            Self::two_sum(high, low)
+        }
+
+        fn div(self, other: Self) -> Self {
+            let quotient = self.high / other.high;
+            let remainder = self.add(other.mul(Self::from(quotient)).negated());
+            Self::two_sum(quotient, remainder.high / other.high)
+        }
+
+        fn root_of(value: f64) -> Self {
+            if value == 0.0 {
+                return Self::from(0.0);
+            }
+            let root = value.sqrt();
+            let residual = -root.mul_add(root, -value);
+            Self::two_sum(root, residual / (2.0 * root))
+        }
+    }
+
+    /// `sⁿ/√(n!)`.
+    fn hermite_normalizer(scale: f64, order: usize) -> f64 {
+        (1..=order).fold(1.0, |normalizer, index| normalizer * scale / (index as f64).sqrt())
     }
 
     /// The terms of the zero-mean exact-GELU closed forms, recomputed for the
@@ -1527,6 +2085,362 @@ mod tests {
                     tag: tag.to_owned()
                 })
             );
+        }
+    }
+
+    #[test]
+    fn hermite_coefficients_are_the_scaled_smoothing_derivatives() {
+        // a_n = sⁿ T⁽ⁿ⁾_{s²}σ(t)/√(n!) against the derivative towers the heat-equation,
+        // derivative-chain and quadrature pins already validate. The coefficient
+        // carries its returned bound, and the derivative route rounds within
+        // EVALUATION_OPERATIONS ulps of its term magnitudes.
+        for activation in [GaussianActivation::Relu, GaussianActivation::ExactGelu] {
+            for (t, scale) in [(-2.0, 0.5), (0.7, 2.0), (3.0, 1.0), (-0.4, 0.1)] {
+                let mut coefficients = [f64::NAN; 9];
+                let mut bounds = [f64::NAN; 9];
+                gaussian_hermite_coefficients(activation, t, scale, &mut coefficients, &mut bounds)
+                    .expect("valid coefficient law");
+                let variance = scale * scale;
+                let derivatives = smoothing(activation, t, variance, 9);
+                for order in 0..9 {
+                    let normalizer = hermite_normalizer(scale, order);
+                    let expected = normalizer * derivatives[order];
+                    let tolerance = bounds[order]
+                        + closed_form_rounding(
+                            normalizer * smoothing_magnitude(activation, t, variance, order),
+                        );
+                    let discrepancy = (coefficients[order] - expected).abs();
+                    assert!(
+                        discrepancy <= tolerance,
+                        "{activation:?} a_{order} at t = {t}, s = {scale}: {} against sⁿT⁽ⁿ⁾/√n! = {expected} (discrepancy {discrepancy:e}, derived tolerance {tolerance:e})",
+                        coefficients[order]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hermite_coefficients_reproduce_the_zero_mean_pair_kernel_by_mehler() {
+        // E[σ(X)σ(Y)] = Σ_n ρⁿ a_n(0, √v) a_n(0, √w). By Cauchy-Schwarz the terms after
+        // the first N add up to at most |ρ|^N √(E σ(X)² E σ(Y)²), and E σ(X)² is the
+        // diagonal kernel K(v, v; v).
+        const TERMS: usize = 64;
+        for activation in [GaussianActivation::Relu, GaussianActivation::ExactGelu] {
+            let laws: [(f64, f64, f64); 3] = [(1.0, 1.0, 0.3), (4.0, 0.25, -0.5), (9.0, 16.0, 7.0)];
+            for (variance_x, variance_y, covariance) in laws {
+                let mut first = [f64::NAN; TERMS];
+                let mut first_bounds = [f64::NAN; TERMS];
+                let mut second = [f64::NAN; TERMS];
+                let mut second_bounds = [f64::NAN; TERMS];
+                gaussian_hermite_coefficients(
+                    activation,
+                    0.0,
+                    variance_x.sqrt(),
+                    &mut first,
+                    &mut first_bounds,
+                )
+                .expect("first coefficients");
+                gaussian_hermite_coefficients(
+                    activation,
+                    0.0,
+                    variance_y.sqrt(),
+                    &mut second,
+                    &mut second_bounds,
+                )
+                .expect("second coefficients");
+                let correlation = covariance / (variance_x.sqrt() * variance_y.sqrt());
+                let mut power = 1.0;
+                let mut series = 0.0;
+                let mut absolute = 0.0;
+                let mut reflected = 0.0;
+                let mut propagated = 0.0;
+                for order in 0..TERMS {
+                    let term = power * first[order] * second[order];
+                    series += term;
+                    absolute += term.abs();
+                    reflected += if order % 2 == 0 { term } else { -term };
+                    propagated += power.abs()
+                        * (first[order].abs() * second_bounds[order]
+                            + second[order].abs() * first_bounds[order]);
+                    power *= correlation;
+                }
+                let diagonal = |variance: f64| {
+                    pair_kernel(activation, zero_mean(variance, variance, variance))
+                        .expect("diagonal kernel")
+                        .value
+                };
+                let tail = correlation.abs().powi(TERMS as i32)
+                    * (diagonal(variance_x) * diagonal(variance_y)).sqrt();
+                let closed = pair_kernel(
+                    activation,
+                    zero_mean(variance_x, variance_y, covariance),
+                )
+                .expect("zero-mean pair kernel");
+                let magnitude = match activation {
+                    GaussianActivation::Relu => {
+                        (variance_x * variance_y - covariance * covariance).max(0.0).sqrt() / TAU
+                            + covariance.abs() * closed.covariance_derivative
+                    }
+                    GaussianActivation::ExactGelu => {
+                        exact_gelu_zero_mean_magnitudes(variance_x, variance_y, covariance).0
+                    }
+                    GaussianActivation::Silu => unreachable!("SiLU has no closed form here"),
+                };
+                let tolerance = tail
+                    + propagated
+                    + (TERMS as f64 + EVALUATION_OPERATIONS) * f64::EPSILON * absolute
+                    + closed_form_rounding(magnitude);
+                let discrepancy = (closed.value - series).abs();
+                assert!(
+                    discrepancy <= tolerance,
+                    "{activation:?} Mehler series at v = {variance_x}, w = {variance_y}, r = {covariance}: {series} against K = {} (discrepancy {discrepancy:e}, derived tolerance {tolerance:e})",
+                    closed.value
+                );
+                // Positive control: the series at −ρ is the kernel of the reflected law,
+                // and the same tolerance rejects it.
+                let control = (closed.value - reflected).abs();
+                assert!(
+                    control > tolerance,
+                    "{activation:?} Mehler control at r = {covariance}: discrepancy {control:e} within {tolerance:e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_gelu_hermite_coefficients_match_gauss_hermite_projections() {
+        const DEGREE: usize = 12;
+        let coarse_rule = gauss_hermite_rule(256).expect("256-node Gauss-Hermite rule");
+        let fine_rule = gauss_hermite_rule(512).expect("512-node Gauss-Hermite rule");
+        for (t, scale) in [(-3.0, 2.0), (1.5, 0.5), (0.0, 3.0), (-6.0, 1.0)] {
+            let mut coefficients = [f64::NAN; DEGREE + 1];
+            let mut bounds = [f64::NAN; DEGREE + 1];
+            gaussian_hermite_coefficients(
+                GaussianActivation::ExactGelu,
+                t,
+                scale,
+                &mut coefficients,
+                &mut bounds,
+            )
+            .expect("exact GELU coefficients");
+            for order in 0..=DEGREE {
+                let integrand = |e: f64| {
+                    let (activation, activation_magnitude) = exact_gelu_derivative(t + scale * e, 0);
+                    let (hermite, hermite_magnitude) = normalized_hermite(order, e)[order];
+                    (activation * hermite, activation_magnitude * hermite_magnitude)
+                };
+                let reference = doubled_order(
+                    hermite_pass(&coarse_rule, integrand),
+                    hermite_pass(&fine_rule, integrand),
+                    512,
+                    512,
+                    0.0,
+                );
+                let tolerance = reference.bound + bounds[order];
+                let discrepancy = (coefficients[order] - reference.value).abs();
+                assert!(
+                    discrepancy <= tolerance,
+                    "exact GELU a_{order} at t = {t}, s = {scale}: {} against E[σ h_n] = {} (discrepancy {discrepancy:e}, derived tolerance {tolerance:e})",
+                    coefficients[order],
+                    reference.value
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hermite_coefficients_stay_finite_where_raw_derivatives_overflow_and_vanish_without_scale() {
+        // At s = 1e-150 and u = t/s = 0.1 the raw T⁽ⁿ⁾ = (−1)ⁿ He_{n−2}(u) φ(u)/sⁿ⁻¹
+        // overflows by n = 4, while a_n = (−1)ⁿ s φ(u) h_{n−2}(u)/√(n(n−1)) has size s.
+        let scale = 1.0e-150;
+        let t = 1.0e-151;
+        let mut raw = [f64::NAN; 8];
+        gaussian_smoothing_derivatives(GaussianActivation::Relu, t, scale * scale, &mut raw)
+            .expect("raw derivatives");
+        assert!(raw[4].is_infinite(), "positive control: raw T⁽⁴⁾ = {} should overflow", raw[4]);
+        let mut coefficients = [f64::NAN; 8];
+        let mut bounds = [f64::NAN; 8];
+        gaussian_hermite_coefficients(
+            GaussianActivation::Relu,
+            t,
+            scale,
+            &mut coefficients,
+            &mut bounds,
+        )
+        .expect("coefficients at a tiny scale");
+        assert!(
+            coefficients
+                .iter()
+                .chain(bounds.iter())
+                .all(|entry| entry.is_finite()),
+            "coefficients at s = {scale}: {coefficients:?} with bounds {bounds:?}"
+        );
+        let expected = scale * normal_pdf(t / scale) / SQRT_2;
+        assert!(
+            (coefficients[2] - expected).abs() <= bounds[2] + closed_form_rounding(expected),
+            "a_2 at s = {scale}: {} against s φ(u)/√2 = {expected}",
+            coefficients[2]
+        );
+        // Without scale the smoothed activation is the constant σ(t), and the
+        // coefficients past the first are exact zeros.
+        for activation in [GaussianActivation::Relu, GaussianActivation::ExactGelu] {
+            let mut constant = [f64::NAN; 4];
+            let mut constant_bounds = [f64::NAN; 4];
+            gaussian_hermite_coefficients(activation, -1.5, 0.0, &mut constant, &mut constant_bounds)
+                .expect("coefficients without scale");
+            let value = smoothing(activation, -1.5, 0.0, 1)[0];
+            assert_eq!(constant, [value, 0.0, 0.0, 0.0], "{activation:?} without scale");
+            assert_eq!(
+                constant_bounds[1..],
+                [0.0; 3],
+                "{activation:?} bounds without scale"
+            );
+        }
+        let mut refused = [0.0; 2];
+        let mut refused_bounds = [0.0; 2];
+        assert_eq!(
+            gaussian_hermite_coefficients(
+                GaussianActivation::Relu,
+                0.0,
+                -1.0,
+                &mut refused,
+                &mut refused_bounds
+            ),
+            Err(GaussianActivationError::InvalidScale { scale: -1.0 })
+        );
+        assert!(matches!(
+            gaussian_hermite_coefficients(
+                GaussianActivation::ExactGelu,
+                f64::NAN,
+                1.0,
+                &mut refused,
+                &mut refused_bounds
+            ),
+            Err(GaussianActivationError::NonFiniteArgument { .. })
+        ));
+        assert_eq!(
+            gaussian_hermite_coefficients(
+                GaussianActivation::Silu,
+                0.0,
+                1.0,
+                &mut refused,
+                &mut refused_bounds
+            ),
+            Err(GaussianActivationError::NoClosedForm {
+                activation: GaussianActivation::Silu
+            })
+        );
+        let mut short_bounds = [0.0; 1];
+        assert_eq!(
+            gaussian_hermite_coefficients(
+                GaussianActivation::Relu,
+                0.0,
+                1.0,
+                &mut refused,
+                &mut short_bounds
+            ),
+            Err(GaussianActivationError::MismatchedBoundsLength {
+                coefficients: 2,
+                bounds: 1
+            })
+        );
+    }
+
+    #[test]
+    fn hermite_recurrence_running_error_bounds_its_double_double_reference() {
+        // The production recurrence against the same recurrence carried in
+        // double-double at the same computed argument, whose own error is O(ε²)
+        // and far below the rounding the running bound accounts for.
+        let mut largest_discrepancy = 0.0_f64;
+        for argument in [-6.3, -1.7, 0.0, 0.9, 4.2, 11.5] {
+            let mut recurrence = HermiteRecurrence::start(argument);
+            let x = DoubleDouble::from(argument);
+            let mut previous = DoubleDouble::from(0.0);
+            let mut current = DoubleDouble::from(1.0);
+            for degree in 0..64 {
+                let discrepancy = ((recurrence.current - current.high) - current.low).abs();
+                largest_discrepancy = largest_discrepancy.max(discrepancy);
+                assert!(
+                    discrepancy <= recurrence.current_error,
+                    "h_{degree}({argument}): discrepancy {discrepancy:e} beyond its running bound {:e}",
+                    recurrence.current_error
+                );
+                let root = DoubleDouble::root_of(degree as f64);
+                let next_root = DoubleDouble::root_of((degree + 1) as f64);
+                let next = x
+                    .mul(current)
+                    .add(root.mul(previous).negated())
+                    .div(next_root);
+                previous = current;
+                current = next;
+                recurrence.advance();
+            }
+        }
+        // Positive control: the propagated part alone is zero from h_0 = 1, so the
+        // bound is only as good as its rounding terms, and some step does round.
+        assert!(
+            largest_discrepancy > 0.0,
+            "the recurrence never rounded, so the running bound was not exercised"
+        );
+    }
+
+    #[test]
+    fn underflowed_density_returns_zero_coefficients_with_cramer_bounds() {
+        // Past |x| ≈ 38.6 the density underflows. By Cramér's inequality
+        // φ(x) |h_j(x)| ≤ 1.0865 (2π)^{−1/4} √φ(x), which bounds what the zero
+        // coefficients lose. Just inside the edge the same inequality, at that φ,
+        // bounds the representable coefficients.
+        let cramer = |density: f64| CRAMER_BOUND * TAU.sqrt().sqrt().recip() * density.sqrt();
+        for activation in [GaussianActivation::Relu, GaussianActivation::ExactGelu] {
+            let root_total = match activation {
+                GaussianActivation::Relu => 1.0,
+                GaussianActivation::ExactGelu => SQRT_2,
+                GaussianActivation::Silu => unreachable!("SiLU has no closed form here"),
+            };
+            let mut coefficients = [f64::NAN; 12];
+            let mut bounds = [f64::NAN; 12];
+            gaussian_hermite_coefficients(activation, 45.0 * root_total, 1.0, &mut coefficients, &mut bounds)
+                .expect("coefficients past the underflow edge");
+            assert!(
+                coefficients[2..].iter().all(|coefficient| *coefficient == 0.0),
+                "{activation:?} coefficients past the edge: {coefficients:?}"
+            );
+            assert!(
+                bounds[2..].iter().all(|bound| bound.is_finite() && *bound > 0.0),
+                "{activation:?} Cramér bounds past the edge: {bounds:?}"
+            );
+            let inside = 38.0;
+            let mut representable = [f64::NAN; 12];
+            let mut representable_bounds = [f64::NAN; 12];
+            gaussian_hermite_coefficients(
+                activation,
+                inside * root_total,
+                1.0,
+                &mut representable,
+                &mut representable_bounds,
+            )
+            .expect("coefficients inside the edge");
+            let density = normal_pdf(inside);
+            assert!(density > 0.0, "positive control: φ({inside}) is representable");
+            for order in 2..12 {
+                let normalizer = ((order * (order - 1)) as f64).sqrt();
+                let envelope = match activation {
+                    GaussianActivation::Relu => cramer(density) / normalizer,
+                    GaussianActivation::ExactGelu => {
+                        // (s/S)ⁿ/S (A/√(n(n−1)) + 1) with s = 1, A = 2, S = √2.
+                        SQRT_2.recip().powi(order as i32) / SQRT_2
+                            * (2.0 / normalizer + 1.0)
+                            * cramer(density)
+                    }
+                    GaussianActivation::Silu => unreachable!("SiLU has no closed form here"),
+                };
+                assert!(
+                    representable[order].abs() <= envelope + representable_bounds[order],
+                    "{activation:?} a_{order} at x = {inside}: {} above Cramér's envelope {envelope:e}",
+                    representable[order]
+                );
+            }
         }
     }
 
