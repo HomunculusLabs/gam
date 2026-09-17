@@ -85,6 +85,9 @@ pub mod codec;
 // Matrix-valued parameter fields over GAM bases, with anchored pullbacks.
 // [unlanded: field]
 
+// Parameter-family labels: share and split of fixed components into affine fields, scored on decoded code.
+pub mod families;
+
 // Joint finite-intervention objective and structural proposals.
 pub mod fit;
 
