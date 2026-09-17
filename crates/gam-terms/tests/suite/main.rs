@@ -13,4 +13,5 @@ mod measure_jet_affine_null_survives_centering_2751;
 mod measure_jet_psi_box_is_its_own_geometry_2750;
 mod measure_jet_range_moves_the_span_2761;
 mod parametric_orthogonality_costs_no_dimension_2747;
+mod pca_term_freezes_for_persistence_2627;
 mod probe_2761_penalty_topology;

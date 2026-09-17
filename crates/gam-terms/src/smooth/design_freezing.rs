@@ -542,6 +542,35 @@ fn freeze_smooth_basis_from_metadata(
             s.group_frozen_levels = Some(group_levels.clone());
         }
         (
+            SmoothBasisSpec::Pca {
+                feature_cols,
+                basis_matrix,
+                centered,
+                center_mean,
+                pca_basis_path,
+                chunk_size,
+            },
+            BasisMetadata::Pca {
+                feature_cols: fitted_cols,
+                basis_matrix: fitted_basis,
+                centered: fitted_centered,
+                center_mean: fitted_mean,
+                pca_basis_path: fitted_path,
+                chunk_size: fitted_chunk_size,
+            },
+        ) => {
+            // The build records the realized projection: a centred eager term's
+            // TRAINING mean, or a lazy term's scores file. Carrying both into the
+            // spec makes a rebuild over any rows reuse the training centering
+            // instead of recentring on those rows (#2627).
+            *feature_cols = fitted_cols.clone();
+            *basis_matrix = fitted_basis.clone();
+            *centered = *fitted_centered;
+            *center_mean = fitted_mean.clone();
+            *pca_basis_path = fitted_path.clone();
+            *chunk_size = *fitted_chunk_size;
+        }
+        (
             SmoothBasisSpec::BySmooth { smooth, by_kind },
             BasisMetadata::FactorSmooth {
                 knots,
