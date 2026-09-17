@@ -14,6 +14,23 @@ impl<E: ToString> WorkflowCauseCountResult for Result<usize, E> {
     }
 }
 
+/// Why a marginal-slope fit refuses the link its main formula names. The calibrated
+/// de-nested kernel is probit-only, so every other request is refused with the rule it
+/// breaks rather than fitted as probit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarginalSlopeLinkRefusal {
+    /// `link(type=flexible(...))`: link deviations are learned by `linkwiggle(...)` around a
+    /// fixed base link.
+    Flexible,
+    /// A base link other than probit, or a blend of links.
+    NonProbit,
+    /// A link parameter that only `link(type=<requires>)` reads.
+    ForeignParameter {
+        parameter: &'static str,
+        requires: &'static str,
+    },
+}
+
 /// Typed error category for the `solver::fit_orchestration` materialization and
 /// fitting pipeline.
 ///
@@ -75,6 +92,11 @@ pub enum WorkflowError {
         similar: Vec<String>,
         tsv_hint: bool,
     },
+    /// A marginal-slope fit named a link its probit-only kernel cannot fit.
+    MarginalSlopeLink {
+        context: &'static str,
+        refusal: MarginalSlopeLinkRefusal,
+    },
 }
 
 impl std::fmt::Display for WorkflowError {
@@ -134,6 +156,23 @@ impl std::fmt::Display for WorkflowError {
                     )
                 }
             }
+            WorkflowError::MarginalSlopeLink { context, refusal } => match refusal {
+                MarginalSlopeLinkRefusal::Flexible => write!(
+                    f,
+                    "{context} does not accept flexible(...) inside link(); use link(type=<base-link>) plus linkwiggle(...) to learn anchored link deviations"
+                ),
+                MarginalSlopeLinkRefusal::NonProbit => write!(
+                    f,
+                    "{context} requires link(type=probit); non-probit marginal-slope links are not supported by the calibrated de-nested probit kernel"
+                ),
+                MarginalSlopeLinkRefusal::ForeignParameter {
+                    parameter,
+                    requires,
+                } => write!(
+                    f,
+                    "link({parameter}=...) requires link(type={requires}), which {context} does not support"
+                ),
+            },
         }
     }
 }
@@ -148,7 +187,8 @@ impl std::error::Error for WorkflowError {
             | WorkflowError::IntegrationFailed { .. }
             | WorkflowError::InvalidData { .. }
             | WorkflowError::SpatialUnderresolved { .. }
-            | WorkflowError::ColumnNotFound { .. } => None,
+            | WorkflowError::ColumnNotFound { .. }
+            | WorkflowError::MarginalSlopeLink { .. } => None,
         }
     }
 }

@@ -2339,12 +2339,13 @@ fn survival_marginal_slope_accepts_explicit_probit_link() {
         z_column: Some("z".to_string()),
         ..FitConfig::default()
     };
-    let ok = materialize(
+    if let Err(err) = materialize(
         "Surv(age_entry, age_exit, event) ~ bmi + link(type=probit)",
         &data,
         &config,
-    );
-    assert!(ok.is_ok(), "explicit probit should be accepted");
+    ) {
+        panic!("explicit probit must be accepted, got {err:?}");
+    }
 
     let err = match materialize(
         "Surv(age_entry, age_exit, event) ~ bmi + link(type=logit)",
@@ -2354,7 +2355,16 @@ fn survival_marginal_slope_accepts_explicit_probit_link() {
         Ok(_) => panic!("non-probit link should be rejected"),
         Err(err) => err,
     };
-    assert!(err.to_string().contains("only link(type=probit)"));
+    assert!(
+        matches!(
+            err,
+            WorkflowError::MarginalSlopeLink {
+                context: "survival marginal-slope",
+                refusal: MarginalSlopeLinkRefusal::NonProbit,
+            }
+        ),
+        "a non-probit survival marginal-slope link must be the typed probit-only refusal, got {err:?}"
+    );
 }
 
 #[test]
@@ -3963,8 +3973,14 @@ fn marginal_slope_base_link_accepts_only_probit() {
         )
         .expect_err("non-probit marginal-slope link should be rejected");
         assert!(
-            err.contains("requires link(type=probit)"),
-            "unexpected error for {formula}: {err}"
+            matches!(
+                err,
+                WorkflowError::MarginalSlopeLink {
+                    context: "bernoulli marginal-slope",
+                    refusal: MarginalSlopeLinkRefusal::NonProbit,
+                }
+            ),
+            "unexpected error for {formula}: {err:?}"
         );
     }
 }
@@ -3979,7 +3995,16 @@ fn marginal_slope_base_link_rejects_flexible_and_unbounded_links() {
         "bernoulli marginal-slope",
     )
     .expect_err("flexible link should be rejected");
-    assert!(err.contains("does not accept flexible"));
+    assert!(
+        matches!(
+            err,
+            WorkflowError::MarginalSlopeLink {
+                context: "bernoulli marginal-slope",
+                refusal: MarginalSlopeLinkRefusal::Flexible,
+            }
+        ),
+        "a flexible link must be the typed flexible refusal, got {err:?}"
+    );
 
     let parsed = gam_terms::inference::formula_dsl::parse_formula("y ~ x + link(type=log)")
         .expect("main formula");
@@ -3988,5 +4013,14 @@ fn marginal_slope_base_link_rejects_flexible_and_unbounded_links() {
         "bernoulli marginal-slope",
     )
     .expect_err("log link should be rejected");
-    assert!(err.contains("requires link(type=probit)"));
+    assert!(
+        matches!(
+            err,
+            WorkflowError::MarginalSlopeLink {
+                context: "bernoulli marginal-slope",
+                refusal: MarginalSlopeLinkRefusal::NonProbit,
+            }
+        ),
+        "a log link must be the typed probit-only refusal, got {err:?}"
+    );
 }

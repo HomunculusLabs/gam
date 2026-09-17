@@ -71,41 +71,46 @@ fn validate_bernoulli_marginal_slope_z_column_variance(
 /// refused rather than fitted as probit without a word.
 pub(super) fn resolve_marginal_slope_base_link(
     linkspec: Option<&gam_terms::inference::formula_dsl::LinkFormulaSpec>,
-    context: &str,
-) -> Result<InverseLink, String> {
+    context: &'static str,
+) -> Result<InverseLink, WorkflowError> {
+    let refuse = |refusal| WorkflowError::MarginalSlopeLink { context, refusal };
     let Some(linkspec) = linkspec else {
         return Ok(InverseLink::Standard(StandardLink::Probit));
     };
-    let Some(choice) = parse_link_choice(Some(&linkspec.link), false)? else {
+    let Some(choice) = parse_link_choice(Some(&linkspec.link), false).map_err(|error| {
+        WorkflowError::InvalidConfig {
+            reason: String::from(error),
+        }
+    })?
+    else {
         return Ok(InverseLink::Standard(StandardLink::Probit));
     };
     if matches!(
         choice.mode,
         gam_terms::inference::formula_dsl::LinkMode::Flexible
     ) {
-        return Err(format!(
-            "{context} does not accept flexible(...) inside link(); use link(type=<base-link>) plus linkwiggle(...) to learn anchored link deviations"
-        ));
+        return Err(refuse(MarginalSlopeLinkRefusal::Flexible));
     }
     if choice.mixture_components.is_some() || choice.link != LinkFunction::Probit {
-        return Err(format!(
-            "{context} requires link(type=probit); non-probit marginal-slope links are not supported by the calibrated de-nested probit kernel"
-        ));
+        return Err(refuse(MarginalSlopeLinkRefusal::NonProbit));
     }
     if linkspec.sas_init.is_some() {
-        return Err(format!(
-            "link(sas_init=...) requires link(type=sas), which {context} does not support"
-        ));
+        return Err(refuse(MarginalSlopeLinkRefusal::ForeignParameter {
+            parameter: "sas_init",
+            requires: "sas",
+        }));
     }
     if linkspec.beta_logistic_init.is_some() {
-        return Err(format!(
-            "link(beta_logistic_init=...) requires link(type=beta-logistic), which {context} does not support"
-        ));
+        return Err(refuse(MarginalSlopeLinkRefusal::ForeignParameter {
+            parameter: "beta_logistic_init",
+            requires: "beta-logistic",
+        }));
     }
     if linkspec.mixture_rho.is_some() {
-        return Err(format!(
-            "link(rho=...) requires link(type=blended(...)/mixture(...)), which {context} does not support"
-        ));
+        return Err(refuse(MarginalSlopeLinkRefusal::ForeignParameter {
+            parameter: "rho",
+            requires: "blended(...)/mixture(...)",
+        }));
     }
     Ok(InverseLink::Standard(StandardLink::Probit))
 }

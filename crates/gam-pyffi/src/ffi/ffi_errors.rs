@@ -891,6 +891,7 @@ pub(crate) fn workflow_error_to_pyerr(py: Python<'_>, err: WorkflowError) -> PyE
         }
         WorkflowError::SpatialUnderresolved { .. } => IntegrationError::new_err(err.to_string()),
         WorkflowError::FormulaDsl { .. } => FormulaError::new_err(err.to_string()),
+        WorkflowError::MarginalSlopeLink { .. } => InvalidConfigurationError::new_err(err.to_string()),
     }
 }
 
