@@ -255,19 +255,22 @@ struct SummaryPayload {
     /// Cross-model comparable criterion: `raw_reml_score` plus the rank-aware
     /// Tierney-Kadane normalizer over the penalty null space.
     ///
-    /// `null` — together with `raw_reml_score` — when the fit has **no**
-    /// criterion at all, which is a different statement from "not recorded":
-    /// an exactly-interpolating Gaussian fit has `φ̂ = 0`, so its restricted
-    /// likelihood is unbounded and every score derived from it is undefined.
-    /// `reml_score_unavailable` carries the explanation in that case, and every
-    /// ranking surface refuses rather than substituting a number (#2595).
+    /// `null` in two cases, each named by `reml_score_unavailable`, and no
+    /// surface substitutes a number for it:
+    /// - the fit has **no** criterion at all (`raw_reml_score` is `null` too),
+    ///   which is a different statement from "not recorded": an
+    ///   exactly-interpolating Gaussian fit has `φ̂ = 0`, so its restricted
+    ///   likelihood is unbounded and every score derived from it is undefined
+    ///   (#2595);
+    /// - the fit has a raw criterion but no penalty null-space metadata, so the
+    ///   normalizer cannot be formed and no score comparable across fits exists
+    ///   (#2627).
     reml_score: Option<f64>,
-    /// The outer optimizer's own criterion value, un-normalized. `null` under
-    /// exactly the condition described on `reml_score`.
+    /// The outer optimizer's own criterion value, un-normalized. `null` exactly
+    /// when the fit has no criterion at all.
     raw_reml_score: Option<f64>,
-    /// Why this fit has no criterion. Present iff `raw_reml_score` is `null`;
-    /// the two are emitted together so a reader never sees an absence without
-    /// its reason.
+    /// Why `reml_score` is `null`. Present iff `reml_score` is `null`, so a
+    /// reader never sees an absence without its reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     reml_score_unavailable: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4412,8 +4415,8 @@ const REML_SCORE_KEYS: &[&str] = &["reml_score"];
 
 const RAW_REML_SCORE_KEYS: &[&str] = &["raw_reml_score"];
 
-/// Payload key carrying WHY a summary has no criterion (#2595). Present exactly
-/// when `raw_reml_score` / `reml_score` are `null`.
+/// Payload key carrying WHY a summary has no comparable criterion (#2595,
+/// #2627). Present exactly when `reml_score` is `null`.
 const REML_UNAVAILABLE_KEYS: &[&str] = &["reml_score_unavailable"];
 
 /// The refusal a ranking surface raises when the summary it was handed has no
@@ -4564,7 +4567,7 @@ fn compare_reml_fits(
     Ok(out.unbind())
 }
 
-fn extract_reml_score_from_view(view: &RemlFitView<'_>) -> PyResult<f64> {
+fn extract_reml_score_from_view(view: &RemlFitView<'_>) -> PyResult<Option<f64>> {
     let raw = extract_reml_score_raw_from_view(view)?;
     with_tierney_kadane_normalizer_from_view(view, raw)
 }
@@ -4591,9 +4594,15 @@ fn extract_reml_score_raw_from_view(view: &RemlFitView<'_>) -> PyResult<f64> {
     }
 }
 
-fn with_tierney_kadane_normalizer_from_view(view: &RemlFitView<'_>, score: f64) -> PyResult<f64> {
+/// The comparable criterion of a fit view, or `None` when the view carries no
+/// null-space metadata: a raw criterion without the Tierney-Kadane normalizer is
+/// not comparable across fits (#2627).
+fn with_tierney_kadane_normalizer_from_view(
+    view: &RemlFitView<'_>,
+    score: f64,
+) -> PyResult<Option<f64>> {
     let Some(null_dim) = extract_null_dim_from_view(view)? else {
-        return Ok(score);
+        return Ok(None);
     };
     gam::solver::topology_selector::comparable_reml_score(
         score,

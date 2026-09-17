@@ -16,9 +16,15 @@ pub struct ReportInput {
     /// The fit's cross-model comparable REML/LAML criterion, the number the
     /// saved-model summary publishes as `reml_score`
     /// (`UnifiedFitResult::comparable_reml_score`), or `None` when the fit has
-    /// no criterion at all (an exactly-interpolating Gaussian fit). The report
-    /// prints the absence rather than a stand-in number (#2595).
+    /// no criterion at all (an exactly-interpolating Gaussian fit), or has no
+    /// null-space metadata for the normalizer (#2627). The report prints the
+    /// absence rather than a stand-in number (#2595).
     pub reml_score: Option<f64>,
+    /// The fit's raw REML/LAML criterion, `None` exactly when the fit has no
+    /// criterion at all. It tells the two absences of `reml_score` apart: an
+    /// exact fit has neither, while a fit without null-space metadata still has
+    /// its raw criterion (#2627).
+    pub raw_reml_score: Option<f64>,
     pub iterations: usize,
     /// Human-readable P-IRLS / outer convergence status (e.g. "Converged",
     /// "Max iterations reached"). Plain text so report.rs stays free of gam
@@ -545,10 +551,7 @@ pub fn render_html(input: &ReportInput) -> Result<String, String> {
     summary_pairs.push(("Deviance", fmt_num(input.deviance)));
     summary_pairs.push((
         "REML / LAML",
-        input.reml_score.map_or_else(
-            || "none (exact fit: criterion unbounded)".to_string(),
-            fmt_num,
-        ),
+        criterion_row(input.reml_score, input.raw_reml_score, fmt_num),
     ));
     if let Some(r2) = input.r_squared {
         summary_pairs.push(("R-squared", format!("{:.6}", r2)));
@@ -1341,9 +1344,71 @@ fn fmt_num(v: f64) -> String {
     }
 }
 
+/// The words for a fit with no REML/LAML criterion at all: an exactly
+/// interpolating Gaussian fit, whose profiled restricted likelihood is unbounded.
+const NO_CRITERION_WORDS: &str = "none (exact fit: criterion unbounded)";
+
+/// The words for a fit that has its raw criterion but no comparable one, because
+/// it produces no penalty null-space metadata for the normalizer (#2627).
+const NO_COMPARABLE_CRITERION_WORDS: &str = "none comparable (no null-space metadata)";
+
+/// Render a possibly-absent criterion for human output.
+///
+/// This module owns every word a reporting surface says about an absent
+/// criterion — CLI fit lines, the HTML report, the survival runners — so the
+/// same state reads the same everywhere instead of each surface picking its own
+/// placeholder for "there is no criterion".
+pub fn criterion_display(value: Option<f64>) -> String {
+    value.map_or_else(|| NO_CRITERION_WORDS.to_string(), |value| format!("{value:.6e}"))
+}
+
+/// Render the comparable REML/LAML criterion beside the raw one it is built from.
+///
+/// A comparable criterion is shown as a number. Its absence has two causes that
+/// must read differently: a fit without null-space metadata still has its raw
+/// criterion, so it says "none comparable" and shows the raw value, while an
+/// exact fit has no criterion at all. `fmt` is the surface's number format.
+pub fn criterion_row(comparable: Option<f64>, raw: Option<f64>, fmt: impl Fn(f64) -> String) -> String {
+    match (comparable, raw) {
+        (Some(comparable), _) => fmt(comparable),
+        (None, Some(raw)) => format!("{NO_COMPARABLE_CRITERION_WORDS}; raw criterion {}", fmt(raw)),
+        (None, None) => NO_CRITERION_WORDS.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── criterion words (#2627) ─────────────────────────────────────────────
+
+    #[test]
+    fn criterion_row_names_each_absence_by_its_cause_2627() {
+        let sci = |v: f64| format!("{v:.6e}");
+        assert_eq!(criterion_row(Some(53.703889), Some(51.97367), sci), "5.370389e1");
+        assert_eq!(
+            criterion_row(None, Some(-17.3), sci),
+            "none comparable (no null-space metadata); raw criterion -1.730000e1"
+        );
+        assert_eq!(criterion_row(None, None, sci), criterion_display(None));
+        assert_eq!(criterion_display(None), "none (exact fit: criterion unbounded)");
+        assert_eq!(criterion_display(Some(-71.25605)), "-7.125605e1");
+    }
+
+    #[test]
+    fn the_html_report_says_the_criterion_row_words_2627() {
+        let mut input = minimal_input("y ~ s(x)");
+        input.reml_score = None;
+        input.raw_reml_score = Some(-17.3);
+        let html = render_html(&input).expect("render a report without a comparable criterion");
+        assert!(
+            html.contains(&criterion_row(None, Some(-17.3), fmt_num)),
+            "the report must render the one owner's words for a fit without null-space metadata"
+        );
+        input.raw_reml_score = None;
+        let html = render_html(&input).expect("render a report for an exact fit");
+        assert!(html.contains(&criterion_display(None)));
+    }
 
     // ── esc ──────────────────────────────────────────────────────────────────
 
@@ -1485,6 +1550,7 @@ mod tests {
             n_obs: Some(100),
             deviance: 42.5,
             reml_score: Some(-17.3),
+            raw_reml_score: Some(-17.3),
             iterations: 5,
             convergence_status: "Converged".to_string(),
             converged: true,

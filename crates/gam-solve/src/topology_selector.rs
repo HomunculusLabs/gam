@@ -1062,14 +1062,17 @@ pub fn tk_normalized_score(
 ///
 /// Every surface that publishes a `reml_score` beside the raw criterion reads it
 /// here: the saved-model summary, `compare_models`, and the HTML report. A fit
-/// with no null-space metadata keeps its raw criterion.
+/// with no null-space metadata has no comparable criterion, and `Ok(None)` says
+/// so. Publishing its raw criterion under the comparable name would label a
+/// number without the normalizer as one with it (#2627); the raw criterion stays
+/// published as `raw_reml_score`.
 pub fn comparable_reml_score(
     raw_reml_score: f64,
     null_dim: Option<f64>,
     null_space_logdet: Option<f64>,
-) -> Result<f64, String> {
+) -> Result<Option<f64>, String> {
     let Some(null_dim) = null_dim else {
-        return Ok(raw_reml_score);
+        return Ok(None);
     };
     tk_normalized_score(
         raw_reml_score,
@@ -1079,6 +1082,7 @@ pub fn comparable_reml_score(
         1,
         TopologyScoreScale::PerObservation,
     )
+    .map(Some)
 }
 
 /// [`tk_normalized_score`] carrying the score's own numerical RESOLUTION
@@ -2765,6 +2769,24 @@ mod tests {
         assert!(
             ring_rung.fits.iter().any(|fit| fit.k == 8),
             "bracketing seven requires the certified eighth order"
+        );
+    }
+
+    #[test]
+    fn comparable_reml_score_without_null_space_metadata_is_absent_2627() {
+        // #2627: without the penalty null space there is no Tierney-Kadane
+        // normalizer, so the comparable criterion is absent, not the raw one.
+        assert_eq!(comparable_reml_score(51.973668, None, None), Ok(None));
+        // With metadata it is the raw criterion plus the normalizer (the CLI
+        // before/after fixture: null_dim 1, null-space logdet log 200).
+        let logdet = 200.0_f64.ln();
+        let comparable = comparable_reml_score(51.973668, Some(1.0), Some(logdet))
+            .expect("the normalizer evaluates with metadata")
+            .expect("a fit with metadata has a comparable criterion");
+        let expected = 51.973668 - 0.5 * (2.0 * std::f64::consts::PI).ln() + 0.5 * logdet;
+        assert!(
+            (comparable - expected).abs() < 1e-12,
+            "comparable criterion {comparable} should be {expected}"
         );
     }
 }

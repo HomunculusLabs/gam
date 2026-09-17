@@ -280,12 +280,15 @@ fn run_canonical_standard_fit(
                 edf,
                 log_likelihood,
                 // An exactly-interpolating Gaussian fit has no criterion at
-                // all; printing a stand-in would read as one (#2595).
-                gam::estimate::criterion_display(
+                // all, and a fit without null-space metadata has no comparable
+                // one; each absence prints its own words (#2595, #2627).
+                gam::report::criterion_row(
                     fit.comparable_reml_score()
                         .map_err(|err| format!("failed to compute comparable REML score: {err}"))?,
+                    fit.reml_score(),
+                    |value| format!("{value:.6e}"),
                 ),
-                gam::estimate::criterion_display(fit.reml_score()),
+                gam::report::criterion_display(fit.reml_score()),
             );
             if let Some(out) = args.out.as_ref() {
                 apply_request_metadata(&mut payload, fit_config, outcome.inference_notes);
@@ -402,11 +405,13 @@ fn run_library_formula_fit(
             fit.convergence_evidence().inner_status().label(),
             fit.outer_iterations,
             fit.log_likelihood,
-            gam::estimate::criterion_display(
+            gam::report::criterion_row(
                 fit.comparable_reml_score()
                     .map_err(|err| format!("failed to compute comparable REML score: {err}"))?,
+                fit.reml_score(),
+                |value| format!("{value:.6e}"),
             ),
-            gam::estimate::criterion_display(fit.reml_score()),
+            gam::report::criterion_display(fit.reml_score()),
         );
     }
     write_payload_json(out, payload)

@@ -4259,6 +4259,24 @@ fn summary_repr(payload: &Bound<'_, PyDict>) -> PyResult<String> {
     Ok(format!("Summary({})", fields.join(", ")))
 }
 
+/// The summary's criterion row in gam-report's words, so the printed summary
+/// names a fit without null-space metadata apart from an exact fit the same way
+/// `gam fit` and the HTML report do (#2627).
+#[pyfunction]
+fn summary_criterion_row(payload: &Bound<'_, PyDict>) -> PyResult<String> {
+    let criterion = |key: &str| -> PyResult<Option<f64>> {
+        match payload.get_item(key)? {
+            Some(value) if !value.is_none() => Ok(Some(value.extract::<f64>()?)),
+            _ => Ok(None),
+        }
+    };
+    Ok(gam::report::criterion_row(
+        criterion("reml_score")?,
+        criterion("raw_reml_score")?,
+        summary_render::summary_format_float,
+    ))
+}
+
 #[pyfunction]
 fn summary_html(payload: &Bound<'_, PyDict>) -> PyResult<String> {
     // Pure presentation layer; no math.

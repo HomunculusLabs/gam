@@ -139,23 +139,25 @@ fn python_rust_ffi_parity_gaussian_linear_case() {
     // Pin the headline's documented relationship to the raw score as well, so a
     // normalizer that silently changes definition (or stops being applied) is a
     // failure rather than an invisible shift in what `Summary.reml_score` means.
-    let expected_headline = match value["null_dim"].as_f64() {
-        Some(null_dim) => gam::solver::topology_selector::tk_normalized_score(
-            raw_reml_py,
-            null_dim,
-            value["null_space_logdet"].as_f64(),
-            1.0,
-            1,
-            gam::solver::evidence::TopologyScoreScale::PerObservation,
-        )
-        .expect("summary null-space metadata must admit the TK normalizer"),
-        None => raw_reml_py,
-    };
+    // A standard formula fit publishes its penalty null space, and a comparable
+    // criterion exists only with it: a fit without that metadata publishes no
+    // `reml_score`, never its raw criterion under the comparable name (#2627).
+    let null_dim = value["null_dim"]
+        .as_f64()
+        .expect("a standard formula fit publishes its penalty null-space dimension");
+    let expected_headline = gam::solver::topology_selector::tk_normalized_score(
+        raw_reml_py,
+        null_dim,
+        value["null_space_logdet"].as_f64(),
+        1.0,
+        1,
+        gam::solver::evidence::TopologyScoreScale::PerObservation,
+    )
+    .expect("summary null-space metadata must admit the TK normalizer");
     assert!(
         (reml_py - expected_headline).abs() <= 1e-9,
         "comparable reml py={reml_py} expected={expected_headline} \
-         (raw={raw_reml_py}, null_dim={:?}, null_space_logdet={:?})",
-        value["null_dim"].as_f64(),
+         (raw={raw_reml_py}, null_dim={null_dim}, null_space_logdet={:?})",
         value["null_space_logdet"].as_f64()
     );
     assert!(

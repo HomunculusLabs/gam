@@ -174,21 +174,25 @@ class Summary:
         zero-dispersion boundary where no normalized Gaussian density exists.
     reml_score : float or None
         Comparable REML / LAML cost at convergence, including the
-        rank-aware Tierney-Kadane null-space normalizer when available.
-        ``None`` when the fit has **no** criterion at all rather than one that
-        was not recorded: an exactly-interpolating Gaussian fit has
-        :math:`\hat\varphi = 0`, so its restricted likelihood is unbounded and
-        every score derived from it is undefined.
-        :attr:`reml_score_unavailable` then carries the explanation, and
-        :meth:`Model.evidence` / :func:`gamfit.compare_models` refuse the model
-        by name instead of ranking a stand-in value.
+        rank-aware Tierney-Kadane null-space normalizer. ``None`` in two cases,
+        each named by :attr:`reml_score_unavailable`, and never replaced by a
+        stand-in value:
+
+        - the fit has **no** criterion at all (:attr:`raw_reml_score` is
+          ``None`` too), which is not the same as one that was not recorded: an
+          exactly-interpolating Gaussian fit has :math:`\hat\varphi = 0`, so
+          its restricted likelihood is unbounded and every score derived from
+          it is undefined;
+        - the fit has a raw criterion but no penalty null-space metadata, so
+          the normalizer cannot be formed and no score comparable across fits
+          exists (#2627).
     raw_reml_score : float or None
         Raw outer-loop REML / LAML cost before the null-space normalizer.
-        ``None`` under exactly the condition described for :attr:`reml_score`.
+        ``None`` exactly when the fit has no criterion at all.
     reml_score_unavailable : str or None
-        Why this fit has no criterion. Present exactly when
-        :attr:`raw_reml_score` is ``None``, so an absence is never reported
-        without its reason.
+        Why :attr:`reml_score` is ``None``. Present exactly when
+        :attr:`reml_score` is ``None``, so an absence is never reported without
+        its reason.
     null_space_logdet : float or None
         Log-determinant of the null-space penalty Gram block; used by the
         evidence calculation.
@@ -458,10 +462,17 @@ class Summary:
             lines.append(f"  Training rows: {self.n_obs}")
         if self.deviance is not None:
             lines.append(f"  Deviance: {self.deviance:g}")
-        if self.reml_score is not None:
-            lines.append(f"  REML score: {self.reml_score:g}")
-        elif self.reml_score_unavailable is not None:
-            lines.append("  REML score: none (exact fit; criterion unbounded)")
+        if (
+            self.reml_score is not None
+            or self.raw_reml_score is not None
+            or self.reml_score_unavailable is not None
+        ):
+            # gam-report owns the words for an absent criterion, so this line
+            # names a fit without null-space metadata apart from an exact fit
+            # the same way `gam fit` and the HTML report do (#2627).
+            lines.append(
+                f"  REML score: {rust_module().summary_criterion_row(self.to_dict())}"
+            )
         if self.edf_total is not None:
             lines.append(f"  Effective dof: {self.edf_total:g}")
         if self.iterations is not None:

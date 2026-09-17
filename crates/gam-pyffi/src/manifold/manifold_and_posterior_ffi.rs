@@ -1401,12 +1401,15 @@ fn scan_summary_payload(model: &FittedModel, scan: &ScanIntrospection) -> Summar
         deviance: scan.deviance,
         log_likelihood: Some(scan.log_likelihood),
         n_obs: Some(scan.training_sample_size),
-        // null_dim is left unset: the scan does not compute the penalized-Hessian
-        // null-space logdet the TK normalizer needs, so `comparable_reml_score`
-        // returns the raw cost unchanged (and `evidence()` stays well-defined).
-        reml_score: Some(scan.reml_cost),
+        // The scan does not compute the penalized-Hessian null-space logdet the TK
+        // normalizer needs, so it has no comparable criterion: the raw cost is
+        // published as `raw_reml_score` only. `evidence()` ranks on conditional
+        // AIC and stays well-defined.
+        reml_score: None,
         raw_reml_score: Some(scan.reml_cost),
-        reml_score_unavailable: None,
+        reml_score_unavailable: Some(
+            gam::solver::estimate::NO_COMPARABLE_CRITERION_WITHOUT_NULL_SPACE,
+        ),
         null_space_logdet: None,
         null_dim: None,
         iterations: 0,
@@ -1549,9 +1552,13 @@ fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
         n_obs: Some(fit.training_sample_size()),
         reml_score,
         raw_reml_score,
-        reml_score_unavailable: raw_reml_score
-            .is_none()
-            .then_some(gam::solver::estimate::NO_CRITERION_AT_EXACT_FIT),
+        reml_score_unavailable: match (raw_reml_score, reml_score) {
+            (None, _) => Some(gam::solver::estimate::NO_CRITERION_AT_EXACT_FIT),
+            (Some(_), None) => {
+                Some(gam::solver::estimate::NO_COMPARABLE_CRITERION_WITHOUT_NULL_SPACE)
+            }
+            (Some(_), Some(_)) => None,
+        },
         null_space_logdet: fit.artifacts.null_space_logdet,
         null_dim: fit.artifacts.null_space_dim.map(|dim| dim as f64),
         iterations: fit.outer_iterations,
@@ -2063,7 +2070,10 @@ fn scan_report_html(model: &FittedModel, scan: &ScanIntrospection) -> Result<Str
         formula: model.payload().formula.clone(),
         n_obs: Some(scan.training_sample_size),
         deviance: scan.deviance,
-        reml_score: Some(scan.reml_cost),
+        // No penalty null-space metadata, so no comparable criterion; the raw
+        // cost is shown as raw (#2627).
+        reml_score: None,
+        raw_reml_score: Some(scan.reml_cost),
         iterations: 0,
         convergence_status: "exact (state-space spline scan)".to_string(),
         converged: true,
@@ -2161,6 +2171,7 @@ fn report_html_impl(model_bytes: &[u8]) -> Result<String, String> {
         reml_score: fit
             .comparable_reml_score()
             .map_err(|err| format!("failed to compute comparable REML score: {err}"))?,
+        raw_reml_score: fit.reml_score(),
         iterations: fit.outer_iterations,
         convergence_status: fit
             .convergence_evidence()

@@ -1558,6 +1558,14 @@
     "evidence": "The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) classes both DELETE with zero references in every category. At 6272b6588, git grep -w finds each name only at its definition and in the gam-event-history crate-root re-export removed in this commit."
   },
   {
+    "base": "877906883013440b85c4f54dca0152ac9f84e8e0",
+    "removed": {
+      "crates/gam-solve/src/model_types/result_types.rs::criterion_display": 1
+    },
+    "reason": "#2627: gam-report now owns the criterion-absence words. criterion_display moves from gam-solve to gam-report beside criterion_row, which tells a fit without null-space metadata apart from an exact fit, on the CLI fit lines and in the HTML report.",
+    "evidence": "At the base, git grep -n finds criterion_display only at its definition, in the two gam-solve re-exports removed here, and at five gam-cli call sites (run_fit.rs x4, run_sample_generate_report.rs x1), which now call gam::report. No test, bench, example, gam-pyffi, Python or facade source names it. Re-confirmed at this base with git grep -n -w over crates, src, tests, bench, benches, examples, gamfit and python; the landing gates are cited in the commit message."
+  },
+  {
     "base": "83787ff535eba1a5142adb845f9de8302958da03",
     "removed": {
       "crates/gam-models/src/gamlss/gaussian/log_link.rs::metadata": 2,

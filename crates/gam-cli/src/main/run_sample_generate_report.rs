@@ -449,7 +449,10 @@ pub(crate) fn run_report_spline_scan(
         formula: model.formula.clone(),
         n_obs: Some(scan.training_sample_size()),
         deviance: scan.deviance(),
-        reml_score: Some(-scan.restricted_loglik),
+        // The scan has no penalty null-space metadata, so it has no comparable
+        // criterion; its raw criterion is shown as raw (#2627).
+        reml_score: None,
+        raw_reml_score: Some(-scan.restricted_loglik),
         iterations: 0,
         convergence_status: "exact (state-space spline scan)".to_string(),
         converged: true,
@@ -543,7 +546,10 @@ pub(crate) fn run_report_residual_cascade(
         // Gaussian-identity deviance ≡ the penalized residual quadratic
         // `y'Wy − ĉ'X'Wy` the fit profiles σ² from.
         deviance: fit.rss_pen,
-        reml_score: Some(-fit.restricted_loglik),
+        // The cascade has no penalty null-space metadata, so it has no comparable
+        // criterion; its raw criterion is shown as raw (#2627).
+        reml_score: None,
+        raw_reml_score: Some(-fit.restricted_loglik),
         iterations: 0,
         convergence_status: "exact (multiresolution residual cascade)".to_string(),
         converged: true,
@@ -663,7 +669,7 @@ pub(crate) fn run_report(args: ReportArgs) -> Result<(), String> {
         notes.push(format!(
             "Log-likelihood: {:.4}, penalized objective: {}",
             unified.log_likelihood,
-            gam::estimate::criterion_display(unified.penalized_objective())
+            gam::report::criterion_display(unified.penalized_objective())
         ));
     }
     let mut diagnostics = None;
@@ -1019,6 +1025,7 @@ pub(crate) fn run_report(args: ReportArgs) -> Result<(), String> {
         reml_score: fit
             .comparable_reml_score()
             .map_err(|err| format!("failed to compute comparable REML score: {err}"))?,
+        raw_reml_score: fit.reml_score(),
         iterations: fit.outer_iterations,
         convergence_status: fit
             .convergence_evidence()

@@ -4149,6 +4149,15 @@ pub const NO_CRITERION_AT_EXACT_FIT: &str = "this fit has no REML/LAML criterion
      are undefined for an exactly-interpolating fit; compare it on predictive accuracy \
      instead, or refit on data whose response is not an exact function of the design";
 
+/// The one explanation for a fit that has a raw REML/LAML criterion but no
+/// comparable one: the Tierney-Kadane normalizer needs the penalty null space,
+/// and this fit family does not produce it (#2627).
+pub const NO_COMPARABLE_CRITERION_WITHOUT_NULL_SPACE: &str = "this fit reports its raw REML/LAML criterion (raw_reml_score) but no comparable one: \
+     the Tierney-Kadane normalizer that makes criteria comparable across fits needs the \
+     penalty null-space dimension and log-determinant, and this fit family does not produce \
+     them. Compare its raw criterion only against fits of the same family and penalty \
+     structure, or compare on predictive accuracy";
+
 /// The exact-fit Gaussian boundary, from the three quantities that define it.
 ///
 /// A free function rather than a method so the ONE definition serves the
@@ -4164,18 +4173,6 @@ pub fn is_zero_dispersion_boundary(
     likelihood_family.is_some_and(|family| family.is_gaussian_identity())
         && matches!(likelihood_scale, LikelihoodScaleMetadata::ProfiledGaussian)
         && standard_deviation == 0.0
-}
-
-/// Render a possibly-absent criterion for human output.
-///
-/// One helper so every reporting surface — CLI fit lines, the HTML report, the
-/// survival runners — says the same words about the same state, instead of each
-/// picking its own placeholder for "there is no criterion".
-pub fn criterion_display(value: Option<f64>) -> String {
-    value.map_or_else(
-        || "none (exact fit: criterion unbounded)".to_string(),
-        |value| format!("{value:.6e}"),
-    )
 }
 
 impl UnifiedFitResult {
@@ -4213,18 +4210,19 @@ impl UnifiedFitResult {
     /// normalizer over this fit's penalty null space
     /// ([`crate::topology_selector::comparable_reml_score`]).
     ///
-    /// `Ok(None)` exactly when [`Self::reml_score`] is `None`: the normalizer is a
-    /// correction to a criterion, so a fit without one has no comparable score.
+    /// `Ok(None)` when [`Self::reml_score`] is `None`, since the normalizer is a
+    /// correction to a criterion and a fit without one has no comparable score,
+    /// and when the fit carries no null-space metadata
+    /// ([`NO_COMPARABLE_CRITERION_WITHOUT_NULL_SPACE`]).
     pub fn comparable_reml_score(&self) -> Result<Option<f64>, String> {
-        self.reml_score()
-            .map(|raw| {
-                crate::topology_selector::comparable_reml_score(
-                    raw,
-                    self.artifacts.null_space_dim.map(|dim| dim as f64),
-                    self.artifacts.null_space_logdet,
-                )
-            })
-            .transpose()
+        let Some(raw) = self.reml_score() else {
+            return Ok(None);
+        };
+        crate::topology_selector::comparable_reml_score(
+            raw,
+            self.artifacts.null_space_dim.map(|dim| dim as f64),
+            self.artifacts.null_space_logdet,
+        )
     }
 
     /// `true` at the exact-fit Gaussian boundary: a profiled Gaussian scale

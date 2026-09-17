@@ -2894,9 +2894,12 @@ impl UnionStructure {
 pub struct RemlCandidate {
     pub index: usize,
     pub name: String,
-    /// Minimised REML/LAML cost, kept verbatim in the diagnostic score table.
-    /// This is not the conditional-AIC cost that ranks candidates.
-    pub score: f64,
+    /// Comparable REML/LAML criterion, kept verbatim in the diagnostic score
+    /// table, or `None` for a fit without one (no criterion at all, or no
+    /// null-space metadata for the Tierney-Kadane normalizer). This is not the
+    /// conditional-AIC cost that ranks candidates, so its absence never blocks a
+    /// ranking.
+    pub score: Option<f64>,
     /// Effective degrees of freedom consumed by the fitted mean. Required
     /// because conditional AIC has no definition without its complexity term.
     pub edf: f64,
@@ -2938,10 +2941,12 @@ impl RemlCandidate {
     /// evidence headline. The reported `score_table` still carries that raw
     /// diagnostic unchanged.
     pub(crate) fn ranking_score(&self) -> Result<f64, String> {
-        if !self.score.is_finite() {
+        if let Some(score) = self.score
+            && !score.is_finite()
+        {
             return Err(format!(
-                "compare_models: candidate '{}' has non-finite raw REML/LAML score {}",
-                self.name, self.score
+                "compare_models: candidate '{}' has non-finite raw REML/LAML score {score}",
+                self.name
             ));
         }
         if !(self.edf.is_finite() && self.edf >= 0.0) {
@@ -2979,7 +2984,7 @@ pub struct RemlComparison {
 #[derive(Clone, Debug)]
 pub struct RankedRow {
     pub name: String,
-    pub score: f64,
+    pub score: Option<f64>,
     /// Cost gap from the winning model on the SAME scale used to order the
     /// ranking (`ranking_score`, the Occam-penalised conditional AIC,
     /// issue #1362). The winner is `argmin ranking_score`, so this
@@ -3003,11 +3008,14 @@ pub struct RankedRow {
 }
 
 #[derive(Clone, Debug)]
+/// One row of the diagnostic REML/LAML score table. The criterion and its
+/// factors are `None` for a candidate without a comparable criterion, and the
+/// factors are referenced to the minimum over the candidates that have one.
 pub struct ScoreRow {
     pub name: String,
-    pub reml_score: f64,
-    pub delta_reml: f64,
-    pub bayes_factor_best_over_model: f64,
+    pub reml_score: Option<f64>,
+    pub delta_reml: Option<f64>,
+    pub bayes_factor_best_over_model: Option<f64>,
     pub effective_dof: f64,
 }
 
@@ -3103,10 +3111,7 @@ pub fn compare_reml_fits(mut candidates: Vec<RemlCandidate>) -> Result<RemlCompa
     // The raw-REML `score_table` stays on its explicitly labelled diagnostic
     // scale, but is referenced to the genuine minimum raw REML so its factors are
     // coherent (`>= 1`), rather than to whichever row happens to sit at index 0.
-    let best_raw_score = candidates
-        .iter()
-        .map(|c| c.score)
-        .fold(f64::INFINITY, f64::min);
+    let best_raw_score = candidates.iter().filter_map(|c| c.score).reduce(f64::min);
     let mut ranking = Vec::with_capacity(candidates.len());
     let mut score_table = Vec::with_capacity(candidates.len());
     for row in &candidates {
@@ -3118,7 +3123,9 @@ pub fn compare_reml_fits(mut candidates: Vec<RemlCandidate>) -> Result<RemlCompa
         // `delta.exp()` squared the intended ratio (issue #2124). `delta` itself is
         // left on the AIC scale on purpose — only its exp() conversion is halved.
         let evidence_ratio = (0.5 * delta).exp();
-        let delta_reml = log_bayes_factor(best_raw_score, row.score);
+        let delta_reml = best_raw_score
+            .zip(row.score)
+            .map(|(best, score)| log_bayes_factor(best, score));
         ranking.push(RankedRow {
             name: row.name.clone(),
             score: row.score,
@@ -3130,7 +3137,7 @@ pub fn compare_reml_fits(mut candidates: Vec<RemlCandidate>) -> Result<RemlCompa
             name: row.name.clone(),
             reml_score: row.score,
             delta_reml,
-            bayes_factor_best_over_model: delta_reml.exp(),
+            bayes_factor_best_over_model: delta_reml.map(f64::exp),
             effective_dof: row.edf,
         });
     }
@@ -3794,7 +3801,7 @@ mod tests {
         let cand = |name: &str, score: f64, edf: f64| RemlCandidate {
             index: 0,
             name: name.to_string(),
-            score,
+            score: Some(score),
             edf,
             log_lik: 0.0,
             family: Some("gaussian".to_string()),
@@ -3836,14 +3843,15 @@ mod tests {
         // (m2), so its best-over-model Bayes factors are also coherent (>= 1).
         for row in &cmp.score_table {
             assert!(
-                row.delta_reml >= 0.0,
-                "score-table delta_reml for {} must be >= 0, got {}",
+                row.delta_reml.is_some_and(|delta| delta >= 0.0),
+                "score-table delta_reml for {} must be >= 0, got {:?}",
                 row.name,
                 row.delta_reml
             );
             assert!(
-                row.bayes_factor_best_over_model >= 1.0 - 1e-12,
-                "score-table bayes_factor for {} must be >= 1, got {}",
+                row.bayes_factor_best_over_model
+                    .is_some_and(|factor| factor >= 1.0 - 1e-12),
+                "score-table bayes_factor for {} must be >= 1, got {:?}",
                 row.name,
                 row.bayes_factor_best_over_model
             );
@@ -3851,7 +3859,7 @@ mod tests {
         // m2 carries the minimum raw REML, so its raw delta is exactly 0.
         let m2 = cmp.score_table.iter().find(|r| r.name == "m2").unwrap();
         assert!(
-            m2.delta_reml.abs() < 1e-12,
+            m2.delta_reml.is_some_and(|delta| delta.abs() < 1e-12),
             "the minimum-raw-REML row has delta_reml 0"
         );
     }
@@ -4806,7 +4814,7 @@ mod tests {
         RemlCandidate {
             index: 0,
             name: name.to_string(),
-            score,
+            score: Some(score),
             edf,
             log_lik,
             family: None,
@@ -4827,7 +4835,7 @@ mod tests {
         let c = RemlCandidate {
             index: 0,
             name: "m".to_string(),
-            score: 151.28,
+            score: Some(151.28),
             edf: 6.0,
             log_lik: f64::NAN,
             family: None,
@@ -4871,8 +4879,12 @@ mod tests {
             .iter()
             .find(|r| r.name == "big")
             .expect("big row");
-        assert!((small_row.reml_score - 180.526).abs() < 1e-9);
-        assert!((big_row.reml_score - 177.404).abs() < 1e-9);
+        assert!(small_row
+            .reml_score
+            .is_some_and(|score| (score - 180.526).abs() < 1e-9));
+        assert!(big_row
+            .reml_score
+            .is_some_and(|score| (score - 177.404).abs() < 1e-9));
     }
 
     #[test]
@@ -4926,8 +4938,10 @@ mod tests {
             .expect("loser score row");
         let expected_reml_bf = 10.0_f64.exp();
         assert!(
-            (loser_score_row.bayes_factor_best_over_model / expected_reml_bf - 1.0).abs() < 1e-9,
-            "raw-REML bayes_factor_best_over_model must stay exp(Δreml)=exp(10), got {}",
+            loser_score_row
+                .bayes_factor_best_over_model
+                .is_some_and(|factor| (factor / expected_reml_bf - 1.0).abs() < 1e-9),
+            "raw-REML bayes_factor_best_over_model must stay exp(Δreml)=exp(10), got {:?}",
             loser_score_row.bayes_factor_best_over_model
         );
     }
@@ -4956,7 +4970,7 @@ mod tests {
         let with_n = |name: &str, n: usize| RemlCandidate {
             index: 0,
             name: name.to_string(),
-            score: 100.0,
+            score: Some(100.0),
             edf: 5.0,
             log_lik: -40.0,
             family: Some("gaussian".to_string()),
@@ -4978,7 +4992,7 @@ mod tests {
         let without_n = RemlCandidate {
             index: 0,
             name: "legacy".to_string(),
-            score: 90.0,
+            score: Some(90.0),
             edf: 4.0,
             log_lik: -35.0,
             family: Some("gaussian".to_string()),
@@ -4986,5 +5000,44 @@ mod tests {
         };
         compare_reml_fits(vec![with_n("counted", 500), without_n])
             .expect("an unconstrained (None) count must not trip the guard");
+    }
+
+    #[test]
+    fn a_candidate_without_a_comparable_criterion_ranks_and_reports_none_2627() {
+        // #2627: a fit without null-space metadata has no comparable REML/LAML
+        // criterion. It still ranks on conditional AIC, and its score-table row
+        // reports the absence instead of a raw number under the comparable name.
+        // The other rows keep their factors, referenced among themselves.
+        let mut scan = cand("scan", 0.0, 4.0, -40.0);
+        scan.score = None;
+        let standard = cand("standard", 120.0, 5.0, -38.0);
+        let other = cand("other", 125.0, 5.0, -39.0);
+        // Conditional AIC: scan 88, standard 86, other 88.
+        let cmp = compare_reml_fits(vec![scan, standard, other]).expect("compare");
+        assert_eq!(cmp.winner, "standard");
+
+        let scan_row = cmp
+            .score_table
+            .iter()
+            .find(|r| r.name == "scan")
+            .expect("scan row");
+        assert_eq!(scan_row.reml_score, None);
+        assert_eq!(scan_row.delta_reml, None);
+        assert_eq!(scan_row.bayes_factor_best_over_model, None);
+        let scan_ranked = cmp
+            .ranking
+            .iter()
+            .find(|r| r.name == "scan")
+            .expect("scan ranking row");
+        assert_eq!(scan_ranked.score, None);
+
+        let other_row = cmp
+            .score_table
+            .iter()
+            .find(|r| r.name == "other")
+            .expect("other row");
+        assert!(other_row
+            .delta_reml
+            .is_some_and(|delta| (delta - 5.0).abs() < 1e-12));
     }
 }

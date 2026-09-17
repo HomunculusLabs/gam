@@ -80,12 +80,20 @@ def test_scan_model_predicts_and_summarizes(degree, penalty_order, order):
         assert np.isfinite(value)
         assert value > 0.0
 
-    # summary(): finite REML diagnostic, ordinary Gaussian log-likelihood, and
-    # an EDF strictly between the polynomial null-space dimension (== order)
-    # and n.
+    # summary(): the scan's own raw REML/LAML criterion, an ordinary Gaussian
+    # log-likelihood, and an EDF strictly between the polynomial null-space
+    # dimension (== order) and n. A spline scan produces no penalty null-space
+    # metadata, so it has no criterion comparable across fits: `reml_score` is
+    # absent and says why, instead of publishing the raw criterion under the
+    # comparable name (#2627).
     summary = model.summary()
-    reml = float(summary.reml_score)
-    assert np.isfinite(reml)
+    assert np.isfinite(float(summary.raw_reml_score))
+    assert summary.reml_score is None
+    assert "no comparable" in summary.reml_score_unavailable
+    # The printed summary names the same cause, never the exact-fit words.
+    printed = str(summary)
+    assert "REML score: none comparable (no null-space metadata); raw criterion" in printed, printed
+    assert "exact fit" not in printed, printed
     log_likelihood = float(summary.log_likelihood)
     assert np.isfinite(log_likelihood)
     edf = float(summary.edf_total)
@@ -123,7 +131,12 @@ def test_scan_summary_matches_dense_double_penalty_reference():
     )
 
     edf_scan = float(scan.summary().edf_total)
-    edf_dense = float(dense.summary().edf_total)
+    dense_summary = dense.summary()
+    edf_dense = float(dense_summary.edf_total)
+    # The dense fit carries null-space metadata, so it prints its comparable
+    # criterion with the summary's `:g` number format.
+    assert dense_summary.reml_score is not None
+    assert f"REML score: {dense_summary.reml_score:g}\n" in str(dense_summary) + "\n"
     # Different penalty structure (single vs double penalty), so not identical,
     # but both must land in a sane smooth band and within a factor of ~2.
     assert 2.0 < edf_scan < len(df)

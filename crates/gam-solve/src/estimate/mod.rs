@@ -79,9 +79,10 @@ pub use crate::model_types::result_types::dispersion_from_likelihood;
 pub use crate::model_types::{
     BlockRole, CovarianceDeclined, FitArtifacts, FitGeometry,
     FitInference, FitOptions,
-    FittedBlock, FittedLinkState, NO_CRITERION_AT_EXACT_FIT, OuterCriterionCertificate,
+    FittedBlock, FittedLinkState, NO_COMPARABLE_CRITERION_WITHOUT_NULL_SPACE,
+    NO_CRITERION_AT_EXACT_FIT, OuterCriterionCertificate,
     OuterStationarityCertificate, UnifiedFitResult, UnifiedFitResultParts, WorkingGeometry,
-    criterion_display, is_zero_dispersion_boundary,
+    is_zero_dispersion_boundary,
     saved_latent_cloglog_state_from_fit, saved_mixture_state_from_fit, saved_sas_state_from_fit,
     validate_dense_hessian_export, validate_explicit_dense_hessian_for_whitening,
 };
