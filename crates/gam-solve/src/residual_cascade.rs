@@ -6403,70 +6403,6 @@ mod refinement_decision_tests {
         }
     }
 
-    /// Column count of a `dense_fixture(side)` cascade at each level count, so
-    /// the two width regimes the certified route now distinguishes are read off
-    /// the design rather than guessed from the net arithmetic.
-    #[test]
-    fn zz_measure_cascade_width_by_level_count_2546() {
-        for levels in 4..=8 {
-            let (x1, x2, y) = dense_fixture(6);
-            let weights = vec![1.0; y.len()];
-            let axes: [&[f64]; 2] = [&x1, &x2];
-            let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, levels)
-                .expect("cascade design");
-            let m = design.core.m;
-            println!(
-                "#2546 levels={levels} m={m} gram_cached={} certified={}",
-                design.core.dense_gram.is_some(),
-                m <= CERTIFIED_SPECTRUM_MAX
-            );
-        }
-        // The net is GEOMETRIC, not data-subsampled: `dense_fixture(6)` above is
-        // 36 rows and still refines to 1725 columns at `levels = 6`. So the
-        // identifiability the certified search needs -- every Schur mode carried
-        // by the data -- is a race between a net set by `levels` and a sample set
-        // by `side`, and neither the level table above nor the net arithmetic
-        // says where it is won. Two guesses at it were wrong by 13 and by 8
-        // columns respectively, so it is measured here instead.
-        //
-        // The band is swept DENSELY (every side from 45 to 64) rather than sampled,
-        // because a coarse sample of this curve is what produced both wrong guesses
-        // and then a third wrong claim drawn from the sample itself -- that no side
-        // below 64 can be identified, inferred from 45, 50 and 60 all being short
-        // by a small margin. The MARGIN is not monotone in `side` either, so
-        // neighbouring sides disagree and only every-side settles it. Sides above
-        // the band stay coarse: past the net discontinuity `m` falls away from `n`
-        // and the outcome is no longer close.
-        let mut sides: Vec<usize> = (45..=64).collect();
-        sides.extend([70, 80, 90]);
-        let mut identified_in_band: Vec<(usize, usize, usize)> = Vec::new();
-        for side in sides {
-            let (x1, x2, y) = dense_fixture(side);
-            let weights = vec![1.0; y.len()];
-            let axes: [&[f64]; 2] = [&x1, &x2];
-            let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 6)
-                .expect("cascade design");
-            let m = design.core.m;
-            let n = y.len();
-            let nullity = design.core.nullity();
-            let identified = m - nullity <= n - nullity;
-            let past_cache = m > DENSE_GRAM_MAX && design.core.dense_gram.is_none();
-            let certified = m <= CERTIFIED_SPECTRUM_MAX;
-            println!(
-                "#2546-IDENT side={side} n={n} m={m} nullity={nullity} margin={} \
-                 identified={identified} past_cache={past_cache} certified={certified}",
-                m as i64 - n as i64
-            );
-            if side <= 64 && identified && past_cache && certified {
-                identified_in_band.push((side, m, n));
-            }
-        }
-        println!(
-            "#2546-IDENT sides in 45..=64 that are past the cache, inside the budget \
-             and identified: {identified_in_band:?}"
-        );
-    }
-
     /// The width regime this issue existed to open: PAST the dense Gram cache,
     /// INSIDE the certified spectrum budget. Automatic REML must certify here.
     ///
@@ -6502,8 +6438,9 @@ mod refinement_decision_tests {
         // the admissible sides are a band.
         //
         // The band is NOT where counting upward from 45 suggests, because `m` is
-        // not monotone in `side`. Measured by
-        // `zz_measure_cascade_width_by_level_count_2546` at `levels = 6`:
+        // not monotone in `side`. Measured at `levels = 6` by #2546's width sweep
+        // of `dense_fixture(side)` designs (a print-only instrument, deleted once
+        // #2546 closed; these tables are its record):
         //
         //   side=45  n=2025  m=2038   13 short
         //   side=47  n=2209  m=2159   IDENTIFIED, 50 to spare
@@ -6522,7 +6459,7 @@ mod refinement_decision_tests {
         //
         // Below the discontinuity, though, `m` does not track `n` at a fixed
         // offset, and the MARGIN `m - n` is not monotone in `side` either. Swept
-        // exhaustively over 45..=64 by `zz_measure_cascade_width_by_level_count_2546`:
+        // exhaustively over 45..=64 by the same sweep:
         //
         //   45:+13  46: +9  47:-50  48:-63  49:+27  50: +8  51:+22  52:+21
         //   53:+24  54:+19  55:+27  56:+14  57:+20  58:+18  59:+20  60:+28
@@ -6561,7 +6498,7 @@ mod refinement_decision_tests {
             }
         }
         let (x1, x2, y, weights, m) = fixture.expect(
-            "no candidate grid side puts the width between DENSE_GRAM_MAX and              CERTIFIED_SPECTRUM_MAX with at least as many rows as columns -- if the caps              moved, re-run zz_measure_cascade_width_by_level_count_2546 and take the              candidates from its sweep rather than extrapolating a trend, because m is              not monotone in side",
+            "no candidate grid side puts the width between DENSE_GRAM_MAX and              CERTIFIED_SPECTRUM_MAX with at least as many rows as columns -- if the caps              moved, re-sweep dense_fixture(side) at levels = 6 over every side and take the              candidates from that sweep rather than extrapolating a trend, because m is              not monotone in side",
         );
         let axes: [&[f64]; 2] = [&x1, &x2];
         let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 6)
