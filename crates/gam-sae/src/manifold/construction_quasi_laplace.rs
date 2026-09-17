@@ -8725,6 +8725,7 @@ mod shape_covariance_observed_information_tests_2933_f33 {
             SaeShapeCovarianceOperator::ObservedInformation {
                 identified_rank: covariance.identified_rank,
                 ambient_dim: covariance.ambient_dim,
+                frame_conditioning: covariance.frame_conditioning,
             }
         );
         let scale = dispersion.posterior_covariance_scale();
