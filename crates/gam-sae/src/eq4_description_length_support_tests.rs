@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Support-code, rare-atom and spectrum-sampling contracts of the Eq. 4 scorer
 //! (#2933 F09, F16, F19). The support oracles are exact integer combinatorics, the
 //! Kraft sum and explicit Krichevsky–Trofimov products, never the scorer's own
