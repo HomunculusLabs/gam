@@ -8,131 +8,331 @@
 //! `B`'s selected inverse and differentiated `∂B` while the value ranked `A`.
 //! The gap `½·d/dρ log|I + B⁻¹ΔC|` is not a tolerance question.
 //!
-//! The arbiter here is the COMPLETE reconverged scalar criterion: every
-//! finite-difference endpoint re-runs the inner fit from the same starting state
-//! through the production entry point `evaluate_outer_criterion_route`, so no
-//! derivative routine is compared against another that shares its inverse.
+//! The arbiter is the complete criterion at the stationary root of every endpoint's
+//! inner problem. Production's inner acceptance certifies the penalized OBJECTIVE
+//! (`½λ²/scale` at the stall band), which resolves the root itself only to about
+//! `√(tol/μ)` along a weak direction, and `½log|A|` is first order in the root. On
+//! this fixture that leaves the priced criterion trajectory-dependent: job 1113848
+//! re-priced the centre from the fixture start and moved the cost by −5.4e-4 and
+//! +1.08e-3, and its differences did not converge in `h`. A warm endpoint a small step
+//! away starts inside the band and never moves, so its difference is the fixed-θ
+//! partial derivative instead. Neither is the derivative the gradient claims.
 //!
-//! Every endpoint declares the collapse-prevention gates the central root adopted
-//! (#2933 F05). An objective holds one gate set for its whole hyperparameter solve,
-//! and its analytic gradient differentiates with that set held. An endpoint that
-//! chose its own gates at its own root would add `L_w·W_θ·θ̂_ρ`, a motion no
-//! objective's value contains.
+//! So every root, centre and endpoints, is reconverged by production and then driven
+//! to its roundoff floor by undamped exact-A Newton steps on production's arrow system
+//! (`exact_a_evidence_system`), the step the terminal polish takes. Each route prices
+//! the criterion at that frozen state (`inner_max_iter = 0`). Every endpoint holds the
+//! central root's collapse-prevention gates (#2933 F05) and must keep its deflation
+//! stratum, and the differences must agree across three steps before their Richardson
+//! value is compared.
+//!
+//! The control prices the same endpoints with the central root held, which is the
+//! fixed-θ partial and omits the implicit response. The arbiter has to reject it by a
+//! material margin, or it could not tell a gradient that drops a channel from a
+//! complete one.
 
 use super::tests_sparse_curvature_operator_2500::threshold_gate_tiny_fixture;
 use super::*;
 use ndarray::{Array1, Array2};
 
 const INNER_MAX_ITER: usize = 40;
+const LEARNING_RATE: f64 = 0.4;
+const RIDGE: f64 = 1.0e-6;
+/// An undamped Newton step contracts quadratically near the root; the polish ends
+/// when `‖g‖` stops falling, and this only bounds a loop that cannot.
+const POLISH_MAX_STEPS: usize = 32;
+/// Central-difference steps, each half the previous one, so `D(h) = D + c·h² + O(h⁴)`
+/// gives two Richardson values from successive halvings.
+const STEPS: [f64; 3] = [4.0e-3, 2.0e-3, 1.0e-3];
+/// Relative budget shared by the analytic-vs-oracle gap and the oracle's own
+/// disagreement across steps (the #2933 F05 derivative test's budget).
+const BUDGET: f64 = 1.0e-4;
 
 fn outer_objective(
     term: SaeManifoldTerm,
     target: &Array2<f64>,
     rho: &SaeManifoldRho,
+    inner_max_iter: usize,
 ) -> SaeManifoldOuterObjective {
     SaeManifoldOuterObjective::new(
         term,
         target.clone(),
         None,
         rho.clone(),
-        INNER_MAX_ITER,
-        0.4,
-        1.0e-6,
-        1.0e-6,
+        inner_max_iter,
+        LEARNING_RATE,
+        RIDGE,
+        RIDGE,
     )
+}
+
+/// Drive `term` to the stationary root of its penalized objective at `rho` with
+/// undamped exact-A Newton steps, keeping a step only while it lowers `‖g‖`.
+/// Returns `‖g‖` at entry and at the polished state.
+fn polish_root(
+    term: &mut SaeManifoldTerm,
+    target: &Array2<f64>,
+    rho: &SaeManifoldRho,
+) -> Result<(f64, f64), String> {
+    let options = term.evidence_factor_options();
+    let mut majorizer = term.assemble_arrow_schur(target.view(), rho, None)?;
+    let entry = SaeManifoldTerm::system_grad_norm_sq(&majorizer).sqrt();
+    let mut current = entry;
+    for _ in 0..POLISH_MAX_STEPS {
+        let exact = term.exact_a_evidence_system(target.view(), rho, &majorizer, 1.0)?;
+        let (delta_t, delta_beta, _) =
+            gam_solve::arrow_schur::solve_with_lm_escalation_inner(&exact, 0.0, 0.0, &options)
+                .map_err(|err| format!("exact-A Newton solve: {err:?}"))?;
+        let snapshot = term.snapshot_mutable_state();
+        term.apply_newton_step(delta_t.view(), delta_beta.view(), 1.0)?;
+        let trial = term.assemble_arrow_schur(target.view(), rho, None)?;
+        let trial_norm = SaeManifoldTerm::system_grad_norm_sq(&trial).sqrt();
+        if !(trial_norm < current) {
+            term.restore_mutable_state(&snapshot)
+                .map_err(|err| err.to_string())?;
+            break;
+        }
+        current = trial_norm;
+        majorizer = trial;
+    }
+    Ok((entry, current))
 }
 
 #[test]
 fn threshold_gate_route_gradients_differentiate_the_reconverged_criterion_2933() {
+    let routes = [("dense", true), ("streaming", false)];
     let mut failures = Vec::new();
     let mut compared = 0usize;
+    let mut worst_control = 0.0_f64;
     for straddle in [false, true] {
         let (term, target, rho) = threshold_gate_tiny_fixture(straddle);
-        for (route, direct_logdet_admitted) in [("dense", true), ("streaming", false)] {
-            let mut objective = outer_objective(term.clone(), &target, &rho);
-            let flat = objective.baseline_rho.to_flat();
-            let at = objective
-                .baseline_rho
-                .from_flat(flat.view())
-                .expect("#2933 F03: the objective owns its typed rho layout");
-            let evaluation =
-                match objective.evaluate_outer_criterion_route(&at, direct_logdet_admitted, false) {
-                    Ok(evaluation) => evaluation,
-                    Err(err) => {
-                        failures.push(format!("straddle={straddle} route={route}: value refused: {err}"));
-                        continue;
-                    }
-                };
-            let gradient = match objective.analytic_gradient_for_outer_evaluation(&at, &evaluation) {
-                Ok(gradient) => gradient,
-                Err(err) => {
-                    failures.push(format!("straddle={straddle} route={route}: gradient refused: {err}"));
-                    continue;
-                }
-            };
-            println!(
-                "[#2933 F03] straddle={straddle} route={route} cost={:.12e} ‖g‖∞={:.6e}",
-                evaluation.cost,
-                gradient.iter().fold(0.0_f64, |acc, value| acc.max(value.abs())),
-            );
-            // The set the central root adopted; every endpoint prices the same objective.
-            let gates = objective.term.collapse_prevention_gates();
-            let reconverged_cost = |flat: &Array1<f64>| -> Result<f64, String> {
-                let mut endpoint_term = term.clone();
-                endpoint_term.declare_collapse_prevention_gates(&gates);
-                let mut endpoint = outer_objective(endpoint_term, &target, &rho);
-                let at = endpoint.baseline_rho.from_flat(flat.view())?;
+        let mut production = outer_objective(term, &target, &rho, INNER_MAX_ITER);
+        let layout = production.baseline_rho.clone();
+        let flat = layout.to_flat();
+        let centre_rho = layout
+            .from_flat(flat.view())
+            .expect("#2933 F03: the objective owns its typed rho layout");
+        if let Err(err) = production.evaluate_outer_criterion_route(&centre_rho, true, false) {
+            failures.push(format!("straddle={straddle}: the centre refused: {err}"));
+            continue;
+        }
+        // The set the central root adopted; every priced state holds it.
+        let gates = production.term.collapse_prevention_gates();
+        let declared = |state: &SaeManifoldTerm| -> SaeManifoldTerm {
+            let mut state = state.clone();
+            state.declare_collapse_prevention_gates(&gates);
+            state
+        };
+        let polished = |start: &SaeManifoldTerm,
+                        point: &Array1<f64>,
+                        reconverge: bool|
+         -> Result<(SaeManifoldTerm, f64, f64), String> {
+            let rho_at = layout.from_flat(point.view())?;
+            let mut state = declared(start);
+            if reconverge {
+                let mut endpoint = outer_objective(state, &target, &rho, INNER_MAX_ITER);
                 endpoint
-                    .evaluate_outer_criterion_route(&at, direct_logdet_admitted, false)
+                    .evaluate_outer_criterion_route(&rho_at, true, false)
+                    .map_err(|err| format!("production reconvergence refused: {err}"))?;
+                state = declared(&endpoint.term);
+            }
+            let (entry, after) = polish_root(&mut state, &target, &rho_at)?;
+            Ok((state, entry, after))
+        };
+        let stratum = |state: &SaeManifoldTerm, point: &Array1<f64>| -> Result<usize, String> {
+            let rho_at = layout.from_flat(point.view())?;
+            declared(state)
+                .penalized_quasi_laplace_criterion_with_cache(
+                    target.view(),
+                    &rho_at,
+                    None,
+                    0,
+                    LEARNING_RATE,
+                    RIDGE,
+                    RIDGE,
+                )
+                .map(|(_, loss, _)| loss.criterion_gauge_deflated_directions)
+                .map_err(|err| err.to_string())
+        };
+        let price_value =
+            |state: &SaeManifoldTerm, point: &Array1<f64>, direct: bool| -> Result<f64, String> {
+                let mut frozen = outer_objective(declared(state), &target, &rho, 0);
+                let rho_at = layout.from_flat(point.view())?;
+                frozen
+                    .evaluate_outer_criterion_route(&rho_at, direct, false)
                     .map(|evaluation| evaluation.cost)
                     .map_err(|err| err.to_string())
             };
-            for coordinate in 0..flat.len() {
-                let mut differences = Vec::new();
-                for step in [1.0e-3, 2.5e-4] {
-                    let mut plus = flat.clone();
-                    plus[coordinate] += step;
-                    let mut minus = flat.clone();
-                    minus[coordinate] -= step;
-                    match (reconverged_cost(&plus), reconverged_cost(&minus)) {
-                        (Ok(up), Ok(down)) => differences.push((step, (up - down) / (2.0 * step))),
-                        (Err(err), _) | (_, Err(err)) => println!(
-                            "[#2933 F03] straddle={straddle} route={route} coord={coordinate} \
-                             h={step:.1e}: endpoint refused: {err}"
-                        ),
+        let price_with_gradient = |state: &SaeManifoldTerm,
+                                   direct: bool|
+         -> Result<(f64, Array1<f64>), String> {
+            let mut frozen = outer_objective(declared(state), &target, &rho, 0);
+            let evaluation = frozen
+                .evaluate_outer_criterion_route(&centre_rho, direct, false)
+                .map_err(|err| format!("value refused: {err}"))?;
+            let gradient = frozen
+                .analytic_gradient_for_outer_evaluation(&centre_rho, &evaluation)
+                .map_err(|err| format!("gradient refused: {err}"))?;
+            Ok((evaluation.cost, gradient))
+        };
+
+        let (centre, centre_entry, centre_after) = match polished(&production.term, &flat, false) {
+            Ok(polished) => polished,
+            Err(err) => {
+                failures.push(format!("straddle={straddle}: the centre polish refused: {err}"));
+                continue;
+            }
+        };
+        let centre_stratum = match stratum(&centre, &flat) {
+            Ok(count) => count,
+            Err(err) => {
+                failures.push(format!("straddle={straddle}: the centre stratum refused: {err}"));
+                continue;
+            }
+        };
+        println!(
+            "[#2933 F03] straddle={straddle} centre root ‖g‖ {centre_entry:.3e} → \
+             {centre_after:.3e} after the exact-A polish; deflated directions {centre_stratum}"
+        );
+        let mut centre_prices = Vec::with_capacity(routes.len());
+        for &(route, direct) in &routes {
+            match price_with_gradient(&centre, direct) {
+                Ok((cost, gradient)) => {
+                    println!(
+                        "[#2933 F03] straddle={straddle} route={route} cost={cost:.12e} \
+                         gradient={:?}",
+                        gradient.to_vec()
+                    );
+                    centre_prices.push(Some(gradient));
+                }
+                Err(err) => {
+                    failures.push(format!("straddle={straddle} route={route}: {err}"));
+                    centre_prices.push(None);
+                }
+            }
+        }
+
+        for coordinate in 0..flat.len() {
+            let mut differences = vec![[None::<f64>; STEPS.len()]; routes.len()];
+            let mut controls = vec![[None::<f64>; STEPS.len()]; routes.len()];
+            for (index, &step) in STEPS.iter().enumerate() {
+                let mut plus = flat.clone();
+                plus[coordinate] += step;
+                let mut minus = flat.clone();
+                minus[coordinate] -= step;
+                let mut roots = Vec::with_capacity(2);
+                for point in [&plus, &minus] {
+                    let root = polished(&centre, point, true).and_then(|(state, _, after)| {
+                        stratum(&state, point).map(|count| (state, after, count))
+                    });
+                    match root {
+                        Ok((state, after, count)) if count == centre_stratum => {
+                            roots.push((state, after));
+                        }
+                        Ok((_, _, count)) => failures.push(format!(
+                            "straddle={straddle} coord={coordinate} h={step:.1e}: the endpoint \
+                             deflates {count} directions against the centre's {centre_stratum}, \
+                             so the difference would straddle a stratum"
+                        )),
+                        Err(err) => failures.push(format!(
+                            "straddle={straddle} coord={coordinate} h={step:.1e}: endpoint \
+                             refused: {err}"
+                        )),
                     }
                 }
-                for &(step, fd) in &differences {
-                    println!(
-                        "[#2933 F03] straddle={straddle} route={route} coord={coordinate} \
-                         h={step:.1e} fd={fd:.10e} analytic={:.10e} gap={:.3e}",
-                        gradient[coordinate],
-                        (gradient[coordinate] - fd).abs(),
+                let [(up_state, up_norm), (down_state, down_norm)] = roots.as_slice() else {
+                    continue;
+                };
+                for (slot, &(route, direct)) in routes.iter().enumerate() {
+                    let reconverged = (
+                        price_value(up_state, &plus, direct),
+                        price_value(down_state, &minus, direct),
                     );
+                    let held = (
+                        price_value(&centre, &plus, direct),
+                        price_value(&centre, &minus, direct),
+                    );
+                    match (reconverged, held) {
+                        ((Ok(up), Ok(down)), (Ok(held_up), Ok(held_down))) => {
+                            let fd = (up - down) / (2.0 * step);
+                            let held_fd = (held_up - held_down) / (2.0 * step);
+                            differences[slot][index] = Some(fd);
+                            controls[slot][index] = Some(held_fd);
+                            println!(
+                                "[#2933 F03] straddle={straddle} route={route} coord={coordinate} \
+                                 h={step:.1e} fd={fd:.10e} held_root_fd={held_fd:.10e} endpoint \
+                                 ‖g‖ {up_norm:.2e}/{down_norm:.2e}"
+                            );
+                        }
+                        ((Err(err), _), _)
+                        | ((_, Err(err)), _)
+                        | (_, (Err(err), _))
+                        | (_, (_, Err(err))) => failures.push(format!(
+                            "straddle={straddle} route={route} coord={coordinate} h={step:.1e}: \
+                             pricing refused: {err}"
+                        )),
+                    }
                 }
-                let Some(&(_, fd)) = differences.last() else {
+            }
+            for (slot, &(route, _)) in routes.iter().enumerate() {
+                let Some(gradient) = centre_prices[slot].as_ref() else {
+                    continue;
+                };
+                let analytic = gradient[coordinate];
+                let ([Some(d1), Some(d2), Some(d3)], [_, Some(c2), Some(c3)]) =
+                    (differences[slot], controls[slot])
+                else {
                     failures.push(format!(
-                        "straddle={straddle} route={route} coord={coordinate}: no finite difference"
+                        "straddle={straddle} route={route} coord={coordinate}: a difference is \
+                         missing"
                     ));
                     continue;
                 };
-                let gap = (gradient[coordinate] - fd).abs();
-                if gap > 1.0e-4 * (1.0 + fd.abs()) {
+                let coarse = (4.0 * d2 - d1) / 3.0;
+                let fine = (4.0 * d3 - d2) / 3.0;
+                let held = (4.0 * c3 - c2) / 3.0;
+                let scale = 1.0 + analytic.abs().max(fine.abs());
+                let oracle_error = (fine - coarse).abs() / scale;
+                let gap = (analytic - fine).abs() / scale;
+                let control_gap = (analytic - held).abs() / scale;
+                worst_control = worst_control.max(control_gap);
+                println!(
+                    "[#2933 F03] straddle={straddle} route={route} coord={coordinate} \
+                     analytic={analytic:.10e} richardson={fine:.10e} oracle_error={oracle_error:.3e} \
+                     gap={gap:.3e} held_root_gap={control_gap:.3e}"
+                );
+                if oracle_error > BUDGET {
+                    failures.push(format!(
+                        "straddle={straddle} route={route} coord={coordinate}: the reconverged \
+                         criterion is not h-convergent (Richardson {coarse:.10e} vs {fine:.10e}, \
+                         relative {oracle_error:.3e})"
+                    ));
+                } else if gap + oracle_error > BUDGET {
                     failures.push(format!(
                         "straddle={straddle} route={route} coord={coordinate}: analytic \
-                         {:.10e} vs reconverged fd {fd:.10e} (gap {gap:.3e})",
-                        gradient[coordinate]
+                         {analytic:.10e} vs reconverged Richardson {fine:.10e} (relative gap \
+                         {gap:.3e}, oracle error {oracle_error:.3e})"
                     ));
                 }
                 compared += 1;
             }
         }
     }
-    println!("[#2933 F03] compared {compared} coordinates; {} failures", failures.len());
+    println!(
+        "[#2933 F03] compared {compared} coordinates; {} failures; worst held-root gap \
+         {worst_control:.3e}",
+        failures.len()
+    );
     assert!(
         failures.is_empty(),
         "#2933 F03: a ThresholdGate route returned a hypergradient that is not the \
          derivative of the criterion it ranks:\n{}",
         failures.join("\n")
+    );
+    assert!(
+        worst_control > 10.0 * BUDGET,
+        "#2933 F03 control: the held-root difference departs from the analytic gradient by \
+         only {worst_control:.3e}, so at this fixture the implicit response is not material \
+         and the arbiter cannot tell a gradient that drops a channel from a complete one"
     );
 }
