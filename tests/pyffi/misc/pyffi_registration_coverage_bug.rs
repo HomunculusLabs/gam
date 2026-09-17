@@ -1,152 +1,340 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::path::PathBuf;
 
-/// Every `#[pyfunction]` exported by the PyO3 boundary must be registered
-/// exactly once in the `#[pymodule]` body, otherwise the symbol compiles but is
-/// unreachable from Python.
+/// Every `#[pyfunction]` exported by the PyO3 boundary must be registered in the
+/// `#[pymodule]` body, otherwise the symbol compiles but is unreachable from
+/// Python.
 ///
-/// The boundary is no longer a single `lib.rs`: the `#[pyfunction]` definitions
-/// and the `#[pymodule] fn rust_extension` body live in the source fragments
-/// that `lib.rs` pulls in with `include!(...)` (`model_ffi.rs`,
-/// `latent_basis_and_sae_ffi.rs`, `reml_latent_fit_ffi.rs`, `geometry_ffi.rs`,
-/// `manifold_and_posterior_ffi.rs`). This test scans those fragments — the same
-/// text the compiler sees through `lib.rs` — so the registration invariant is
-/// checked against the real source layout, not a stale single-file assumption.
+/// Registration has two forms. Functions in the `include!`d fragments are listed
+/// one by one in `fn rust_extension`. A concern module (`event_history_ffi`,
+/// `inference_instruments`) owns `fn register(module)`, and the pymodule body
+/// calls it with one `<module>::register(module)?;` line. So the registered set
+/// is the `wrap_pyfunction!` sites inside the pymodule body plus those inside the
+/// body of every `register` function that body calls, and the definitions are
+/// every `#[pyfunction]` in every source file of the crate. Scanning only the
+/// `include!` fragments left every concern module's functions unchecked.
 #[test]
 fn pyffi_every_pyfunction_is_registered_once() {
-    // Source fragments `include!`d into crates/gam-pyffi/src/lib.rs. The
-    // `#[pyfunction]`s and the `#[pymodule]` body are distributed across these.
-    // Derive the list from lib.rs's own `include!("…")` directives rather than
-    // hardcoding paths: the fragments have already been relocated once (the
-    // flat `src/<x>_ffi.rs` files moved under `src/model/`, `src/latent/`,
-    // `src/manifold/`), and a hardcoded list silently rots into a `cannot read`
-    // panic on the next move. lib.rs is the single source of truth for which
-    // fragments the compiler actually inlines, so read it from there.
-    let fragment_files = pyffi_include_fragments();
-
-    // Collect every `#[pyfunction]` name across all fragments.
-    let mut pyfns = BTreeSet::new();
-    for path in &fragment_files {
-        let src = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-        let lines: Vec<&str> = src.lines().collect();
-        let mut i = 0usize;
-        while i < lines.len() {
-            if lines[i].trim_start().starts_with("#[pyfunction") {
-                let mut j = i + 1;
-                while j < lines.len() {
-                    let t = lines[j].trim_start();
-                    if t.starts_with("#[") {
-                        j += 1;
-                        continue;
-                    }
-                    if let Some(rest) = t.strip_prefix("fn ") {
-                        // Function name terminates at the first `(`, `<`, or
-                        // whitespace, so we strip generic / lifetime parameters
-                        // like `<'py>` before comparing against
-                        // `wrap_pyfunction!` registrations.
-                        let name: String = rest
-                            .chars()
-                            .take_while(|c| !matches!(c, '(' | '<' | ' ' | '\t'))
-                            .collect();
-                        pyfns.insert(name);
-                    }
-                    break;
-                }
-                i = j;
-            }
-            i += 1;
-        }
+    let sources = pyffi_sources();
+    let scan = scan_registrations(&sources).unwrap_or_else(|e| panic!("{e}"));
+    // Positive controls on the real tree: a fragment function, and a function of
+    // a concern module registered through its own `register`, must each be seen
+    // both as a definition and as a registration.
+    for known in ["intervention_calibration_plan", "fit_event_history"] {
+        assert!(
+            scan.definitions.contains(known),
+            "the scan missed the #[pyfunction] definition of {known}"
+        );
+        assert!(
+            scan.registered.contains(known),
+            "the scan missed the registration of {known}"
+        );
     }
-    assert!(
-        !pyfns.is_empty(),
-        "no #[pyfunction] exports found; the boundary fragment layout changed"
-    );
-
-    // The `#[pymodule] fn rust_extension` body holds every `wrap_pyfunction!`
-    // registration. Locate the fragment that defines it and scan from the
-    // function start to the end of file (the body runs to EOF in its fragment).
-    let mut mod_src = String::new();
-    for path in &fragment_files {
-        let src = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-        if let Some(module_start) = src.find("fn rust_extension") {
-            // If a `#[cfg(test)]` module trails the pymodule body in the same
-            // fragment, stop before it so test-only helpers do not count.
-            let end = src[module_start..]
-                .find("#[cfg(test)]")
-                .map(|off| module_start + off)
-                .unwrap_or(src.len());
-            mod_src = src[module_start..end].to_string();
-            break;
-        }
-    }
-    assert!(
-        !mod_src.is_empty(),
-        "could not locate `fn rust_extension` pymodule body in the boundary fragments"
-    );
-
-    // Find every `wrap_pyfunction!(...)` invocation. The first identifier inside
-    // the parentheses is the registered Rust function. Walk character-by-character
-    // so that whitespace / newlines between `wrap_pyfunction!(` and the function
-    // name (rustfmt loves to split these) do not hide the registration.
-    let needle = "wrap_pyfunction!(";
-    let mut regs = Vec::new();
-    let bytes = mod_src.as_bytes();
-    let mut search_from = 0usize;
-    while let Some(off) = mod_src[search_from..].find(needle) {
-        let abs = search_from + off + needle.len();
-        let mut k = abs;
-        while k < bytes.len() && (bytes[k] as char).is_whitespace() {
-            k += 1;
-        }
-        let start = k;
-        while k < bytes.len() {
-            let c = bytes[k] as char;
-            if c.is_ascii_alphanumeric() || c == '_' {
-                k += 1;
-            } else {
-                break;
-            }
-        }
-        if k > start {
-            regs.push(mod_src[start..k].to_string());
-        }
-        search_from = abs;
-    }
-
-    let regs_set: BTreeSet<String> = regs.iter().cloned().collect();
-    let missing: Vec<String> = pyfns.difference(&regs_set).cloned().collect();
+    let missing: Vec<&String> = scan.definitions.difference(&scan.registered).collect();
     assert!(
         missing.is_empty(),
         "unregistered #[pyfunction] exports: {missing:?}"
     );
 }
 
-/// The boundary fragments `include!`d into `crates/gam-pyffi/src/lib.rs`,
-/// resolved to workspace-relative paths. Parsing them out of `lib.rs` keeps this
-/// list in lockstep with the real layout: when a fragment is renamed, moved, or
-/// added, lib.rs's `include!` directive is the one place that must change, and
-/// this test follows it automatically instead of failing on a stale hardcoded
-/// path.
-fn pyffi_include_fragments() -> Vec<String> {
-    const SRC_DIR: &str = "crates/gam-pyffi/src";
-    let lib_rs = format!("{SRC_DIR}/lib.rs");
-    let lib_src = fs::read_to_string(&lib_rs).unwrap_or_else(|e| panic!("read {lib_rs}: {e}"));
+/// Each way a function can be unreachable must be reported, and a registration
+/// outside the pymodule body must not count.
+#[test]
+fn registration_scan_reports_every_unreachable_pyfunction() {
+    let call = "    crate::concern_ffi::register(module)?;";
 
-    let needle = "include!(\"";
-    let mut fragments = Vec::new();
-    let mut from = 0usize;
-    while let Some(off) = lib_src[from..].find(needle) {
-        let start = from + off + needle.len();
-        let Some(end_rel) = lib_src[start..].find('"') else {
-            break;
-        };
-        let rel = &lib_src[start..start + end_rel];
-        fragments.push(format!("{SRC_DIR}/{rel}"));
-        from = start + end_rel;
+    // Clean: a fragment function and a concern-module function behind a
+    // multi-line `#[pyo3(signature = ...)]` attribute, both registered.
+    assert_eq!(
+        unregistered(&[
+            synthetic_pymodule(call, ""),
+            source("concern_ffi", CONCERN_MODULE)
+        ]),
+        Ok(Vec::new())
+    );
+
+    // A concern-module function that its `register` omits.
+    let with_forgotten = format!("{CONCERN_MODULE}\n#[pyfunction]\nfn forgotten() {{}}\n");
+    assert_eq!(
+        unregistered(&[
+            synthetic_pymodule(call, ""),
+            source("concern_ffi", &with_forgotten)
+        ]),
+        Ok(vec!["forgotten".to_string()])
+    );
+
+    // A concern module whose `register` the pymodule body never calls.
+    assert_eq!(
+        unregistered(&[
+            synthetic_pymodule("", ""),
+            source("concern_ffi", CONCERN_MODULE)
+        ]),
+        Ok(vec!["wired".to_string()])
+    );
+
+    // A `wrap_pyfunction!` in a function after the pymodule body does not
+    // register anything. This also fails if a `{` inside a string or a `}` inside
+    // a comment moves the end of the body.
+    let stray = "#[pyfunction]\nfn stray() {}\n\nfn after(module: &Bound<'_, PyModule>) -> PyResult<()> {\n    module.add_function(wrap_pyfunction!(stray, module)?)\n}\n";
+    assert_eq!(
+        unregistered(&[
+            synthetic_pymodule(call, stray),
+            source("concern_ffi", CONCERN_MODULE)
+        ]),
+        Ok(vec!["stray".to_string()])
+    );
+
+    // A `register` call that names no source file is refused, not skipped.
+    assert!(unregistered(&[synthetic_pymodule(call, "")]).is_err());
+}
+
+/// One crate source file: its stem, which is the module name a `register` call
+/// names, and its text.
+struct Source {
+    stem: String,
+    text: String,
+}
+
+/// The functions defined under `#[pyfunction]` and the functions reachable from
+/// the pymodule body through `wrap_pyfunction!`.
+struct RegistrationScan {
+    definitions: BTreeSet<String>,
+    registered: BTreeSet<String>,
+}
+
+/// Every `.rs` file under `crates/gam-pyffi/src`, walked recursively.
+fn pyffi_sources() -> Vec<Source> {
+    let mut pending = vec![PathBuf::from("crates/gam-pyffi/src")];
+    let mut sources = Vec::new();
+    while let Some(dir) = pending.pop() {
+        let entries =
+            fs::read_dir(&dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|e| panic!("read_dir entry in {}: {e}", dir.display()))
+                .path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let text = fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                let stem = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or_else(|| panic!("non-UTF-8 file name {}", path.display()))
+                    .to_string();
+                sources.push(Source { stem, text });
+            }
+        }
     }
     assert!(
-        !fragments.is_empty(),
-        "no include!(\"…\") fragments found in {lib_rs}; the boundary layout changed"
+        !sources.is_empty(),
+        "no source files found under crates/gam-pyffi/src"
     );
-    fragments
+    sources
 }
+
+fn scan_registrations(sources: &[Source]) -> Result<RegistrationScan, String> {
+    let mut definitions = BTreeSet::new();
+    for source in sources {
+        definitions.extend(pyfunction_definitions(&source.text)?);
+    }
+    if definitions.is_empty() {
+        return Err("no #[pyfunction] definitions found; the boundary layout changed".to_string());
+    }
+
+    let pymodules: Vec<&Source> = sources
+        .iter()
+        .filter(|source| source.text.contains("fn rust_extension("))
+        .collect();
+    let [pymodule] = pymodules.as_slice() else {
+        return Err(format!(
+            "expected exactly one `fn rust_extension` pymodule body, found {}",
+            pymodules.len()
+        ));
+    };
+    let body = item_body(&pymodule.text, "fn rust_extension(")?;
+    let mut registered = wrapped_functions(body);
+    for module in register_calls(body) {
+        let owners: Vec<&Source> = sources
+            .iter()
+            .filter(|source| source.stem == module)
+            .collect();
+        let [owner] = owners.as_slice() else {
+            return Err(format!(
+                "the pymodule body calls `{module}::register`, but {} source files are named {module}.rs",
+                owners.len()
+            ));
+        };
+        registered.extend(wrapped_functions(item_body(&owner.text, "fn register(")?));
+    }
+    Ok(RegistrationScan {
+        definitions,
+        registered,
+    })
+}
+
+fn unregistered(sources: &[Source]) -> Result<Vec<String>, String> {
+    let scan = scan_registrations(sources)?;
+    Ok(scan
+        .definitions
+        .difference(&scan.registered)
+        .cloned()
+        .collect())
+}
+
+/// The name of the `fn` item under each `#[pyfunction]` attribute. The item line
+/// is the first line after the attribute that starts with `fn` once a visibility
+/// prefix is stripped, so further attributes (including a multi-line
+/// `#[pyo3(signature = (...))]`) and doc comments in between do not hide it.
+fn pyfunction_definitions(text: &str) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if !line.trim_start().starts_with("#[pyfunction") {
+            continue;
+        }
+        let item = lines
+            .by_ref()
+            .map(str::trim_start)
+            .map(|item| {
+                item.strip_prefix("pub(crate) ")
+                    .or_else(|| item.strip_prefix("pub(super) "))
+                    .or_else(|| item.strip_prefix("pub "))
+                    .unwrap_or(item)
+            })
+            .find_map(|item| item.strip_prefix("fn "))
+            .ok_or_else(|| format!("a #[pyfunction] attribute has no fn item after it: {line:?}"))?;
+        names.push(
+            item.chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect(),
+        );
+    }
+    Ok(names)
+}
+
+/// The text inside the braces of the first item whose header starts with
+/// `header`. Braces are matched past string literals and line comments, so a `{`
+/// in a message or a `}` in a comment does not move the end of the body.
+fn item_body<'a>(text: &'a str, header: &str) -> Result<&'a str, String> {
+    let start = text
+        .find(header)
+        .ok_or_else(|| format!("no `{header}` item found"))?;
+    let open = start
+        + text[start..]
+            .find('{')
+            .ok_or_else(|| format!("`{header}` has no body"))?;
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut i = open;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if in_string {
+            if byte == b'\\' {
+                i += 1;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else if byte == b'{' {
+            depth += 1;
+        } else if byte == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return Ok(&text[open + 1..i]);
+            }
+        }
+        i += 1;
+    }
+    Err(format!("`{header}` body is not closed"))
+}
+
+/// The registered function of each `wrap_pyfunction!(path, module)`: the last
+/// segment of the path, so `crate::io::x` registers `x`.
+fn wrapped_functions(body: &str) -> BTreeSet<String> {
+    body.split("wrap_pyfunction!(")
+        .skip(1)
+        .filter_map(|rest| {
+            let path: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':')
+                .collect();
+            path.rsplit("::")
+                .next()
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// The module named by each `<path>::<module>::register(` call in a body.
+fn register_calls(body: &str) -> Vec<String> {
+    let needle = "::register(";
+    let mut modules = Vec::new();
+    let mut from = 0usize;
+    while let Some(off) = body[from..].find(needle) {
+        let at = from + off;
+        let head = &body[..at];
+        let start = head
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map_or(0, |i| i + 1);
+        modules.push(head[start..].to_string());
+        from = at + needle.len();
+    }
+    modules
+}
+
+fn source(stem: &str, text: &str) -> Source {
+    Source {
+        stem: stem.to_string(),
+        text: text.to_string(),
+    }
+}
+
+/// A pymodule fragment that defines and registers `listed`, runs `extra_body`
+/// inside the pymodule body, and appends `after_body` after it.
+fn synthetic_pymodule(extra_body: &str, after_body: &str) -> Source {
+    source(
+        "geometry_ffi",
+        &format!(
+            r#"#[pyfunction]
+fn listed() {{}}
+
+#[pymodule(name = "_rust", gil_used = false)]
+fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {{
+    module.add("__doc__", "a {{ inside a string")?; // and a }} inside a comment
+    module.add_function(wrap_pyfunction!(
+        listed,
+        module
+    )?)?;
+{extra_body}
+    Ok(())
+}}
+{after_body}"#
+        ),
+    )
+}
+
+const CONCERN_MODULE: &str = r#"#[pyfunction]
+#[pyo3(signature = (
+    x,
+    y = None
+))]
+pub(crate) fn wired(x: f64, y: Option<f64>) -> f64 {
+    x
+}
+
+pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(crate::concern_ffi::wired, module)?)?;
+    Ok(())
+}
+"#;
