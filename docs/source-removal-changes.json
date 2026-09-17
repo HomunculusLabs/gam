@@ -9989,5 +9989,13 @@
     ],
     "reason": "#2951 A6, per gam-67's 09-17 ruling. ClaimedBoundCheck {Refuted, Certified, Unresolved} duplicated the shared evidence status that mpd-supports landed in supports.rs (0f421d611e). check_claimed_absolute_bound now returns MaskEvidence: a Counterexample when the absolute supremum status's lower bound exceeds the claim, the Exact supremum status when its upper bound certifies the claim, and otherwise Unresolved, with the status's bracket and the witness mask attaining its lower side. The coupled-factor test is renamed coupled_factors_give_an_unresolved_bracket_not_an_exact_maximum_2951, because a coupled logit declaration now returns an Unresolved bracket with a feasible witness instead of a witness-free UniformBound. It keeps the not-Exact assertions and adds the compare_strength ordering.",
     "evidence": "At the base, git grep over crates, bench, gamfit, tests, scripts, examples and python finds ClaimedBoundCheck only in crates/gam-sae/src/parameter_decomposition/moments.rs: the enum, check_claimed_absolute_bound, two doc lines, and a_cancelling_pair_average_is_never_reported_as_a_bound_2951. That test keeps every assertion and matches EvidenceStatus::Counterexample, the Exact status and EvidenceStatus::Unresolved instead. No example, Python, FFI or CLI source names it."
+  },
+  {
+    "base": "36b575b1653ed1367aaf9c4adc840c203460933b",
+    "items": [
+      "crates/gam-event-history/src/static_state.rs:const:SLACK"
+    ],
+    "reason": "#2962 follow-up: replaced by the derived running error bound. SLACK = 64 eps was the undeclared roundoff factor of the one-dimensional oracle in static_state.rs's #[cfg(test)] mod tests. The oracle's log_integral now accumulates the canonical running error bound sum_i eps (u_i r_i + s_i) in its own summation loop, and resolved and reference propagate it to the spell PIT and the mark probabilities. Nothing else read SLACK, so it is deleted.",
+    "evidence": "At 930d22076c SLACK is a private const inside static_state.rs's bare #[cfg(test)] mod tests: its declaration and one use, in reference()'s roundoff. The guard at gate 1211303 reports it as test_scoped true with production_occurrences 0 (sw-status/evh-pit-gate.1211303.guard.txt). In the landing tree static_state.rs names SLACK 0 times (grep -c). Gate 1211303 at 18b1a6e353 with this commit's static_state.rs (tree 0826c28f5e): workspace --all-targets check RC 0, the #2962 test 1/1, owner tests 6/6, public_api_census 0, assertionless 0, mutant RC 100 on invariance."
   }
 ]

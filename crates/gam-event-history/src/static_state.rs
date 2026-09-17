@@ -315,10 +315,6 @@ mod tests {
     /// to, `2G − 1`.
     const ORDERS: [usize; 3] = [9, 17, 33];
 
-    /// The roundoff slack `predictive_pit` allows a probability, per unit of
-    /// the log integrals a spell is a ratio of.
-    const SLACK: f64 = 64.0 * f64::EPSILON;
-
     fn emit(line: &str) {
         use std::io::Write;
         let mut out = std::io::stdout().lock();
@@ -404,39 +400,102 @@ mod tests {
     }
 
     /// `ln ∫_{−L}^{L} exp(f(z)) dz` by the 20-point Gauss-Legendre rule on
-    /// `cells` equal cells.
-    fn log_integral(f: &dyn Fn(f64) -> f64, half_width: f64, cells: usize) -> f64 {
+    /// `cells` equal cells, with a bound on the computed logarithm's roundoff.
+    ///
+    /// The bound is the canonical running error bound (Higham, *Accuracy and
+    /// Stability*, ch. 3), accumulated in the summation loop itself.
+    /// - `f` returns its value and the summed magnitudes `m` of the operands it
+    ///   forms.
+    /// - A log term `t_i = ln w_i + f(z_i)` is off by at most `ε (|ln w_i| + m_i)`.
+    /// - `u_i = exp(t_i − shift)` has relative error at most `ε r_i`, with
+    ///   `r_i = 1 + |ln w_i| + m_i + |t_i| + |shift|`.
+    /// - Adding `u_i` to the partial sum gives `s_i` and adds `ε s_i`.
+    /// - So the sum is off by at most `Σ_i ε (u_i r_i + s_i)`.
+    /// - The logarithm divides that by `s_T`, and restoring the shift adds
+    ///   `ε (|ln s_T| + |shift|)`.
+    fn log_integral(f: &dyn Fn(f64) -> (f64, f64), half_width: f64, cells: usize) -> (f64, f64) {
         let (nodes, weights) = gam_math::special::gauss_legendre(20);
         let width = 2.0 * half_width / cells as f64;
         let mut terms = Vec::with_capacity(cells * nodes.len());
         for c in 0..cells {
             let left = -half_width + width * c as f64;
             for (x, w) in nodes.iter().zip(weights.iter()) {
-                terms.push((0.5 * width * w).ln() + f(left + 0.5 * width * (1.0 + x)));
+                let log_weight = (0.5 * width * w).ln();
+                let (value, magnitude) = f(left + 0.5 * width * (1.0 + x));
+                terms.push((log_weight + value, log_weight.abs() + magnitude));
             }
         }
-        log_sum_exp(&terms)
+        let shift = terms.iter().fold(f64::NEG_INFINITY, |a, t| a.max(t.0));
+        let (mut sum, mut error) = (0.0_f64, 0.0_f64);
+        for &(t, magnitude) in &terms {
+            let u = (t - shift).exp();
+            sum += u;
+            error += f64::EPSILON * (u * (1.0 + magnitude + t.abs() + shift.abs()) + sum);
+        }
+        let log_sum = sum.ln();
+        (log_sum + shift, error / sum + f64::EPSILON * (log_sum.abs() + shift.abs()))
     }
 
     /// The spell after `events` events over `(start, end]`, by one-dimensional
-    /// integration at one resolution: its PIT, the mark probabilities at `end`,
-    /// and the largest magnitude of the log integrals they are ratios of.
+    /// integration at one resolution: its PIT and the mark probabilities at
+    /// `end`, each with its roundoff bound (see [`log_integral`]).
     fn resolved(marks: &[(f64, f64)], events: usize, start: f64, end: f64, half_width: f64, cells: usize)
-        -> (f64, Vec<f64>, f64) {
-        let log_rate = |d: usize, z: f64| marks[d].0 - 0.5 * marks[d].1 * marks[d].1 + marks[d].1 * z;
-        let prefix = |exposure: f64, z: f64| {
-            -0.5 * z * z + events as f64 * log_rate(0, z)
-                - exposure * (0..marks.len()).map(|d| log_rate(d, z).exp()).sum::<f64>()
+        -> (f64, f64, Vec<f64>, Vec<f64>) {
+        // `r_d(z) = η⁰_d − a_d²/2 + a_d z` and the summed magnitudes of its operands.
+        let log_rate = |d: usize, z: f64| {
+            let (eta, a) = marks[d];
+            (eta - 0.5 * a * a + a * z, eta.abs() + 0.5 * a * a + (a * z).abs())
         };
-        let opened = log_integral(&|z| prefix(start, z), half_width, cells);
-        let before = log_integral(&|z| prefix(end, z), half_width, cells);
-        let tilted: Vec<f64> = (0..marks.len())
-            .map(|d| log_integral(&|z| prefix(end, z) + log_rate(d, z), half_width, cells))
+        // The prior times the likelihood of the first `events` events with
+        // exposure `exposure`, and the summed magnitudes of its operands. A hazard
+        // `exposure e^{r}` carries relative error `ε (1 + m_r)`.
+        let prefix = |exposure: f64, z: f64| {
+            let (r0, m0) = log_rate(0, z);
+            let (mut value, mut magnitude) = (-0.5 * z * z + events as f64 * r0, 0.5 * z * z + events as f64 * m0);
+            for d in 0..marks.len() {
+                let (r, m) = log_rate(d, z);
+                let hazard = exposure * r.exp();
+                value -= hazard;
+                magnitude += hazard * (1.0 + m) + value.abs();
+            }
+            (value, magnitude)
+        };
+        let (opened, opened_roundoff) = log_integral(&|z| prefix(start, z), half_width, cells);
+        let (before, before_roundoff) = log_integral(&|z| prefix(end, z), half_width, cells);
+        let tilted: Vec<(f64, f64)> = (0..marks.len())
+            .map(|d| log_integral(&|z| {
+                let (value, magnitude) = prefix(end, z);
+                let (r, m) = log_rate(d, z);
+                (value + r, magnitude + m + (value + r).abs())
+            }, half_width, cells))
             .collect();
-        let shift = tilted.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-        let total: f64 = tilted.iter().map(|t| (t - shift).exp()).sum();
-        let magnitude = tilted.iter().fold(opened.abs().max(before.abs()), |a, t| a.max(t.abs()));
-        (-(before - opened).exp_m1(), tilted.iter().map(|t| (t - shift).exp() / total).collect(), magnitude)
+        // The log survival `before − opened` is off by at most both bounds plus
+        // `ε (|before| + |opened|)`; `expm1` scales that by the survival and adds
+        // `ε` of its own result.
+        let pit = -(before - opened).exp_m1();
+        let pit_roundoff = (before - opened).exp()
+            * (before_roundoff + opened_roundoff + f64::EPSILON * (before.abs() + opened.abs()))
+            + f64::EPSILON * pit.abs();
+        // The probabilities normalise `v_d = exp(t_d − shift)` by their running
+        // sum. Each `v_d` has relative error `ρ_d = δ_d + ε (1 + |t_d| + |shift|)`,
+        // and the sum's absolute error accumulates in the same loop.
+        let shift = tilted.iter().fold(f64::NEG_INFINITY, |a, t| a.max(t.0));
+        let (mut total, mut error) = (0.0_f64, 0.0_f64);
+        let mut relative = Vec::with_capacity(marks.len());
+        for &(t, roundoff) in &tilted {
+            let v = (t - shift).exp();
+            let rho = roundoff + f64::EPSILON * (1.0 + t.abs() + shift.abs());
+            total += v;
+            error += v * rho + f64::EPSILON * total;
+            relative.push(rho);
+        }
+        let probabilities: Vec<f64> = tilted.iter().map(|t| (t.0 - shift).exp() / total).collect();
+        let probability_roundoffs: Vec<f64> = probabilities
+            .iter()
+            .zip(relative.iter())
+            .map(|(p, rho)| p * (rho + error / total) + f64::EPSILON * p)
+            .collect();
+        (pit, pit_roundoff, probabilities, probability_roundoffs)
     }
 
     struct Reference {
@@ -448,19 +507,18 @@ mod tests {
 
     /// The spell resolved with its own error scale: the value at `L = 12` on
     /// 192 cells, its change when every cell is halved and when the interval
-    /// widens to `L = 16`, and the roundoff of its log integrals.
+    /// widens to `L = 16`, and the roundoff bounds of the fine and wide values.
     fn reference(marks: &[(f64, f64)], events: usize, start: f64, end: f64) -> Reference {
         let coarse = resolved(marks, events, start, end, 12.0, 96);
         let fine = resolved(marks, events, start, end, 12.0, 192);
         let wide = resolved(marks, events, start, end, 16.0, 256);
-        let roundoff = SLACK * (1.0 + fine.2.max(wide.2));
         Reference {
             pit: fine.0,
-            pit_error: (fine.0 - coarse.0).abs() + (wide.0 - fine.0).abs() + roundoff,
+            pit_error: (fine.0 - coarse.0).abs() + (wide.0 - fine.0).abs() + fine.1 + wide.1,
             probability_errors: (0..marks.len())
-                .map(|d| (fine.1[d] - coarse.1[d]).abs() + (wide.1[d] - fine.1[d]).abs() + roundoff)
+                .map(|d| (fine.2[d] - coarse.2[d]).abs() + (wide.2[d] - fine.2[d]).abs() + fine.3[d] + wide.3[d])
                 .collect(),
-            probabilities: fine.1,
+            probabilities: fine.2,
         }
     }
 
