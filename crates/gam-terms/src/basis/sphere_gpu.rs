@@ -16,8 +16,6 @@
 //! Legendre recurrence math. Host code owns centering, constraints, and solver
 //! assembly in `basis.rs`.
 
-use std::sync::OnceLock;
-
 use ndarray::{Array2, ArrayView2};
 
 use gam_gpu::gpu_error::GpuError;
@@ -28,7 +26,7 @@ use gam_gpu::{GpuDecision, GpuKernel, decide};
 #[cfg(target_os = "linux")]
 use std::collections::HashMap;
 #[cfg(target_os = "linux")]
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(target_os = "linux")]
 use cudarc::driver::{CudaContext, CudaModule, CudaSlice, CudaStream};
@@ -58,22 +56,6 @@ impl SphereSpectralKernelKind {
             }
         }
     }
-
-    /// Stable string tag used in the NVRTC module cache key + logs.
-    pub const fn tag(self) -> &'static str {
-        match self {
-            SphereSpectralKernelKind::Sobolev => "sobolev",
-            SphereSpectralKernelKind::Pseudo => "pseudo",
-        }
-    }
-}
-
-/// Layout of the (n,m) kernel design matrix on device. The Wahba
-/// pipeline downstream of this kernel (cuBLAS GEMM, cuSOLVER GEQRF)
-/// requires column-major.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum DeviceMatrixLayout {
-    ColumnMajor,
 }
 
 /// Lat/lon (degrees or radians) → unit vector `(x, y, z)` on S² ⊂ ℝ³.
@@ -440,8 +422,6 @@ pub(crate) struct S2KernelBuildInputs<'a> {
     pub data_xyz: &'a [f64],
     pub centers_xyz: &'a [f64],
     pub coeffs: &'a [f64],
-    pub kind: SphereSpectralKernelKind,
-    pub layout: DeviceMatrixLayout,
 }
 
 impl<'a> S2KernelBuildInputs<'a> {
@@ -665,18 +645,18 @@ void s2_wahba_householder_constrained_colmajor(
 // Module cache key + per-process backend.
 // ────────────────────────────────────────────────────────────────────────
 
-/// Module cache key: every distinct `(CC, LMAX, kind, layout, kernel
-/// flavor)` compiles to a different PTX. `precision = f64` and the
-/// (32, 8, 1) raw-kernel block / (128, 1, 1) Householder-kernel block
-/// shapes are baked into the kernel source so they are implicit in the
-/// flavor tag and don't appear here.
+/// Module cache key. The compiled PTX depends only on the device's compute
+/// capability (the NVRTC arch) and `LMAX`, which is prepended to the source.
+/// The kernel kind reaches the device as the uploaded `c_ℓ` array, and the
+/// column-major layout, `precision = f64` and the (32, 8, 1) raw-kernel block /
+/// (128, 1, 1) Householder-kernel block shapes are baked into the source, so
+/// none of them keys the cache.
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct S2ModuleCacheKey {
-    pub cc_major: i32,
-    pub cc_minor: i32,
-    pub lmax: u32,
-    pub kind: SphereSpectralKernelKind,
-    pub layout: DeviceMatrixLayout,
+struct S2ModuleCacheKey {
+    cc_major: i32,
+    cc_minor: i32,
+    lmax: u32,
 }
 
 /// Returns `true` if this build was compiled with the Linux + cudarc GPU
@@ -814,8 +794,6 @@ fn build_truncated_kernel_matrix_gpu_admitted(
         data_xyz: &data_xyz,
         centers_xyz: &centers_xyz,
         coeffs: &coeffs,
-        kind,
-        layout: DeviceMatrixLayout::ColumnMajor,
     };
     let device_matrix = build_kernel_matrix_device(inputs)?;
     let out = device_matrix.to_host_array()?;
@@ -847,34 +825,24 @@ struct SphereGpuContext {
 }
 
 /// Process-wide sphere GPU backend. Lazy-initialised on first call to
-/// [`SphereGpuBackend::probe`].
+/// [`SphereGpuBackend::probe`]. Only the Linux NVRTC path launches kernels, so
+/// the backend exists only there.
+#[cfg(target_os = "linux")]
 pub(crate) struct SphereGpuBackend {
-    #[cfg(target_os = "linux")]
     inner: SphereGpuContext,
 }
 
+#[cfg(target_os = "linux")]
 impl SphereGpuBackend {
     /// Lazily initialise the process-wide sphere backend.
     pub fn probe() -> Result<&'static Self, GpuError> {
         static BACKEND: OnceLock<Result<SphereGpuBackend, GpuError>> = OnceLock::new();
         BACKEND
-            .get_or_init(|| {
-                #[cfg(target_os = "linux")]
-                {
-                    Self::probe_linux()
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    Err(GpuError::DriverLibraryUnavailable {
-                        reason: "sphere GPU backend is Linux-only".to_string(),
-                    })
-                }
-            })
+            .get_or_init(Self::probe_linux)
             .as_ref()
             .map_err(GpuError::clone)
     }
 
-    #[cfg(target_os = "linux")]
     fn probe_linux() -> Result<Self, GpuError> {
         let parts = gam_gpu::backend_probe::probe_cuda_backend("sphere")?;
         Ok(SphereGpuBackend {
@@ -890,7 +858,6 @@ impl SphereGpuBackend {
 
     /// NVRTC-compile (or fetch from cache) the module for `key`. The
     /// returned module exposes both raw and Householder-fused kernels.
-    #[cfg(target_os = "linux")]
     fn module_for(&self, key: S2ModuleCacheKey) -> Result<Arc<CudaModule>, GpuError> {
         if let Ok(guard) = self.inner.modules.lock() {
             if let Some(existing) = guard.get(&key) {
@@ -908,11 +875,7 @@ impl SphereGpuBackend {
         // the options.)
         let src = format!("#define LMAX {}\n{}", key.lmax, KERNEL_TEMPLATE);
         let ptx = gam_gpu::device_cache::compile_ptx_arch(&src).gpu_ctx_with(|err| {
-            format!(
-                "sphere NVRTC compile (kind={}, lmax={}): {err}",
-                key.kind.tag(),
-                key.lmax
-            )
+            format!("sphere NVRTC compile (lmax={}): {err}", key.lmax)
         })?;
         let module = self
             .inner
@@ -925,7 +888,6 @@ impl SphereGpuBackend {
         Ok(module)
     }
 
-    #[cfg(target_os = "linux")]
     fn cc(&self) -> (i32, i32) {
         (self.inner.cc_major, self.inner.cc_minor)
     }
@@ -951,8 +913,6 @@ pub(crate) fn build_kernel_matrix_device(
             cc_major,
             cc_minor,
             lmax: inputs.lmax as u32,
-            kind: inputs.kind,
-            layout: inputs.layout,
         };
         let module = backend.module_for(key)?;
         let func = module
@@ -1351,8 +1311,6 @@ mod sphere_gpu_tests {
             data_xyz: &data_xyz,
             centers_xyz: &centers_xyz,
             coeffs: &coeffs,
-            kind: SphereSpectralKernelKind::Sobolev,
-            layout: DeviceMatrixLayout::ColumnMajor,
         };
 
         let cpu = spherical_wahba_kernel_matrix_with_kind(
@@ -1374,7 +1332,9 @@ mod sphere_gpu_tests {
             return;
         }
         // Past the runtime Some-gate: a probe failure is a real device fault on a
-        // CUDA host — fail loud (device-PCG skip-pass class, eee12f6b2).
+        // CUDA host — fail loud (device-PCG skip-pass class, eee12f6b2). The
+        // backend exists only on Linux, the one target that launches kernels.
+        #[cfg(target_os = "linux")]
         SphereGpuBackend::probe()
             .expect("[sphere_gpu test] backend probe must succeed on a CUDA host");
         let dev_mat = build_kernel_matrix_device(inputs).expect("device kernel matrix");
@@ -1442,6 +1402,7 @@ mod sphere_gpu_tests {
         }
         // A CUDA runtime is present, so a probe failure is a real device/
         // dispatch fault — fail the gate loudly rather than skip-passing.
+        #[cfg(target_os = "linux")]
         SphereGpuBackend::probe()
             .expect("[sphere_gpu end-to-end dispatch] backend probe must succeed on a CUDA host");
 
@@ -1613,8 +1574,6 @@ mod sphere_gpu_tests {
             data_xyz: &data_xyz,
             centers_xyz: &centers_xyz,
             coeffs: &coeffs,
-            kind: SphereSpectralKernelKind::Sobolev,
-            layout: DeviceMatrixLayout::ColumnMajor,
         };
         // Deterministic synthetic response. The intent is to give the
         // penalised LS solve a non-trivial right-hand side; any smooth
@@ -1692,7 +1651,9 @@ mod sphere_gpu_tests {
             return;
         }
         // Past the runtime Some-gate: a probe failure is a real device fault on a
-        // CUDA host — fail loud (device-PCG skip-pass class, eee12f6b2).
+        // CUDA host — fail loud (device-PCG skip-pass class, eee12f6b2). The
+        // backend exists only on Linux, the one target that launches kernels.
+        #[cfg(target_os = "linux")]
         SphereGpuBackend::probe()
             .expect("[sphere gpu parity] sphere GPU backend probe must succeed on a CUDA host");
         let raw_dev = build_kernel_matrix_device(inputs).expect("GPU raw design");

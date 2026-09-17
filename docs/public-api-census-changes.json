@@ -4060,5 +4060,13 @@
     },
     "reason": "#2899 (SPEC rules 9 and 25): the atlas nerve's topology_promotion report is deleted, because it could only ever say one thing. AtlasNerveDiagram::certified_compression always returned GraphCompressionReport::unnamed: naming a surface needs the good-cover premise, which the diagram has not carried since 6874b6d21. So every pyffi and gamfit atlas nerve reported certified=False, kind='graph', bits_saved=0, whatever the data. certified_compression and GraphCompressionReport's unnamed and earns_standard_name are deleted, along with the pyffi dict entry, the gamfit field and the facade asserts on the constant.",
     "evidence": "public_api_census.py over e4a2051e6 and a private commit of the change (dcf2265e7, lane sw0e) counted 11594 -> 11591 public function declarations and reported exactly these as removed. At the base, git grep -n -w finds each name only at its definition, in certified_compression, and in the pyffi atlas_nerve_dict, apart from earlier ledger text. Gate job 1113845 (lane sw0e, node n36) stacked this slice on 196300a52: public_api_census.py over the base and the code-only commit refused exactly these three declarations, and verified the same commit carrying this entry."
+  },
+  {
+    "base": "192b2c1ae19f728fda72b406aff9f02e226eeca4",
+    "removed": {
+      "crates/gam-terms/src/basis/sphere_gpu.rs::tag": 1
+    },
+    "reason": "#2899/#2900 macOS release red: SphereSpectralKernelKind::tag was read only by the Linux NVRTC compile-error message, so every non-Linux target refused gam-terms with `method tag is never used`. The module cache key it labelled keys only what the compiled module depends on (compute capability and LMAX), so the tag is deleted rather than hidden.",
+    "evidence": "At the base, git grep -n finds one call, key.kind.tag() in SphereGpuBackend::module_for (cfg(target_os = \"linux\")). No other crate, test, example, Python or FFI source names it. Scheduled macOS release run 35185548302 at b1b723c65 reports `method tag is never used`."
   }
 ]
