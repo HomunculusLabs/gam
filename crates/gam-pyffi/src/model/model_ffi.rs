@@ -891,7 +891,7 @@ fn encoded_table_from_columns(
     let mut column_kinds = vec![ColumnKindTag::Continuous; headers.len()];
     for (matrix_column, &table_column) in numeric_positions.iter().enumerate() {
         let column = numeric.column(matrix_column);
-        let kind = infer_numeric_array_column_kind(column);
+        let kind = gam::data::infer_numeric_column_kind(column.iter().copied());
         for (row, value) in column.iter().enumerate() {
             values[[row, table_column]] = *value;
         }
@@ -1080,7 +1080,7 @@ fn dataset_with_model_schema_from_encoded(
             (_, ColumnKindTag::Binary) => {
                 for row in 0..n_rows {
                     let value = source.values[[row, source_index]];
-                    if (value - 0.0).abs() >= 1e-12 && (value - 1.0).abs() >= 1e-12 {
+                    if !gam::data::is_binary_value(value) {
                         return Err(format!(
                             "column '{name}' is binary in schema but row {} has value {value}; expected 0 or 1",
                             row + 1

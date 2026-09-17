@@ -992,7 +992,7 @@ impl DelimitedInferenceState {
                         reason: format!("non-finite value at row {row}, column '{header}'"),
                     });
                 }
-                if value != 0.0 && value != 1.0 {
+                if !is_binary_value(value) {
                     self.all_binary = false;
                 }
             }
@@ -1036,6 +1036,28 @@ fn is_missing_marker(raw: &str) -> bool {
         raw.trim().to_ascii_uppercase().as_str(),
         "NA" | "N/A" | "NULL"
     )
+}
+
+/// Is this numeric cell a binary code?
+///
+/// A column is `Binary` only when every present cell is exactly `0` or `1`, and a
+/// `Binary` schema column refuses any other cell. The test is exact on purpose: a
+/// cell a rounding error away from `0` or `1` is a measurement, and typing it as an
+/// indicator would store that measurement as a code. Every front door types and
+/// checks binary cells through this one rule, so the same numbers make the same
+/// column whether they arrive as text, as Arrow, or as a NumPy matrix.
+pub fn is_binary_value(value: f64) -> bool {
+    value == 0.0 || value == 1.0
+}
+
+/// The kind of a numeric column read from an in-memory matrix: `Binary` when every
+/// cell [`is_binary_value`], otherwise `Continuous`.
+pub fn infer_numeric_column_kind(values: impl IntoIterator<Item = f64>) -> ColumnKindTag {
+    if values.into_iter().all(is_binary_value) {
+        ColumnKindTag::Binary
+    } else {
+        ColumnKindTag::Continuous
+    }
 }
 
 fn parse_inferred_numeric_cell(raw: &str, row: usize, header: &str) -> Result<f64, DataError> {
@@ -1507,7 +1529,7 @@ fn parse_cell_with_schema(
                         col_name, row, raw, err
                     ),
                 })?;
-            if v != 0.0 && v != 1.0 {
+            if !is_binary_value(v) {
                 return Err(DataError::SchemaMismatch {
                     reason: format!(
                         "column '{}' is binary in schema but row {} has value {}; expected 0 or 1",
@@ -1600,7 +1622,7 @@ fn write_arrow_numeric_values(
                     continue;
                 };
                 *saw_numeric = true;
-                if value != 0.0 && value != 1.0 {
+                if !is_binary_value(value) {
                     *all_binary = false;
                 }
                 output[batch_row] = value;
@@ -2573,7 +2595,7 @@ fn encode_one_column(
                         ),
                     })
                 })?;
-                if v != 0.0 && v != 1.0 {
+                if !is_binary_value(v) {
                     return Err(DataError::SchemaMismatch {
                         reason: format!(
                             "column '{}' is binary in schema but row {} has value {}; expected 0 or 1",
@@ -2659,7 +2681,7 @@ fn infer_schema_column(
                     reason: format!("non-finite value at row {}, column '{}'", i + 1, name),
                 });
             }
-            if v != 0.0 && v != 1.0 {
+            if !is_binary_value(v) {
                 all_binary = false;
             }
         } else {
@@ -2863,6 +2885,31 @@ mod tests {
             &mut reader,
             vec!["normalized".to_string()],
         )
+    }
+
+    #[test]
+    fn a_numeric_column_is_binary_only_when_every_cell_is_exactly_zero_or_one() {
+        // gam-pyffi typed a NumPy column Binary within 1e-12 of {0, 1} while the
+        // text and Arrow encoders required the codes exactly, so these numbers
+        // trained a Binary column through gamfit and a Continuous one through `gam fit`.
+        let near_codes = [0.0, 1.0e-13, 1.0];
+        let codes = [0.0, 1.0, 1.0];
+        assert!(is_binary_value(0.0) && is_binary_value(1.0));
+        assert!(!is_binary_value(1.0 + 1.0e-13) && !is_binary_value(f64::NAN));
+        assert_eq!(infer_numeric_column_kind(near_codes), ColumnKindTag::Continuous);
+        assert_eq!(infer_numeric_column_kind(codes), ColumnKindTag::Binary);
+        let as_text = |cells: &[f64]| -> Vec<StringRecord> {
+            cells
+                .iter()
+                .map(|cell| StringRecord::from(vec![cell.to_string()]))
+                .collect()
+        };
+        let text = encode_recordswith_inferred_schema(vec!["b".to_string()], as_text(&near_codes))
+            .expect("text table with near codes");
+        assert_eq!(text.column_kinds[0], ColumnKindTag::Continuous);
+        let text = encode_recordswith_inferred_schema(vec!["b".to_string()], as_text(&codes))
+            .expect("text table with codes");
+        assert_eq!(text.column_kinds[0], ColumnKindTag::Binary);
     }
 
     #[test]

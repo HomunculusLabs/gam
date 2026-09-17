@@ -3132,7 +3132,7 @@ fn dataset_from_numeric_array(
     let mut schema_cols = Vec::<SchemaColumn>::with_capacity(headers.len());
     let mut column_kinds = Vec::<ColumnKindTag>::with_capacity(headers.len());
     for (j, name) in headers.iter().enumerate() {
-        let kind = infer_numeric_array_column_kind(values.column(j));
+        let kind = gam::data::infer_numeric_column_kind(values.column(j).iter().copied());
         column_kinds.push(kind);
         schema_cols.push(SchemaColumn {
             name: name.clone(),
@@ -3176,7 +3176,7 @@ fn dataset_from_numeric_array_with_schema(
             }
             ColumnKindTag::Binary => {
                 for (row, value) in values.column(j).iter().enumerate() {
-                    if (*value - 0.0).abs() >= 1e-12 && (*value - 1.0).abs() >= 1e-12 {
+                    if !gam::data::is_binary_value(*value) {
                         return Err(format!(
                             "column '{name}' is binary in schema but row {} has value {}; expected 0 or 1",
                             row + 1,
@@ -3240,17 +3240,6 @@ fn validate_numeric_array_values(
         }
     }
     Ok(())
-}
-
-fn infer_numeric_array_column_kind(column: ArrayView1<'_, f64>) -> ColumnKindTag {
-    if column
-        .iter()
-        .all(|value| (*value - 0.0).abs() < 1e-12 || (*value - 1.0).abs() < 1e-12)
-    {
-        ColumnKindTag::Binary
-    } else {
-        ColumnKindTag::Continuous
-    }
 }
 
 #[pyfunction]

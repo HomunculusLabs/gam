@@ -9497,5 +9497,13 @@
     ],
     "reason": "#2899 F1 (SPEC rule 9): pyffi computed held-out survival scores and residuals itself. survival_score_grid_from_times carried the 24-knot quantile grid (INTERIOR) and its own type-7 quantile (quantile_of_sorted). gam-models survival::predict::survival_score_grid now owns the grid, through gam_math::quantile::quantile_from_sorted. compute_residuals returned observed - mean, which gam::inference::diagnostics::diagnostics_from_predictions already returns; gamfit.Diagnostics reads it from there, and the binding is deleted.",
     "evidence": "At ba5b2a6b1, the pyffi INTERIOR const is declared once, inside survival_score_grid_from_times; the guard's 73 occurrences of the word are other INTERIOR constants in other items. quantile_of_sorted is defined and called only in survival_score_grid_from_times. compute_residuals is defined in reml_latent_fit_ffi.rs, registered in geometry_ffi.rs, and called only by gamfit/_diagnostics.py (two sites). Gate job 1102058 (lane sw0e, node n42) stacked this slice on ba5b2a6b1, and source_removal_guard.py refused exactly these three identities for this file. Gate job 1113845 (lane sw0e, node n36) stacked this slice on 196300a52 and refused exactly the same three identities without this entry, then verified with it."
+  },
+  {
+    "base": "ff66268ff62bb2142c1c189e76d997d7ca39b328",
+    "items": [
+      "crates/gam-pyffi/src/manifold/manifold_and_posterior_ffi.rs:fn:infer_numeric_array_column_kind"
+    ],
+    "reason": "#2899 F7 (SPEC rule 9): gam-pyffi typed a NumPy column Binary within 1e-12 of {0, 1}, while gam-data's text and Arrow encoders required the codes exactly, so the same numbers trained different column kinds through gamfit and gam fit. gam_data::infer_numeric_column_kind replaces it, through the one is_binary_value rule every encoder now uses.",
+    "evidence": "At ba5b2a6b1, infer_numeric_array_column_kind is defined in manifold_and_posterior_ffi.rs and called by dataset_from_numeric_array in that file and by encoded_table_from_columns in model_ffi.rs, which is include!d into the same crate root. Both callers now call gam::data::infer_numeric_column_kind. Gate job 1102058 (lane sw0e, node n42): source_removal_guard.py refused exactly this identity for this file. Gate job 1113845 (lane sw0e, node n36) stacked this slice on 196300a52 and refused exactly this identity without this entry, then verified with it; re-gate job 1115266 on f9c289480 did the same."
   }
 ]
