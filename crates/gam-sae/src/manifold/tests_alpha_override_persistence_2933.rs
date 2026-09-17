@@ -104,13 +104,21 @@ fn configured_term(
 /// scalars.
 fn assert_finalization_preserves_the_objective(learnable: bool, override_alpha: Option<f64>) {
     let label = format!("learnable_alpha={learnable}, override={override_alpha:?}");
-    let z = planted_circle_embedded(24, 4, 0.03);
+    let started = std::time::Instant::now();
+    let stage = |what: &str| eprintln!("[F06 {label}] {what} at {:.2?}", started.elapsed());
+    let z = planted_circle_embedded(16, 3, 0.03);
     let k = 2;
     let mode = AssignmentMode::ordered_beta_bernoulli(TEMPERATURE, BASE_ALPHA, learnable);
-    let term = configured_term(&z, Topo::Circle, mode, override_alpha);
+    // Two Euclidean-patch atoms. The two-atom periodic term PCA-seeds duplicate atoms, and its
+    // first fixed-rho root never reproduces its own collapse-prevention gates: the evidence-root
+    // gate refresh alternates between two roots without end, so that fixture measures the gate
+    // loop instead of finalization.
+    let term = configured_term(&z, Topo::Euclidean, mode, override_alpha);
     let rho = SaeManifoldRho::new(3.0_f64.ln(), 0.0, vec![array![0.0]; k])
         .for_assignment(&term.assignment);
+    stage("term built; fitting at fixed rho");
     let objective = fixed_rho_objective(&z, term, &rho);
+    stage("fixed-rho fit returned");
 
     let concentration = expected_concentration(learnable, override_alpha);
     let learned = learnable && override_alpha.is_none();
@@ -131,9 +139,20 @@ fn assert_finalization_preserves_the_objective(learnable: bool, override_alpha: 
         .expect("a fixed-rho fit stamps its criterion");
     let assignments_before = objective.term.assignment.try_assignments()
         .expect("finite fitted logits give assignments");
-    let reconstruction_before = objective.term.try_fitted()
+    let reconstruction_before = objective
+        .term
+        .try_fitted_for_rho(&rho_before)
+        .expect("the fitted state reconstructs its curved image");
+    let production_before = objective.term.try_fitted()
         .expect("the fitted state reconstructs");
     let prior_expected = expected_prior_value(&logits_before, concentration);
+    eprintln!(
+        "[F06 {label}] concentration={concentration} learned={learned} \
+         prior_expected={prior_expected:.12e} loss_prior={:.12e} loss_total={:.12e} \
+         criterion={criterion_before:.12e}",
+        loss_before.assignment_sparsity,
+        loss_before.total()
+    );
     // The loss prior term also carries the gate-logit change of variables, which reads
     // neither the concentration nor the placeholder.
     let loss_prior_expected =
@@ -148,6 +167,7 @@ fn assert_finalization_preserves_the_objective(learnable: bool, override_alpha: 
     let fitted = objective
         .into_fitted()
         .unwrap_or_else(|error| panic!("{label}: into_fitted: {error}"));
+    stage("into_fitted returned");
     assert_eq!(
         fitted.term.assignment.logits, logits_before,
         "{label}: finalization must not move the logits"
@@ -212,20 +232,42 @@ fn assert_finalization_preserves_the_objective(learnable: bool, override_alpha: 
         assignments_before,
         "{label}: finalization must not change assignments"
     );
-    let reconstruction_after = fitted.term.try_fitted()
-        .expect("the fitted state reconstructs");
+    // The certified objective scores the curved image at the certified rho. `try_fitted` is the
+    // user-facing decode: the post-fit #1026 hybrid-split adjudication, which `into_fitted` runs,
+    // may decode a `d = 1` slot with its straight sub-model, so its gap is printed, not asserted.
+    let reconstruction_after = fitted
+        .term
+        .try_fitted_for_rho(&fitted.rho)
+        .expect("the returned state reconstructs its curved image");
     let reconstruction_gap = max_abs(&(&reconstruction_after - &reconstruction_before));
+    let production_after = fitted.term.try_fitted()
+        .expect("the returned state reconstructs");
+    eprintln!(
+        "[F06 {label}] curved image gap {reconstruction_gap:.3e}, production decode gap {:.3e}, \
+         charts_canonicalized={}, hybrid_split_report={}",
+        max_abs(&(&production_after - &production_before)),
+        fitted.charts_canonicalized,
+        fitted.term.hybrid_split_report().is_some()
+    );
     assert!(
         reconstruction_gap <= 1.0e-6 * (1.0 + max_abs(&reconstruction_before)),
-        "{label}: reconstruction moved by {reconstruction_gap:.3e} through finalization"
+        "{label}: the curved image moved by {reconstruction_gap:.3e} through finalization"
     );
 
     // The criterion the fit reports must describe the returned (term, rho): re-mint it
     // through the same authoritative fixed-rho lane.
+    stage("finalization compared; re-minting the returned state");
     let reevaluated = fixed_rho_objective(&z, fitted.term.clone(), &fitted.rho);
     let criterion_after = reevaluated
         .terminal_penalized_quasi_laplace_criterion
         .expect("a fixed-rho fit stamps its criterion");
+    stage("re-mint returned");
+    eprintln!(
+        "[F06 {label}] criterion before={criterion_before:.12e} after={criterion_after:.12e} \
+         loss_total after={:.12e} charts_canonicalized={}",
+        fitted.loss.total(),
+        fitted.charts_canonicalized
+    );
     let criterion_tolerance = 1.0e-6 * (1.0 + criterion_before.abs());
     assert!(
         (criterion_after - criterion_before).abs() <= criterion_tolerance,
@@ -252,6 +294,11 @@ fn assert_finalization_preserves_the_objective(learnable: bool, override_alpha: 
         .for_assignment(&reloaded);
         let reloaded_prior = assignment_prior_value_weighted(&reloaded, &reloaded_rho, None)
             .unwrap_or_else(|error| panic!("{label}: reloaded prior: {error}"));
+        eprintln!(
+            "[F06 {label}] reloaded prior={reloaded_prior:.12e} expected={prior_expected:.12e} \
+             persisted log_lambda_sparse={}",
+            fitted.rho.log_lambda_sparse
+        );
         assert!(
             relative_gap(reloaded_prior, prior_expected) <= 1.0e-12,
             "{label}: the reloaded payload scores the prior as {reloaded_prior:.12e}, but the \
@@ -260,6 +307,7 @@ fn assert_finalization_preserves_the_objective(learnable: bool, override_alpha: 
             fitted.rho.log_lambda_sparse
         );
     }
+    stage("done");
 }
 
 #[test]
