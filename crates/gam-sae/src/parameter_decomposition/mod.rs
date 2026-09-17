@@ -64,6 +64,9 @@
 //! Lipschitz covering). Derivatives are analytic; finite differences appear only
 //! in tests.
 
+// Executed-stage receipts against the native lift.
+pub mod receipts;
+
 // Nonlinear separation over the moment zonotope: lower witnesses, derived upper bounds.
 // [unlanded: adversary]
 
