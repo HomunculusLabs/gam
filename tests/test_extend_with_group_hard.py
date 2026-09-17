@@ -271,12 +271,12 @@ def test_hyperprior_precision_is_preserved_by_prior_mean_extension() -> None:
 
     # The Gamma hyperprior participates in the fit-time marginal REML
     # optimisation.  A deployment extension does not refit the model, so its
-    # prior mean must not alter the already-fitted precision.
+    # prior mean must not alter any already-fitted precision.  This formula
+    # fits more than the group precision (`y ~ group(g)` alone fits one; the
+    # linear term adds its own), so every fitted entry is checked.
     fitted = fit_model.smoothing_parameters()
-    assert len(fitted) == 1
-    fitted_lambda = next(iter(fitted.values()))
-    assert np.isfinite(fitted_lambda)
-    assert fitted_lambda > 0.0
+    assert fitted, "the hyperprior-fitted model publishes no smoothing parameters"
+    assert all(np.isfinite(value) and value > 0.0 for value in fitted.values()), fitted
     assert extended_mu.smoothing_parameters() == fitted
     assert extended_zero.smoothing_parameters() == fitted
 
