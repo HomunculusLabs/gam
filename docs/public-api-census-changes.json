@@ -4170,5 +4170,15 @@
     },
     "reason": "#2933 audit remainder, SPEC 25 (gam-60 ruling): the #1026 ungated background tier had no production producer and is deleted. has_ungated and validate_gate_configuration existed only for it. Without partial fixed-logit masks the per-atom logit_is_fixed(k) and fixed_logit_mask() are replaced by the scalar SaeAssignment::logits_are_fixed() (TopK or frozen routing).",
     "evidence": "At the base, git grep -n finds has_ungated and validate_gate_configuration only in assignment.rs, and logit_is_fixed and fixed_logit_mask in assignment.rs, construction_exact_hessian.rs, construction_quasi_laplace.rs, construction_rank_charge_derivative.rs, construction_arrow_schur_assembly.rs, fit_drivers.rs and three gam-sae tests, all of which now call logits_are_fixed or were restated on frozen routing. No example, Python or FFI source names them."
+  },
+  {
+    "base": "7d5c48d9220f566227ab096dad10b3a17cf697aa",
+    "removed": {
+      "crates/gam-sae/src/manifold/construction_ard.rs::latent_block_inverse_diagonal_hutchinson": 1,
+      "crates/gam-sae/src/manifold/construction_smoothness_dof.rs::decoder_smoothness_effective_dof_per_atom_hutchinson": 1,
+      "crates/gam-sae/src/manifold/tests.rs::latent_block_inverse_diagonal_hutchinson_matches_exact_trace": 1
+    },
+    "reason": "#2900 rows 6.18 and 6.19 (SPEC rule 6: no size window): the SAE ARD latent inverse diagonal and the decoder-smoothness effective dof switched from their exact routes to 64-probe Hutchinson estimates at K = 2048 atoms. Both are exact at every K now, so the two estimators and the test that compared the latent estimator with the exact diagonal are deleted.",
+    "evidence": "Pool job 1190978 (pool-gx2) ran scripts/public_api_census.py --base acdf183fe6 over the landing tree (overlay 5a601c05c2, tree cf69208822) and measured exactly these three declarations. source_removal_guard.py verified the same removals with their ledger entry (11 guarded removals). The replacement routes are ArrowFactorCache::latent_block_inverse_diagonal (exact at every K, pinned by latent_inverse_diagonal_contracts_touched_columns_against_the_dense_inverse_2900) and the existing exact per-column smoothness trace."
   }
 ]

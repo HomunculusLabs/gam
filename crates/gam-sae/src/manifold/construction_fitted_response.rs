@@ -165,16 +165,18 @@ impl SaeManifoldTerm {
                 .map_err(numerical)?;
             self.fitted_response_divergence_exact_spectral(&geometry, cache, frame_conditioning)
         } else {
-            // The divergence shares the ARD trace lane's probe budget and seed: both
-            // are grouped Hutchinson traces of an arrow inverse at the same scale.
-            let probes = Self::ARD_TRACE_HUTCHINSON_PROBES;
+            // Probe budget and base seed of the fitted-response Hutchinson traces. The
+            // fixed seed keeps the estimate bit-reproducible across outer iterations.
+            const FITTED_RESPONSE_HUTCHINSON_PROBES: usize = 64;
+            const FITTED_RESPONSE_HUTCHINSON_SEED: u64 = 0x5AED_A3D0_1ACE_9C01;
+            let probes = FITTED_RESPONSE_HUTCHINSON_PROBES;
             let (divergence, standard_error) = self
                 .hutchinson_fitted_response_divergence(
                     rho,
                     target,
                     cache,
                     probes,
-                    Self::ARD_TRACE_HUTCHINSON_SEED,
+                    FITTED_RESPONSE_HUTCHINSON_SEED,
                 )
                 .map_err(numerical)?;
             // The residual dofs are probed in output space, where each probe's
@@ -185,7 +187,7 @@ impl SaeManifoldTerm {
                     target,
                     cache,
                     probes,
-                    Self::ARD_TRACE_HUTCHINSON_SEED.wrapping_add(1 << 32),
+                    FITTED_RESPONSE_HUTCHINSON_SEED.wrapping_add(1 << 32),
                     FittedResponseFrame::Likelihood,
                 )
                 .map_err(numerical)?;
@@ -195,7 +197,7 @@ impl SaeManifoldTerm {
                     target,
                     cache,
                     probes,
-                    Self::ARD_TRACE_HUTCHINSON_SEED.wrapping_add(2 << 32),
+                    FITTED_RESPONSE_HUTCHINSON_SEED.wrapping_add(2 << 32),
                     FittedResponseFrame::Raw,
                 )
                 .map_err(numerical)?

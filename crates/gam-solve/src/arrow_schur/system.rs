@@ -2568,15 +2568,25 @@ impl ArrowFactorCache {
     /// `(H⁻¹)_tt = A⁻¹ + A⁻¹ B S⁻¹ Bᵀ A⁻¹`, where
     /// `S = H_ββ − Bᵀ A⁻¹ B` is the Schur complement on `β`. Because `A` is
     /// block-diagonal, the `(i, j)` diagonal entry of `(H⁻¹)_tt` is computed
-    /// purely from row `i`'s factor and cross-block:
+    /// from row `i`'s factor and cross-block and the one shared `S⁺`:
     ///
     /// ```text
+    /// S⁺   = [`Self::schur_inverse_block`](0..K)  (K applies of `schur_inverse_apply`, once)
     /// a    = A_i⁻¹ e_j                       (chol_solve on the per-row factor)
     /// [A_i⁻¹]_{jj} = a[j]
     /// w    = B_iᵀ a = H_βt^(i) a             (a K-vector)
-    /// z    = S⁻¹ w                           (chol_solve on the Schur factor)
-    /// diag = a[j] + w · z
+    /// T    = { c : w[c] ≠ 0 }                (the border columns row i touches)
+    /// diag = a[j] + Σ_{c,b ∈ T} w[c]·S⁺[c,b]·w[b]
     /// ```
+    ///
+    /// `S⁺` is exactly the operator [`Self::schur_inverse_apply`] applies, gauge
+    /// quotient and β-Schur spectral deflation included, so `wᵀ S⁺ w` equals the
+    /// per-coordinate `w · (S⁺ w)` up to rounding. The columns outside `T`
+    /// multiply an exact zero. This costs `K` Schur applies (`O(K³)`, the order of
+    /// the Schur factorization the cache already holds) plus `O(K + |T|²)` per
+    /// latent coordinate, instead of one `O(K²)` Schur solve per coordinate, which
+    /// was `O(total_t·K²)` (#2900 row 6.18). The `K × K` `S⁺` is charged on the
+    /// memory governor while it lives, and a refusal is an error.
     ///
     /// The UNDAMPED per-row factors ([`Self::undamped_factor`]) are used so
     /// the result is the inverse of the *true* `H_tt`, not the LM-damped
@@ -2623,22 +2633,28 @@ impl ArrowFactorCache {
         }
         let n = self.undamped_factor_count();
         let total_len = self.delta_t_len();
+        let k = self.k;
+        let schur_inverse_charge = gam_runtime::resource::MemoryGovernor::global()
+            .try_reserve_dense_f64(k, k, "ArrowFactorCache::latent_block_inverse_diagonal S⁺")
+            .map_err(|error| ArrowSchurError::SchurFactorFailed {
+                reason: format!(
+                    "latent_block_inverse_diagonal: refusing the {k}×{k} Schur inverse: {error}"
+                ),
+            })?;
+        let schur_inverse = self.schur_inverse_block(0..k)?;
         let mut out = Array1::<f64>::zeros(total_len);
-        // Per-row scratch, sized to the max latent dim / K.
-        let mut e_j = Array1::<f64>::zeros(self.d);
-        let mut w = Array1::<f64>::zeros(self.k);
+        let mut w = Array1::<f64>::zeros(k);
+        let mut touched: Vec<usize> = Vec::with_capacity(k);
         for i in 0..n {
             let di = self.row_dims[i];
             let row_base = self.row_offsets[i];
             let factor = self.undamped_factor(i);
+            let mut e_j = Array1::<f64>::zeros(di);
             for j in 0..di {
                 // a = A_i⁻¹ e_j.
-                for c in 0..di {
-                    e_j[c] = 0.0;
-                }
+                e_j.fill(0.0);
                 e_j[j] = 1.0;
-                let e_j_slice = e_j.slice(ndarray::s![..di]).to_owned();
-                let a = cholesky_solve_vector(factor, &e_j_slice);
+                let a = cholesky_solve_vector(factor, &e_j);
                 // w = H_βt^(i) a (a K-vector); accumulator must start zeroed.
                 w.fill(0.0);
                 if !self.apply_htbeta_row_transpose(i, a.view(), &mut w, None) {
@@ -2649,15 +2665,22 @@ impl ArrowFactorCache {
                         ),
                     });
                 }
-                // z = S⁻¹ w; correction = w · z.
-                let z = self.schur_inverse_apply(w.view())?;
+                // correction = wᵀ S⁺ w over the border columns w touches.
+                touched.clear();
+                touched.extend((0..k).filter(|&c| w[c] != 0.0));
                 let mut corr = 0.0_f64;
-                for c in 0..self.k {
-                    corr += w[c] * z[c];
+                for &c in &touched {
+                    let mut contracted = 0.0_f64;
+                    for &b in &touched {
+                        contracted += schur_inverse[[c, b]] * w[b];
+                    }
+                    corr += w[c] * contracted;
                 }
                 out[row_base + j] = a[j] + corr;
             }
         }
+        drop(schur_inverse);
+        drop(schur_inverse_charge);
         Ok(out)
     }
 

@@ -124,6 +124,8 @@ mod tests_device_gauge_2660;
 #[cfg(test)]
 mod evidence_schur_reuse_2900_tests;
 #[cfg(test)]
+mod latent_inverse_diagonal_2900_tests;
+#[cfg(test)]
 mod touched_pair_fold_2900_tests;
 
 pub(crate) use factorization::*;

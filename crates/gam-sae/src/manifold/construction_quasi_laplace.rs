@@ -5421,20 +5421,6 @@ impl SaeManifoldTerm {
         // The t-RHS is identically zero for every β-only smoothness solve; build
         // it once instead of re-zeroing a delta_t_len()-sized buffer per column.
         let zero_t = Array1::<f64>::zeros(cache.delta_t_len());
-        if self.atoms.len() >= Self::SMOOTHNESS_DOF_HUTCHINSON_MIN_ATOMS {
-            // Massive-K matrix-free path: one deflated `(H⁻¹)_ββ` solve per
-            // Hutchinson probe estimates ALL per-atom traces, replacing the
-            // `Σ_k M_k·r_k` deflated solves that form the `O(K³·M·p)` wall.
-            return self.decoder_smoothness_effective_dof_per_atom_hutchinson(
-                k,
-                &offsets,
-                out_dim.as_ref(),
-                lambda_smooth,
-                Self::SMOOTHNESS_DOF_HUTCHINSON_PROBES,
-                Self::SMOOTHNESS_DOF_HUTCHINSON_SEED,
-                |rhs| Ok(solver.solve(zero_t.view(), rhs)?.beta),
-            );
-        }
         // #2253/#2228 λ→0 boundary: route the β-only columns through the ONE
         // deflated spectral pseudo-inverse (see
         // `decoder_smoothness_effective_dof_per_atom`) so a doubly-null decoder
@@ -9066,10 +9052,9 @@ mod smoothness_dof_exact_oracle_tests {
         /// read back `result[col]`. The total edf is the sum of the returned vector
         /// (a uniform/broadcast λ reproduces the historical global trace).
         ///
-        /// At `K ≥ SMOOTHNESS_DOF_HUTCHINSON_MIN_ATOMS` this delegates to the
-        /// matrix-free Hutchinson estimator (the exact `K·M·p`-solve trace is
-        /// infeasible at that scale); below it the exact column solve is used
-        /// unchanged.
+        /// The trace is exact at every `K`: `Σ_k M_k·r_k = K` column applies of
+        /// `O(K²)` cost `O(K³)`, the order of the Schur factorization the cache
+        /// already holds (#2900 row 6.19).
         pub(crate) fn decoder_smoothness_effective_dof_per_atom(
             &self,
             cache: &ArrowFactorCache,
@@ -9087,25 +9072,6 @@ mod smoothness_dof_exact_oracle_tests {
                 (self.beta_offsets(), Box::new(move |_: usize| p))
             };
             let k = cache.k;
-            if self.atoms.len() >= Self::SMOOTHNESS_DOF_HUTCHINSON_MIN_ATOMS {
-                // Massive-K: `Σ_k M_k·r_k` exact solves is infeasible — estimate every
-                // atom's trace matrix-free with one `S_β⁻¹` solve per Hutchinson probe.
-                return self
-                    .decoder_smoothness_effective_dof_per_atom_hutchinson(
-                        k,
-                        &offsets,
-                        out_dim.as_ref(),
-                        lambda_smooth,
-                        Self::SMOOTHNESS_DOF_HUTCHINSON_PROBES,
-                        Self::SMOOTHNESS_DOF_HUTCHINSON_SEED,
-                        |rhs| {
-                            cache
-                                .schur_inverse_apply(rhs)
-                                .map_err(|e| format!("schur_inverse_apply: {e:?}"))
-                        },
-                    )
-                    .map_err(|reason| ArrowSchurError::SchurFactorFailed { reason });
-            }
             // #2253/#2228 λ→0 boundary: the plain per-column back-substitution
             // divides by the doubly-null (data-null ∧ penalty-null) β-Schur pivots
             // at the ρ lower face and returns `Inf`/`NaN` — the EDF value is the

@@ -5637,11 +5637,10 @@ include!("construction_quasi_laplace.rs");
 // and private-field access. Keeps this tracked file under the 10k limit.
 include!("construction_row_jet_logdet_channels.rs");
 
-// [#780 line-count gate] Massive-K decoder-smoothness effective-dof Hutchinson
-// estimator (associated constants + the matrix-free per-atom trace) lives in a
-// sibling file as another `impl SaeManifoldTerm` block, inlined here so it keeps
-// the SAME module scope and private-field access. The two gated exact/estimator
-// entry points above dispatch into it at `K >= MIN_ATOMS`.
+// [#780 line-count gate] The decoder-smoothness effective dof and κ-penalty traces
+// taken off a reduced-Schur probe bundle live in a sibling file as another
+// `impl SaeManifoldTerm` block, inlined here so it keeps the SAME module scope and
+// private-field access.
 include!("construction_smoothness_dof.rs");
 
 // [#780 line-count gate] `term_from_geometry_plans_with_mode` (the geometry-plan

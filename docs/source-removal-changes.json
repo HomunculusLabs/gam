@@ -6,5 +6,23 @@
     ],
     "reason": "#2962 follow-up: replaced by the derived running error bound. SLACK = 64 eps was the undeclared roundoff factor of the one-dimensional oracle in static_state.rs's #[cfg(test)] mod tests. The oracle's log_integral now accumulates the canonical running error bound sum_i eps (u_i r_i + s_i) in its own summation loop, and resolved and reference propagate it to the spell PIT and the mark probabilities. Nothing else read SLACK, so it is deleted.",
     "evidence": "At 930d22076c SLACK is a private const inside static_state.rs's bare #[cfg(test)] mod tests: its declaration and one use, in reference()'s roundoff. The guard at gate 1211303 reports it as test_scoped true with production_occurrences 0 (sw-status/evh-pit-gate.1211303.guard.txt). In the landing tree static_state.rs names SLACK 0 times (grep -c). Gate 1211303 at 18b1a6e353 with this commit's static_state.rs (tree 0826c28f5e): workspace --all-targets check RC 0, the #2962 test 1/1, owner tests 6/6, public_api_census 0, assertionless 0, mutant RC 100 on invariance."
+  },
+  {
+    "base": "7d5c48d9220f566227ab096dad10b3a17cf697aa",
+    "items": [
+      "crates/gam-sae/src/manifold/construction_ard.rs:const:ARD_TRACE_HUTCHINSON_MIN_ATOMS",
+      "crates/gam-sae/src/manifold/construction_ard.rs:const:ARD_TRACE_HUTCHINSON_PROBES",
+      "crates/gam-sae/src/manifold/construction_ard.rs:const:ARD_TRACE_HUTCHINSON_SEED",
+      "crates/gam-sae/src/manifold/construction_ard.rs:fn:latent_block_inverse_diagonal_hutchinson",
+      "crates/gam-sae/src/manifold/construction_smoothness_dof.rs:const:SMOOTHNESS_DOF_HUTCHINSON_MIN_ATOMS",
+      "crates/gam-sae/src/manifold/construction_smoothness_dof.rs:const:SMOOTHNESS_DOF_HUTCHINSON_PROBES",
+      "crates/gam-sae/src/manifold/construction_smoothness_dof.rs:const:SMOOTHNESS_DOF_HUTCHINSON_SEED",
+      "crates/gam-sae/src/manifold/construction_smoothness_dof.rs:fn:decoder_smoothness_effective_dof_per_atom_hutchinson",
+      "crates/gam-sae/src/manifold/construction_tests.rs:fn:beta_layout",
+      "crates/gam-sae/src/manifold/construction_tests.rs:fn:hutchinson_smoothness_dof_matches_exact_and_is_deterministic",
+      "crates/gam-sae/src/manifold/tests.rs:fn:latent_block_inverse_diagonal_hutchinson_matches_exact_trace"
+    ],
+    "reason": "#2900 rows 6.18 and 6.19 (SPEC rule 6: no size window). ard_inverse_traces took the exact selected-inverse latent diagonal below K = ARD_TRACE_HUTCHINSON_MIN_ATOMS = 2048 and a 64-probe Hutchinson estimate (latent_block_inverse_diagonal_hutchinson) at K >= 2048. decoder_smoothness_effective_dof_per_atom and decoder_smoothness_effective_dof_with_solver_per_atom took the exact per-column trace below K = SMOOTHNESS_DOF_HUTCHINSON_MIN_ATOMS = 2048 and a 64-probe Hutchinson estimate (decoder_smoothness_effective_dof_per_atom_hutchinson) above it. Both are exact at every K now: ArrowFactorCache::latent_block_inverse_diagonal builds the Schur inverse once (K applies, O(K^3), the order of the factorization the cache holds) and contracts each latent coordinate over its touched border columns, and the smoothness trace keeps its exact K-column route, also O(K^3). The two thresholds, both estimators, their probe counts and seeds, and the two tests that compared the estimators with the exact routes are deleted with them. The fitted-response divergence also read ARD_TRACE_HUTCHINSON_PROBES and ARD_TRACE_HUTCHINSON_SEED for its own Hutchinson route; it keeps the same values as function-local constants (FITTED_RESPONSE_HUTCHINSON_PROBES, FITTED_RESPONSE_HUTCHINSON_SEED).",
+    "evidence": "At the base, git grep -n finds ARD_TRACE_HUTCHINSON_MIN_ATOMS and latent_block_inverse_diagonal_hutchinson only in crates/gam-sae/src/manifold/construction_ard.rs (declarations, the ard_inverse_traces gate and doc links) and in tests.rs (the deleted estimator test). ARD_TRACE_HUTCHINSON_PROBES and ARD_TRACE_HUTCHINSON_SEED occur there and in construction_fitted_response.rs (four uses, rewritten onto the local constants). The four SMOOTHNESS_DOF_HUTCHINSON names occur only in construction_smoothness_dof.rs (declarations and doc), the two dispatch sites and one doc paragraph in construction_quasi_laplace.rs, a comment in construction.rs, and construction_tests.rs (the deleted test module smoothness_dof_hutchinson_tests with its helper beta_layout). Every one of those sites is deleted or rewritten in this commit. No bench, example, script or Python file names any of them."
   }
 ]
