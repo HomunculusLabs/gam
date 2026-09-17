@@ -9,15 +9,6 @@
 
 use std::fmt;
 
-/// The exact syntax of one cgroup-v2 `memory.max` value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CgroupMemoryLimit {
-    /// The literal `max` token: this level imposes no hard memory ceiling.
-    Unlimited,
-    /// A finite hard ceiling in bytes. Zero is valid and authoritative.
-    Finite(u64),
-}
-
 /// Why a live cgroup memory hierarchy could not be observed safely.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CgroupMemoryProbeFailureKind {
@@ -134,17 +125,6 @@ impl CgroupMemoryAvailability {
     }
 }
 
-#[cfg(test)]
-mod tests_fixtures {
-    use super::*;
-
-    impl CgroupMemoryProbeFailure {
-    }
-
-    impl CgroupMemoryAvailability {
-    }
-}
-
 impl fmt::Display for CgroupMemoryAvailability {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -216,6 +196,15 @@ mod linux {
     use std::io;
     use std::os::unix::ffi::OsStringExt;
     use std::path::{Component, Path, PathBuf};
+
+    /// The exact syntax of one cgroup-v2 `memory.max` value.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CgroupMemoryLimit {
+        /// The literal `max` token: this level imposes no hard memory ceiling.
+        Unlimited,
+        /// A finite hard ceiling in bytes. Zero is valid and authoritative.
+        Finite(u64),
+    }
 
     impl CgroupMemoryProbeFailure {
         fn new(
