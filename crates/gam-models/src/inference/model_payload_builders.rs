@@ -48,9 +48,8 @@ use crate::survival::location_scale::{
 };
 use crate::transformation_normal::{TransformationNormalFamily, TransformationNormalFitResult};
 use crate::wiggle::{WigglePenaltyMetadata, canonical_wiggle_function_penalties};
-use faer::Side;
 use gam_data::{DataSchema, EncodedDataset};
-use gam_linalg::faer_ndarray::{FaerCholesky, array2_to_nested_vec};
+use gam_linalg::faer_ndarray::array2_to_nested_vec;
 use gam_problem::BlockRole;
 use gam_problem::types::{
     InverseLink, LikelihoodSpec, ResponseFamily, StandardLink, inverse_link_to_binomial_spec,
@@ -63,7 +62,7 @@ use gam_terms::inference::formula_dsl::{
     parse_formula, parse_surv_interval_response, parse_surv_response,
 };
 use gam_terms::smooth::{BlockwisePenalty, TermCollectionDesign, TermCollectionSpec};
-use ndarray::{Array1, Array2, s};
+use ndarray::{Array1, Array2};
 use std::collections::HashMap;
 
 /// Family tag persisted for Bernoulli marginal-slope saved models.
@@ -275,140 +274,6 @@ impl RealizedRawPenaltyTopology {
     }
 }
 
-fn standard_null_space_metadata(
-    topology: &RealizedRawPenaltyTopology,
-    fit: &UnifiedFitResult,
-) -> Result<(usize, f64), String> {
-    let hessian = fit
-        .penalized_hessian()
-        .ok_or_else(|| "null-space Hessian logdet requires fitted penalized Hessian".to_string())?;
-    let hessian_dim = hessian.nrows();
-    if hessian.ncols() != hessian_dim {
-        return Err(format!(
-            "null-space Hessian logdet requires a square Hessian, got {}x{}",
-            hessian.nrows(),
-            hessian.ncols()
-        ));
-    }
-    let p = topology.coefficient_dim;
-    let null_basis = if topology.penalties.is_empty() {
-        // No penalty block touches any coefficient, so the whole raw space is the
-        // penalty null space and the normalizer runs over every direction. This
-        // used to return q = 0, which switched the normalizer off for exactly the
-        // fits whose null space is largest: `y ~ 1` scored without the intercept
-        // direction that `y ~ x` carries.
-        Array2::<f64>::eye(p)
-    } else {
-        standard_penalty_null_basis(topology, p)?
-    };
-    let q = null_basis.ncols();
-    if q == 0 {
-        return Ok((0, 0.0));
-    }
-
-    // The saved Hessian lives in the active coordinates declared by the fit's
-    // gauge, while `null_basis` is expressed in the design's raw coordinates.
-    // Pull every raw null-space direction N back through the injective lift
-    // `T`: solve `T C = N`, then restrict as `C' H_active C`. Treating a
-    // rectangular active Hessian as if it were raw curvature was the hidden
-    // identity-gauge assumption exposed by exact smoothing boundaries (#2623).
-    let active_null_basis = if let Some(geometry) = fit.geometry.as_ref() {
-        let gauge = &geometry.coefficient_gauge;
-        if gauge.raw_total() != p || gauge.reduced_total() != hessian_dim {
-            return Err(format!(
-                "null-space Hessian logdet gauge mismatch: realized penalty topology has {p} raw columns, gauge \
-                 maps {} raw from {} active coordinates, Hessian is {hessian_dim}x{hessian_dim}",
-                gauge.raw_total(),
-                gauge.reduced_total(),
-            ));
-        }
-        let t = &gauge.t_full;
-        let raw_gram = t.t().dot(t);
-        let gram = (&raw_gram + &raw_gram.t().to_owned()) * 0.5;
-        let chol = gram.cholesky(Side::Lower).map_err(|error| {
-            format!(
-                "null-space Hessian logdet coefficient gauge is not injective: {error}"
-            )
-        })?;
-        let coordinates = chol.solve_mat(&t.t().dot(&null_basis));
-        let residual = t.dot(&coordinates) - &null_basis;
-        let residual_max = residual
-            .iter()
-            .copied()
-            .map(f64::abs)
-            .fold(0.0_f64, f64::max);
-        let basis_max = null_basis
-            .iter()
-            .copied()
-            .map(f64::abs)
-            .fold(0.0_f64, f64::max)
-            .max(1.0);
-        let backward_error = residual_max / basis_max;
-        let roundoff_limit = f64::EPSILON.sqrt() * p.max(hessian_dim).max(1) as f64;
-        if !backward_error.is_finite() || backward_error > roundoff_limit {
-            return Err(format!(
-                "null-space Hessian logdet raw penalty null space is not contained in the \
-                 fitted active gauge: relative residual {backward_error:.6e}, numerical limit \
-                 {roundoff_limit:.6e}"
-            ));
-        }
-        coordinates
-    } else {
-        if hessian_dim != p {
-            return Err(format!(
-                "null-space Hessian logdet design/Hessian mismatch without a coefficient \
-                 gauge: design has {p} columns but Hessian is {hessian_dim}x{hessian_dim}"
-            ));
-        }
-        null_basis
-    };
-    let projected = hessian.dot(&active_null_basis);
-    let mut restricted = active_null_basis.t().dot(&projected);
-    restricted = (&restricted + &restricted.t()) * 0.5;
-    let chol = restricted
-        .cholesky(Side::Lower)
-        .map_err(|err| format!("null-space Hessian is not positive definite: {err}"))?;
-    let logdet = 2.0 * chol.diag().iter().map(|value| value.ln()).sum::<f64>();
-    if logdet.is_finite() {
-        Ok((q, logdet))
-    } else {
-        Err(format!("null-space Hessian logdet is not finite: {logdet}"))
-    }
-}
-
-/// A basis for the raw null space of the summed realized penalty blocks.
-fn standard_penalty_null_basis(
-    topology: &RealizedRawPenaltyTopology,
-    p: usize,
-) -> Result<Array2<f64>, String> {
-    let mut penalty = Array2::<f64>::zeros((p, p));
-    for (idx, block) in topology.penalties.iter().enumerate() {
-        let range = block.col_range.clone();
-        if range.start > range.end
-            || range.end > p
-            || block.local.nrows() != range.len()
-            || block.local.ncols() != range.len()
-        {
-            return Err(format!(
-                "null-space Hessian logdet penalty {idx} shape mismatch: range {}..{}, local {}x{}, p={p}",
-                range.start,
-                range.end,
-                block.local.nrows(),
-                block.local.ncols()
-            ));
-        }
-        penalty
-            .slice_mut(s![range.clone(), range])
-            .scaled_add(1.0, &block.local);
-    }
-    let (null_basis, _) = gam_linalg::faer_ndarray::rrqr_nullspace_basis(
-        &penalty,
-        gam_linalg::faer_ndarray::default_rrqr_rank_alpha(),
-    )
-    .map_err(|err| format!("failed to compute penalty null-space basis: {err}"))?;
-    Ok(null_basis)
-}
-
 fn response_for_standard_payload(formula: &str, dataset: &EncodedDataset) -> Option<Array1<f64>> {
     let response = gam_terms::inference::formula_dsl::parse_formula(formula)
         .ok()?
@@ -505,7 +370,11 @@ pub fn assemble_standard_payload(
         wiggle_penalty_metadata.as_ref(),
     )?;
     let (null_space_dim, null_space_logdet) =
-        standard_null_space_metadata(&raw_penalty_topology, &fit)?;
+        gam_solve::estimate::null_space_normalizer_metadata(
+            raw_penalty_topology.coefficient_dim,
+            &raw_penalty_topology.penalties,
+            &fit,
+        )?;
     fit.artifacts.null_space_dim = Some(null_space_dim);
     fit.artifacts.null_space_logdet = Some(null_space_logdet);
     let family = fit

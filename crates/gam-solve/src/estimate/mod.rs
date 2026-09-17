@@ -65,6 +65,7 @@ mod external_options;
 mod fit;
 mod identified_hessian;
 mod joint_hyper;
+mod null_space_normalizer;
 mod optimizer;
 pub mod outer_eval_capture;
 pub mod rho_domain;
@@ -95,6 +96,7 @@ pub use gam_problem::{ensure_finite_scalar, validate_all_finite};
 pub use joint_hyper::{
     ExternalJointHyperEvaluator, gaussian_identity_outer_response_conditioning,
 };
+pub use null_space_normalizer::null_space_normalizer_metadata;
 pub(crate) use optimizer::optimize_external_designwith_heuristic_log_lambdas_andwarm_start;
 pub use optimizer::optimize_external_designwith_heuristic_log_lambdas;
 pub(crate) use penalty::{

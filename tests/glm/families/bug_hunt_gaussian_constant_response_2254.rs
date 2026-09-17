@@ -9,7 +9,8 @@
 //! coefficients (β = intercept, smooth ≡ 0) but returned a `UnifiedFitResult`
 //! with `inference: None` / `geometry: None`. So the fit *succeeded* yet carried
 //! no penalized Hessian, no EDF, and no covariance — and the model/persistence
-//! builder (`standard_null_space_metadata`) then hard-errored with
+//! builder's null-space metadata step (then `standard_null_space_metadata`, now
+//! `gam_solve::estimate::null_space_normalizer_metadata`) hard-errored with
 //! "null-space Hessian logdet requires fitted penalized Hessian", even for the
 //! simplest model `y ~ 1`. A near-constant response (variance ≈ 1e-12) fit
 //! cleanly, so this was a numerical cliff at exactly-zero variance.

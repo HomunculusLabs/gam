@@ -4758,6 +4758,15 @@
     "evidence": "At the base, git grep -n for per_call_secs and to_dense_scales_linearly_in_n_1720 finds only their declarations in row_coeff_operator.rs and the two per_call_secs calls inside the removed test. No other test, bench, example, doc or production source names either function."
   },
   {
+    "base": "09f326c78bd1a0791c686d649144305f0cb539fa",
+    "items": [
+      "crates/gam-models/src/inference/model_payload_builders.rs:fn:standard_null_space_metadata",
+      "crates/gam-models/src/inference/model_payload_builders.rs:fn:standard_penalty_null_basis"
+    ],
+    "reason": "#2627 one owner for the null-space normalizer metadata: the Tierney-Kadane metadata (FitArtifacts::null_space_dim, null_space_logdet) that comparable_reml_score reads was produced only inside the standard payload builder, so every other fit route published its raw criterion as reml_score. The two functions move unchanged into gam-solve as estimate::null_space_normalizer_metadata(coefficient_dim, penalties, fit) and its private penalty_null_basis, which every route can call where it forms its artifacts. The standard route now calls the owner with its realized raw penalty topology, and its result is unchanged.",
+    "evidence": "At the base, git grep -n finds standard_null_space_metadata only at its declaration and its one call in assemble_standard_payload, and standard_penalty_null_basis only at its declaration and its one call inside standard_null_space_metadata, all in crates/gam-models/src/inference/model_payload_builders.rs. The one other occurrence is a doc comment in tests/glm/families/bug_hunt_gaussian_constant_response_2254.rs, restated in this commit to name the owner."
+  },
+  {
     "base": "53d420d79d102e86898b8ce9f9f32a04aef101cc",
     "items": [
       "crates/gam-solve/src/cone_reduction.rs:fn:constrained_cone_mode",
