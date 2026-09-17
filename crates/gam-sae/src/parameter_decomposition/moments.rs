@@ -68,7 +68,8 @@
 //! the error to `a²/(6n)`, while `sup|E_n| = |a|`. The expectation under a mask law, an observed
 //! worst case and a certified supremum are therefore three different numbers, and they live in
 //! different types: [`UniformMaskLawMoments`], a caller's own witness, and
-//! [`MaskMomentSystem::absolute_supremum`] with [`ClaimedBoundCheck`].
+//! [`MaskMomentSystem::absolute_supremum_status`] with
+//! [`MaskMomentSystem::check_claimed_absolute_bound`].
 //!
 //! # What the reported numbers are
 //!
@@ -83,7 +84,8 @@
 //!   endpoint mask as its witness.
 //! - The logit vertex maximum is `Exact` and exhaustive over its vertex tuples. Its numerical error
 //!   combines gam-math's KL evaluation error with `2·max_k |δz′_k|` for the rounding of the shifted
-//!   logits. A coupled declaration gives only a `UniformBound`.
+//!   logits. A coupled declaration gives `Unresolved`: a feasible endpoint mask attains the lower
+//!   side, and the maximum over the product of the per-factor zonotopes bounds the upper side.
 
 use std::cmp::Ordering;
 
@@ -91,7 +93,7 @@ use gam_linalg::roundoff::{UNIT_ROUNDOFF, accumulation_band, accumulation_growth
 use gam_math::categorical::{CategoricalError, categorical_kl_from_logits_with_error};
 use ndarray::Array1;
 
-use super::supports::{EvidenceStatus, EvidenceStatusError, ExactBasis};
+use super::supports::{EvidenceStatus, EvidenceStatusError, ExactBasis, Extremum};
 
 /// One moment coordinate space: the coefficient space of one edited tensor use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -300,7 +302,7 @@ impl PlanarBoundary {
 ///
 /// It is an expectation under a declared mask law, not a bound. Splitting a cancelling pair `±a`
 /// into `n` pieces drives the mean square to `a²/(6n)`, while the supremum of `|⟨u, q⟩|` stays `|a|`
-/// (#2951 P10). Nothing converts it into a supremum or a [`ClaimedBoundCheck`].
+/// (#2951 P10). Nothing converts it into an [`EvidenceStatus`] about the supremum.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UniformMaskLawMoments {
     pub mean: f64,
@@ -309,22 +311,6 @@ pub struct UniformMaskLawMoments {
     pub variance_band: f64,
     pub mean_square: f64,
     pub mean_square_band: f64,
-}
-
-/// A claimed bound on `sup |⟨u, q⟩|` over the admissible masks, checked against the support
-/// function (#2951 A6).
-#[derive(Clone, Debug, PartialEq)]
-pub enum ClaimedBoundCheck {
-    /// The witness mask attains more than the claim, beyond the roundoff band: a counterexample.
-    Refuted {
-        attained: f64,
-        band: f64,
-        witness: Vec<WitnessEndpoint>,
-    },
-    /// The supremum plus its band is at most the claim.
-    Certified { supremum: f64, band: f64 },
-    /// The claim lies inside the supremum's band.
-    Unresolved { supremum: f64, band: f64 },
 }
 
 /// The declared mask domain with its kept set: the region an extremum over masks is stated over.
@@ -668,40 +654,48 @@ impl MaskMomentSystem {
     }
 
     /// Checks a claimed bound on `sup |⟨u, q⟩|` against
-    /// [`MaskMomentSystem::absolute_supremum_status`] (#2951 A6).
+    /// [`MaskMomentSystem::absolute_supremum_status`] (#2951 A6), and returns what the check proves.
     ///
-    /// The claim is refuted when the status's lower bound exceeds it, since the witness mask
-    /// attains at least that lower bound. It is certified when the status's upper bound is at most
-    /// the claim. An expectation under a mask law presented as a bound is refuted this way.
+    /// - A `Counterexample` when the status's lower bound exceeds the claim: the witness mask
+    ///   attains at least that lower bound.
+    /// - The `Exact` status when its upper bound is at most the claim.
+    /// - Otherwise `Unresolved`, with the status's bracket and the witness attaining its lower side.
+    ///
+    /// An expectation under a mask law presented as a bound is refuted this way.
     pub fn check_claimed_absolute_bound(
         &self,
         domain: &MaskDomain,
         kept: &[bool],
         direction: &MomentVector,
         claimed: f64,
-    ) -> Result<ClaimedBoundCheck, MomentGeometryError> {
+    ) -> Result<MaskEvidence, MomentGeometryError> {
         if !claimed.is_finite() {
             return Err(MomentGeometryError::NonFiniteClaim { claimed });
         }
         let supremum = self.absolute_supremum(domain, kept, direction)?;
         let status = supremum_status(domain, kept, &supremum)?;
-        Ok(if status.refutes_at_most(claimed) {
-            ClaimedBoundCheck::Refuted {
-                attained: supremum.value,
-                band: supremum.band,
-                witness: supremum.witness,
-            }
-        } else if status.certifies_at_most(claimed) {
-            ClaimedBoundCheck::Certified {
-                supremum: supremum.value,
-                band: supremum.band,
-            }
-        } else {
-            ClaimedBoundCheck::Unresolved {
-                supremum: supremum.value,
-                band: supremum.band,
-            }
-        })
+        if status.refutes_at_most(claimed) {
+            return EvidenceStatus::counterexample(supremum.value, supremum.band, claimed, supremum.witness)
+                .map_err(MomentGeometryError::Evidence);
+        }
+        if status.certifies_at_most(claimed) {
+            return Ok(status);
+        }
+        let (Some(lower), Some(upper)) = (status.lower_bound(), status.upper_bound()) else {
+            // An exact status proves both sides, so this arm returns the status unchanged.
+            return Ok(status);
+        };
+        EvidenceStatus::unresolved(
+            lower,
+            upper,
+            Extremum::Supremum,
+            Some(supremum.witness),
+            AdmissibleMasks {
+                domain: domain.clone(),
+                kept: kept.to_vec(),
+            },
+        )
+        .map_err(MomentGeometryError::Evidence)
     }
 
     /// Mean, variance and mean square of `⟨u, q⟩` under independent uniform masks on each free
@@ -793,8 +787,9 @@ impl MaskMomentSystem {
     /// vertices (#2951 P9).
     ///
     /// Returns `Exact { basis: Exhaustive { cardinality: tuples } }` with the attaining mask. When a
-    /// control couples two factors that share no term, the tuple maximum is returned as a
-    /// `UniformBound` over the product of the per-factor zonotopes, which is a superset.
+    /// control couples two factors that share no term, the product of the per-factor zonotopes is a
+    /// superset. The result is then `Unresolved`: the tuple maximum bounds the upper side, and the
+    /// best feasible endpoint mask formed from the tuples attains the lower side.
     pub fn logit_vertex_adversary(
         &self,
         domain: &MaskDomain,
@@ -941,37 +936,71 @@ impl MaskMomentSystem {
             domain: domain.clone(),
             kept: kept.to_vec(),
         };
+        // The endpoint mask a vertex tuple names. A control shared by two factors takes the endpoint
+        // of the last factor that moves it, so the mask is always admissible.
+        let combined_witness = |tuple: &[usize]| {
+            let mut witness: Vec<WitnessEndpoint> = kept
+                .iter()
+                .map(|&is_kept| {
+                    if is_kept {
+                        WitnessEndpoint::Kept
+                    } else {
+                        WitnessEndpoint::Upper
+                    }
+                })
+                .collect();
+            for (walk, &vertex) in walks.iter().zip(tuple) {
+                let factor_witness = walk.switched_witness(vertex);
+                for edge in &walk.edges {
+                    for &control in &edge.controls {
+                        witness[control] = factor_witness[control];
+                    }
+                }
+            }
+            witness
+        };
         if coupled {
-            return EvidenceStatus::uniform_bound(
+            // Each tuple's mask is feasible. Its divergence, evaluated on its own moment with that
+            // moment's roundoff band, is attained. So the best rounded-down value bounds the
+            // supremum from below.
+            let feasible = |tuple: &[usize]| {
+                let witness = combined_witness(tuple);
+                let mask = domain.mask_at(&witness).map_err(LogitAdversaryRefusal::Geometry)?;
+                let moment = self.moment(domain, &mask).map_err(LogitAdversaryRefusal::Geometry)?;
+                let band = self.moment_band(&mask);
+                let (value, error) = model.divergence(|term, index| {
+                    let coordinate = model.terms[term].coordinates[index];
+                    moment
+                        .component(coordinate)
+                        .map(|component| (component, band))
+                        .ok_or(LogitAdversaryRefusal::Geometry(
+                            MomentGeometryError::CoordinateOutOfRange { coordinate },
+                        ))
+                })?;
+                Ok::<_, LogitAdversaryRefusal>(((value - error).next_down(), witness))
+            };
+            let (mut lower, mut witness) = feasible(&tuple)?;
+            while advance_tuple(&mut tuple, &walks) {
+                let (candidate, candidate_witness) = feasible(&tuple)?;
+                if candidate > lower {
+                    lower = candidate;
+                    witness = candidate_witness;
+                }
+            }
+            return EvidenceStatus::unresolved(
+                lower,
                 (divergence + numerical_error).next_up(),
-                numerical_error,
+                Extremum::Supremum,
+                Some(witness),
                 admissible,
             )
             .map_err(LogitAdversaryRefusal::Evidence);
-        }
-        let mut witness: Vec<WitnessEndpoint> = kept
-            .iter()
-            .map(|&is_kept| {
-                if is_kept {
-                    WitnessEndpoint::Kept
-                } else {
-                    WitnessEndpoint::Upper
-                }
-            })
-            .collect();
-        for (walk, &vertex) in walks.iter().zip(&best) {
-            let factor_witness = walk.switched_witness(vertex);
-            for edge in &walk.edges {
-                for &control in &edge.controls {
-                    witness[control] = factor_witness[control];
-                }
-            }
         }
         EvidenceStatus::exact(
             divergence,
             numerical_error,
             ExactBasis::Exhaustive { cardinality },
-            Some(witness),
+            Some(combined_witness(&best)),
             admissible,
         )
         .map_err(LogitAdversaryRefusal::Evidence)
@@ -1103,6 +1132,28 @@ impl MaskMomentSystem {
             }
         }
         Ok(())
+    }
+
+    /// A bound on each coordinate's roundoff in [`MaskMomentSystem::moment`]. A coordinate sums at
+    /// most one product per control, each from a rounded deletion amount, so the bound is
+    /// `γ_{C+2}·max_i Σ_c |1 − m_c|·|v_{c,i}|`.
+    fn moment_band(&self, mask: &[f64]) -> f64 {
+        let mut absolute: Vec<Array1<f64>> = self
+            .blocks
+            .iter()
+            .map(|block| Array1::zeros(block.dimension))
+            .collect();
+        for (&value, parts) in mask.iter().zip(&self.generators) {
+            let deletion = (1.0 - value).abs();
+            for part in parts {
+                absolute[part.block].scaled_add(deletion, &part.vector.mapv(f64::abs));
+            }
+        }
+        let largest = absolute
+            .iter()
+            .flat_map(|block| block.iter())
+            .fold(0.0_f64, |acc, &entry| acc.max(entry));
+        accumulation_growth(self.generators.len() + 2) * largest
     }
 
     fn check_coordinate(&self, coordinate: MomentCoordinate) -> Result<(), MomentGeometryError> {
@@ -1786,8 +1837,8 @@ mod tests {
                 .check_claimed_absolute_bound(&domain, &kept, &direction, law.mean_square.sqrt())
                 .expect("finite claim")
             {
-                ClaimedBoundCheck::Refuted { attained, witness, .. } => {
-                    assert_eq!(attained, 1.0);
+                EvidenceStatus::Counterexample { value, witness, .. } => {
+                    assert_eq!(value, 1.0);
                     let moment = system
                         .moment(&domain, &domain.mask_at(&witness).expect("same controls"))
                         .expect("admissible");
@@ -1810,16 +1861,17 @@ mod tests {
                 system
                     .check_claimed_absolute_bound(&domain, &kept, &direction, upper)
                     .expect("finite claim"),
-                ClaimedBoundCheck::Certified {
-                    supremum: 1.0,
-                    band: supremum.band
-                }
+                status
             );
             assert!(matches!(
                 system
                     .check_claimed_absolute_bound(&domain, &kept, &direction, 1.0)
                     .expect("finite claim"),
-                ClaimedBoundCheck::Unresolved { .. }
+                EvidenceStatus::Unresolved {
+                    extremum: Extremum::Supremum,
+                    witness: Some(..),
+                    ..
+                }
             ));
         }
         // A single non-cancelling component keeps its bias: E q² = 1/3 whole and 1/4 + 1/(12n) split.
@@ -2139,7 +2191,7 @@ mod tests {
     }
 
     #[test]
-    fn coupled_factors_give_a_uniform_bound_not_an_exact_maximum_2951() {
+    fn coupled_factors_give_an_unresolved_bracket_not_an_exact_maximum_2951() {
         // One control tied across two additive factors, with columns a and −a. Its only moments are (0, 0) and
         // (1, 1), both with shift 0, so the true maximum is 0. The per-factor product also contains (1, 0) with
         // shift a, where the divergence is positive. Labelling that superset maximum Exact would be wrong.
@@ -2159,12 +2211,38 @@ mod tests {
         let domain = unit_domain(1);
         let status = system
             .logit_vertex_adversary(&domain, &[false], &model)
-            .expect("coupled factors give a bound");
-        assert!(matches!(status, EvidenceStatus::UniformBound { .. }), "got {status:?}");
+            .expect("coupled factors give a bracket");
+        let EvidenceStatus::Unresolved {
+            lower,
+            upper,
+            extremum,
+            witness: Some(witness),
+            ..
+        } = status.clone()
+        else {
+            panic!("a coupled declaration must give an unresolved bracket with a feasible witness");
+        };
+        assert_eq!(extremum, Extremum::Supremum);
         let exhaustive = exhaustive_divergence(&system, &domain, &[false], &model);
         assert_eq!(exhaustive, 0.0);
-        let upper = status.upper_bound().expect("a uniform bound bounds its extremum");
-        assert!(upper > exhaustive && !status.certifies_at_most(0.0));
-        assert_eq!(status.witness(), None);
+        assert!(lower <= exhaustive && exhaustive < upper && !status.certifies_at_most(0.0));
+        // The witness is an admissible mask whose divergence is at least the lower side.
+        let witness_moment = system
+            .moment(&domain, &domain.mask_at(&witness).expect("same controls"))
+            .expect("admissible");
+        assert!(model.divergence_at(&witness_moment).expect("coordinates present").0 >= lower);
+        // The feasible witness makes the bracket strictly stronger than the bare product bound over the same
+        // masks.
+        let bare = MaskEvidence::uniform_bound(
+            upper,
+            0.0,
+            AdmissibleMasks {
+                domain: domain.clone(),
+                kept: vec![false],
+            },
+        )
+        .expect("finite bound");
+        assert_eq!(status.compare_strength(&bare), Some(Ordering::Greater));
+        assert_eq!(bare.compare_strength(&status), Some(Ordering::Less));
     }
 }
