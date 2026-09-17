@@ -47,6 +47,12 @@
 //! triangular solve and no pseudoinverse. The factorization is a one-time
 //! construction whose read already holds `C ≥ d` rows.
 //!
+//! The solve is faer's blocked `solve_lower_triangular_in_place` at
+//! `decomposition_parallelism()`, not gam-linalg's `triangular` owner, for speed
+//! at LLM width. That owner substitutes one right-hand side at a time in a scalar
+//! loop, about `p·d²` flops without blocking or parallelism: ≈2.7·10¹¹ for
+//! `p = 16384`, `d = 4096`.
+//!
 //! # Coverage refusal
 //!
 //! A read with fewer components than input directions, `C < d`, has a null
@@ -395,19 +401,22 @@ impl NativeMlp {
         Ok(activations)
     }
 
-    /// `x + W₂ a + b₂` for each row `x` of `inputs` and its row `a` of
-    /// `activations`.
+    /// The block's write `W₂ a + b₂` for each row `a` of `activations`, without
+    /// the residual: what a transformer layer adds to its residual stream in the
+    /// source's own order.
+    pub fn written(&self, activations: ArrayView2<'_, f64>) -> Result<Array2<f64>, ShapeMismatch> {
+        check("activation width", self.hidden_width(), activations.ncols())?;
+        Ok(activations.dot(&self.write_out.t()) + &self.bias_out)
+    }
+
+    /// `x + (W₂ a + b₂)` for each row `x` of `inputs` and its row `a` of
+    /// `activations`: [`Self::written`] with the residual added last.
     pub fn write(
         &self,
         inputs: ArrayView2<'_, f64>,
         activations: ArrayView2<'_, f64>,
     ) -> Result<Array2<f64>, ShapeMismatch> {
-        self.check_write(inputs, activations)?;
-        Ok(residual_write(
-            inputs,
-            activations.dot(&self.write_out.t()),
-            &self.bias_out,
-        ))
+        add_residual(inputs, self.written(activations)?)
     }
 
     /// The block on its original tensors: [`Self::summed_input`], then
@@ -417,28 +426,21 @@ impl NativeMlp {
         let activations = self.activate(summed_input.view())?;
         Ok(self.write(inputs, activations.view())?)
     }
-
-    fn check_write(
-        &self,
-        inputs: ArrayView2<'_, f64>,
-        activations: ArrayView2<'_, f64>,
-    ) -> Result<(), ShapeMismatch> {
-        check("input width", self.width(), inputs.ncols())?;
-        check("activation width", self.hidden_width(), activations.ncols())?;
-        check("activation rows", inputs.nrows(), activations.nrows())
-    }
 }
 
-/// `written + x + b₂`, one sequence of additions shared by the native and the
-/// component write so the all-on path stays bit-identical.
-fn residual_write(
+/// `x + written` for each row `x` of `inputs`, in torch's association
+/// (`residual + hidden_states`, with the bias inside the linear map): the
+/// residual is added last. Floating-point addition commutes bitwise but does not
+/// associate, so this order is part of the native reference. The native and the
+/// component write share it, so the all-on path stays bit-identical.
+fn add_residual(
     inputs: ArrayView2<'_, f64>,
     mut written: Array2<f64>,
-    bias_out: &Array1<f64>,
-) -> Array2<f64> {
+) -> Result<Array2<f64>, ShapeMismatch> {
+    check("input width", written.ncols(), inputs.ncols())?;
+    check("input rows", written.nrows(), inputs.nrows())?;
     written += &inputs;
-    written += bias_out;
-    written
+    Ok(written)
 }
 
 /// The component read `R` of one weight and the candidate write `N` whose
@@ -536,25 +538,29 @@ impl ComponentMlp {
         }
     }
 
-    /// `x + Ū M̄ R̄ a + b₂`, or the native `x + W₂ a + b₂` with the write-out
-    /// factor all on.
+    /// The write `Ū M̄ R̄ a + b₂`, or the native `W₂ a + b₂` with the write-out
+    /// factor all on, without the residual.
+    pub fn written(
+        &self,
+        activations: ArrayView2<'_, f64>,
+        mask: ComponentMask<'_>,
+    ) -> Result<Array2<f64>, ShapeMismatch> {
+        match mask {
+            ComponentMask::AllOn => self.native.written(activations),
+            ComponentMask::Components(mask) => {
+                Ok(self.write_out.apply_masked(activations, mask)? + &self.native.bias_out)
+            }
+        }
+    }
+
+    /// `x + (Ū M̄ R̄ a + b₂)`: [`Self::written`] with the residual added last.
     pub fn write(
         &self,
         inputs: ArrayView2<'_, f64>,
         activations: ArrayView2<'_, f64>,
         mask: ComponentMask<'_>,
     ) -> Result<Array2<f64>, ShapeMismatch> {
-        match mask {
-            ComponentMask::AllOn => self.native.write(inputs, activations),
-            ComponentMask::Components(mask) => {
-                self.native.check_write(inputs, activations)?;
-                Ok(residual_write(
-                    inputs,
-                    self.write_out.apply_masked(activations, mask)?,
-                    &self.native.bias_out,
-                ))
-            }
-        }
+        add_residual(inputs, self.written(activations, mask)?)
     }
 
     /// `h + Ū M̄ R̄ σ(U M R h + b₁) + b₂` for each row `h` of `inputs`: the native
@@ -929,6 +935,43 @@ mod tests {
             !bitwise_equal(&factored, &native),
             "the bit-identity check must distinguish the factored all-ones path from the native one"
         );
+    }
+
+    #[test]
+    fn written_is_the_write_before_its_residual() {
+        let (block, inputs) = random_block(GaussianActivation::ExactGelu, 2960);
+        let mut rng = StdRng::seed_from_u64(9);
+        let summed_input = block
+            .native
+            .summed_input(inputs.view())
+            .expect("native summed input");
+        let activations = block
+            .native
+            .activate(summed_input.view())
+            .expect("native activations");
+        let write_out_mask =
+            Array1::from_shape_simple_fn(WRITE_OUT_COMPONENTS, || rng.random_range(-1.0..1.0));
+        for mask in [
+            ComponentMask::AllOn,
+            ComponentMask::Components(write_out_mask.view()),
+        ] {
+            let written = block
+                .written(activations.view(), mask)
+                .expect("write without the residual");
+            let write = block
+                .write(inputs.view(), activations.view(), mask)
+                .expect("write with the residual");
+            assert!(
+                bitwise_equal(&(&written + &inputs), &write),
+                "the write must be the written block with the residual added last, under {mask:?}"
+            );
+
+            // Positive control: the residual is not zero, so the written block alone is not the write.
+            assert!(
+                !bitwise_equal(&written, &write),
+                "the comparison must see the residual, under {mask:?}"
+            );
+        }
     }
 
     /// A hand-built exact factor in small integers, so every operation is exact in
