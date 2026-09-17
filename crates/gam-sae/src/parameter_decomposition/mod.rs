@@ -69,6 +69,10 @@
 //! Lipschitz covering). Derivatives must be analytic; finite differences belong in
 //! tests only.
 
+// Blind re-derivation oracles for P7, P15 and P17 against the landed APIs.
+#[cfg(test)]
+mod oracle_tests;
+
 // Executed-stage receipts against the native lift.
 pub mod receipts;
 
