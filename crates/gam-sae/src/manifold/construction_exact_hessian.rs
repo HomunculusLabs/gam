@@ -655,8 +655,9 @@ include!("exact_stationarity_krylov.rs");
 
 /// #2330 Patch D — shared per-row context for the residual-curvature
 /// third-derivative legs: the whitened `√w·M·r` error metric, its `√w` twin,
-/// the frozen assignments/jets, and the ordered-Beta–Bernoulli gate mode. One
-/// borrow per row replaces the per-call argument tower of the two leg helpers.
+/// the frozen assignments/jets, the gate family, and the row's error-metric
+/// contractions of every atom's decoded curve. One borrow per row replaces the
+/// per-call argument tower of the two leg helpers.
 #[derive(Clone, Copy)]
 struct PatchDResidualCtx<'a> {
     row: usize,
@@ -664,9 +665,140 @@ struct PatchDResidualCtx<'a> {
     sqrt_w: f64,
     assignments: &'a Array1<f64>,
     second_jets: &'a [Array4<f64>],
-    third_jets: &'a [AtomThirdJet],
-    is_obb: bool,
-    inv_tau: f64,
+    gate: PatchDGate,
+    reconstruction: &'a PatchDRowContractions,
+}
+
+/// #2933 F01 — how the logits move the gates `a_k` of the reconstruction
+/// `f = Σ_k a_k(ℓ)·γ_k(t_k)`, for the same assignment families the row program
+/// differentiates.
+#[derive(Clone, Copy)]
+enum PatchDGate {
+    /// `a = softmax(ℓ/τ)`: every free logit moves every gate.
+    Softmax { inv_tau: f64 },
+    /// `a_k = σ((ℓ_k − θ)/τ)` (ordered Beta–Bernoulli, threshold gate): a logit
+    /// moves only its own atom's gate.
+    IndependentLogistic { inv_tau: f64 },
+    /// TopK mints no free logit.
+    Constant,
+}
+
+impl PatchDGate {
+    fn for_mode(mode: &AssignmentMode) -> Self {
+        match *mode {
+            AssignmentMode::Softmax { temperature, .. } => Self::Softmax {
+                inv_tau: 1.0 / temperature,
+            },
+            AssignmentMode::OrderedBetaBernoulli { temperature, .. }
+            | AssignmentMode::ThresholdGate { temperature, .. } => Self::IndependentLogistic {
+                inv_tau: 1.0 / temperature,
+            },
+            AssignmentMode::TopK { .. } => Self::Constant,
+        }
+    }
+
+    /// `∂a_k/∂ℓ_i`.
+    fn first(self, a: &Array1<f64>, k: usize, i: usize) -> f64 {
+        let delta = |x: usize, y: usize| if x == y { 1.0 } else { 0.0 };
+        match self {
+            Self::Softmax { inv_tau } => a[k] * (delta(k, i) - a[i]) * inv_tau,
+            Self::IndependentLogistic { inv_tau } => {
+                delta(k, i) * a[k] * (1.0 - a[k]) * inv_tau
+            }
+            Self::Constant => 0.0,
+        }
+    }
+
+    /// `∂²a_k/∂ℓ_i∂ℓ_j`.
+    fn second(self, a: &Array1<f64>, k: usize, i: usize, j: usize) -> f64 {
+        let delta = |x: usize, y: usize| if x == y { 1.0 } else { 0.0 };
+        match self {
+            Self::Softmax { inv_tau } => {
+                a[k] * ((delta(k, i) - a[i]) * (delta(k, j) - a[j]) - a[i] * (delta(i, j) - a[j]))
+                    * inv_tau
+                    * inv_tau
+            }
+            Self::IndependentLogistic { inv_tau } => {
+                delta(k, i) * delta(k, j) * a[k] * (1.0 - a[k]) * (1.0 - 2.0 * a[k])
+                    * inv_tau
+                    * inv_tau
+            }
+            Self::Constant => 0.0,
+        }
+    }
+
+    /// `Σ_k ∂³a_k/∂ℓ_i∂ℓ_j∂ℓ_l · ⟨em, γ_k⟩`.
+    ///
+    /// For the softmax this contracts the symmetric third derivative
+    /// `D³a_k[u,v,w] = a_k/τ³·[ũ_kṽ_kw̃_k − ũ_k C(v,w) − ṽ_k C(u,w) − w̃_k C(u,v) − κ(u,v,w)]`
+    /// (`ũ = u − ⟨a,u⟩`, `C(u,v) = Σ a ũṽ`, `κ(u,v,w) = Σ a ũṽw̃`) at the unit
+    /// logit directions. Because `Σ_k D³a_k = 0`, the curve contraction may be
+    /// centered, `h_k = ⟨em, γ_k⟩ − Σ_j a_j⟨em, γ_j⟩`, and `Σ_k a_k h_k = 0` removes
+    /// `κ`, leaving
+    /// `τ⁻³·{2a_i a_j a_l(h_i+h_j+h_l) − [i=j]a_i a_l(h_i+h_l) − [i=l]a_i a_j(h_i+h_j)
+    ///  − [j=l]a_i a_j(h_i+h_j) + [i=j=l]a_i h_i}`,
+    /// which is also the logit derivative of the row program's centered second
+    /// moment `τ⁻²·a_j[δ_jl C_j − a_l(C_j + C_l)]`.
+    fn third_contraction(
+        self,
+        a: &Array1<f64>,
+        reconstruction: &PatchDRowContractions,
+        i: usize,
+        j: usize,
+        l: usize,
+    ) -> f64 {
+        match self {
+            Self::Softmax { inv_tau } => {
+                let h = &reconstruction.centered;
+                let mut acc = 2.0 * a[i] * a[j] * a[l] * (h[i] + h[j] + h[l]);
+                if i == j {
+                    acc -= a[i] * a[l] * (h[i] + h[l]);
+                }
+                if i == l {
+                    acc -= a[i] * a[j] * (h[i] + h[j]);
+                }
+                if j == l {
+                    acc -= a[i] * a[j] * (h[i] + h[j]);
+                }
+                if i == j && j == l {
+                    acc += a[i] * h[i];
+                }
+                acc * inv_tau * inv_tau * inv_tau
+            }
+            Self::IndependentLogistic { inv_tau } => {
+                if i != j || j != l {
+                    return 0.0;
+                }
+                let s = a[i];
+                s * (1.0 - s) * (1.0 - 6.0 * s + 6.0 * s * s)
+                    * inv_tau
+                    * inv_tau
+                    * inv_tau
+                    * reconstruction.value[i]
+            }
+            Self::Constant => 0.0,
+        }
+    }
+}
+
+/// #2933 F01 — one row's contractions of the error metric `em` against every
+/// atom's decoded curve `γ_k = Σ_m B_k[m,·]·φ_m(t_k)` and its coordinate jets,
+/// built once per row so each trilinear residual leg is a gate derivative times
+/// one stored number instead of a fresh `basis × p` decode.
+struct PatchDRowContractions {
+    /// `⟨em, γ_k⟩`.
+    value: Vec<f64>,
+    /// `⟨em, γ_k⟩ − Σ_j a_j·⟨em, γ_j⟩`, the centered component the softmax
+    /// moments differentiate (an inactive atom is the zero curve but its gate
+    /// still normalizes, exactly as in `execute_softmax_row_program`).
+    centered: Vec<f64>,
+    /// `⟨em, ∂_x γ_k⟩`, indexed `x`.
+    first: Vec<Vec<f64>>,
+    /// `⟨em, ∂²_xy γ_k⟩`, indexed `x·d + y`.
+    second: Vec<Vec<f64>>,
+    /// `⟨em, ∂³_xyz γ_k⟩`, indexed `(x·d + y)·d + z`; identically zero for an
+    /// [`AtomThirdJet::CertifiedZero`] basis.
+    third: Vec<Vec<f64>>,
 }
 
 /// #2933 F02 — one atom's third jet as the exact-A residual leg consumes it.
@@ -2263,23 +2395,96 @@ impl SaeManifoldTerm {
         sqrt_w * gate_factor * phi * eo
     }
 
+    /// #2933 F01 — the row's [`PatchDRowContractions`]: one decoder contraction
+    /// `Σ_out B_k[m,out]·em[out]` per atom, then its dot with each basis jet order.
+    /// These read the same basis values, Jacobians and second jets the row program
+    /// decodes, so the residual third leg differentiates the `∂²f` that `ΔC` holds.
+    fn patchd_row_contractions(
+        &self,
+        row: usize,
+        error_metric: &[f64],
+        assignments: &Array1<f64>,
+        second_jets: &[Array4<f64>],
+        third_jets: &[AtomThirdJet],
+    ) -> PatchDRowContractions {
+        let k_atoms = self.k_atoms();
+        let p = error_metric.len();
+        let active_atoms = self
+            .last_row_layout
+            .as_ref()
+            .map(|layout| layout.active_atoms[row].as_slice());
+        let mut value = vec![0.0_f64; k_atoms];
+        let mut first = Vec::with_capacity(k_atoms);
+        let mut second = Vec::with_capacity(k_atoms);
+        let mut third = Vec::with_capacity(k_atoms);
+        for (k, atom) in self.atoms.iter().enumerate() {
+            let d = atom.latent_dim();
+            let mut first_k = vec![0.0_f64; d];
+            let mut second_k = vec![0.0_f64; d * d];
+            let mut third_k = vec![0.0_f64; d * d * d];
+            if active_atoms.is_none_or(|active| active.binary_search(&k).is_ok()) {
+                let decoder = atom.decoder_coefficients();
+                for m in 0..atom.basis_size() {
+                    let mut weight = 0.0_f64;
+                    for out in 0..p {
+                        weight += decoder[[m, out]] * error_metric[out];
+                    }
+                    value[k] += weight * atom.basis_values[[row, m]];
+                    for x in 0..d {
+                        first_k[x] += weight * atom.basis_jacobian[[row, m, x]];
+                        for y in 0..d {
+                            second_k[x * d + y] += weight * second_jets[k][[row, m, x, y]];
+                        }
+                    }
+                    // A certified-zero basis has every third partial identically zero.
+                    if let AtomThirdJet::Analytic(jet) = &third_jets[k] {
+                        for x in 0..d {
+                            for y in 0..d {
+                                for z in 0..d {
+                                    third_k[(x * d + y) * d + z] += weight * jet[[row, m, x, y, z]];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            first.push(first_k);
+            second.push(second_k);
+            third.push(third_k);
+        }
+        let mean: f64 = (0..k_atoms).map(|k| assignments[k] * value[k]).sum();
+        let centered = value.iter().map(|&v| v - mean).collect();
+        PatchDRowContractions {
+            value,
+            centered,
+            first,
+            second,
+            third,
+        }
+    }
+
     /// #2330 Patch D — the exact-A residual-curvature THIRD-derivative leg
     /// `⟨error_metric, ∂³f_{a,b,w}⟩`, the second half of `∂ΔC_tt[a,b]/∂θ_w`
     /// (the first half `⟨∂error_metric/∂θ_w, ∂²f⟩ = ⟨jets.first(w), jets.second(a,b)⟩`
     /// is added inline as term 1a). The data fit is `½rᵀMr` so its residual
     /// curvature is `⟨M r, ∂²f⟩`; differentiating the SECOND-jet factor gives this
-    /// leg. For the per-atom gated decoder `f_out = Σ_k g_k(ℓ_k)·Σ_m B_k[m,out]·φ_m(x_k)`,
-    /// `∂³f` is nonzero only when `a,b,w` all touch ONE atom `k` (each summand
-    /// depends only on that atom's `(x_k, ℓ_k)` — exact for ordered-Beta–Bernoulli
-    /// where `g_k` depends on `ℓ_k` alone). It then factors as `g_k^{(l)} · Σ_m
-    /// B_k[m,out]·∂^{c}φ_m` where `l` = number of LOGIT derivatives among `{a,b,w}`
-    /// and `c = 3−l` = number of COORD derivatives (over their axes). The `l=0`
-    /// coord³ leg uses the plain gate value and holds for ANY mode; the `l≥1` legs
-    /// use the ordered-Beta–Bernoulli logistic-gate derivatives and are skipped
-    /// (returns 0) for other modes — softmax's cross-atom gate third-order is a
-    /// separate follow-on. `error_metric` already carries one `√w·M`; this leg
-    /// carries the other `√w`, matching the `⟨error_metric, jets.second⟩`
-    /// convention exactly.
+    /// leg. `error_metric` already carries one `√w·M`; this leg carries the other
+    /// `√w`, matching the `⟨error_metric, jets.second⟩` convention exactly.
+    ///
+    /// #2933 F01 — for `f = Σ_k a_k(ℓ)·γ_k(t_k)` each summand reads one atom's
+    /// coordinates, so a triple whose coordinates belong to two atoms is an exact
+    /// zero. Every other triple selects ONE term of the product rule for `a_k·γ_k`:
+    ///
+    /// * `c ≥ 1` coordinates of atom `k` and `3 − c` logits:
+    ///   `∂^{3−c}a_k · ⟨em, ∂^c γ_k⟩` (gate-zero/curve-third, gate-first/curve-second,
+    ///   gate-second/curve-first);
+    /// * three logits `i, j, l`: `Σ_k ∂³a_k/∂ℓ_i∂ℓ_j∂ℓ_l · ⟨em, γ_k⟩`
+    ///   (gate-third/curve-zero, [`PatchDGate::third_contraction`]).
+    ///
+    /// The logits need not share the coordinates' atom: under a softmax gate every
+    /// free logit moves every gate. This leg used to return zero for any triple
+    /// with mixed atom labels, and for any logit unless the gate was ordered
+    /// Beta–Bernoulli, while the exact-A route admits Softmax.
     fn patchd_residual_third_leg(
         &self,
         ctx: &PatchDResidualCtx<'_>,
@@ -2288,107 +2493,50 @@ impl SaeManifoldTerm {
         w_var: SaeLocalRowVar,
     ) -> f64 {
         let PatchDResidualCtx {
-            row,
-            error_metric,
             sqrt_w,
             assignments,
-            second_jets,
-            third_jets,
-            is_obb,
-            inv_tau,
+            gate,
+            reconstruction,
+            ..
         } = *ctx;
-        // Classify each var as (atom, Some(axis)) for a coordinate or
-        // (atom, None) for a logit; all three must share ONE atom.
-        let classify = |v: SaeLocalRowVar| -> (usize, Option<usize>) {
-            match v {
-                SaeLocalRowVar::Coord { atom, axis } => (atom, Some(axis)),
-                SaeLocalRowVar::Logit { atom } => (atom, None),
-            }
-        };
-        let (ka, aa) = classify(a_var);
-        let (kb, ab) = classify(b_var);
-        let (kw, aw) = classify(w_var);
-        if ka != kb || ka != kw {
-            return 0.0;
-        }
-        let atom_idx = ka;
-        // Collect coord axes; count logit derivatives.
-        let mut coord_axes: Vec<usize> = Vec::with_capacity(3);
-        let mut logit_count = 0usize;
-        for opt in [aa, ab, aw] {
-            match opt {
-                Some(axis) => coord_axes.push(axis),
-                None => logit_count += 1,
-            }
-        }
-        if logit_count > 0 && !is_obb {
-            // Non-OBB gate third-order (softmax cross-atom) is a follow-on;
-            // the l==0 basis third jet still applies to any mode.
-            return 0.0;
-        }
-        let atom = &self.atoms[atom_idx];
-        let basis = atom.basis_size();
-        let decoder = atom.decoder_coefficients(); // (basis, out)
-        let p = error_metric.len();
-        // D_c[out] = Σ_m B[m,out] · ∂^c φ_m over the collected coord axes.
-        let mut d_c = vec![0.0_f64; p];
-        match coord_axes.len() {
-            3 => {
-                let tj = match &third_jets[atom_idx] {
-                    AtomThirdJet::Analytic(tj) => tj,
-                    // Every third partial of this basis vanishes identically.
-                    AtomThirdJet::CertifiedZero => return 0.0,
-                };
-                let (a0, a1, a2) = (coord_axes[0], coord_axes[1], coord_axes[2]);
-                for m in 0..basis {
-                    let phi3 = tj[[row, m, a0, a1, a2]];
-                    for out in 0..p {
-                        d_c[out] += decoder[[m, out]] * phi3;
-                    }
+        let mut logits = [0usize; 3];
+        let mut n_logits = 0usize;
+        let mut axes = [0usize; 3];
+        let mut n_axes = 0usize;
+        let mut coord_atom: Option<usize> = None;
+        for var in [a_var, b_var, w_var] {
+            match var {
+                SaeLocalRowVar::Logit { atom } => {
+                    logits[n_logits] = atom;
+                    n_logits += 1;
                 }
+                SaeLocalRowVar::Coord { atom, axis } => {
+                    if coord_atom.is_some_and(|owner| owner != atom) {
+                        return 0.0;
+                    }
+                    coord_atom = Some(atom);
+                    axes[n_axes] = axis;
+                    n_axes += 1;
+                }
+            }
+        }
+        let Some(atom) = coord_atom else {
+            return sqrt_w
+                * gate.third_contraction(assignments, reconstruction, logits[0], logits[1], logits[2]);
+        };
+        let d = self.atoms[atom].latent_dim();
+        let leg = match n_axes {
+            1 => {
+                gate.second(assignments, atom, logits[0], logits[1])
+                    * reconstruction.first[atom][axes[0]]
             }
             2 => {
-                let sj = &second_jets[atom_idx];
-                let (a0, a1) = (coord_axes[0], coord_axes[1]);
-                for m in 0..basis {
-                    let phi2 = sj[[row, m, a0, a1]];
-                    for out in 0..p {
-                        d_c[out] += decoder[[m, out]] * phi2;
-                    }
-                }
+                gate.first(assignments, atom, logits[0])
+                    * reconstruction.second[atom][axes[0] * d + axes[1]]
             }
-            1 => {
-                let a0 = coord_axes[0];
-                for m in 0..basis {
-                    let phi1 = atom.basis_jacobian[[row, m, a0]];
-                    for out in 0..p {
-                        d_c[out] += decoder[[m, out]] * phi1;
-                    }
-                }
-            }
-            _ => {
-                for m in 0..basis {
-                    let phi0 = atom.basis_values[[row, m]];
-                    for out in 0..p {
-                        d_c[out] += decoder[[m, out]] * phi0;
-                    }
-                }
-            }
-        }
-        // Gate factor g^{(l)}: l logit derivatives of the atom's gate. For OBB
-        // g = σ(ℓ/τ): g0=s, g1=s(1−s)/τ, g2=s(1−s)(1−2s)/τ², g3=s(1−s)(1−6s+6s²)/τ³.
-        let s = assignments[atom_idx];
-        let gate_factor = match logit_count {
-            0 => s,
-            1 => s * (1.0 - s) * inv_tau,
-            2 => s * (1.0 - s) * (1.0 - 2.0 * s) * inv_tau * inv_tau,
-            _ => s * (1.0 - s) * (1.0 - 6.0 * s + 6.0 * s * s) * inv_tau * inv_tau * inv_tau,
+            _ => assignments[atom] * reconstruction.third[atom][(axes[0] * d + axes[1]) * d + axes[2]],
         };
-        let mut acc = 0.0_f64;
-        for out in 0..p {
-            acc += error_metric[out] * d_c[out];
-        }
-        sqrt_w * gate_factor * acc
+        sqrt_w * leg
     }
 
     /// Dense reconstruction of the θ-adjoint `Γ_w = tr(inv · ∂H/∂θ_w)` against an
@@ -2446,6 +2594,7 @@ impl SaeManifoldTerm {
         } else {
             None
         };
+        let patchd_gate = PatchDGate::for_mode(&self.assignment.mode);
         let patchd_is_obb = matches!(
             self.assignment.mode,
             AssignmentMode::OrderedBetaBernoulli { .. }
@@ -2503,18 +2652,23 @@ impl SaeManifoldTerm {
                 self.patchd_row_error_metric(row, w_row, tgt, &assignments, whiten_row_jets)
             });
             let patchd_sqrt_w = w_row.sqrt();
-            let patchd_ctx: Option<PatchDResidualCtx<'_>> = patchd_error_metric
+            let patchd_reconstruction: Option<PatchDRowContractions> = patchd_error_metric
                 .as_deref()
                 .zip(patchd_third_jets.as_deref())
-                .map(|(em, third_jets)| PatchDResidualCtx {
+                .map(|(em, third_jets)| {
+                    self.patchd_row_contractions(row, em, &assignments, &second_jets, third_jets)
+                });
+            let patchd_ctx: Option<PatchDResidualCtx<'_>> = patchd_error_metric
+                .as_deref()
+                .zip(patchd_reconstruction.as_ref())
+                .map(|(em, reconstruction)| PatchDResidualCtx {
                     row,
                     error_metric: em,
                     sqrt_w: patchd_sqrt_w,
                     assignments: &assignments,
                     second_jets: &second_jets,
-                    third_jets,
-                    is_obb: patchd_is_obb,
-                    inv_tau: patchd_obb_inv_tau,
+                    gate: patchd_gate,
+                    reconstruction,
                 });
             // #2308 — per-row spectral/gauge deflation the criterion factor applied.
             // It is FROZEN at the fixed stratum (the radial-gauge / ARD-inactive-half
@@ -2624,8 +2778,8 @@ impl SaeManifoldTerm {
                             // metric factor `L`, so a plain dot of two jets
                             // reconstitutes the `w`-weighted `M`-inner product the
                             // assembly uses. Only the FIRST leg lands here; the
-                            // third-jet leg `⟨error_metric, ∂³f_abw⟩` needs a jet
-                            // channel `SaeRowJets` does not expose.
+                            // third-jet leg `⟨error_metric, ∂³f_abw⟩` is
+                            // `patchd_residual_third_leg` above.
                             dh += sae_dot(jets.first(w), jets.second(a, b));
                         }
                         if let (

@@ -7295,12 +7295,11 @@ impl SaeManifoldTerm {
     /// (`inv_vv`, `inv_vbeta`, and the refolded `S⁻¹` trace), so `exact_a` changes
     /// only the `dh` OPERANDS and never the contraction structure.
     ///
-    /// SCOPE — the #2330 Patch-D residual THIRD-derivative legs
-    /// (`⟨error_metric, ∂³f⟩`) are not carried here, which is why the reference
-    /// above pins `residual_target = None`: the dense route skips those legs under
-    /// that argument too, so the two are comparable term for term. They are
-    /// additive later and need `atom_third_jets()`, a per-row quantity already
-    /// available matrix-free. `OrderedBetaBernoulli`'s cross-row adjoint is
+    /// SCOPE — with a `residual_target`, the #2330 Patch-D residual
+    /// THIRD-derivative legs (`⟨error_metric, ∂³f⟩`) are carried through the same
+    /// `patchd_residual_third_leg` / `patchd_residual_third_leg_beta` the dense
+    /// route calls, softmax cross-atom gate terms included (#2933 F01); with
+    /// `None` both routes skip them. `OrderedBetaBernoulli`'s cross-row adjoint is
     /// excluded because the streaming evidence lane refuses that family by name
     /// (#2509 Phase-2b) rather than pricing `B` and calling it `A`.
     pub(crate) fn logdet_theta_adjoint_from_probes(
@@ -7432,6 +7431,7 @@ impl SaeManifoldTerm {
         } else {
             None
         };
+        let patchd_gate = PatchDGate::for_mode(&self.assignment.mode);
         // The ordered-Beta–Bernoulli Patch-D channel is a CROSS-ROW adjoint and
         // has no per-row arrow block; the streaming evidence lane refuses that
         // family by name (#2509 Phase-2b) rather than pricing `B` and calling it
@@ -7450,7 +7450,6 @@ impl SaeManifoldTerm {
                     .to_string(),
             );
         }
-        let patchd_obb_inv_tau = 0.0_f64;
         let mut assignments = Array1::<f64>::zeros(self.k_atoms());
         let mut jet_window: std::collections::VecDeque<SaeRowJets> =
             std::collections::VecDeque::new();
@@ -7531,18 +7530,23 @@ impl SaeManifoldTerm {
                 self.patchd_row_error_metric(row, patchd_w_row, tgt, &assignments, whiten_row_jets)
             });
             let patchd_sqrt_w = patchd_w_row.sqrt();
-            let patchd_ctx: Option<PatchDResidualCtx<'_>> = patchd_error_metric
+            let patchd_reconstruction: Option<PatchDRowContractions> = patchd_error_metric
                 .as_deref()
                 .zip(patchd_third_jets.as_deref())
-                .map(|(em, third_jets)| PatchDResidualCtx {
+                .map(|(em, third_jets)| {
+                    self.patchd_row_contractions(row, em, &assignments, &second_jets, third_jets)
+                });
+            let patchd_ctx: Option<PatchDResidualCtx<'_>> = patchd_error_metric
+                .as_deref()
+                .zip(patchd_reconstruction.as_ref())
+                .map(|(em, reconstruction)| PatchDResidualCtx {
                     row,
                     error_metric: em,
                     sqrt_w: patchd_sqrt_w,
                     assignments: &assignments,
                     second_jets: &second_jets,
-                    third_jets,
-                    is_obb: patchd_is_obb,
-                    inv_tau: patchd_obb_inv_tau,
+                    gate: patchd_gate,
+                    reconstruction,
                 });
 
             if ordered_beta_bernoulli_channels.is_some() {
