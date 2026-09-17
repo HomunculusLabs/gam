@@ -1946,15 +1946,12 @@ where
                 // through the same HyperCoord infrastructure used for aniso ψ.
                 let eval_mode =
                     crate::estimate::reml::reml_outer_engine::EvalMode::ValueGradientHessian;
-                let result = state.evaluate_unified_with_link_ext(&rho, eval_mode)?;
+                let mut result = state.evaluate_unified_with_link_ext(&rho, eval_mode)?;
 
                 let cost = result.cost + sas_ridge_cost(theta);
-                let mut grad = result.gradient.ok_or_else(|| {
-                    EstimationError::InvalidInput(
-                        "unified evaluator returned no gradient in ValueGradientHessian mode"
-                            .to_string(),
-                    )
-                })?;
+                let mut grad = result
+                    .gradient_for_mode(eval_mode, theta_dim)
+                    .map_err(|reason| EstimationError::TrialPointRefused { reason })?;
 
                 assert_eq!(
                     grad.len(),

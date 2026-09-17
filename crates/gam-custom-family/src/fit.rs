@@ -2885,9 +2885,21 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 eval
             }
             Ok(eval) => {
+                // Name the failing channel. A requested Hessian that is simply unavailable
+                // was reported as "non-finite", which is how #979's terminal refusal came to
+                // read "value or gradient is non-finite" at a state whose search evaluations
+                // were all finite (job 1131465).
+                let channel = if !eval.objective.is_finite() {
+                    "the objective is non-finite"
+                } else if !eval.gradient.iter().all(|v| v.is_finite()) {
+                    "the outer gradient is non-finite"
+                } else if matches!(eval.outer_hessian, gam_problem::HessianValue::Unavailable) {
+                    "the outer Hessian was requested and is unavailable"
+                } else {
+                    "the outer Hessian is non-finite or does not match the outer dimension"
+                };
                 outer.last_error = Some(CustomFamilyError::trial_point(format!(
-                    "custom-family outer objective/derivatives became non-finite \
-                     (objective={})",
+                    "custom-family outer evaluation refused: {channel} (objective={})",
                     eval.objective
                 )));
                 // Recoverable (data-driven): the objective/derivatives became

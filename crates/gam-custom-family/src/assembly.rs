@@ -484,7 +484,7 @@ pub(crate) fn unified_joint_cost_gradient(
         }
         (0.0, gradient_correction, None)
     });
-    let result = evaluator.evaluate(rho_slice, eval_mode, first_order_trace_correction)?;
+    let mut result = evaluator.evaluate(rho_slice, eval_mode, first_order_trace_correction)?;
 
     let cost = result.cost;
     let criterion_components = [
@@ -495,8 +495,8 @@ pub(crate) fn unified_joint_cost_gradient(
     ];
     let gradient_present = result.gradient.is_some();
     let gradient = result
-        .gradient
-        .unwrap_or_else(|| Array1::zeros(rho.len() + n_joint + ext_dim));
+        .gradient_for_mode(eval_mode, rho.len() + n_joint + ext_dim)
+        .map_err(|reason| CustomFamilyError::TrialPointRefused { reason })?;
     log::debug!(
         "[UNIFIED-GRAD] mode={eval_mode:?} present={gradient_present} trace_skip={trace_skip} \
          |g|={:.6e} len={} n_joint={n_joint} rho_len={} ext={ext_dim}",

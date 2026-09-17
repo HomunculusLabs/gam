@@ -1251,12 +1251,12 @@ impl<'a> RemlState<'a> {
                     super::reml_outer_engine::EvalMode::ValueGradientHessian
                 }
             };
-            let result =
+            let mut result =
                 self.evaluate_unified_with_psi_ext(&rho, Some(theta), eval_mode, hyper_dirs)?;
             let cost = result.cost;
             let grad = result
-                .gradient
-                .unwrap_or_else(|| Array1::zeros(theta.len()));
+                .gradient_for_mode(eval_mode, theta.len())
+                .map_err(|reason| EstimationError::TrialPointRefused { reason })?;
             log::info!(
                 "[outer-timing] compute_joint_hyper_eval (unified, rho_dim={}, psi_dim={}): {:.3}s  cost={:.6e}",
                 rho_dim,

@@ -3208,7 +3208,7 @@ impl WorkingModelSurvival {
         // (β′ᵀS′β′ = βᵀSβ), so it carries over unchanged.
         let penalty_quadratic = state.penalty_term;
 
-        let result = InnerAssembly {
+        let mut result = InnerAssembly {
             log_likelihood: state.log_likelihood,
             penalty_quadratic,
             beta: reparam_inner.beta_transformed,
@@ -3247,7 +3247,9 @@ impl WorkingModelSurvival {
         )
         .map_err(EstimationError::InvalidInput)?;
 
-        let gradient = result.gradient.unwrap_or_else(|| Array1::zeros(rho.len()));
+        let gradient = result
+            .gradient_for_mode(mode, rho.len())
+            .map_err(|reason| EstimationError::TrialPointRefused { reason })?;
         let resolution = f64::EPSILON
             * (1.0
                 + result.criterion_components.fixed_beta.abs()

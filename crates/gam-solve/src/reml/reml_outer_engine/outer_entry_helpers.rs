@@ -43,6 +43,31 @@ pub struct RemlLamlResult {
     pub ext_mode_response_cols: Option<Array2<f64>>,
 }
 
+impl RemlLamlResult {
+    /// The outer gradient an evaluation in `mode` hands its caller.
+    ///
+    /// `gradient` is `None` in exactly two situations. A value-only evaluation computes
+    /// no gradient, and its caller never reads the gradient slot, so it gets zeros of
+    /// length `dim`. A derivative-bearing evaluation has no gradient only when the
+    /// envelope-gradient tripwire suppressed an invalid descent direction. There is no
+    /// gradient at that θ, and zeros would say the point is stationary. On the #979
+    /// 160×6 survival repro they did: BFGS reported "Converged by gradient ||g||=0" and
+    /// the screening certificate read |g| = 0 as stationary (job 1131465). That
+    /// evaluation is refused instead, so the outer search retreats from the trial or
+    /// rejects the seed, which is what the tripwire exists to cause.
+    pub fn gradient_for_mode(&mut self, mode: EvalMode, dim: usize) -> Result<Array1<f64>, String> {
+        match (self.gradient.take(), mode) {
+            (Some(gradient), _) => Ok(gradient),
+            (None, EvalMode::ValueOnly) => Ok(Array1::zeros(dim)),
+            (None, mode) => Err(format!(
+                "the {mode:?} evaluation has no outer gradient: the envelope-gradient tripwire \
+                 suppressed it at this point, so the trial is refused instead of being handed to \
+                 the outer optimizer as a zero gradient"
+            )),
+        }
+    }
+}
+
 /// Four additive scalar atoms of the unified criterion.
 ///
 /// `fixed_beta` owns every scalar other than the two determinant terms and the

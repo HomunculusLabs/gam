@@ -2747,19 +2747,16 @@ impl<'a> RemlState<'a> {
         );
 
         let t_assemble = std::time::Instant::now();
-        let result = if bundle.backend_kind() == GeometryBackendKind::SparseExactSpd {
+        let mut result = if bundle.backend_kind() == GeometryBackendKind::SparseExactSpd {
             self.evaluate_unified_sparse(p, &bundle, eval_mode)?
         } else {
             self.evaluate_unified(p, &bundle, eval_mode)?
         };
         let assemble_ms = t_assemble.elapsed().as_secs_f64() * 1000.0;
 
-        let gradient = result.gradient.ok_or_else(|| {
-            EstimationError::InvalidInput(format!(
-                "unified evaluator returned no gradient in {:?} mode",
-                eval_mode
-            ))
-        })?;
+        let gradient = result
+            .gradient_for_mode(eval_mode, p.len())
+            .map_err(|reason| EstimationError::TrialPointRefused { reason })?;
 
         let hessian = match decision.map(|decision| decision.strategy) {
             Some(HessianEvalStrategyKind::SpectralExact) => result.hessian,

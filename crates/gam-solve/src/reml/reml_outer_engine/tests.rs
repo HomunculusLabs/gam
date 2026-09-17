@@ -2787,6 +2787,147 @@ pub(crate) fn envelope_inconsistent_gradient_skips_outer_hessian_assembly() {
 }
 
 #[test]
+fn a_suppressed_envelope_gradient_is_refused_never_zeroed_979() {
+    // A caller that turned the suppressed gradient into zeros handed the outer optimizer a
+    // stationary point: BFGS converged on ||g|| = 0 and the screening certificate called it
+    // stationary (#979, job 1131465). Every derivative-bearing mode must refuse, and only a
+    // value-only evaluation, whose gradient slot nobody reads, gets the zero placeholder.
+    let solution = build_sentinel_tripwire_solution(DispersionHandling::ProfiledGaussian, None);
+    for mode in [EvalMode::ValueAndGradient, EvalMode::ValueGradientHessian] {
+        let mut suppressed = reml_laml_evaluate(&solution, &[0.0], mode, None)
+            .expect("envelope tripwire evaluation");
+        assert!(
+            suppressed.gradient.is_none(),
+            "the sentinel fixture must trip the envelope tripwire in {mode:?}"
+        );
+        let refusal = suppressed
+            .gradient_for_mode(mode, 1)
+            .expect_err("a suppressed gradient must be refused, never zeroed");
+        assert!(
+            refusal.contains("envelope-gradient tripwire"),
+            "unexpected refusal in {mode:?}: {refusal}"
+        );
+    }
+
+    let mut value_only = reml_laml_evaluate(&solution, &[0.0], EvalMode::ValueOnly, None)
+        .expect("value-only evaluation");
+    assert!(value_only.gradient.is_none(), "a value-only evaluation computes no gradient");
+    let placeholder = value_only
+        .gradient_for_mode(EvalMode::ValueOnly, 1)
+        .expect("value-only placeholder");
+    assert_eq!(placeholder.len(), 1);
+    assert!(placeholder.iter().all(|value| *value == 0.0));
+}
+
+/// An outer objective over the sentinel tripwire fixture that takes its gradient the way
+/// every production consumer does, through [`RemlLamlResult::gradient_for_mode`], and raises
+/// the refusal as the same `TrialPointRefused`.
+struct TripwireOuterObjective {
+    solution: InnerSolution<'static>,
+    derivative_refusals: usize,
+}
+
+impl TripwireOuterObjective {
+    fn evaluate(
+        &mut self,
+        rho: &Array1<f64>,
+        mode: EvalMode,
+    ) -> Result<gam_problem::OuterEval, gam_problem::EstimationError> {
+        let rho_slice = rho.as_slice().expect("the outer rho is contiguous");
+        let mut result = reml_laml_evaluate(&self.solution, rho_slice, mode, None)
+            .map_err(gam_problem::EstimationError::InvalidInput)?;
+        let gradient = match result.gradient_for_mode(mode, rho.len()) {
+            Ok(gradient) => gradient,
+            Err(reason) => {
+                self.derivative_refusals += 1;
+                return Err(gam_problem::EstimationError::TrialPointRefused { reason });
+            }
+        };
+        Ok(gam_problem::OuterEval {
+            cost: result.cost,
+            gradient,
+            hessian: gam_problem::HessianValue::Unavailable,
+            inner_beta_hint: None,
+        })
+    }
+}
+
+impl crate::rho_optimizer::OuterObjective for TripwireOuterObjective {
+    fn capability(&self) -> crate::rho_optimizer::OuterCapability {
+        crate::rho_optimizer::OuterCapability {
+            gradient: gam_problem::Derivative::Analytic,
+            hessian: gam_problem::DeclaredHessianForm::Unavailable,
+            n_params: 1,
+            psi_dim: 0,
+            fixed_point_available: false,
+            barrier_config: None,
+            prefer_gradient_only: false,
+            disable_fixed_point: true,
+        }
+    }
+    fn eval_cost(&mut self, rho: &Array1<f64>) -> Result<f64, gam_problem::EstimationError> {
+        self.evaluate(rho, EvalMode::ValueOnly).map(|evaluation| evaluation.cost)
+    }
+    fn eval(&mut self, rho: &Array1<f64>) -> Result<gam_problem::OuterEval, gam_problem::EstimationError> {
+        self.evaluate(rho, EvalMode::ValueAndGradient)
+    }
+    fn eval_with_order(
+        &mut self,
+        rho: &Array1<f64>,
+        order: crate::rho_optimizer::OuterEvalOrder,
+    ) -> Result<gam_problem::OuterEval, gam_problem::EstimationError> {
+        let mode = match order {
+            crate::rho_optimizer::OuterEvalOrder::Value => EvalMode::ValueOnly,
+            crate::rho_optimizer::OuterEvalOrder::ValueAndGradient => EvalMode::ValueAndGradient,
+            crate::rho_optimizer::OuterEvalOrder::ValueGradientHessian => {
+                EvalMode::ValueGradientHessian
+            }
+        };
+        self.evaluate(rho, mode)
+    }
+    fn reset(&mut self) {
+        // The sentinel inner solution is fixed, so there is no warm state to re-baseline.
+    }
+    fn seed_inner_state(
+        &mut self,
+        beta: &Array1<f64>,
+    ) -> Result<crate::rho_optimizer::SeedOutcome, gam_problem::EstimationError> {
+        if beta.iter().any(|value| !value.is_finite()) {
+            return Err(gam_problem::EstimationError::RemlOptimizationFailed(
+                "the tripwire objective was offered a non-finite inner seed".to_string(),
+            ));
+        }
+        Ok(crate::rho_optimizer::SeedOutcome::NoSlot)
+    }
+}
+
+#[test]
+fn an_outer_search_refuses_where_the_envelope_tripwire_fires_979() {
+    // Every derivative-bearing evaluation of this objective trips the envelope tripwire. A
+    // search that took the suppressed gradient as zeros converged on its first gradient
+    // evaluation and certified |g| = 0; the #979 160x6 survival repro did exactly that (job
+    // 1131465). The search must instead meet the refusal and return no converged result.
+    let mut objective = TripwireOuterObjective {
+        solution: build_sentinel_tripwire_solution(DispersionHandling::ProfiledGaussian, None),
+        derivative_refusals: 0,
+    };
+    let outcome = crate::rho_optimizer::run_outer(
+        &mut objective,
+        &crate::rho_optimizer::OuterConfig::default(),
+        "envelope tripwire #979",
+    );
+    assert!(
+        objective.derivative_refusals > 0,
+        "the outer search never requested a derivative-bearing evaluation"
+    );
+    assert!(
+        outcome.is_err(),
+        "the outer search returned a result where every gradient was suppressed by the envelope \
+         tripwire"
+    );
+}
+
+#[test]
 pub(crate) fn test_dense_spectral_operator_simple() {
     // 2×2 diagonal matrix: H = diag(2, 5)
     let h = Array2::from_diag(&array![2.0, 5.0]);
