@@ -1118,7 +1118,7 @@ mod log_partition_2933_tests {
     #[test]
     fn log_shape_derivative_is_a_central_difference_of_the_log_partition_2933() {
         let h = 1.0e-4;
-        for shape in [1.0e-6, 0.3, 7.0, 1.0e5] {
+        for shape in [1.0e-6_f64, 0.3, 7.0, 1.0e5] {
             for rows in [0.4, 1.0, 37.5, 1.0e4] {
                 let at = |log_shape: f64| {
                     ordered_beta_bernoulli_log_partition(log_shape.exp(), rows)
@@ -1177,7 +1177,7 @@ mod log_partition_2933_tests {
     /// derivative (energy plus partition) has zero mean under it.
     #[test]
     fn learnable_penalty_normalizes_and_its_score_has_zero_mean_2933() {
-        for alpha in [0.6, 1.3, 4.0] {
+        for alpha in [0.6_f64, 1.3, 4.0] {
             let penalty = OrderedBetaBernoulliPenalty::new(2, 1.0, 1.0, true);
             let rho = [alpha.ln()];
             let placeholder = Array1::<f64>::zeros(2);
