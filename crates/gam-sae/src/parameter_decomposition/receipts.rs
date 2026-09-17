@@ -39,8 +39,10 @@
 //! as a measured discrepancy. The measured discrepancy is reported beside the
 //! band and never folded into it (#2951 correction C2).
 
-use super::rewrite::ShapeMismatch;
+use super::apply::{ApplyError, FactorView, apply_anchored_linear};
+use super::rewrite::{NativeMlp, ShapeMismatch};
 use gam_linalg::roundoff::accumulation_growth;
+use gam_math::gaussian_activation::{GaussianActivation, GaussianActivationError};
 use ndarray::{Array2, ArrayView1, ArrayView2};
 use std::fmt;
 
@@ -63,7 +65,7 @@ impl ExternalExecution<'_> {
 }
 
 /// A refused receipt computation.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ReceiptRefusal {
     Shape(ShapeMismatch),
     /// An executed or band array has a non-finite entry.
@@ -75,11 +77,27 @@ pub enum ReceiptRefusal {
     /// The external stage was not executed in binary64 with TF32 off, so no band here
     /// covers it.
     ExternalPrecision { float64: bool, tf32_matmul: bool },
+    /// The native factored-edit kernel refused.
+    Apply(ApplyError),
+    /// The native activation refused.
+    Activation(GaussianActivationError),
 }
 
 impl From<ShapeMismatch> for ReceiptRefusal {
     fn from(mismatch: ShapeMismatch) -> Self {
         Self::Shape(mismatch)
+    }
+}
+
+impl From<ApplyError> for ReceiptRefusal {
+    fn from(error: ApplyError) -> Self {
+        Self::Apply(error)
+    }
+}
+
+impl From<GaussianActivationError> for ReceiptRefusal {
+    fn from(error: GaussianActivationError) -> Self {
+        Self::Activation(error)
     }
 }
 
@@ -99,6 +117,10 @@ impl fmt::Display for ReceiptRefusal {
                 "the external stage was not executed in binary64 with TF32 off (float64: {float64}, \
                  tf32_matmul: {tf32_matmul}), so no binary64 band covers it"
             ),
+            Self::Apply(error) => {
+                write!(formatter, "the native factored-edit kernel refused: {error:?}")
+            }
+            Self::Activation(error) => write!(formatter, "the native activation refused: {error}"),
         }
     }
 }
@@ -314,6 +336,164 @@ pub fn compare_stage(
         }
     }
     Ok(agreement)
+}
+
+/// The largest `|external − native|` entry of one stage, measured. It compares two
+/// implementations of a special function, so no band covers it: a receipt reports it and
+/// never folds it into a band (#2951 correction C2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeasuredDiscrepancy {
+    pub largest: f64,
+    /// `(row, column)` of the largest entry.
+    pub witness: (usize, usize),
+    /// The native value at the witness.
+    pub native_at_witness: f64,
+}
+
+fn measured_discrepancy(
+    external_name: &'static str,
+    native_name: &'static str,
+    external: ArrayView2<'_, f64>,
+    native: ArrayView2<'_, f64>,
+) -> Result<MeasuredDiscrepancy, ReceiptRefusal> {
+    check(external_name, native.nrows(), external.nrows())?;
+    check(external_name, native.ncols(), external.ncols())?;
+    require_finite(external_name, external)?;
+    require_finite(native_name, native)?;
+    let mut measured = MeasuredDiscrepancy {
+        largest: 0.0,
+        witness: (0, 0),
+        native_at_witness: native.iter().next().copied().unwrap_or(0.0),
+    };
+    for ((row, column), &native_value) in native.indexed_iter() {
+        let difference = (external[[row, column]] - native_value).abs();
+        if difference > measured.largest {
+            measured = MeasuredDiscrepancy {
+                largest: difference,
+                witness: (row, column),
+                native_at_witness: native_value,
+            };
+        }
+    }
+    Ok(measured)
+}
+
+/// One residual MLP block's tensors and the stages an external executor ran.
+///
+/// The block is `W₂ σ((W₁ + L diag(s) Rᵀ) x + b₁) + b₂` without the residual: the output
+/// of a transformer MLP module. The `external_*` arrays are the executor's stage outputs,
+/// with rows matching `inputs`.
+#[derive(Clone, Copy, Debug)]
+pub struct MlpBlockReceiptInputs<'a> {
+    pub external_execution: ExternalExecution<'a>,
+    pub activation: GaussianActivation,
+    pub weight: ArrayView2<'a, f64>,
+    pub bias: ArrayView1<'a, f64>,
+    pub left: ArrayView2<'a, f64>,
+    pub coefficients: ArrayView1<'a, f64>,
+    pub right: ArrayView2<'a, f64>,
+    pub weight_out: ArrayView2<'a, f64>,
+    pub bias_out: ArrayView1<'a, f64>,
+    pub inputs: ArrayView2<'a, f64>,
+    pub external_pre_activation: ArrayView2<'a, f64>,
+    pub external_activation: ArrayView2<'a, f64>,
+    pub external_output: ArrayView2<'a, f64>,
+}
+
+/// A residual MLP block's receipt, stage by stage. Each stage compares from the external
+/// executor's own stage input, so an upstream discrepancy never enters a downstream band.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MlpBlockReceipt {
+    /// `(W₁ + L diag(s) Rᵀ) x + b₁`, native through [`apply_anchored_linear`] with anchor
+    /// one, against the factored-edit band on both sides.
+    pub pre_activation: StageAgreement,
+    /// The native activation at the external pre-activation against the external
+    /// activation: measured only.
+    pub activation_measured: MeasuredDiscrepancy,
+    /// `W₂ a + b₂` at the external activation, native through [`NativeMlp::written`],
+    /// against the affine band on both sides.
+    pub output: StageAgreement,
+    /// The native block run from `inputs` alone against the external output: measured only,
+    /// since the activation discrepancy propagates into it.
+    pub end_to_end_measured: MeasuredDiscrepancy,
+}
+
+/// The whole stage map of one residual MLP block ([`MlpBlockReceipt`]). It refuses before
+/// executing anything unless `external_execution` is binary64 with TF32 off.
+pub fn mlp_block_receipt(block: MlpBlockReceiptInputs<'_>) -> Result<MlpBlockReceipt, ReceiptRefusal> {
+    if !block.external_execution.covered_by_binary64_bands() {
+        return Err(ReceiptRefusal::ExternalPrecision {
+            float64: block.external_execution.dtype == "float64",
+            tf32_matmul: block.external_execution.tf32_matmul,
+        });
+    }
+    check("read-in bias length", block.weight.nrows(), block.bias.len())?;
+    let native = NativeMlp::new(
+        block.weight.to_owned(),
+        block.bias.to_owned(),
+        block.weight_out.to_owned(),
+        block.bias_out.to_owned(),
+        block.activation,
+    )?;
+
+    // Anchor one rounds nothing, and the bias is added after the kernel: the path the
+    // factored-edit band counts.
+    let edited = apply_anchored_linear(
+        block.weight,
+        1.0,
+        FactorView::new(block.left, block.right)?,
+        block.coefficients,
+        block.inputs,
+    )?;
+    let native_pre_activation = &*edited + &block.bias;
+    let pre_band = factored_edit_stage_band(
+        block.weight,
+        block.left,
+        block.coefficients,
+        block.right,
+        Some(block.bias),
+        block.inputs,
+    )?;
+    let pre_activation = compare_stage(
+        block.external_execution,
+        block.external_pre_activation,
+        native_pre_activation.view(),
+        pre_band.view(),
+        pre_band.view(),
+    )?;
+
+    let native_activation = native.activate(block.external_pre_activation)?;
+    let activation_measured = measured_discrepancy(
+        "external activation",
+        "native activation",
+        block.external_activation,
+        native_activation.view(),
+    )?;
+
+    let native_output = native.written(block.external_activation)?;
+    let output_band =
+        affine_stage_band(block.weight_out, Some(block.bias_out), block.external_activation)?;
+    let output = compare_stage(
+        block.external_execution,
+        block.external_output,
+        native_output.view(),
+        output_band.view(),
+        output_band.view(),
+    )?;
+
+    let end_to_end = native.written(native.activate(native_pre_activation.view())?.view())?;
+    let end_to_end_measured = measured_discrepancy(
+        "external output",
+        "native end-to-end output",
+        block.external_output,
+        end_to_end.view(),
+    )?;
+    Ok(MlpBlockReceipt {
+        pre_activation,
+        activation_measured,
+        output,
+        end_to_end_measured,
+    })
 }
 
 #[cfg(test)]
@@ -553,6 +733,113 @@ mod tests {
             Err(ReceiptRefusal::ExternalPrecision {
                 float64: true,
                 tf32_matmul: true,
+            })
+        );
+    }
+
+    /// A dense float64 program stands in for the external executor. It forms
+    /// `W' = W + L diag(s) Rᵀ` densely, activates through the same gam-math owner, and writes
+    /// left to right. The receipt agrees at the pre-activation and the output, and the
+    /// measured activation discrepancy is zero because both sides call one implementation.
+    ///
+    /// Positive controls:
+    /// - an external pre-activation displaced at one entry by twice its band sum is refuted
+    ///   there, and moves the measured activation discrepancy off zero at that entry;
+    /// - a float32 record refuses before anything executes.
+    #[test]
+    fn mlp_block_receipt_agrees_with_a_dense_float64_program_and_refutes_a_displaced_stage() {
+        let (hidden, width, components, rows) = (6, 4, 2, 3);
+        let mut rng = StdRng::seed_from_u64(2951);
+        let weight = uniform(&mut rng, hidden, width);
+        let left = uniform(&mut rng, hidden, components);
+        let right = uniform(&mut rng, width, components);
+        let weight_out = uniform(&mut rng, width, hidden);
+        let inputs = uniform(&mut rng, rows, width);
+        let bias: Array1<f64> = Array1::from_shape_simple_fn(hidden, || rng.random_range(-1.0..1.0));
+        let bias_out: Array1<f64> =
+            Array1::from_shape_simple_fn(width, || rng.random_range(-1.0..1.0));
+        let coefficients = array![-1.0, 0.5];
+
+        let mut edited = weight.clone();
+        for output in 0..hidden {
+            for input in 0..width {
+                let mut edit = 0.0;
+                for component in 0..components {
+                    edit += left[[output, component]] * coefficients[component] * right[[input, component]];
+                }
+                edited[[output, input]] += edit;
+            }
+        }
+        let external_pre_activation = affine_forward(&edited, &inputs) + &bias;
+        let executor = NativeMlp::new(
+            weight.clone(),
+            bias.clone(),
+            weight_out.clone(),
+            bias_out.clone(),
+            GaussianActivation::ExactGelu,
+        )
+        .expect("the block's shapes compose");
+        let external_activation = executor
+            .activate(external_pre_activation.view())
+            .expect("finite pre-activations");
+        let external_output = affine_forward(&weight_out, &external_activation) + &bias_out;
+
+        let receipt_for = |execution: ExternalExecution<'static>, pre_activation: &Array2<f64>| {
+            mlp_block_receipt(MlpBlockReceiptInputs {
+                external_execution: execution,
+                activation: GaussianActivation::ExactGelu,
+                weight: weight.view(),
+                bias: bias.view(),
+                left: left.view(),
+                coefficients: coefficients.view(),
+                right: right.view(),
+                weight_out: weight_out.view(),
+                bias_out: bias_out.view(),
+                inputs: inputs.view(),
+                external_pre_activation: pre_activation.view(),
+                external_activation: external_activation.view(),
+                external_output: external_output.view(),
+            })
+        };
+
+        let receipt = receipt_for(BINARY64_CPU, &external_pre_activation)
+            .expect("a binary64 execution compares");
+        assert!(receipt.pre_activation.agrees && !receipt.pre_activation.refutes, "{receipt:?}");
+        assert!(receipt.output.agrees && !receipt.output.refutes, "{receipt:?}");
+        assert_eq!(receipt.activation_measured.largest, 0.0, "{receipt:?}");
+
+        let band = factored_edit_stage_band(
+            weight.view(),
+            left.view(),
+            coefficients.view(),
+            right.view(),
+            Some(bias.view()),
+            inputs.view(),
+        )
+        .expect("shapes compose");
+        let mut displaced = external_pre_activation.clone();
+        displaced[[1, 2]] += 2.0 * (band[[1, 2]] + band[[1, 2]]);
+        let refuted =
+            receipt_for(BINARY64_CPU, &displaced).expect("a binary64 execution compares");
+        assert!(
+            refuted.pre_activation.refutes && refuted.pre_activation.witness == (1, 2),
+            "{refuted:?}"
+        );
+        assert!(
+            refuted.activation_measured.largest > 0.0 && refuted.activation_measured.witness == (1, 2),
+            "{refuted:?}"
+        );
+
+        let float32 = ExternalExecution {
+            dtype: "float32",
+            device: "cpu",
+            tf32_matmul: false,
+        };
+        assert_eq!(
+            receipt_for(float32, &external_pre_activation),
+            Err(ReceiptRefusal::ExternalPrecision {
+                float64: false,
+                tf32_matmul: false,
             })
         );
     }
