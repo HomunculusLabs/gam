@@ -1433,6 +1433,82 @@ mod tests {
             let residual = -root.mul_add(root, -value);
             Self::two_sum(root, residual / (2.0 * root))
         }
+
+        /// Multiplication by an exactly representable power of two.
+        fn scaled(self, factor: f64) -> Self {
+            Self {
+                high: self.high * factor,
+                low: self.low * factor,
+            }
+        }
+
+        fn sqrt(self) -> Self {
+            let root = self.high.sqrt();
+            let residual = self.add(Self::from(root).mul(Self::from(root)).negated());
+            Self::two_sum(root, residual.high / (2.0 * root))
+        }
+
+        /// `exp` by reduction `x = k ln 2 + r`, the Taylor series of `r/2¹⁰` to
+        /// sixteen terms (the first omitted term is below `1e-60`), ten squarings
+        /// and the exact factor `2^k`; the squarings amplify its `O(ε²)` rounding
+        /// by at most `2¹⁰`.
+        fn exp(self) -> Self {
+            const LN_2: DoubleDouble = DoubleDouble {
+                high: std::f64::consts::LN_2,
+                low: 2.319_046_813_846_299_6e-17,
+            };
+            const HALVINGS: i32 = 10;
+            let multiple = (self.high / LN_2.high).round();
+            let reduced = self
+                .add(LN_2.mul(Self::from(multiple)).negated())
+                .scaled(2.0_f64.powi(-HALVINGS));
+            let mut term = Self::from(1.0);
+            let mut sum = Self::from(1.0);
+            let mut index = 1.0;
+            while index <= 16.0 {
+                term = term.mul(reduced).div(Self::from(index));
+                sum = sum.add(term);
+                index += 1.0;
+            }
+            let mut remaining = HALVINGS;
+            while remaining > 0 {
+                sum = sum.mul(sum);
+                remaining -= 1;
+            }
+            sum.scaled(2.0_f64.powi(multiple as i32))
+        }
+    }
+
+    /// `|value − reference|` for a double-double reference.
+    fn double_double_discrepancy(value: f64, reference: DoubleDouble) -> f64 {
+        ((value - reference.high) - reference.low).abs()
+    }
+
+    /// `φ(x) = exp(−x²/2)/√(2π)` in double-double at a computed argument.
+    fn double_double_normal_pdf(argument: f64) -> DoubleDouble {
+        let pi = DoubleDouble {
+            high: PI,
+            low: 1.224_646_799_147_353_2e-16,
+        };
+        DoubleDouble::from(argument)
+            .mul(DoubleDouble::from(argument))
+            .scaled(-0.5)
+            .exp()
+            .div(pi.scaled(2.0).sqrt())
+    }
+
+    /// Mills' ratio `R(x) = Φ(−x)/φ(x)`, `x > 0`, by the Laplace continued fraction
+    /// `1/(x + 1/(x + 2/(x + 3/(…))))` truncated after `depth` levels, in
+    /// double-double. Every level adds positive quantities, so nothing cancels.
+    fn double_double_mills_ratio(magnitude: f64, depth: usize) -> DoubleDouble {
+        let argument = DoubleDouble::from(magnitude);
+        let mut tail = argument;
+        let mut level = depth;
+        while level > 0 {
+            tail = argument.add(DoubleDouble::from(level as f64).div(tail));
+            level -= 1;
+        }
+        DoubleDouble::from(1.0).div(tail)
     }
 
     /// The bivariate normal owner's absolute contract, from its module docs and
@@ -3166,6 +3242,152 @@ mod tests {
                 slope * gelu_moments[1]
             );
         }
+    }
+
+    #[test]
+    fn left_tail_and_coefficient_bounds_hold_against_a_double_double_reference() {
+        // The a_0/a_1 bounds rest on derived owner contracts: normal_pdf's 5u, erfc's
+        // ulp, erfcx below 5e-16, and the log-CDF owner's λ and q. This pins them
+        // against double-double evaluations at the same computed arguments, where φ
+        // is not subnormal. Mills' continued fraction is checked at doubled depth,
+        // and |R_N − R_2N| bounds the reference's truncation.
+        const DEPTH: usize = 4096;
+        let mut largest_discrepancy = 0.0_f64;
+        let left_arguments: [f64; 8] = [-37.0, -30.0, -17.0, -8.0, -4.1, -3.9, -1.7, -0.5];
+        for argument in left_arguments {
+            let magnitude = -argument;
+            let refined = double_double_mills_ratio(magnitude, 2 * DEPTH);
+            let truncation = double_double_mills_ratio(magnitude, DEPTH)
+                .add(refined.negated())
+                .high
+                .abs();
+            let correction =
+                DoubleDouble::from(1.0).add(DoubleDouble::from(magnitude).mul(refined).negated());
+            let density = double_double_normal_pdf(argument);
+            let computed_density = normal_pdf(argument);
+            let density_error = double_double_discrepancy(computed_density, density);
+            assert!(
+                density_error <= density_rounding(computed_density),
+                "φ({argument}): error {density_error:e} beyond 5u = {:e}",
+                density_rounding(computed_density)
+            );
+            let (reciprocal, corrected) = bounded_left_tail_mills(Bounded::exact(argument));
+            let reciprocal_error = double_double_discrepancy(reciprocal.value, refined);
+            let corrected_error = double_double_discrepancy(corrected.value, correction);
+            assert!(
+                reciprocal_error <= reciprocal.bound + truncation,
+                "1/λ({argument}): error {reciprocal_error:e} beyond its bound {:e}",
+                reciprocal.bound
+            );
+            assert!(
+                corrected_error <= corrected.bound + magnitude * truncation,
+                "q/λ({argument}): error {corrected_error:e} beyond its bound {:e}",
+                corrected.bound
+            );
+            // ReLU at s = 1: a_0 = φ q/λ and a_1 = φ/λ. Exact GELU at s = 0: a_0 = φ (q/λ − 1).
+            let mut coefficients = [f64::NAN; 2];
+            let mut bounds = [f64::NAN; 2];
+            gaussian_hermite_coefficients(
+                GaussianActivation::Relu,
+                argument,
+                1.0,
+                &mut coefficients,
+                &mut bounds,
+            )
+            .expect("ReLU coefficients in the left tail");
+            let value_error = double_double_discrepancy(coefficients[0], density.mul(correction));
+            let slope_error = double_double_discrepancy(coefficients[1], density.mul(refined));
+            assert!(
+                value_error <= bounds[0] + density.high * magnitude * truncation,
+                "ReLU a_0({argument}): error {value_error:e} beyond its bound {:e}",
+                bounds[0]
+            );
+            assert!(
+                slope_error <= bounds[1] + density.high * truncation,
+                "ReLU a_1({argument}): error {slope_error:e} beyond its bound {:e}",
+                bounds[1]
+            );
+            let mut gelu = [f64::NAN; 1];
+            let mut gelu_bounds = [f64::NAN; 1];
+            gaussian_hermite_coefficients(
+                GaussianActivation::ExactGelu,
+                argument,
+                0.0,
+                &mut gelu,
+                &mut gelu_bounds,
+            )
+            .expect("exact GELU coefficient in the left tail");
+            let gelu_error = double_double_discrepancy(
+                gelu[0],
+                density.mul(correction.add(DoubleDouble::from(-1.0))),
+            );
+            assert!(
+                gelu_error <= gelu_bounds[0] + density.high * magnitude * truncation,
+                "exact GELU a_0({argument}): error {gelu_error:e} beyond its bound {:e}",
+                gelu_bounds[0]
+            );
+            largest_discrepancy = largest_discrepancy
+                .max(density_error)
+                .max(reciprocal_error)
+                .max(corrected_error)
+                .max(value_error)
+                .max(slope_error)
+                .max(gelu_error);
+        }
+        // Right of the origin Φ = 1 − φ R, and ReLU's a_0 = t Φ + φ, a_1 = Φ.
+        let right_arguments: [f64; 4] = [0.5, 1.3, 3.0, 6.0];
+        for argument in right_arguments {
+            let refined = double_double_mills_ratio(argument, 2 * DEPTH);
+            let truncation = double_double_mills_ratio(argument, DEPTH)
+                .add(refined.negated())
+                .high
+                .abs();
+            let density = double_double_normal_pdf(argument);
+            let probability = DoubleDouble::from(1.0).add(density.mul(refined).negated());
+            let bounded = bounded_normal_cdf(Bounded::exact(argument));
+            let probability_error = double_double_discrepancy(bounded.value, probability);
+            assert!(
+                probability_error <= bounded.bound + density.high * truncation,
+                "Φ({argument}): error {probability_error:e} beyond its bound {:e}",
+                bounded.bound
+            );
+            let mut coefficients = [f64::NAN; 2];
+            let mut bounds = [f64::NAN; 2];
+            gaussian_hermite_coefficients(
+                GaussianActivation::Relu,
+                argument,
+                1.0,
+                &mut coefficients,
+                &mut bounds,
+            )
+            .expect("ReLU coefficients right of the origin");
+            let value_error = double_double_discrepancy(
+                coefficients[0],
+                DoubleDouble::from(argument).mul(probability).add(density),
+            );
+            let slope_error = double_double_discrepancy(coefficients[1], probability);
+            assert!(
+                value_error <= bounds[0] + argument * density.high * truncation,
+                "ReLU a_0({argument}): error {value_error:e} beyond its bound {:e}",
+                bounds[0]
+            );
+            assert!(
+                slope_error <= bounds[1] + density.high * truncation,
+                "ReLU a_1({argument}): error {slope_error:e} beyond its bound {:e}",
+                bounds[1]
+            );
+            largest_discrepancy = largest_discrepancy
+                .max(probability_error)
+                .max(value_error)
+                .max(slope_error);
+        }
+        // Positive control: at exact arguments the propagated part of every bound is
+        // zero, so the bounds are only as good as their rounding terms, and some
+        // evaluation does round.
+        assert!(
+            largest_discrepancy > 0.0,
+            "no evaluation rounded, so the bounds were not exercised"
+        );
     }
 
     #[test]
