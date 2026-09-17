@@ -326,23 +326,21 @@ fn array3_to_nested(a: &Array3<f64>) -> Vec<Vec<Vec<f64>>> {
         .collect()
 }
 
-/// The honest penalized-loss score (#1231):
-/// `penalized_loss_score` else `oos_penalized_loss`; a present-but-null value
-/// stays `None`; neither key present -> error.
+/// The training fit's honest penalized-loss score (#1231): only the fit
+/// report's `penalized_loss_score` is read. `oos_penalized_loss` scores a
+/// frozen-decoder solve on some other batch, so it is never persisted as the
+/// fit's score (#2933 F42). A present-but-null value stays `None`; a missing
+/// key is an error.
 fn penalized_loss_score(raw: &Value) -> Result<Option<f64>, String> {
-    for key in ["penalized_loss_score", "oos_penalized_loss"] {
-        if let Some(v) = raw.get(key) {
-            return Ok(if v.is_null() {
-                None
-            } else {
-                Some(
-                    v.as_f64()
-                        .ok_or_else(|| format!("sae fit payload '{key}' is not a number"))?,
-                )
-            });
-        }
+    let v = raw
+        .get("penalized_loss_score")
+        .ok_or_else(|| "sae fit payload is missing 'penalized_loss_score'".to_string())?;
+    if v.is_null() {
+        return Ok(None);
     }
-    Err("sae fit payload is missing a penalized-loss score".to_string())
+    v.as_f64()
+        .map(Some)
+        .ok_or_else(|| "sae fit payload 'penalized_loss_score' is not a number".to_string())
 }
 
 /// Reorder (periodic) or pass through (else) an atom's shape band. A
@@ -745,5 +743,22 @@ mod manifold_sae_coercion_tests {
         assert!(serde_json::from_str::<Value>("NaN").is_err());
         assert!(serde_json::from_str::<Value>("Infinity").is_err());
         assert!(serde_json::from_str::<Value>("-Infinity").is_err());
+    }
+
+    #[test]
+    fn fit_payload_score_is_never_read_from_a_batch_solve() {
+        // #2933 F42: `oos_penalized_loss` is a frozen-decoder solve's score on
+        // another batch. A report carrying only that key has no fit score.
+        let batch_only = serde_json::json!({ "oos_penalized_loss": -812.5 });
+        let err = penalized_loss_score(&batch_only)
+            .expect_err("a batch solve's score must not become the fit's score");
+        assert!(err.contains("'penalized_loss_score'"), "{err}");
+        let both = serde_json::json!({
+            "penalized_loss_score": -37.5,
+            "oos_penalized_loss": -812.5,
+        });
+        assert_eq!(penalized_loss_score(&both), Ok(Some(-37.5)));
+        let null_score = serde_json::json!({ "penalized_loss_score": null });
+        assert_eq!(penalized_loss_score(&null_score), Ok(None));
     }
 }
