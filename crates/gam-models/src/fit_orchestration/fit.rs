@@ -238,18 +238,24 @@ fn rescale_covariance_coordinates(covariance: &mut Array2<f64>, factors: &[f64])
     }
 }
 
-fn rescale_precision_coordinates(precision: &mut Array2<f64>, factors: &[f64]) {
+fn rescale_precision_coordinates(
+    precision: &mut Array2<f64>,
+    factors: &[f64],
+) -> Result<(), String> {
     let dimension = factors.len();
-    assert_eq!(
-        precision.dim(),
-        (dimension, dimension),
-        "precision must align with the remapped coefficient vector"
-    );
+    if precision.dim() != (dimension, dimension) {
+        return Err(format!(
+            "precision must align with the remapped coefficient vector: the precision is {}x{} against {dimension} raw factors",
+            precision.nrows(),
+            precision.ncols()
+        ));
+    }
     for i in 0..dimension {
         for j in 0..dimension {
             precision[[i, j]] /= factors[i] * factors[j];
         }
     }
+    Ok(())
 }
 
 /// Conjugate a coefficient-to-coefficient linear map (the influence matrix
@@ -270,10 +276,43 @@ fn rescale_influence_coordinates(matrix: &mut Array2<f64>, factors: &[f64]) {
     }
 }
 
+/// Carry a change of raw coefficient units `β_new = D·β_saved + a` into a saved
+/// coefficient gauge whose active frame is not the saved frame. The precision on
+/// the active coordinates θ is left as solved: the returned section lifts θ to
+/// `D·(T·θ + a_self) + a` (#1561).
+fn compose_raw_unit_map_into_gauge(
+    gauge: &gam_problem::gauge::Gauge,
+    row_factors: &[f64],
+    raw_shift: &Array1<f64>,
+) -> Result<gam_problem::gauge::Gauge, String> {
+    let widths = gauge.raw_widths();
+    let total: usize = widths.iter().sum();
+    if row_factors.len() != total || raw_shift.len() != total {
+        return Err(format!(
+            "raw unit map has {} factors and {} shift entries, but the saved coefficient gauge lifts to {total} raw coefficients",
+            row_factors.len(),
+            raw_shift.len()
+        ));
+    }
+    let mut transforms = Vec::with_capacity(widths.len());
+    let mut start = 0usize;
+    for width in widths {
+        transforms.push(Array2::from_diag(&Array1::from(
+            row_factors[start..start + width].to_vec(),
+        )));
+        start += width;
+    }
+    let unit_map =
+        gam_problem::gauge::Gauge::from_block_transforms_with_shift(&transforms, raw_shift.clone());
+    gauge.left_compose(&unit_map).map_err(|reason| {
+        format!("the raw unit map does not compose into the saved coefficient gauge: {reason}")
+    })
+}
+
 #[cfg(test)]
 mod standard_convergence_gate_tests {
     use super::{
-        certified_retry_or_original, firth_can_rescue,
+        certified_retry_or_original, compose_raw_unit_map_into_gauge, firth_can_rescue,
         firth_rescue_has_compatible_outer_coordinates, rescale_covariance_coordinates,
         rescale_precision_coordinates, survival_baseline_parameter_checkpoint,
         survival_pirls_status_is_certified,
@@ -284,13 +323,69 @@ mod standard_convergence_gate_tests {
     use ndarray::array;
 
     #[test]
+    fn raw_unit_map_composes_into_a_reduced_coefficient_gauge() {
+        // Two saved blocks of widths 3 and 2. The identifiability audit dropped raw
+        // column 1 of block 0, so the saved precision lives on 4 active coordinates.
+        let gauge = gam_problem::gauge::Gauge::from_block_transforms(&[
+            array![[1.0, 0.0], [0.0, 0.0], [0.0, 1.0]],
+            array![[1.0, 0.0], [0.0, 1.0]],
+        ]);
+        let s = 3.0_f64;
+        let factors = [s, s, s, 1.0, 1.0];
+        let shift = array![0.0, 0.0, 0.0, s.ln(), 0.0];
+        let composed = compose_raw_unit_map_into_gauge(&gauge, &factors, &shift)
+            .expect("the unit map composes into a reduced gauge");
+        assert_eq!(composed.raw_widths(), vec![3, 2]);
+        assert_eq!(composed.reduced_total(), gauge.reduced_total());
+        assert!(!composed.is_identity());
+        let theta = array![0.7, -1.3, 2.1, 0.4];
+        let saved = gauge.t_full.dot(&theta) + &gauge.affine_shift;
+        let lifted = composed.t_full.dot(&theta) + &composed.affine_shift;
+        for i in 0..factors.len() {
+            let expected = factors[i] * saved[i] + shift[i];
+            assert!(
+                (lifted[i] - expected).abs() <= 1e-15 * (1.0 + expected.abs()),
+                "raw coefficient {i}: lifted {} against D·saved + a = {expected}",
+                lifted[i]
+            );
+        }
+    }
+
+    #[test]
+    fn raw_unit_map_refuses_a_width_that_is_not_the_gauges_raw_frame() {
+        let gauge = gam_problem::gauge::Gauge::identity(&[2, 2]);
+        let refusal =
+            compose_raw_unit_map_into_gauge(&gauge, &[1.0, 1.0, 1.0], &array![0.0, 0.0, 0.0]);
+        assert!(
+            refusal.is_err(),
+            "a unit map over 3 coefficients must not compose onto a 4-coefficient gauge"
+        );
+    }
+
+    #[test]
+    fn raw_units_congruence_refuses_an_active_frame_precision() {
+        // The by-group shape: a precision on 4 active coordinates against 5 raw
+        // factors. The congruence refuses it and leaves the precision untouched.
+        let mut precision = ndarray::Array2::<f64>::eye(4);
+        let refusal = rescale_precision_coordinates(&mut precision, &[3.0, 3.0, 3.0, 1.0, 1.0])
+            .expect_err("a 4x4 active-frame precision must not align with 5 raw factors");
+        assert!(
+            refusal.contains("precision must align with the remapped coefficient vector")
+                && refusal.contains("4x4 against 5 raw factors"),
+            "unexpected refusal: {refusal}"
+        );
+        assert_eq!(precision, ndarray::Array2::<f64>::eye(4));
+    }
+
+    #[test]
     fn raw_coordinate_precision_is_the_inverse_congruence_of_covariance() {
         let mut covariance = array![[0.30, -0.10], [-0.10, 0.70]];
         let mut precision = array![[3.5, 0.5], [0.5, 1.5]];
         let factors = [4.0, 1.0];
 
         rescale_covariance_coordinates(&mut covariance, &factors);
-        rescale_precision_coordinates(&mut precision, &factors);
+        rescale_precision_coordinates(&mut precision, &factors)
+            .expect("a 2x2 precision aligns with 2 raw factors");
 
         assert_eq!(covariance, array![[4.8, -0.4], [-0.4, 0.7]]);
         assert_eq!(precision, array![[0.21875, 0.125], [0.125, 1.5]]);
@@ -1106,8 +1201,50 @@ pub(crate) fn gaussian_response_sample_std(v: ArrayView1<'_, f64>) -> f64 {
 pub(crate) fn rescale_gaussian_location_scale_to_raw(
     result: &mut GaussianLocationScaleFitResult,
     response_scale: f64,
-) {
+) -> Result<(), String> {
+    let units = if result
+        .fit
+        .fit
+        .geometry
+        .as_ref()
+        .map_or(true, |geometry| geometry.coefficient_gauge.is_identity())
+    {
+        ActiveFrameUnits::RescalePrecision
+    } else {
+        ActiveFrameUnits::ComposeIntoGauge
+    };
+    rescale_gaussian_location_scale_to_raw_with_units(result, response_scale, units)
+}
+
+/// How the raw remap carries the change of units on the precision side of a
+/// saved fit.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ActiveFrameUnits {
+    /// The precision lives on the saved coordinates (identity gauge): rescale it
+    /// contravariantly.
+    RescalePrecision,
+    /// The precision lives on the gauge's active coordinates: compose the unit map
+    /// into the gauge and leave every active-frame quantity as solved.
+    ComposeIntoGauge,
+}
+
+/// [`rescale_gaussian_location_scale_to_raw`] with the precision-side
+/// representation chosen by the caller. On an identity gauge both representations
+/// describe one saved state (#1561).
+pub(crate) fn rescale_gaussian_location_scale_to_raw_with_units(
+    result: &mut GaussianLocationScaleFitResult,
+    response_scale: f64,
+    units: ActiveFrameUnits,
+) -> Result<(), String> {
     use gam_problem::BlockRole;
+
+    if matches!(units, ActiveFrameUnits::ComposeIntoGauge) && result.fit.fit.geometry.is_none() {
+        return Err(
+            "gaussian location-scale raw remap: composing the unit map into the coefficient \
+             gauge needs saved geometry"
+                .to_string(),
+        );
+    }
 
     let s = response_scale;
     assert!(
@@ -1183,14 +1320,29 @@ pub(crate) fn rescale_gaussian_location_scale_to_raw(
     // a Location and the Scale block pick up one factor of `s`. This is exactly
     // a per-coefficient diagonal scaling D·Σ·D with D = s on Location/Mean/Wiggle
     // rows and D = 1 on Scale rows.
+    //
+    // The same change of units is one affine map on the saved coefficients,
+    // `β_raw = D·β_internal + a`, with `a = ln(s)` on the Scale block's intercept
+    // columns (the shift the block surgery above applies) and zero elsewhere.
     let mut row_factors: Vec<f64> = Vec::new();
+    let mut raw_shift: Vec<f64> = Vec::new();
     for block in &result.fit.fit.blocks {
         let f = match block.role {
             BlockRole::Mean | BlockRole::Location | BlockRole::LinkWiggle => s,
             BlockRole::Scale | BlockRole::Time | BlockRole::Threshold => 1.0,
         };
+        let block_start = raw_shift.len();
         row_factors.extend(std::iter::repeat_n(f, block.beta.len()));
+        raw_shift.extend(std::iter::repeat_n(0.0, block.beta.len()));
+        if matches!(block.role, BlockRole::Scale) {
+            for col in scale_intercept_range.clone() {
+                if col < block.beta.len() {
+                    raw_shift[block_start + col] = ln_s;
+                }
+            }
+        }
     }
+    let raw_shift = Array1::from(raw_shift);
     if let Some(cov) = result.fit.fit.covariance_conditional.as_mut() {
         rescale_covariance_coordinates(cov, &row_factors);
     }
@@ -1209,11 +1361,30 @@ pub(crate) fn rescale_gaussian_location_scale_to_raw(
     // deletion) therefore mixed parameter systems. Transform every persisted
     // precision copy at the producer boundary so the saved model has one
     // coordinate convention.
+    //
+    // That congruence holds only where the precision lives on the saved
+    // coordinates. A saved precision lives on the active coordinates of the
+    // geometry's coefficient gauge, `β_saved = T·θ + a`. When the custom-family
+    // identifiability audit drops aliased columns, `T` is rectangular and `H_θ`
+    // stays on the reduced frame. The change of units then moves the lift, not
+    // θ: it composes into the gauge, and every active-frame quantity stays as
+    // solved.
+    let precision_on_saved_frame = matches!(units, ActiveFrameUnits::RescalePrecision);
     if let Some(geometry) = result.fit.fit.geometry.as_mut() {
-        rescale_precision_coordinates(&mut geometry.penalized_hessian.0, &row_factors);
+        if precision_on_saved_frame {
+            rescale_precision_coordinates(&mut geometry.penalized_hessian.0, &row_factors)?;
+        } else {
+            geometry.coefficient_gauge = compose_raw_unit_map_into_gauge(
+                &geometry.coefficient_gauge,
+                &row_factors,
+                &raw_shift,
+            )?;
+        }
     }
     if let Some(inference) = result.fit.fit.inference.as_mut() {
-        rescale_precision_coordinates(&mut inference.penalized_hessian.0, &row_factors);
+        if precision_on_saved_frame {
+            rescale_precision_coordinates(&mut inference.penalized_hessian.0, &row_factors)?;
+        }
 
         // The inference block carries its own copies of every coefficient-frame
         // covariance object, and `UnifiedFitResult::try_from_parts` re-runs on
@@ -1245,12 +1416,16 @@ pub(crate) fn rescale_gaussian_location_scale_to_raw(
                 *value *= factor;
             }
         }
-        // X'WX is a precision-side quadratic form exactly like H.
-        if let Some(gram) = inference.weighted_gram.as_mut() {
-            rescale_precision_coordinates(gram, &row_factors);
-        }
-        if let Some(influence) = inference.coefficient_influence.as_mut() {
-            rescale_influence_coordinates(influence, &row_factors);
+        // X'WX is a precision-side quadratic form exactly like H, and the influence
+        // map acts on the same coordinates, so both change with the units only
+        // where H does.
+        if precision_on_saved_frame {
+            if let Some(gram) = inference.weighted_gram.as_mut() {
+                rescale_precision_coordinates(gram, &row_factors)?;
+            }
+            if let Some(influence) = inference.coefficient_influence.as_mut() {
+                rescale_influence_coordinates(influence, &row_factors);
+            }
         }
         // `β_saved = Qs·θ` puts the rows of the stabilizing reparameterization
         // in the saved coefficient frame: Qs_raw = D·Qs.
@@ -1295,6 +1470,7 @@ pub(crate) fn rescale_gaussian_location_scale_to_raw(
     }
 
     result.response_scale = s;
+    Ok(())
 }
 
 pub(crate) fn fit_gaussian_location_scale_model(
@@ -1331,7 +1507,7 @@ pub(crate) fn fit_gaussian_location_scale_model(
     let mut result =
         fit_location_scale_with_optional_wiggle::<GaussianLocationScaleWorkflow>(request)?;
 
-    rescale_gaussian_location_scale_to_raw(&mut result, response_scale);
+    rescale_gaussian_location_scale_to_raw(&mut result, response_scale)?;
     Ok(result)
 }
 

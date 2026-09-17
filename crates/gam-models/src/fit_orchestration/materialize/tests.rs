@@ -2716,7 +2716,7 @@ fn reference_gaussian_no_wiggle(
         beta_link_wiggle: None,
         response_scale: 1.0,
     };
-    rescale_gaussian_location_scale_to_raw(&mut result, s);
+    rescale_gaussian_location_scale_to_raw(&mut result, s).expect("gaussian location-scale raw remap");
     result
 }
 
@@ -2765,7 +2765,7 @@ fn reference_gaussian_wiggle(
         beta_link_wiggle,
         response_scale: 1.0,
     };
-    rescale_gaussian_location_scale_to_raw(&mut result, s);
+    rescale_gaussian_location_scale_to_raw(&mut result, s).expect("gaussian location-scale raw remap");
     result
 }
 
@@ -2867,7 +2867,7 @@ fn gaussian_location_scale_raw_remap_keeps_inference_covariance_copies_bitwise_e
         );
     }
 
-    rescale_gaussian_location_scale_to_raw(&mut result, s);
+    rescale_gaussian_location_scale_to_raw(&mut result, s).expect("gaussian location-scale raw remap");
 
     let fit = &result.fit.fit;
     let top_conditional = fit
@@ -2937,6 +2937,222 @@ fn gaussian_location_scale_raw_remap_keeps_inference_covariance_copies_bitwise_e
             "corrected SE {i} must track the remapped corrected diagonal: {} vs {expected}",
             se[i]
         );
+    }
+}
+
+/// #1561: the raw remap carries the change of units on the precision side in one
+/// of two representations of one saved state. It either rescales the precision
+/// (the gauge's active coordinates are the saved coordinates) or composes the unit
+/// map into the gauge and leaves the precision as solved (a reduced active frame).
+/// Forced onto one identity-gauge fit, the two must agree on every quantity a
+/// consumer reads, or one representation is wrong.
+#[test]
+fn gaussian_location_scale_raw_remap_representations_agree_1561() {
+    let n = 48usize;
+    let mut records: Vec<csv::StringRecord> = Vec::with_capacity(n);
+    for i in 0..n {
+        let x = -2.0 + 4.0 * (i as f64) / ((n - 1) as f64);
+        let y = 140.0 * (0.7 * x + 0.3 * (1.3 * x).sin());
+        records.push(csv::StringRecord::from(vec![
+            format!("{y:.17e}"),
+            format!("{x:.17e}"),
+        ]));
+    }
+    let data =
+        gam_data::encode_recordswith_inferred_schema(vec!["y".to_string(), "x".to_string()], records)
+            .expect("encode scaled gaussian location-scale dataset");
+    let config = FitConfig {
+        family: Some("gaussian".to_string()),
+        noise_formula: Some("1".to_string()),
+        ..FitConfig::default()
+    };
+    let materialized =
+        materialize("y ~ x", &data, &config).expect("gaussian location-scale materialization");
+    let FitRequest::GaussianLocationScale(request) = materialized.request else {
+        panic!("expected a Gaussian location-scale request");
+    };
+    let GaussianLocationScaleFitRequest {
+        data: req_data,
+        spec,
+        options,
+        kappa_options,
+        ..
+    } = request;
+    let mut spec = spec;
+    let s = standardize_gaussian_spec_like_engine(&mut spec);
+    assert!(
+        (s - 1.0).abs() > 10.0,
+        "fixture response scale must make the remap non-trivial, got s={s}"
+    );
+    // The production workflow (`fit_location_scale_with_optional_wiggle`) fits with
+    // `compute_covariance = true`, so the remap always meets a published covariance.
+    let mut options = options;
+    options.compute_covariance = true;
+    let fit = fit_gaussian_location_scale_terms(req_data, spec, &options, &kappa_options)
+        .expect("standardized gaussian location-scale terms fit");
+    assert!(
+        fit.fit
+            .geometry
+            .as_ref()
+            .expect("terms fit carries saved geometry")
+            .coefficient_gauge
+            .is_identity(),
+        "the equivalence fixture must be an identity-gauge fit"
+    );
+    let wrap = |fit| GaussianLocationScaleFitResult {
+        fit,
+        wiggle_knots: None,
+        wiggle_degree: None,
+        beta_link_wiggle: None,
+        response_scale: 1.0,
+    };
+    let mut rescaled = wrap(fit.clone());
+    let mut composed = wrap(fit);
+    rescale_gaussian_location_scale_to_raw_with_units(
+        &mut rescaled,
+        s,
+        ActiveFrameUnits::RescalePrecision,
+    )
+    .expect("rescaled representation");
+    rescale_gaussian_location_scale_to_raw_with_units(
+        &mut composed,
+        s,
+        ActiveFrameUnits::ComposeIntoGauge,
+    )
+    .expect("composed representation");
+    let (a, b) = (&rescaled.fit.fit, &composed.fit.fit);
+
+    // Raw coefficients, raw covariance and SE bands: what predictions and
+    // intervals read. The conditional covariance and SEs must be published, so
+    // their agreement is not `None == None`.
+    assert_eq!(a.blocks.len(), b.blocks.len());
+    for (block_a, block_b) in a.blocks.iter().zip(&b.blocks) {
+        assert_eq!(
+            block_a.beta, block_b.beta,
+            "raw coefficients must not depend on the representation"
+        );
+    }
+    let covariance_a = a
+        .covariance_conditional
+        .as_ref()
+        .expect("the terms fit publishes a conditional covariance");
+    assert_eq!(Some(covariance_a), b.covariance_conditional.as_ref());
+    assert_eq!(a.covariance_corrected, b.covariance_corrected);
+    let inf_a = a.inference.as_ref().expect("rescaled inference block");
+    let inf_b = b.inference.as_ref().expect("composed inference block");
+    assert!(
+        inf_a.beta_standard_errors.is_some(),
+        "the terms fit publishes conditional standard errors"
+    );
+    assert_eq!(inf_a.beta_standard_errors, inf_b.beta_standard_errors);
+    assert_eq!(
+        inf_a.beta_standard_errors_corrected,
+        inf_b.beta_standard_errors_corrected
+    );
+
+    // Predictions on the fitted rows: each channel's linear predictor
+    // `affine_offset + X·β` and its conditional SE band `sqrt(diag(X·V·Xᵀ))`.
+    let covariance_b = b
+        .covariance_conditional
+        .as_ref()
+        .expect("composed conditional covariance");
+    let mut start = 0usize;
+    for (block_a, block_b) in a.blocks.iter().zip(&b.blocks) {
+        let width = block_a.beta.len();
+        let (design_a, design_b) = if matches!(block_a.role, gam_problem::BlockRole::Scale) {
+            (&rescaled.fit.noise_design, &composed.fit.noise_design)
+        } else {
+            (&rescaled.fit.mean_design, &composed.fit.mean_design)
+        };
+        let x_a = design_a.design.to_dense();
+        let x_b = design_b.design.to_dense();
+        assert_eq!(x_a.ncols(), width, "block design width must match its coefficients");
+        let eta_a = &design_a.affine_offset + &x_a.dot(&block_a.beta);
+        let eta_b = &design_b.affine_offset + &x_b.dot(&block_b.beta);
+        assert_eq!(
+            eta_a, eta_b,
+            "fitted linear predictors must not depend on the representation"
+        );
+        let block = ndarray::s![start..start + width, start..start + width];
+        let band_a = x_a
+            .dot(&covariance_a.slice(block))
+            .dot(&x_a.t())
+            .diag()
+            .mapv(f64::sqrt);
+        let band_b = x_b
+            .dot(&covariance_b.slice(block))
+            .dot(&x_b.t())
+            .diag()
+            .mapv(f64::sqrt);
+        assert!(
+            band_a.iter().all(|se| se.is_finite() && *se > 0.0),
+            "each fitted row carries a positive finite SE band"
+        );
+        assert_eq!(
+            band_a, band_b,
+            "SE bands must not depend on the representation"
+        );
+        start += width;
+    }
+    assert_eq!(start, covariance_a.nrows(), "the blocks tile the joint covariance");
+
+    // The two representations: the rescaled precision on an identity gauge, and
+    // the as-solved precision on the composed section β_raw = D·β_internal + a.
+    let geom_a = a.geometry.as_ref().expect("rescaled geometry");
+    let geom_b = b.geometry.as_ref().expect("composed geometry");
+    assert!(geom_a.coefficient_gauge.is_identity());
+    assert!(!geom_b.coefficient_gauge.is_identity());
+    assert!(
+        geom_a.penalized_hessian == inf_a.penalized_hessian
+            && geom_b.penalized_hessian == inf_b.penalized_hessian,
+        "each representation keeps its geometry and inference precision copies equal"
+    );
+    let lift = &geom_b.coefficient_gauge.t_full;
+    let p = lift.nrows();
+    assert_eq!(
+        lift.dim(),
+        (p, p),
+        "an identity gauge composed with the unit map stays square"
+    );
+
+    // The raw precision pulled back through the composed gauge is the rescaled
+    // precision.
+    let h_a = &geom_a.penalized_hessian.0;
+    let h_theta = &geom_b.penalized_hessian.0;
+    let inverse_lift: Vec<f64> = (0..p).map(|i| 1.0 / lift[[i, i]]).collect();
+    let scale = h_a.iter().fold(0.0_f64, |acc, v| acc.max(v.abs())).max(1.0);
+    for i in 0..p {
+        for j in 0..p {
+            let pulled_back = inverse_lift[i] * h_theta[[i, j]] * inverse_lift[j];
+            assert!(
+                (pulled_back - h_a[[i, j]]).abs() <= 1e-12 * scale,
+                "raw precision [{i},{j}]: pulled back {pulled_back:e} against rescaled {:e}",
+                h_a[[i, j]]
+            );
+        }
+    }
+
+    // #2623: raw directions N restrict the saved precision as NᵀH_raw N. Through the
+    // gauge, C = T⁻¹N restricts H_θ as CᵀH_θC. Both representations must price the
+    // same restricted curvature.
+    let directions =
+        Array2::from_shape_fn((p, 2), |(i, k)| (0.37 * (i + 1) as f64 + 1.3 * k as f64).sin());
+    let restricted_a = directions.t().dot(&h_a.dot(&directions));
+    let pulled = Array2::from_shape_fn((p, 2), |(i, k)| inverse_lift[i] * directions[[i, k]]);
+    let restricted_b = pulled.t().dot(&h_theta.dot(&pulled));
+    let restricted_scale = restricted_a
+        .iter()
+        .fold(0.0_f64, |acc, v| acc.max(v.abs()))
+        .max(1.0);
+    for r in 0..2 {
+        for c in 0..2 {
+            assert!(
+                (restricted_a[[r, c]] - restricted_b[[r, c]]).abs() <= 1e-12 * restricted_scale,
+                "restricted curvature [{r},{c}]: rescaled {:e} against composed {:e}",
+                restricted_a[[r, c]],
+                restricted_b[[r, c]]
+            );
+        }
     }
 }
 
