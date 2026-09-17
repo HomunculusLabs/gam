@@ -2827,6 +2827,8 @@ mod stacked_first_stage_sandwich_2484_tests {
 pub(crate) mod axis_direction_search;
 pub(crate) mod cell_moment_assembly;
 #[cfg(test)]
+mod empirical_intercept_bracket_tests;
+#[cfg(test)]
 mod empirical_measure_2484_tests;
 mod standard_normal_flex_fifth;
 pub(crate) mod empirical_measure_sensitivity;
