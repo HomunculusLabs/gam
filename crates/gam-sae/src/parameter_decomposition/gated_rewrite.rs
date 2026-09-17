@@ -19,8 +19,9 @@
 //!   carry the bias coordinates. The constant `1` is never masked.
 //! * **SwiGLU (R2).** `F_m(x) = W_d(m_d) [s(W_g(m_g) x) ⊙ W_u(m_u) x]` with the
 //!   SiLU gate `s(t) = t sigma(t)` (Qwen3 `hidden_act = "silu"`)
-//!   ([`swiglu_hidden`]). The gate is read from its one owner,
-//!   [`gam_math::gaussian_gated::silu_derivatives`]. At fixed `x` the block is
+//!   ([`swiglu_hidden`], [`ComponentSwiglu`]). The gate is read from its one
+//!   owner, [`gam_math::gaussian_gated::silu_derivatives`], and every weight
+//!   factors through mpd-rewrite's [`ExactFactor`]. At fixed `x` the block is
 //!   affine in each of `m_u` and `m_d` (multilinear, degree one per control) and
 //!   nonlinear in `m_g`. `W_u -> D W_u`, `W_d -> W_d D^-1` for an invertible
 //!   diagonal `D` is a gauge of the block; the gate rows have none.
@@ -38,10 +39,16 @@
 //!   `cI` mask, invariant under every change of component basis. The next block
 //!   reads the summed stream ([`decoder_layer`]).
 //!
+//! The analytic pullbacks of the gate and the norms ([`swiglu_hidden_pullback`],
+//! [`MaskedNorm::pullback`]) carry cotangents through the same summed inputs, so
+//! a parameter gradient through a masked block (P16) never differentiates a
+//! per-component copy.
+//!
 //! Every downstream readout passes a final norm (`z = W_U N(h_L)`), so a mask on
 //! any residual write reaches the logits through `(mean(h_L^2) + eps)^(-1/2)`,
 //! a nonlinearity between the masked factors and the logits.
 
+use super::rewrite::{ComponentMask, ComponentRead, ExactFactor, FactorRefusal, ShapeMismatch};
 use gam_math::gaussian_gated::silu_derivatives;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, Zip, s};
 use std::fmt;
@@ -167,6 +174,240 @@ pub fn swiglu_hidden(
         .map_collect(|&gate_value, &up_value| silu_derivatives(gate_value)[0] * up_value))
 }
 
+/// Cotangents of a SwiGLU layer's two pre-activation rows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwigluCotangents {
+    /// `dl/da_g = g_bar ⊙ s'(a_g) ⊙ a_u`.
+    pub gate: Array2<f64>,
+    /// `dl/da_u = g_bar ⊙ s(a_g)`.
+    pub up: Array2<f64>,
+}
+
+/// The analytic pullback of [`swiglu_hidden`] at the pre-activation rows for the
+/// hidden cotangent rows `g_bar`, with `s` and `s'` read from the SiLU jet's owner.
+pub fn swiglu_hidden_pullback(
+    gate: ArrayView2<'_, f64>,
+    up: ArrayView2<'_, f64>,
+    hidden_cotangent: ArrayView2<'_, f64>,
+) -> Result<SwigluCotangents, GatedRewriteError> {
+    require_shape("SwiGLU up pre-activations", gate.dim(), up.dim())?;
+    require_shape("SwiGLU hidden cotangent", gate.dim(), hidden_cotangent.dim())?;
+    require_finite("SwiGLU gate pre-activations", gate)?;
+    require_finite("SwiGLU up pre-activations", up)?;
+    require_finite("SwiGLU hidden cotangent", hidden_cotangent)?;
+    let mut gate_cotangent = Array2::zeros(gate.raw_dim());
+    let mut up_cotangent = Array2::zeros(gate.raw_dim());
+    Zip::from(&mut gate_cotangent)
+        .and(&mut up_cotangent)
+        .and(gate)
+        .and(up)
+        .and(hidden_cotangent)
+        .for_each(|gate_slot, up_slot, &gate_value, &up_value, &cotangent| {
+            let jet = silu_derivatives(gate_value);
+            *gate_slot = cotangent * jet[1] * up_value;
+            *up_slot = cotangent * jet[0];
+        });
+    Ok(SwigluCotangents {
+        gate: gate_cotangent,
+        up: up_cotangent,
+    })
+}
+
+/// The three weights of a SwiGLU layer, in torch `Linear` layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwigluFactor {
+    /// `W_g`, `H x d`: the SiLU gate read.
+    Gate,
+    /// `W_u`, `H x d`: the up read.
+    Up,
+    /// `W_d`, `d x H`: the write back into the residual stream.
+    Down,
+}
+
+impl fmt::Display for SwigluFactor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Gate => "gate",
+            Self::Up => "up",
+            Self::Down => "down",
+        })
+    }
+}
+
+/// A refused SwiGLU block construction or execution.
+#[derive(Debug)]
+pub enum SwigluError {
+    /// The input rows or a read do not compose with the weights.
+    Shape(ShapeMismatch),
+    /// A native primitive refused its summed input.
+    Primitive(GatedRewriteError),
+    /// A weight has no exact factor through its declared read.
+    Factor {
+        factor: SwigluFactor,
+        refusal: FactorRefusal,
+    },
+}
+
+impl From<ShapeMismatch> for SwigluError {
+    fn from(mismatch: ShapeMismatch) -> Self {
+        Self::Shape(mismatch)
+    }
+}
+
+impl From<GatedRewriteError> for SwigluError {
+    fn from(error: GatedRewriteError) -> Self {
+        Self::Primitive(error)
+    }
+}
+
+impl fmt::Display for SwigluError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Shape(mismatch) => write!(formatter, "SwiGLU block shapes do not compose: {mismatch}"),
+            Self::Primitive(error) => write!(formatter, "a SwiGLU native primitive refused: {error}"),
+            Self::Factor { factor, refusal } => {
+                write!(formatter, "the SwiGLU {factor} weight has no exact factor: {refusal}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SwigluError {}
+
+/// A bias-free SwiGLU layer on its original tensors (`Qwen3MLP`): the write of
+/// the normalized input rows `x` is `(s(x W_g^T) ⊙ (x W_u^T)) W_d^T`, with no
+/// residual added.
+#[derive(Clone, Debug)]
+pub struct NativeSwiglu {
+    gate: Array2<f64>,
+    up: Array2<f64>,
+    down: Array2<f64>,
+}
+
+impl NativeSwiglu {
+    /// The layer on `gate` and `up` (`H x d`) and `down` (`d x H`).
+    pub fn new(gate: Array2<f64>, up: Array2<f64>, down: Array2<f64>) -> Result<Self, GatedRewriteError> {
+        require_shape("SwiGLU up weight", gate.dim(), up.dim())?;
+        require_shape("SwiGLU down weight", (gate.ncols(), gate.nrows()), down.dim())?;
+        require_finite("SwiGLU gate weight", gate.view())?;
+        require_finite("SwiGLU up weight", up.view())?;
+        require_finite("SwiGLU down weight", down.view())?;
+        Ok(Self { gate, up, down })
+    }
+
+    /// The residual width `d`.
+    pub fn width(&self) -> usize {
+        self.gate.ncols()
+    }
+
+    /// The layer's write for every normalized input row, on the original tensors.
+    pub fn execute(&self, inputs: ArrayView2<'_, f64>) -> Result<Array2<f64>, GatedRewriteError> {
+        require_shape("SwiGLU input rows", (inputs.nrows(), self.width()), inputs.dim())?;
+        let hidden = swiglu_hidden(inputs.dot(&self.gate.t()).view(), inputs.dot(&self.up.t()).view())?;
+        Ok(hidden.dot(&self.down.t()))
+    }
+}
+
+/// How the three factors of a [`ComponentSwiglu`] execute.
+#[derive(Clone, Copy, Debug)]
+pub struct SwigluMask<'a> {
+    pub gate: ComponentMask<'a>,
+    pub up: ComponentMask<'a>,
+    pub down: ComponentMask<'a>,
+}
+
+/// A SwiGLU layer executed in component coordinates under masks.
+///
+/// Every weight factors exactly as `W = U R` through mpd-rewrite's
+/// [`ExactFactor`], and a masked factor reads `((x R^T) ⊙ m) U^T`, so the SiLU
+/// gate and the Hadamard product receive the same summed pre-activations as the
+/// edited tensors `U diag(m) R`. A factor left all on executes its original
+/// tensor on its original path, so a layer with every factor all on is
+/// bit-identical to [`NativeSwiglu::execute`].
+#[derive(Clone, Debug)]
+pub struct ComponentSwiglu {
+    native: NativeSwiglu,
+    gate: ExactFactor,
+    up: ExactFactor,
+    down: ExactFactor,
+}
+
+impl ComponentSwiglu {
+    /// Factors every weight of `native` exactly through its declared read.
+    pub fn new(
+        native: NativeSwiglu,
+        gate: ComponentRead<'_>,
+        up: ComponentRead<'_>,
+        down: ComponentRead<'_>,
+    ) -> Result<Self, SwigluError> {
+        let gate = solve_factor(SwigluFactor::Gate, native.gate.view(), gate)?;
+        let up = solve_factor(SwigluFactor::Up, native.up.view(), up)?;
+        let down = solve_factor(SwigluFactor::Down, native.down.view(), down)?;
+        Ok(Self {
+            native,
+            gate,
+            up,
+            down,
+        })
+    }
+
+    pub fn native(&self) -> &NativeSwiglu {
+        &self.native
+    }
+
+    /// The exact factor of one weight.
+    pub fn factor(&self, which: SwigluFactor) -> &ExactFactor {
+        match which {
+            SwigluFactor::Gate => &self.gate,
+            SwigluFactor::Up => &self.up,
+            SwigluFactor::Down => &self.down,
+        }
+    }
+
+    /// The layer's write for every normalized input row under `mask`.
+    pub fn execute(&self, inputs: ArrayView2<'_, f64>, mask: SwigluMask<'_>) -> Result<Array2<f64>, SwigluError> {
+        let gate = read_through(self.native.gate.view(), &self.gate, inputs, mask.gate)?;
+        let up = read_through(self.native.up.view(), &self.up, inputs, mask.up)?;
+        let hidden = swiglu_hidden(gate.view(), up.view())?;
+        Ok(read_through(self.native.down.view(), &self.down, hidden.view(), mask.down)?)
+    }
+}
+
+fn solve_factor(
+    which: SwigluFactor,
+    weight: ArrayView2<'_, f64>,
+    read: ComponentRead<'_>,
+) -> Result<ExactFactor, SwigluError> {
+    ExactFactor::solve_write(weight, read.read, read.candidate_write).map_err(|refusal| SwigluError::Factor {
+        factor: which,
+        refusal,
+    })
+}
+
+/// `x W^T` on the original tensor with the factor all on, else `U M R x`
+/// matrix-free through the factor.
+fn read_through(
+    native: ArrayView2<'_, f64>,
+    factor: &ExactFactor,
+    inputs: ArrayView2<'_, f64>,
+    mask: ComponentMask<'_>,
+) -> Result<Array2<f64>, ShapeMismatch> {
+    match mask {
+        ComponentMask::AllOn => {
+            if inputs.ncols() == native.ncols() {
+                Ok(inputs.dot(&native.t()))
+            } else {
+                Err(ShapeMismatch {
+                    what: "SwiGLU read input width",
+                    expected: native.ncols(),
+                    found: inputs.ncols(),
+                })
+            }
+        }
+        ComponentMask::Components(mask) => factor.apply_masked(inputs, mask),
+    }
+}
+
 /// The homogeneous read `(x, 1)` of every input row: an affine map `(W, b)` on
 /// `x` is the linear map `[W | b]` on it, so a bias is one more read column of a
 /// component factor.
@@ -220,6 +461,17 @@ pub enum MaskedNorm<'a> {
     },
 }
 
+/// Cotangents of a normalization's residual rows and its tied parameters.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NormCotangents {
+    /// `dl/dh` for every residual row.
+    pub residual: Array2<f64>,
+    /// `dl/dw`, summed over rows: every row reads the same gain.
+    pub gain: Array1<f64>,
+    /// `dl/dbeta` of a LayerNorm, summed over rows; an RMSNorm has no bias.
+    pub bias: Option<Array1<f64>>,
+}
+
 impl MaskedNorm<'_> {
     /// The normalized residual rows, in the source's order of operations:
     /// normalize, multiply by the gain, then add the bias.
@@ -253,11 +505,7 @@ impl MaskedNorm<'_> {
             } => {
                 require_vector("LayerNorm gain", width, gain)?;
                 require_vector("LayerNorm bias", width, bias)?;
-                let mut centred = residual.to_owned();
-                for mut row in centred.rows_mut() {
-                    let mean = row.sum() / width as f64;
-                    row.mapv_inplace(|value| value - mean);
-                }
+                let centred = centred_rows(residual);
                 let normalizers = rms_normalizers(centred.view(), epsilon)?;
                 for ((output_row, centred_row), &inverse_root) in output
                     .rows_mut()
@@ -277,6 +525,94 @@ impl MaskedNorm<'_> {
         }
         Ok(output)
     }
+
+    /// The analytic pullback of [`MaskedNorm::apply`] at `residual` for the output
+    /// cotangent rows `y_bar`.
+    ///
+    /// Per row, with `z = w ⊙ y_bar` and `nu = (mean(x^2) + eps)^(-1/2)`, the
+    /// normalization `n = x nu` pulls back as `x_bar = nu z - (nu^3 / d)(z^T x) x`.
+    /// An RMSNorm reads `x = h`, so `h_bar = x_bar`. A LayerNorm reads `x = P h`,
+    /// and the centring projector is symmetric, so `h_bar = x_bar - mean(x_bar)`.
+    /// The gain cotangent sums `y_bar ⊙ n` over rows, and a LayerNorm's bias
+    /// cotangent sums `y_bar`.
+    pub fn pullback(
+        &self,
+        residual: ArrayView2<'_, f64>,
+        output_cotangent: ArrayView2<'_, f64>,
+    ) -> Result<NormCotangents, GatedRewriteError> {
+        let width = residual.ncols();
+        if width == 0 {
+            return Err(GatedRewriteError::EmptyResidual);
+        }
+        require_shape("normalization output cotangent", residual.dim(), output_cotangent.dim())?;
+        require_finite("normalized residual rows", residual)?;
+        require_finite("normalization output cotangent", output_cotangent)?;
+        let (epsilon, gain, centring) = match *self {
+            Self::Rms { epsilon, gain } => {
+                require_vector("RMSNorm gain", width, gain)?;
+                (epsilon, gain, false)
+            }
+            Self::Layer {
+                epsilon,
+                gain,
+                bias,
+            } => {
+                require_vector("LayerNorm gain", width, gain)?;
+                require_vector("LayerNorm bias", width, bias)?;
+                (epsilon, gain, true)
+            }
+        };
+        let read = if centring {
+            centred_rows(residual)
+        } else {
+            residual.to_owned()
+        };
+        let normalizers = rms_normalizers(read.view(), epsilon)?;
+        let mut residual_cotangent = Array2::zeros(residual.raw_dim());
+        let mut gain_cotangent = Array1::zeros(width);
+        for (((cotangent_row, read_row), output_row), &inverse_root) in residual_cotangent
+            .rows_mut()
+            .into_iter()
+            .zip(read.rows())
+            .zip(output_cotangent.rows())
+            .zip(normalizers.iter())
+        {
+            let scaled = Zip::from(gain)
+                .and(output_row)
+                .map_collect(|&weight, &cotangent| weight * cotangent);
+            let radial = inverse_root * inverse_root * inverse_root * scaled.dot(&read_row) / width as f64;
+            let mut read_cotangent = Zip::from(&scaled)
+                .and(read_row)
+                .map_collect(|&direction, &value| inverse_root * direction - radial * value);
+            if centring {
+                let cotangent_mean = read_cotangent.sum() / width as f64;
+                read_cotangent.mapv_inplace(|value| value - cotangent_mean);
+            }
+            Zip::from(cotangent_row)
+                .and(&read_cotangent)
+                .for_each(|slot, &value| *slot = value);
+            Zip::from(&mut gain_cotangent)
+                .and(output_row)
+                .and(read_row)
+                .for_each(|slot, &cotangent, &value| *slot += cotangent * (value * inverse_root));
+        }
+        Ok(NormCotangents {
+            residual: residual_cotangent,
+            gain: gain_cotangent,
+            bias: centring.then(|| output_cotangent.sum_axis(Axis(0))),
+        })
+    }
+}
+
+/// Every row minus its own mean, the LayerNorm read `P h`.
+fn centred_rows(residual: ArrayView2<'_, f64>) -> Array2<f64> {
+    let width = residual.ncols() as f64;
+    let mut centred = residual.to_owned();
+    for mut row in centred.rows_mut() {
+        let mean = row.sum() / width;
+        row.mapv_inplace(|value| value - mean);
+    }
+    centred
 }
 
 fn require_epsilon(epsilon: f64) -> Result<(), GatedRewriteError> {
@@ -358,11 +694,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        GatedRewriteError, MaskedNorm, ResidualLayout, decoder_layer, homogeneous_read, rms_normalizers,
-        swiglu_hidden,
+        ComponentSwiglu, GatedRewriteError, MaskedNorm, NativeSwiglu, ResidualLayout, SwigluError, SwigluFactor,
+        SwigluMask, decoder_layer, homogeneous_read, rms_normalizers, swiglu_hidden, swiglu_hidden_pullback,
     };
+    use crate::parameter_decomposition::rewrite::{ComponentMask, ComponentRead, FactorRefusal};
     use gam_math::gaussian_gated::silu_derivatives;
-    use ndarray::{Array, Array1, Array2, ArrayView2, Dimension, Zip, array, s};
+    use ndarray::{Array, Array1, Array2, ArrayView2, Axis, Dimension, Zip, arr0, array, s};
     use qd::Quad;
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
@@ -374,6 +711,14 @@ mod tests {
     /// and `sigma (1 - sigma) = e^-|t| / (1 + e^-|t|)^2 <= e^-|t|`, so
     /// `|s'| <= 1 + sup_t t e^-t = 1 + 1/e < 1 + 3/8`, because `e > 8/3`.
     const SILU_LIPSCHITZ: f64 = 1.375;
+
+    /// `|s''| = |2 sigma' + t sigma''| <= 1/2 + 1/e < 7/8`: `sigma' <= 1/4`, and
+    /// `|sigma''| = sigma' |1 - 2 sigma| <= sigma' <= e^-|t|` with `sup t e^-t = 1/e < 3/8`.
+    const SILU_SECOND_BOUND: f64 = 0.875;
+
+    /// `|s'''| = |3 sigma'' + t sigma'''| <= 3/4 + 1/e < 9/8`: `|sigma''| <= sigma' <= 1/4`,
+    /// and `|sigma'''| = sigma' |1 - 6 sigma'| <= sigma' <= e^-|t|` because `0 <= sigma' <= 1/4`.
+    const SILU_THIRD_BOUND: f64 = 1.125;
 
     const ROWS: usize = 3;
     const INPUT_DIM: usize = 6;
@@ -403,15 +748,44 @@ mod tests {
         tolerance.mapv(|value| value / factor)
     }
 
+    /// `2^-100`: qd's double-double resolves about `2^-104` relative per operation,
+    /// so this per-operation allowance covers the oracle's own error.
+    fn quad_relative() -> f64 {
+        0.5_f64.powi(100)
+    }
+
+    fn quad(value: f64) -> Quad {
+        Quad::from_f64(value)
+    }
+
+    fn quad_to_f64(value: Quad) -> f64 {
+        value.0 + value.1
+    }
+
+    fn quad_logistic(t: Quad) -> Quad {
+        quad(1.0) / (quad(1.0) + (-t).exp())
+    }
+
+    fn quad_silu(t: Quad) -> Quad {
+        t * quad_logistic(t)
+    }
+
     /// `|fl(s(t)) - s(t)|` at a floating-point `t`, measured against the
-    /// double-double `t / (1 + e^-t)`. IEEE 754 does not bound the error of libm's
+    /// double-double `t sigma(t)`. IEEE 754 does not bound the error of libm's
     /// `exp`, so this is measured rather than assumed; rounding the difference to
     /// f64 costs at most `u` of it, and the oracle's own error, about 106 bits
     /// down, lies below the added `u |fl(s(t))|`.
     fn silu_evaluation_error(t: f64) -> f64 {
-        let oracle = Quad::from_f64(t) / (Quad::from_f64(1.0) + Quad::from_f64(-t).exp());
-        let difference = Quad::from_f64(silu(t)) - oracle;
-        (difference.0 + difference.1).abs() / (1.0 - UNIT_ROUNDOFF) + UNIT_ROUNDOFF * silu(t).abs()
+        let difference = quad(silu(t)) - quad_silu(quad(t));
+        quad_to_f64(difference).abs() / (1.0 - UNIT_ROUNDOFF) + UNIT_ROUNDOFF * silu(t).abs()
+    }
+
+    /// `|fl(s'(t)) - s'(t)|`, measured against the double-double `sigma + t sigma (1 - sigma)`.
+    fn silu_slope_evaluation_error(t: f64) -> f64 {
+        let sigma = quad_logistic(quad(t));
+        let oracle = sigma + quad(t) * sigma * (quad(1.0) - sigma);
+        let slope = silu_derivatives(t)[1];
+        quad_to_f64(quad(slope) - oracle).abs() / (1.0 - UNIT_ROUNDOFF) + UNIT_ROUNDOFF * slope.abs()
     }
 
     fn uniform_rows(rng: &mut StdRng, rows: usize, cols: usize, low: f64, high: f64) -> Array2<f64> {
@@ -608,6 +982,42 @@ mod tests {
         (sum, radius + &summation_radius)
     }
 
+    /// A random bias-free SwiGLU layer with overcomplete reads on every weight, its
+    /// exact component factorization and input rows.
+    fn random_component_swiglu(seed: u64) -> (ComponentSwiglu, Array2<f64>) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let native = NativeSwiglu::new(
+            uniform_rows(&mut rng, HIDDEN_DIM, INPUT_DIM, -1.0, 1.0),
+            uniform_rows(&mut rng, HIDDEN_DIM, INPUT_DIM, -1.0, 1.0),
+            uniform_rows(&mut rng, INPUT_DIM, HIDDEN_DIM, -1.0, 1.0),
+        )
+        .expect("finite weights of composing shapes");
+        let gate_read = uniform_rows(&mut rng, GATE_COMPONENTS, INPUT_DIM, -1.0, 1.0);
+        let gate_candidate = uniform_rows(&mut rng, HIDDEN_DIM, GATE_COMPONENTS, -1.0, 1.0);
+        let up_read = uniform_rows(&mut rng, UP_COMPONENTS, INPUT_DIM, -1.0, 1.0);
+        let up_candidate = uniform_rows(&mut rng, HIDDEN_DIM, UP_COMPONENTS, -1.0, 1.0);
+        let down_read = uniform_rows(&mut rng, DOWN_COMPONENTS, HIDDEN_DIM, -1.0, 1.0);
+        let down_candidate = uniform_rows(&mut rng, INPUT_DIM, DOWN_COMPONENTS, -1.0, 1.0);
+        let component = ComponentSwiglu::new(
+            native,
+            ComponentRead {
+                read: gate_read.view(),
+                candidate_write: gate_candidate.view(),
+            },
+            ComponentRead {
+                read: up_read.view(),
+                candidate_write: up_candidate.view(),
+            },
+            ComponentRead {
+                read: down_read.view(),
+                candidate_write: down_candidate.view(),
+            },
+        )
+        .expect("overcomplete random reads resolve");
+        let inputs = uniform_rows(&mut rng, ROWS, INPUT_DIM, -2.0, 2.0);
+        (component, inputs)
+    }
+
     #[test]
     fn swiglu_rewrite_equals_direct_edited_tensor_execution_for_every_mask_kind() {
         let mut rng = StdRng::seed_from_u64(2951);
@@ -678,6 +1088,424 @@ mod tests {
             "the separately gated sum {gate_sum} must differ from the whole block {whole} beyond \
              the derived bound {gate_tolerance} somewhere; the same instrument accepts the up split"
         );
+    }
+
+    #[test]
+    fn component_swiglu_all_on_is_the_native_layer_bit_for_bit() {
+        let (component, inputs) = random_component_swiglu(2959);
+        let all_on = SwigluMask {
+            gate: ComponentMask::AllOn,
+            up: ComponentMask::AllOn,
+            down: ComponentMask::AllOn,
+        };
+        let native = component.native().execute(inputs.view()).expect("finite rows");
+        assert_eq!(
+            component.execute(inputs.view(), all_on).expect("finite rows"),
+            native,
+            "every factor all on must execute the original tensors on their original path"
+        );
+        let ones = Array1::ones(GATE_COMPONENTS);
+        let components_on = SwigluMask {
+            gate: ComponentMask::Components(ones.view()),
+            ..all_on
+        };
+        // The factored gate read at an all-ones mask is algebraically the same layer
+        // but a different floating-point program, so bit identity is not automatic.
+        let factored = component.execute(inputs.view(), components_on).expect("finite rows");
+        assert!(
+            factored.iter().zip(native.iter()).any(|(&rewritten, &original)| rewritten != original),
+            "positive control: the factored gate read must differ from the native read in some bit"
+        );
+    }
+
+    #[test]
+    fn component_swiglu_equals_its_edited_tensors_under_every_mask_kind() {
+        let (component, inputs) = random_component_swiglu(2960);
+        let mut rng = StdRng::seed_from_u64(2961);
+        let as_fixture = |which: SwigluFactor| Factor {
+            writes: component.factor(which).write().to_owned(),
+            reads: component.factor(which).read().to_owned(),
+        };
+        let fixture = SwigluFixture {
+            gate: as_fixture(SwigluFactor::Gate),
+            up: as_fixture(SwigluFactor::Up),
+            down: as_fixture(SwigluFactor::Down),
+        };
+        for kind in MaskKind::ALL {
+            let masks = SwigluMasks {
+                gate: kind.draw(&mut rng, GATE_COMPONENTS),
+                up: kind.draw(&mut rng, UP_COMPONENTS),
+                down: kind.draw(&mut rng, DOWN_COMPONENTS),
+            };
+            let rewritten = component
+                .execute(
+                    inputs.view(),
+                    SwigluMask {
+                        gate: ComponentMask::Components(masks.gate.view()),
+                        up: ComponentMask::Components(masks.up.view()),
+                        down: ComponentMask::Components(masks.down.view()),
+                    },
+                )
+                .expect("finite rows");
+            let (factored, factored_radius) = swiglu_block(&fixture, &masks, inputs.view(), Route::Factored);
+            let (executed, executed_radius) = swiglu_block(&fixture, &masks, inputs.view(), Route::Direct);
+            assert_eq!(
+                rewritten, factored,
+                "{kind:?}: ComponentSwiglu must run the factored program ((x R^T) ⊙ m) U^T bit for bit"
+            );
+            let tolerance = inflate(factored_radius + &executed_radius, fixture.tolerance_operations());
+            for (((row, column), &rewrite_value), (&direct_value, &bound)) in rewritten
+                .indexed_iter()
+                .zip(executed.iter().zip(tolerance.iter()))
+            {
+                assert!(
+                    (rewrite_value - direct_value).abs() <= bound,
+                    "{kind:?} masks, row {row}, output {column}: component layer {rewrite_value:e}, \
+                     edited tensors {direct_value:e}, derived roundoff bound {bound:e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn component_swiglu_refuses_an_uncovering_read_and_mismatched_weights() {
+        let mut rng = StdRng::seed_from_u64(2962);
+        let native = || {
+            NativeSwiglu::new(
+                Array2::from_elem((HIDDEN_DIM, INPUT_DIM), 0.5),
+                Array2::from_elem((HIDDEN_DIM, INPUT_DIM), -0.25),
+                Array2::from_elem((INPUT_DIM, HIDDEN_DIM), 0.75),
+            )
+            .expect("composing shapes")
+        };
+        let narrow_read = uniform_rows(&mut rng, INPUT_DIM - 2, INPUT_DIM, -1.0, 1.0);
+        let narrow_candidate = uniform_rows(&mut rng, HIDDEN_DIM, INPUT_DIM - 2, -1.0, 1.0);
+        let wide_read = uniform_rows(&mut rng, GATE_COMPONENTS, INPUT_DIM, -1.0, 1.0);
+        let wide_candidate = uniform_rows(&mut rng, HIDDEN_DIM, GATE_COMPONENTS, -1.0, 1.0);
+        let down_read = uniform_rows(&mut rng, DOWN_COMPONENTS, HIDDEN_DIM, -1.0, 1.0);
+        let down_candidate = uniform_rows(&mut rng, INPUT_DIM, DOWN_COMPONENTS, -1.0, 1.0);
+        let narrow = ComponentRead {
+            read: narrow_read.view(),
+            candidate_write: narrow_candidate.view(),
+        };
+        let wide = ComponentRead {
+            read: wide_read.view(),
+            candidate_write: wide_candidate.view(),
+        };
+        let down = ComponentRead {
+            read: down_read.view(),
+            candidate_write: down_candidate.view(),
+        };
+        assert!(
+            matches!(
+                ComponentSwiglu::new(native(), narrow, wide, down),
+                Err(SwigluError::Factor {
+                    factor: SwigluFactor::Gate,
+                    refusal: FactorRefusal::Uncovered { .. },
+                })
+            ),
+            "a gate read with fewer components than input directions must be refused"
+        );
+        assert!(
+            ComponentSwiglu::new(native(), wide, wide, down).is_ok(),
+            "positive control: overcomplete reads on every weight are accepted"
+        );
+        assert!(matches!(
+            NativeSwiglu::new(
+                Array2::zeros((HIDDEN_DIM, INPUT_DIM)),
+                Array2::zeros((HIDDEN_DIM, INPUT_DIM)),
+                Array2::zeros((HIDDEN_DIM, INPUT_DIM)),
+            ),
+            Err(GatedRewriteError::ShapeMismatch {
+                what: "SwiGLU down weight",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn swiglu_hidden_pullback_matches_a_double_double_central_difference() {
+        let mut rng = StdRng::seed_from_u64(2957);
+        let width = 7;
+        let gate = uniform_rows(&mut rng, ROWS, width, -4.0, 4.0);
+        let up = uniform_rows(&mut rng, ROWS, width, -2.0, 2.0);
+        let cotangent = uniform_rows(&mut rng, ROWS, width, -1.0, 1.0);
+        let gate_direction = uniform_rows(&mut rng, ROWS, width, -1.0, 1.0);
+        let up_direction = uniform_rows(&mut rng, ROWS, width, -1.0, 1.0);
+        let cotangents =
+            swiglu_hidden_pullback(gate.view(), up.view(), cotangent.view()).expect("finite fixture");
+
+        // `<c_g, v_g> + <c_u, v_u>`, summed in double-double so only the f64 entries round.
+        let directional = |gate_cotangent: &Array2<f64>, up_cotangent: &Array2<f64>| {
+            gate_direction.indexed_iter().fold(quad(0.0), |sum, (index, &direction)| {
+                sum + quad(gate_cotangent[index]) * quad(direction)
+                    + quad(up_cotangent[index]) * quad(up_direction[index])
+            })
+        };
+        // `f(t) = <g_bar, s(a_g + t v_g) ⊙ (a_u + t v_u)>` in double-double.
+        let block = |step: f64| {
+            gate.indexed_iter().fold(quad(0.0), |sum, (index, &gate_value)| {
+                let gate_point = quad(gate_value) + quad(step) * quad(gate_direction[index]);
+                let up_point = quad(up[index]) + quad(step) * quad(up_direction[index]);
+                sum + quad(cotangent[index]) * quad_silu(gate_point) * up_point
+            })
+        };
+        let entries = ROWS * width;
+        let step = 0.5_f64.powi(20);
+        let central = (block(step) - block(-step)) / quad(2.0 * step);
+
+        // f64 entry radii: `c_g = fl(fl(g_bar fl(s')) a_u)` and `c_u = fl(g_bar fl(s))`.
+        let mut entry_radius = 0.0;
+        let mut third_derivative = 0.0;
+        let mut oracle_magnitude = 0.0;
+        let mut predicted_magnitude = 0.0;
+        for (index, &t) in gate.indexed_iter() {
+            let gate_entry = cotangents.gate[index];
+            let up_entry = cotangents.up[index];
+            let hidden = cotangent[index];
+            let gate_radius = gamma(2) * gate_entry.abs() / (1.0 - gamma(2))
+                + (hidden * up[index]).abs() * silu_slope_evaluation_error(t);
+            let up_radius =
+                UNIT_ROUNDOFF * up_entry.abs() / (1.0 - UNIT_ROUNDOFF) + hidden.abs() * silu_evaluation_error(t);
+            entry_radius += gate_radius * gate_direction[index].abs() + up_radius * up_direction[index].abs();
+            // `f_i''' = g_bar_i [v_g^3 s''' (a_u + t v_u) + 3 v_g^2 v_u s'']` on `|t| <= step`.
+            third_derivative += hidden.abs()
+                * (gate_direction[index].abs().powi(3)
+                    * SILU_THIRD_BOUND
+                    * (up[index].abs() + step * up_direction[index].abs())
+                    + 3.0 * gate_direction[index].powi(2) * up_direction[index].abs() * SILU_SECOND_BOUND);
+            oracle_magnitude += hidden.abs()
+                * (silu(t).abs() + silu_evaluation_error(t) + SILU_LIPSCHITZ * step * gate_direction[index].abs())
+                * (up[index].abs() + step * up_direction[index].abs());
+            predicted_magnitude +=
+                (gate_entry * gate_direction[index]).abs() + (up_entry * up_direction[index]).abs();
+        }
+        // Central difference: `|D(step) - f'(0)| <= step^2 / 6 sup |f'''|`. The oracle's
+        // own error: at most `entries + 8` operations per evaluation at `2^-100`, divided
+        // by the step, and the predicted sum's `2 entries` operations.
+        let tolerance = entry_radius
+            + step * step / 6.0 * third_derivative
+            + quad_relative() * (entries + 8) as f64 * oracle_magnitude / step
+            + quad_relative() * (2 * entries) as f64 * predicted_magnitude;
+        let tolerance = inflate(arr0(tolerance), 6 * entries + 16).into_scalar();
+        let difference = quad_to_f64(directional(&cotangents.gate, &cotangents.up) - central).abs();
+        assert!(
+            difference / (1.0 - UNIT_ROUNDOFF) <= tolerance,
+            "the SwiGLU pullback's directional derivative differs from the double-double central \
+             difference by {difference:e}, beyond the derived bound {tolerance:e}"
+        );
+        let without_up_factor = Zip::from(&cotangent)
+            .and(&gate)
+            .map_collect(|&hidden, &gate_value| hidden * silu_derivatives(gate_value)[1]);
+        let wrong_difference = quad_to_f64(directional(&without_up_factor, &cotangents.up) - central).abs();
+        assert!(
+            wrong_difference > tolerance,
+            "positive control: a gate cotangent missing the up factor must differ beyond the bound \
+             {tolerance:e}, got {wrong_difference:e}"
+        );
+    }
+
+    #[test]
+    fn norm_pullbacks_match_a_double_double_central_difference() {
+        let mut rng = StdRng::seed_from_u64(2958);
+        let dim = 8;
+        // Eighths below 3 in magnitude: every row's LayerNorm centring is exact.
+        let residual = Array2::from_shape_simple_fn((ROWS, dim), || rng.random_range(-24..24) as f64 / 8.0);
+        let gain = Array1::from_shape_simple_fn(dim, || rng.random_range(-2.0..2.0));
+        let bias = Array1::from_shape_simple_fn(dim, || rng.random_range(-2.0..2.0));
+        let output_cotangent = uniform_rows(&mut rng, ROWS, dim, -1.0, 1.0);
+        let residual_direction = uniform_rows(&mut rng, ROWS, dim, -1.0, 1.0);
+        let gain_direction = Array1::from_shape_simple_fn(dim, || rng.random_range(-1.0..1.0));
+        let bias_direction = Array1::from_shape_simple_fn(dim, || rng.random_range(-1.0..1.0));
+        let epsilon = 1.0e-5;
+        for centring in [false, true] {
+            let norm = if centring {
+                MaskedNorm::Layer {
+                    epsilon,
+                    gain: gain.view(),
+                    bias: bias.view(),
+                }
+            } else {
+                MaskedNorm::Rms {
+                    epsilon,
+                    gain: gain.view(),
+                }
+            };
+            let cotangents = norm
+                .pullback(residual.view(), output_cotangent.view())
+                .expect("finite fixture");
+            let read = if centring {
+                let means = residual.sum_axis(Axis(1)) / dim as f64;
+                &residual - &means.insert_axis(Axis(1))
+            } else {
+                residual.clone()
+            };
+            let direction_means: Vec<Quad> = (0..ROWS)
+                .map(|row| {
+                    (0..dim).fold(quad(0.0), |sum, column| sum + quad(residual_direction[[row, column]]))
+                        / quad(dim as f64)
+                })
+                .collect();
+            let read_direction = Array2::from_shape_fn((ROWS, dim), |(row, column)| {
+                let direction = quad(residual_direction[[row, column]]);
+                if centring { direction - direction_means[row] } else { direction }
+            });
+
+            // `f(t) = sum_r <y_bar_r, N(h_r + t v_r; w + t omega, beta + t b)>` in double-double.
+            let evaluate = |step: f64| {
+                (0..ROWS).fold(quad(0.0), |total, row| {
+                    let points: Vec<Quad> = (0..dim)
+                        .map(|column| quad(read[[row, column]]) + quad(step) * read_direction[[row, column]])
+                        .collect();
+                    let square = points.iter().fold(quad(0.0), |sum, point| sum + *point * *point);
+                    let inverse_root = quad(1.0) / (square / quad(dim as f64) + quad(epsilon)).sqrt();
+                    (0..dim).fold(total, |sum, column| {
+                        let cotangent = quad(output_cotangent[[row, column]]);
+                        let weight = quad(gain[column]) + quad(step) * quad(gain_direction[column]);
+                        let offset = if centring {
+                            cotangent * (quad(bias[column]) + quad(step) * quad(bias_direction[column]))
+                        } else {
+                            quad(0.0)
+                        };
+                        sum + cotangent * weight * points[column] * inverse_root + offset
+                    })
+                })
+            };
+            let directional = |residual_cotangent: &Array2<f64>| {
+                let residual_part = Zip::from(residual_cotangent)
+                    .and(&residual_direction)
+                    .fold(quad(0.0), |sum, &value, &direction| sum + quad(value) * quad(direction));
+                let gain_part = Zip::from(&cotangents.gain)
+                    .and(&gain_direction)
+                    .fold(quad(0.0), |sum, &value, &direction| sum + quad(value) * quad(direction));
+                let bias_part = match &cotangents.bias {
+                    Some(bias_cotangent) => Zip::from(bias_cotangent)
+                        .and(&bias_direction)
+                        .fold(quad(0.0), |sum, &value, &direction| sum + quad(value) * quad(direction)),
+                    None => quad(0.0),
+                };
+                residual_part + gain_part + bias_part
+            };
+
+            // Cauchy, per row: along `x_r + t v_r`, `q_r(t) + eps = a_r + b_r t + c_r t^2`. On
+            // `|t| <= R_r` with `|b_r| R_r + c_r R_r^2 = a_r / 2`, `|q_r + eps| >= a_r / 2`. With
+            // `R = min_r R_r` the normalized part of `f` is bounded on `|t| <= R` by
+            // `M = sum_r P_r (2 / a_r)^(1/2)`, the bias part is linear, and for `|s| <= R / 2`,
+            // `|f'''(s)| <= 3! M / (R / 2)^3`: the central difference is within `8 step^2 M / R^3`.
+            let direction_f64 = read_direction.mapv(quad_to_f64);
+            let quadratics: Vec<(f64, f64, f64)> = (0..ROWS)
+                .map(|row| {
+                    let x = read.row(row);
+                    let v = direction_f64.row(row);
+                    (x.dot(&x) / dim as f64 + epsilon, 2.0 * x.dot(&v) / dim as f64, v.dot(&v) / dim as f64)
+                })
+                .collect();
+            let radius = quadratics
+                .iter()
+                .map(|&(a, b, c)| a / (b.abs() + (b * b + 2.0 * a * c).sqrt()))
+                .fold(f64::INFINITY, f64::min);
+            let bound_m = (0..ROWS)
+                .map(|row| {
+                    (0..dim)
+                        .map(|column| {
+                            output_cotangent[[row, column]].abs()
+                                * (gain[column].abs() + radius * gain_direction[column].abs())
+                                * (read[[row, column]].abs() + radius * direction_f64[[row, column]].abs())
+                        })
+                        .sum::<f64>()
+                        * (2.0 / quadratics[row].0).sqrt()
+                })
+                .sum::<f64>();
+            let step = radius * 0.5_f64.powi(20);
+            let central = (evaluate(step) - evaluate(-step)) / quad(2.0 * step);
+
+            // f64 entry radii. `nu` passes `d + 4` rounded operations; every term of
+            // `x_bar = nu z - (nu^3 / d)(z^T x) x` passes at most `4 d + 20`. The LayerNorm
+            // centring of the cotangent adds its mean's radius and `gamma_(d + 1)`. The gain
+            // cotangent's terms pass `d + 6` operations and the row sum `rows`; the bias
+            // cotangent's row sum `rows - 1`.
+            let term_gamma = gamma(4 * dim + 20);
+            let centring_gamma = gamma(dim + 1);
+            let gain_gamma = gamma(dim + 6 + ROWS);
+            let summation = gamma(ROWS - 1);
+            let mut entry_radius = 0.0;
+            let mut predicted_magnitude = 0.0;
+            let mut gain_magnitude = Array1::<f64>::zeros(dim);
+            let mut flipped_radial = cotangents.residual.clone();
+            let mut uncentred = cotangents.residual.clone();
+            for row in 0..ROWS {
+                let x = read.row(row);
+                let inverse_root = super::inverse_root_mean_square(row, x, epsilon).expect("finite row");
+                let scaled = &gain * &output_cotangent.row(row);
+                let projection = scaled.dot(&x);
+                let absolute_projection = Zip::from(&scaled)
+                    .and(x)
+                    .fold(0.0, |sum, &direction, &value| sum + (direction * value).abs());
+                let radial = inverse_root.powi(3) * projection / dim as f64;
+                let radial_magnitude = inverse_root.powi(3) * (projection.abs() + absolute_projection) / dim as f64;
+                let magnitudes = Zip::from(&scaled)
+                    .and(x)
+                    .map_collect(|&direction, &value| inverse_root * direction.abs() + radial_magnitude * value.abs());
+                let read_radius = magnitudes.mapv(|magnitude| term_gamma * magnitude / (1.0 - term_gamma));
+                let mean_radius = read_radius.sum() / dim as f64;
+                let mean_magnitude = magnitudes.sum() / dim as f64;
+                let scaled_mean = scaled.sum() / dim as f64;
+                for column in 0..dim {
+                    let residual_entry_radius = if centring {
+                        read_radius[column]
+                            + mean_radius
+                            + centring_gamma * (magnitudes[column] + mean_magnitude) / (1.0 - centring_gamma)
+                    } else {
+                        read_radius[column]
+                    };
+                    entry_radius += residual_entry_radius * residual_direction[[row, column]].abs();
+                    gain_magnitude[column] += (output_cotangent[[row, column]] * x[column] * inverse_root).abs();
+                    predicted_magnitude +=
+                        (cotangents.residual[[row, column]] * residual_direction[[row, column]]).abs();
+                    flipped_radial[[row, column]] += 2.0 * radial * x[column];
+                    uncentred[[row, column]] += inverse_root * scaled_mean;
+                }
+            }
+            let mut bias_oracle_magnitude = 0.0;
+            for column in 0..dim {
+                entry_radius +=
+                    gain_gamma * gain_magnitude[column] / (1.0 - gain_gamma) * gain_direction[column].abs();
+                predicted_magnitude += (cotangents.gain[column] * gain_direction[column]).abs();
+                if centring {
+                    let bias_magnitude = (0..ROWS).map(|row| output_cotangent[[row, column]].abs()).sum::<f64>();
+                    entry_radius += summation * bias_magnitude / (1.0 - summation) * bias_direction[column].abs();
+                    predicted_magnitude += bias_magnitude * bias_direction[column].abs();
+                    bias_oracle_magnitude +=
+                        bias_magnitude * (bias[column].abs() + step * bias_direction[column].abs());
+                }
+            }
+            let entries = ROWS * dim;
+            let tolerance = entry_radius
+                + 8.0 * step * step * bound_m / radius.powi(3)
+                + quad_relative() * (4 * entries + 8) as f64 * (bound_m + bias_oracle_magnitude) / step
+                + quad_relative() * (3 * entries) as f64 * predicted_magnitude;
+            let tolerance = inflate(arr0(tolerance), 6 * entries + 30).into_scalar();
+            let difference = quad_to_f64(directional(&cotangents.residual) - central).abs();
+            assert!(
+                difference / (1.0 - UNIT_ROUNDOFF) <= tolerance,
+                "centring {centring}: the norm pullback's directional derivative differs from the \
+                 double-double central difference by {difference:e}, beyond the derived bound {tolerance:e}"
+            );
+            let flipped_difference = quad_to_f64(directional(&flipped_radial) - central).abs();
+            assert!(
+                flipped_difference > tolerance,
+                "positive control (centring {centring}): a sign-flipped radial term must differ beyond \
+                 the bound {tolerance:e}, got {flipped_difference:e}"
+            );
+            if centring {
+                let uncentred_difference = quad_to_f64(directional(&uncentred) - central).abs();
+                assert!(
+                    uncentred_difference > tolerance,
+                    "positive control: a LayerNorm cotangent left uncentred must differ beyond the bound \
+                     {tolerance:e}, got {uncentred_difference:e}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -960,6 +1788,13 @@ mod tests {
             Ok(array![[0.0]]),
             "positive control: a finite pair is accepted"
         );
+        assert!(matches!(
+            swiglu_hidden_pullback(array![[1.0]].view(), array![[1.0]].view(), array![[1.0, 2.0]].view()),
+            Err(GatedRewriteError::ShapeMismatch {
+                what: "SwiGLU hidden cotangent",
+                ..
+            })
+        ));
 
         let gain = array![1.0, 1.0];
         let zero = array![[0.0, 0.0]];
@@ -1007,6 +1842,17 @@ mod tests {
             }
             .apply(zero.view()),
             Err(GatedRewriteError::ShapeMismatch { what: "RMSNorm gain", .. })
+        ));
+        assert!(matches!(
+            MaskedNorm::Rms {
+                epsilon: 1.0e-6,
+                gain: gain.view(),
+            }
+            .pullback(zero.view(), array![[1.0, 2.0, 3.0]].view()),
+            Err(GatedRewriteError::ShapeMismatch {
+                what: "normalization output cotangent",
+                ..
+            })
         ));
         let empty_rows = Array2::<f64>::zeros((1, 0));
         let empty = Array1::<f64>::zeros(0);
