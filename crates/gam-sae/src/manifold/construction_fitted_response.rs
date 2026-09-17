@@ -42,6 +42,11 @@ pub(crate) enum FittedResponseDivergenceEstimator {
 }
 
 /// The within-basin Stein degrees of freedom of the fitted reconstruction.
+///
+/// Only the smooth response inside one basin is differentiated. The selected TopK
+/// support, frozen routing, and the basin the inner solve converged to are held
+/// fixed, so the selection (search) degrees of freedom of a support swap or a basin
+/// switch are omitted, not estimated (#2933 F37).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FittedResponseDivergence {
     pub(crate) divergence: f64,
@@ -98,7 +103,9 @@ impl SaeManifoldTerm {
     /// entries.
     ///
     /// The decoder frames are held at their fitted orientation, so on a framed
-    /// term this is the divergence conditional on the fitted frames.
+    /// term this is the divergence conditional on the fitted frames. The TopK
+    /// support and the converged basin are held fixed in the same way, so the trace
+    /// carries no selection degrees of freedom (#2933 F37).
     pub(crate) fn fitted_response_divergence(
         &self,
         target: ArrayView2<'_, f64>,

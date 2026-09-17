@@ -576,7 +576,9 @@ impl SaeManifoldTerm {
                 // and a clamped prior majorizer. An off-diagonal residual curvature
                 // `A = [[1, c], [c, 1]]` gave it zero where the trace correction is
                 // `2/(1−c²) − 2`, and it went silent on atoms without ARD and on atoms
-                // without a second jet.
+                // without a second jet. The divergence holds the fitted routing (TopK
+                // support, converged basin) fixed, so selection degrees of freedom are
+                // omitted, not estimated; see the fn doc (#2933 F37).
                 let fitted = self.try_fitted_for_rho(rho)?;
                 if fitted.dim() != residual.dim() {
                     return Err(format!(
