@@ -3511,6 +3511,46 @@ mod encode_fix_tests {
         );
     }
 
+    /// #2933 F25: the containment metric folds every cover circle by the kind's
+    /// own chart period. The Möbius band's cover angle has period 2 and the Klein
+    /// bottle's two cover circles period 1. The old hand-kept table left both
+    /// unwrapped, so an iterate just across the seam read as far outside the
+    /// chart. The Möbius width is an interval and must not fold.
+    #[test]
+    fn wrap_aware_containment_wraps_by_the_chart_period_on_quotient_covers_2933() {
+        let mobius = tiny_atom(SaeAtomBasisKind::Mobius, 2);
+        let d = latent_coordinate_distance(
+            &mobius,
+            Array1::from(vec![1.98f64, 0.3]).view(),
+            Array1::from(vec![0.02f64, 0.3]).view(),
+        );
+        assert!(
+            (d - 0.04).abs() < 1e-12,
+            "the Möbius cover angle folds modulo 2 across its seam: got {d}"
+        );
+        let width = latent_coordinate_distance(
+            &mobius,
+            Array1::from(vec![0.02f64, 0.9]).view(),
+            Array1::from(vec![0.02f64, -0.9]).view(),
+        );
+        assert!(
+            (width - 1.8).abs() < 1e-12,
+            "the Möbius width is an interval and keeps its full 1.8 separation: got {width}"
+        );
+
+        let klein = tiny_atom(SaeAtomBasisKind::KleinBottle, 2);
+        let d = latent_coordinate_distance(
+            &klein,
+            Array1::from(vec![0.97f64, 0.01]).view(),
+            Array1::from(vec![0.02f64, 0.98]).view(),
+        );
+        let expected = (0.05f64 * 0.05 + 0.03 * 0.03).sqrt();
+        assert!(
+            (d - expected).abs() < 1e-12,
+            "both Klein cover circles fold modulo 1 across their seams: got {d}, want {expected}"
+        );
+    }
+
     /// FIX #4: a genuinely converging (Kantorovich-quadratic) `h`-sequence is
     /// untouched — every step clears the sufficient-decrease bar, so no
     /// converging row is regressed to the fallback.
