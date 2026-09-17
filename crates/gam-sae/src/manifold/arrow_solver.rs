@@ -1114,6 +1114,56 @@ where
     F: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
     P: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
 {
+    solve_b_preconditioned_gmres_certified(rhs, initial, apply_a, precondition, relative_tolerance, None)
+}
+
+/// [`solve_b_preconditioned_gmres_from`] for a right-hand side known only to its
+/// rounding band `β` (#2933 F08). The residual is certified at
+/// `max(√ε‖rhs‖, β + γ_dim·‖A‖·‖x‖)`: the digits the right-hand side carries, plus
+/// the backward error of forming `A x` over `dim` terms (Wilkinson's `γ_dim`). No
+/// representable correction can certify a residual below that, and asking for
+/// `√ε‖rhs‖` alone refuses a right-hand side that is itself round-off. `‖A‖` is the
+/// largest `‖A z‖/‖z‖` over every operator application the solve makes, which is a
+/// lower bound on `‖A‖₂`, so the floor never exceeds its true value.
+pub(crate) fn solve_b_preconditioned_gmres_to_rounding_floor<F, P>(
+    rhs: &SaeArrowVector,
+    initial: &SaeArrowVector,
+    apply_a: F,
+    precondition: P,
+    rhs_rounding_band: f64,
+) -> Result<(SaeArrowVector, usize), String>
+where
+    F: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
+    P: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
+{
+    if !(rhs_rounding_band.is_finite() && rhs_rounding_band >= 0.0) {
+        return Err(format!(
+            "solve_b_preconditioned_gmres: right-hand-side rounding band must be finite and \
+             non-negative, got {rhs_rounding_band}"
+        ));
+    }
+    solve_b_preconditioned_gmres_certified(
+        rhs,
+        initial,
+        apply_a,
+        precondition,
+        f64::EPSILON.sqrt(),
+        Some(rhs_rounding_band),
+    )
+}
+
+fn solve_b_preconditioned_gmres_certified<F, P>(
+    rhs: &SaeArrowVector,
+    initial: &SaeArrowVector,
+    apply_a: F,
+    precondition: P,
+    relative_tolerance: f64,
+    rhs_rounding_band: Option<f64>,
+) -> Result<(SaeArrowVector, usize), String>
+where
+    F: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
+    P: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
+{
     if !(relative_tolerance.is_finite() && relative_tolerance > 0.0) {
         return Err(format!(
             "solve_b_preconditioned_gmres: relative tolerance must be finite and positive, got \
@@ -1156,6 +1206,18 @@ where
     let b = rhs_flat;
     let b_norm = rhs_norm;
     let relative_floor = relative_tolerance.max(f64::EPSILON.sqrt());
+    // The residual a caller-declared rounding band certifies (see
+    // `solve_b_preconditioned_gmres_to_rounding_floor`); without one, the relative
+    // floor alone.
+    let matvec_growth = gam_linalg::roundoff::accumulation_growth(dim);
+    let certified_floor = |solution_norm: f64, operator_norm: f64| -> f64 {
+        let relative = relative_floor * rhs_norm;
+        match rhs_rounding_band {
+            Some(band) => relative.max(band + matvec_growth * operator_norm * solution_norm),
+            None => relative,
+        }
+    };
+    let mut operator_norm_estimate = 0.0_f64;
     // Full-memory whenever the live memory ledger admits it. Each restarted
     // cycle must make a strictly representable reduction in the original
     // residual, and inability to do so is the typed numerical-stagnation
@@ -1203,9 +1265,14 @@ where
 
     loop {
         let ax = apply_operator(&solution)?;
+        let solution_norm = solution.dot(&solution).sqrt();
+        if solution_norm > 0.0 {
+            operator_norm_estimate = operator_norm_estimate.max(ax.dot(&ax).sqrt() / solution_norm);
+        }
+        let cycle_floor = certified_floor(solution_norm, operator_norm_estimate);
         let mut residual = &b - &ax;
         let residual_norm = residual.dot(&residual).sqrt();
-        if residual_norm <= relative_floor * b_norm {
+        if residual_norm <= cycle_floor {
             let candidate = as_arrow(&solution);
             let ax = apply_a(&candidate)?;
             let original = SaeArrowVector {
@@ -1213,7 +1280,7 @@ where
                 beta: &rhs.beta - &ax.beta,
             };
             let original_norm = sae_norm(&original);
-            if original_norm <= relative_floor * rhs_norm {
+            if original_norm <= cycle_floor {
                 return Ok((candidate, iterations));
             }
         }
@@ -1248,6 +1315,12 @@ where
                 ));
             }
             let mut w = apply_operator(&preconditioned_direction)?;
+            let direction_norm = preconditioned_direction
+                .dot(&preconditioned_direction)
+                .sqrt();
+            if direction_norm > 0.0 {
+                operator_norm_estimate = operator_norm_estimate.max(w.dot(&w).sqrt() / direction_norm);
+            }
             operator_images.push(w.clone());
             preconditioned_basis.push(preconditioned_direction);
             reorthogonalize_arnoldi_column(&basis, &mut w, &mut h, j);
@@ -1298,7 +1371,7 @@ where
                     "[SAE-GMRES] dim={dim} restart={restart} iter={iterations} \
                      rel_residual={:.3e} target={:.3e} elapsed={:.1}s",
                     g[j + 1].abs() / b_norm,
-                    relative_floor,
+                    cycle_floor / b_norm,
                     started.elapsed().as_secs_f64(),
                 );
             }
@@ -1313,7 +1386,7 @@ where
             }
             // The Arnoldi estimate of the residual has met the target: leave
             // the cycle and let the physical residual below certify it.
-            if g[j + 1].abs() <= relative_floor * b_norm {
+            if g[j + 1].abs() <= cycle_floor {
                 break;
             }
         }
@@ -1339,7 +1412,8 @@ where
         // The attainable residual of a moderately conditioned system is
         // O(kappa*eps), so sqrt(eps) is the scalar-type-derived certification
         // floor rather than a last-iterate fallback.
-        let roundoff_floor = relative_floor * rhs_norm;
+        let roundoff_floor =
+            certified_floor(solution.dot(&solution).sqrt(), operator_norm_estimate);
         cycles += 1;
         log::info!(
             "[SAE-GMRES] cycle {cycles} closed: dim={dim} restart={restart} iters={iterations} \

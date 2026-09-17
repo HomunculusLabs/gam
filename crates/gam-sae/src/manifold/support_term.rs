@@ -4153,6 +4153,93 @@ impl SaeSupportSparseTerm {
         Ok(())
     }
 
+    /// The rounding band `β_g` of the penalized objective's gradient as
+    /// [`Self::assemble_arrow_schur`] accumulates it (#2933 F08): each component's
+    /// `accumulation_band` over the terms that component sums, reduced to the
+    /// Euclidean norm. A coordinate component sums `P` residual-weighted Jacobian cells
+    /// and its prior gradient, the terms the row solve's skip band reads (#2469). A
+    /// decoder component sums the `φ·r` cells of the atom's rows and the smoothing
+    /// penalty's `λ·(S·B)` row. The residual and the Jacobian enter as computed.
+    fn gradient_rounding_band(
+        &self,
+        target: ArrayView2<'_, f64>,
+        lambda_smooth: &[f64],
+        ard_precisions: &[Vec<f64>],
+    ) -> Result<f64, String> {
+        let residual = self.raw_residual(target)?;
+        let decoder_sq = (0..self.k_atoms())
+            .into_par_iter()
+            .map_init(ActiveAtomScratch::default, |scratch, atom_idx| -> Result<f64, String> {
+                let atom = &self.atoms[atom_idx];
+                let m = atom.basis_size();
+                let penalty = atom.smooth_penalty();
+                let decoder = atom.decoder_coefficients();
+                let mut data = Array2::<f64>::zeros((m, self.output_dim));
+                for &(row, slot) in &self.atom_rows[atom_idx] {
+                    self.fill_active(row, slot, scratch)?;
+                    let phi = scratch.phi_row();
+                    for basis in 0..m {
+                        for output in 0..self.output_dim {
+                            data[[basis, output]] += (phi[basis] * residual[[row, output]]).abs();
+                        }
+                    }
+                }
+                let terms = self.atom_rows[atom_idx].len() + m + 1;
+                let mut sq = 0.0_f64;
+                for basis in 0..m {
+                    for output in 0..self.output_dim {
+                        let penalty_sum = (0..m)
+                            .map(|other| (penalty[[basis, other]] * decoder[[other, output]]).abs())
+                            .sum::<f64>();
+                        let band = gam_linalg::roundoff::accumulation_band(
+                            terms,
+                            data[[basis, output]] + lambda_smooth[atom_idx] * penalty_sum,
+                        );
+                        sq += band * band;
+                    }
+                }
+                Ok(sq)
+            })
+            .try_reduce(|| 0.0, |a, b| Ok(a + b))?;
+        let coordinate_sq = (0..self.n_obs())
+            .into_par_iter()
+            .map_init(ActiveAtomScratch::default, |scratch, row| -> Result<f64, String> {
+                let mut sq = 0.0_f64;
+                for slot in 0..self.assignment.support_indices(row).len() {
+                    let atom = self.assignment.support_indices(row)[slot] as usize;
+                    self.fill_active(row, slot, scratch)?;
+                    let periods = self.atom_ard_axis_periods(atom);
+                    for axis in 0..scratch.jacobian.nrows() {
+                        let data = scratch
+                            .jacobian
+                            .row(axis)
+                            .iter()
+                            .zip(residual.row(row).iter())
+                            .map(|(jet, error)| (jet * error).abs())
+                            .sum::<f64>();
+                        let prior = ArdAxisPrior::eval(
+                            ard_precisions[atom][axis],
+                            self.assignment.coords_for_slot(row, slot)[axis],
+                            periods[axis],
+                        );
+                        let band = gam_linalg::roundoff::accumulation_band(
+                            self.output_dim + 1,
+                            data + prior.grad.abs(),
+                        );
+                        sq += band * band;
+                    }
+                }
+                Ok(sq)
+            })
+            .try_reduce(|| 0.0, |a, b| Ok(a + b))?;
+        let band = (decoder_sq + coordinate_sq).sqrt();
+        if band.is_finite() {
+            Ok(band)
+        } else {
+            Err(format!("support gradient rounding band is not finite: {band:e}"))
+        }
+    }
+
     /// Solve `A Δ = g` at the installed state: the exact Newton displacement the
     /// fixed point certifies on, and the direction a refused certificate steps
     /// along (#2933 F08).
@@ -4160,8 +4247,21 @@ impl SaeSupportSparseTerm {
     /// The solve is the profile adjoint's large-system route: flexible GMRES on the
     /// exact stationarity Jacobian, right-preconditioned by the majorizer arrow's
     /// per-row factors and reduced-Schur solve. It adds no dense factorization, and
-    /// it certifies the physical residual `‖g − AΔ‖ ≤ √ε‖g‖` rather than a
-    /// preconditioned proxy. `A` may be indefinite; GMRES does not assume otherwise.
+    /// it certifies the physical residual rather than a preconditioned proxy. `A` may
+    /// be indefinite; GMRES does not assume otherwise.
+    ///
+    /// The residual bar is `‖g − AΔ‖ ≤ max(√ε‖g‖, β_g + γ_dim·‖A‖·‖Δ‖)`
+    /// ([`solve_b_preconditioned_gmres_to_rounding_floor`]), with `β_g` the gradient's
+    /// rounding band ([`Self::gradient_rounding_band`]) and `γ_dim·‖A‖·‖Δ‖` the backward
+    /// error of forming `AΔ`. The system is defined only to the digits `g` carries, and
+    /// `AΔ` only to its own, so no solve can be asked for a residual below their sum. The
+    /// `√ε` bar alone asks exactly that at a state converged to round-off: there `g` is
+    /// noise of about `β_g`, and part of it need not lie in what `A` represents. The
+    /// full Krylov space then leaves a residual of a few thousandths of `‖g‖`, and the
+    /// solve refused the states the fixed point exists to return (every
+    /// `support_outer` test at 69befd10c5, job 1109683: ‖g‖ ≈ 2e-15, residual 1e-17).
+    /// A gradient above its band keeps the `√ε` bar, so a displaced state still prices
+    /// its displacement and refuses.
     fn exact_newton_solve(
         &self,
         target: ArrayView2<'_, f64>,
@@ -4194,13 +4294,25 @@ impl SaeSupportSparseTerm {
         let factors = CpuBatchedBlockSolver
             .factor_blocks(&system.rows, 0.0, system.d, true)
             .map_err(|error| format!("support Newton displacement row factorization: {error}"))?;
+        let gradient_band = self.gradient_rounding_band(target, lambda_smooth, ard_precisions)?;
         let prepared = started.elapsed();
-        let displacement = solve_b_preconditioned_gmres_with(
+        let (displacement, iterations) = solve_b_preconditioned_gmres_to_rounding_floor(
             &gradient,
+            &SaeArrowVector {
+                t: Array1::<f64>::zeros(coordinate_dim),
+                beta: Array1::<f64>::zeros(beta_dim),
+            },
             |vector| self.support_outer_exact_hessian_apply(&system, &rows, vector),
             |rhs| support_arrow_majorizer_inverse(&system, &factors, rhs),
+            gradient_band,
         )
-        .map_err(|error| format!("support Newton displacement solve: {error}"))?;
+        .map_err(|error| {
+            format!(
+                "support Newton displacement solve (‖g‖ {:.3e}, gradient rounding band \
+                 {gradient_band:.3e}): {error}",
+                (gradient.t.dot(&gradient.t) + gradient.beta.dot(&gradient.beta)).sqrt()
+            )
+        })?;
         // `f64::max` returns its non-NaN operand, so finiteness is checked before
         // the reductions rather than read off them.
         if !displacement
@@ -4227,8 +4339,8 @@ impl SaeSupportSparseTerm {
         };
         log::info!(
             "support Newton displacement: max {:.3e} (decoder {:.3e}, coordinate {:.3e}) over \
-             {coordinate_dim} coordinates and border {beta_dim}; assemble, differential rows and \
-             row factors {:.2}s, exact-A FGMRES {:.2}s",
+             {coordinate_dim} coordinates and border {beta_dim}; assemble, differential rows, \
+             row factors and gradient band {:.2}s, exact-A FGMRES {iterations} iterations {:.2}s",
             certificate.max_abs(),
             certificate.decoder_max_abs,
             certificate.coordinate_max_abs,
@@ -9019,5 +9131,131 @@ mod tests {
                  {expected}",
             );
         }
+    }
+
+    /// `support_outer`'s two-row fixture: a periodic harmonic atom and a degree-1 plane
+    /// patch, one row each, `P = 1`, with a residual that does not vanish.
+    fn support_outer_fixture_2933() -> (SaeSupportSparseTerm, Array2<f64>, Vec<f64>, Vec<Vec<f64>>) {
+        let periodic_eval: Arc<dyn SaeBasisSecondJet> =
+            Arc::new(PeriodicHarmonicEvaluator::new(3).expect("periodic"));
+        let patch_eval: Arc<dyn SaeBasisSecondJet> =
+            Arc::new(EuclideanPatchEvaluator::new(2, 1).expect("patch"));
+        let atoms = vec![
+            atom(
+                "circle",
+                SaeAtomBasisKind::Periodic,
+                1,
+                periodic_eval,
+                &[0.3],
+                array![[0.2], [1.1], [-0.4]],
+            ),
+            atom(
+                "plane",
+                SaeAtomBasisKind::Linear,
+                2,
+                patch_eval,
+                &[0.1, -0.2],
+                array![[0.3], [2.0], [-1.0]],
+            ),
+        ];
+        let specs = vec![
+            SaeAssignmentAtomSpec {
+                latent_dim: 1,
+                manifold: SaeAtomBasisKind::Periodic.latent_manifold(1),
+                retraction: gam_problem::LatentRetractionRegistry::all_euclidean(),
+            },
+            SaeAssignmentAtomSpec::euclidean(2),
+        ];
+        let state = SaeAssignmentState::from_topk_support_heterogeneous(
+            2,
+            2,
+            1,
+            specs,
+            vec![vec![0], vec![1]],
+            vec![vec![9.0], vec![-4.0]],
+            vec![vec![0.1], vec![3.0, 1.0]],
+        )
+        .expect("state");
+        let term = SaeSupportSparseTerm::new(atoms, state).expect("term");
+        (
+            term,
+            array![[1.4], [4.3]],
+            vec![0.35, 2.8],
+            vec![vec![1.0], vec![1.0, 1.0]],
+        )
+    }
+
+    /// #2933 F08 — a support fit converged to round-off certifies. At this fixture's
+    /// fixed point the gradient is round-off, and `exact_newton_solve` asked GMRES for a
+    /// residual of `√ε‖g‖`, which no representable correction reaches: every
+    /// `support_outer` test on this fixture refused at 69befd10c5 with a residual of
+    /// 1.02e-17 at relative 4.68e-3 (job 1109683). Certified at the gradient's rounding
+    /// band plus the matvec's backward error, the fixed point returns with its
+    /// displacement inside the bound.
+    #[test]
+    fn fixed_point_certifies_a_state_converged_to_roundoff_2933_f08() {
+        let (mut term, target, lambda, ard) = support_outer_fixture_2933();
+        let tolerance = term.fixed_point_tolerance();
+        let report = term
+            .solve_fixed_point(target.view(), &lambda, &ard, 5000, tolerance, 1.0)
+            .expect("a support fit converged to round-off must certify");
+        assert!(report.recurred);
+        let parameter_scale = term.parameter_iterate_scale().expect("parameter scale");
+        assert!(
+            report.newton_displacement.certifies(parameter_scale, tolerance),
+            "returned displacement {:.3e} vs bound {:.3e}",
+            report.newton_displacement.max_abs(),
+            tolerance * parameter_scale,
+        );
+    }
+
+    /// #2933 F08 — the round-off floor does not certify a displaced state. At the
+    /// analytic optimum of the scale-orbit fixture with `α = 1` the displacement
+    /// certifies. Moving the slope by `offset` puts the state, to first order, `offset`
+    /// from its root in the slope alone, so the decoder displacement must read back
+    /// `offset` there and the certificate must refuse. The planted offset is the oracle.
+    #[test]
+    fn planted_decoder_offset_refuses_under_the_roundoff_floor_2933_f08() {
+        let (mut term, target, lambda, ard, _) = scale_orbit_fixture_2933(1.0, 1.0);
+        let tolerance = term.fixed_point_tolerance();
+        let optimum_scale = term.parameter_iterate_scale().expect("parameter scale");
+        let (at_optimum, _) = term
+            .exact_newton_solve(target.view(), &lambda, &ard)
+            .expect("exact Newton displacement at the optimum");
+        assert!(
+            at_optimum.certifies(optimum_scale, tolerance),
+            "the optimum must certify: displacement {:.3e} vs bound {:.3e}",
+            at_optimum.max_abs(),
+            tolerance * optimum_scale,
+        );
+
+        let offset = 1.0e-3;
+        let mut decoder = term.atoms[0].decoder_coefficients().clone();
+        decoder[[1, 0]] += offset;
+        term.atoms[0]
+            .set_decoder_coefficients(decoder)
+            .expect("plant the slope offset");
+        let displaced_scale = term.parameter_iterate_scale().expect("parameter scale");
+        let (displaced, _) = term
+            .exact_newton_solve(target.view(), &lambda, &ard)
+            .expect("exact Newton displacement at the displaced state");
+        let (beta_offsets, _) = term.beta_layout().expect("beta layout");
+        // `offset(atom) + basis · P + channel` for basis 1, channel 0.
+        let slope_index = beta_offsets[0] + term.output_dim;
+        assert!(
+            (displaced.decoder[slope_index] - offset).abs() <= 0.5 * offset,
+            "the slope displacement {:.6e} must read back the planted offset {offset:.3e}",
+            displaced.decoder[slope_index],
+        );
+        assert!(
+            displaced.max_abs() <= 2.0 * offset,
+            "no parameter may be displaced beyond the planted offset: {:.6e}",
+            displaced.max_abs(),
+        );
+        assert!(
+            !displaced.certifies(displaced_scale, tolerance),
+            "a planted offset {offset:.3e} must not certify against bound {:.3e}",
+            tolerance * displaced_scale,
+        );
     }
 }
