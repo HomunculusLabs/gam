@@ -8100,6 +8100,65 @@ impl SaeManifoldTerm {
         }
     }
 
+    /// #2933 F35 — the joint observed information of this framed state in the
+    /// identified tangent coordinates `(t, ξ)` of its learned frames, classified
+    /// through the lifted `B` metric. One owner for every consumer that integrates
+    /// the frames.
+    ///
+    /// `Clone` resets the collapse-prevention gates, and an unframed assembly with
+    /// no gates re-derives them from the state. The criterion priced the gates this
+    /// term holds, declared by the outer objective or frozen at the criterion's
+    /// entry, so the clone declares exactly those. Otherwise the separation
+    /// barrier's routing coactivations `q_jk` and effective sample sizes, the
+    /// repulsion gate and the amplitude turn-on radius of the frame-integrated
+    /// operator would be re-derived at this state, and it would not be the operator
+    /// the criterion and the fixed-frame covariance read.
+    fn frame_marginal_information(
+        &self,
+        rho: &SaeManifoldRho,
+        target: ArrayView2<'_, f64>,
+        registry: Option<&AnalyticPenaltyRegistry>,
+    ) -> Result<FrameMarginalInformation, String> {
+        let mut unframed = self.clone();
+        for atom in unframed.atoms.iter_mut() {
+            atom.deactivate_decoder_frame();
+        }
+        unframed.declare_collapse_prevention_gates(&self.collapse_prevention_gates());
+        let mut sys = unframed.assemble_arrow_schur(target, rho, registry)?;
+        let tangent = LearnedFrameTangentMap::new(self, sys.gb.view())?;
+        Self::ensure_row_gauge_deflation_for_quasi_laplace(&mut sys);
+        let (_delta_t, _delta_beta, cache) = solve_arrow_newton_step_with_options(
+            &sys,
+            0.0,
+            0.0,
+            &unframed.evidence_factor_options(),
+        )
+        .map_err(|err| format!("frame-marginal shape covariance: unframed evidence factor: {err}"))?;
+        let total_t = cache.delta_t_len();
+        let (a, e_beta) =
+            unframed.materialize_exact_hessian_dense_with_gap_border(rho, target, &cache)?;
+        let e_diag = unframed.materialize_ard_concave_clamp_diagonal(rho, &cache)?;
+        let operator = tangent.joint_operator(&a, total_t)?;
+        let e_tangent = e_beta.as_ref().map(|gap| tangent.congruence(gap));
+        let joint = Self::exact_hessian_spectral_block(
+            operator,
+            &e_diag,
+            e_tangent.as_ref(),
+            total_t,
+            ArrowMetric::JointLifted {
+                cache: &cache,
+                lift: &tangent.lift,
+            },
+        )?;
+        Ok(FrameMarginalInformation {
+            tangent,
+            joint,
+            cache,
+            total_t,
+            unframed,
+        })
+    }
+
     /// #2933 F35 — the shape information integrated over every learned Grassmann
     /// frame: the Laplace covariance on the product of the fixed-rank decoder
     /// manifolds, in the same observed information the criterion prices.
@@ -8127,40 +8186,16 @@ impl SaeManifoldTerm {
         target: ArrayView2<'_, f64>,
         registry: Option<&AnalyticPenaltyRegistry>,
     ) -> Result<SaeShapeInformation, String> {
-        let mut unframed = self.clone();
-        for atom in unframed.atoms.iter_mut() {
-            atom.deactivate_decoder_frame();
-        }
-        let mut sys = unframed.assemble_arrow_schur(target, rho, registry)?;
-        let tangent = LearnedFrameTangentMap::new(self, sys.gb.view())?;
-        Self::ensure_row_gauge_deflation_for_quasi_laplace(&mut sys);
-        let (_delta_t, _delta_beta, cache) = solve_arrow_newton_step_with_options(
-            &sys,
-            0.0,
-            0.0,
-            &unframed.evidence_factor_options(),
-        )
-        .map_err(|err| format!("frame-marginal shape covariance: unframed evidence factor: {err}"))?;
-        let total_t = cache.delta_t_len();
-        let (a, e_beta) =
-            unframed.materialize_exact_hessian_dense_with_gap_border(rho, target, &cache)?;
-        let e_diag = unframed.materialize_ard_concave_clamp_diagonal(rho, &cache)?;
-        let operator = tangent.joint_operator(&a, total_t)?;
-        let e_tangent = e_beta.as_ref().map(|gap| tangent.congruence(gap));
-        let joint = Self::exact_hessian_spectral_block(
-            operator,
-            &e_diag,
-            e_tangent.as_ref(),
-            total_t,
-            ArrowMetric::JointLifted {
-                cache: &cache,
-                lift: &tangent.lift,
-            },
-        )?;
-        let sandwich = tangent.tangent_sandwich(unframed.row_sandwich_meat(rho, &cache, target)?)?;
+        let information = self.frame_marginal_information(rho, target, registry)?;
+        let tangent = &information.tangent;
+        let sandwich = tangent.tangent_sandwich(information.unframed.row_sandwich_meat(
+            rho,
+            &information.cache,
+            target,
+        )?)?;
         Ok(
-            match joint.border_selected_inverse_blocks(
-                total_t,
+            match information.joint.border_selected_inverse_blocks(
+                information.total_t,
                 &tangent.ranges,
                 &sandwich,
                 SaeFrameConditioning::MarginalOverLearnedFrames,
@@ -8292,6 +8327,23 @@ impl ExactHessianSpectralBlock {
             },
         ))
     }
+}
+
+/// The observed information of a framed state integrated over its learned frames
+/// (#2933 F35); see [`SaeManifoldTerm::frame_marginal_information`].
+struct FrameMarginalInformation {
+    /// `vec B = T·ξ`, the cross curvature `E` and the per-atom `ξ` ranges.
+    tangent: LearnedFrameTangentMap,
+    /// The joint `(t, ξ)` operator `[[A_tt, A_tB·T], [Tᵀ·A_Bt, Tᵀ·A_BB·T + E]]` and
+    /// its eigensystem classified through `ArrowMetric::JointLifted`.
+    joint: ExactHessianSpectralBlock,
+    /// The frozen evidence factor of the unframed assembly, in `(t, vec B)`.
+    cache: ArrowFactorCache,
+    /// Latent coordinate dimension of the joint layout.
+    total_t: usize,
+    /// The state with every frame dropped and this term's gates declared, which
+    /// `A`, the decoder gradient and the row sandwich are read from.
+    unframed: SaeManifoldTerm,
 }
 
 /// Rank-`r_k` tangent coordinates of the learned frames, written into the
@@ -9048,5 +9100,521 @@ mod smoothness_dof_exact_oracle_tests {
             }
             Ok(per_atom)
         }
+    }
+}
+
+#[cfg(test)]
+mod learned_frame_cross_curvature_2933_f35_tests {
+    use super::*;
+    use crate::basis::SaeBasisEvaluator;
+    use crate::manifold::{FaerEigh, Side};
+    use std::sync::Arc;
+
+    /// Rows, outputs and periodic basis width shared by both fixtures.
+    const ROWS: usize = 24;
+    const OUTPUTS: usize = 12;
+    const BASIS: usize = 3;
+
+    /// Periodic basis rows `[1, sin 2πt, cos 2πt]` at evenly spaced coordinates
+    /// shifted by `phase`, with a rank-2 decoder whose nonzero rows `1` and `2`
+    /// load on the output axes `axes`.
+    fn periodic_atom(
+        name: &str,
+        phase: f64,
+        axes: [usize; 2],
+        loadings: [[f64; 2]; 2],
+    ) -> (SaeManifoldAtom, Array2<f64>) {
+        let evaluator = Arc::new(
+            crate::basis::PeriodicHarmonicEvaluator::new(BASIS).expect("periodic basis"),
+        );
+        let coords =
+            Array2::from_shape_fn((ROWS, 1), |(row, _)| (row as f64 + phase) / ROWS as f64);
+        let (phi, jet) = evaluator.evaluate(coords.view()).expect("periodic jets");
+        let mut decoder = Array2::<f64>::zeros((BASIS, OUTPUTS));
+        for (basis_row, row_loadings) in loadings.iter().enumerate() {
+            for (axis, loading) in axes.iter().zip(row_loadings.iter()) {
+                decoder[[basis_row + 1, *axis]] = *loading;
+            }
+        }
+        let atom = SaeManifoldAtom::new_with_provided_function_gram(
+            name,
+            SaeAtomBasisKind::Periodic,
+            1,
+            phi,
+            jet,
+            decoder,
+            Array2::<f64>::eye(BASIS),
+        )
+        .expect("atom shapes agree")
+        .with_basis_second_jet(evaluator);
+        (atom, coords)
+    }
+
+    /// One periodic atom in `p = 12` outputs. The decoder starts in the span of
+    /// output axes 0 and 1, so the fit activates a rank-2 frame there, but the
+    /// target also carries a constant along axis 2. The circle's two weighted
+    /// singular values (≈ 3.2 and 2.6) exceed the constant's (≈ 1.5), so the rank-2
+    /// optimum keeps the circle and leaves the constant unfitted: the rank
+    /// constraint binds and `∇_B L·U⊥ ≠ 0`.
+    fn fitted_binding_circle() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
+        let (atom, coords) =
+            periodic_atom("binding_circle", 0.25, [0, 1], [[0.9, 0.2], [-0.1, 0.8]]);
+        let mut target = atom.basis_values.dot(atom.decoder_coefficients());
+        for row in 0..ROWS {
+            let x = row as f64;
+            target[[row, 0]] += 0.02 * (1.7 * x).sin();
+            target[[row, 1]] += 0.02 * (1.3 * x).cos();
+            target[[row, 2]] += 0.3;
+        }
+        let assignment = crate::assignment::SaeAssignment::from_blocks_with_mode_and_manifolds(
+            Array2::<f64>::zeros((ROWS, 1)),
+            vec![coords],
+            vec![gam_terms::latent::LatentManifold::Circle { period: 1.0 }],
+            crate::assignment::AssignmentMode::softmax(1.0),
+        )
+        .expect("assignment shapes agree");
+        let mut term = SaeManifoldTerm::new(vec![atom], assignment).expect("term");
+        let rho = SaeManifoldRho::new(
+            0.0,
+            0.8_f64.ln(),
+            vec![Array1::from_vec(vec![250.0_f64.ln()])],
+        );
+        term.penalized_quasi_laplace_criterion_with_cache(
+            target.view(),
+            &rho,
+            None,
+            40,
+            0.4,
+            1.0e-6,
+            1.0e-6,
+        )
+        .expect("the binding rank-2 circle converges");
+        (term, target, rho)
+    }
+
+    /// Two framed periodic atoms whose decoders share output axis 1 (overlap
+    /// `o ≈ 0.36`, below the repulsion gate), routed by `logits`. The target is the
+    /// routed reconstruction plus a constant along axis 5 that neither frame spans.
+    /// The state is not a fit, so the declared-gate comparison needs no converged
+    /// root.
+    fn routed_overlapping_circles(
+        logits: Array2<f64>,
+    ) -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
+        let (first, first_coords) =
+            periodic_atom("first", 0.25, [0, 1], [[0.9, 0.2], [-0.1, 0.8]]);
+        let (second, second_coords) =
+            periodic_atom("second", 0.6, [1, 2], [[0.6, 0.7], [-0.5, 0.6]]);
+        let mut target = Array2::<f64>::zeros((ROWS, OUTPUTS));
+        for row in 0..ROWS {
+            let top = logits[[row, 0]].max(logits[[row, 1]]);
+            let weights = [
+                (logits[[row, 0]] - top).exp(),
+                (logits[[row, 1]] - top).exp(),
+            ];
+            let total = weights[0] + weights[1];
+            for (atom, weight) in [&first, &second].into_iter().zip(weights) {
+                let decoded = atom.basis_values.row(row).dot(atom.decoder_coefficients());
+                target
+                    .row_mut(row)
+                    .scaled_add(weight / total, &decoded);
+            }
+            target[[row, 5]] += 0.2;
+        }
+        let assignment = crate::assignment::SaeAssignment::from_blocks_with_mode_and_manifolds(
+            logits,
+            vec![first_coords, second_coords],
+            vec![
+                gam_terms::latent::LatentManifold::Circle { period: 1.0 },
+                gam_terms::latent::LatentManifold::Circle { period: 1.0 },
+            ],
+            crate::assignment::AssignmentMode::softmax(1.0),
+        )
+        .expect("assignment shapes agree");
+        let mut term = SaeManifoldTerm::new(vec![first, second], assignment).expect("term");
+        term.auto_activate_decoder_frames()
+            .expect("frame activation at p = 12");
+        let rho = SaeManifoldRho::new(
+            0.0,
+            0.8_f64.ln(),
+            vec![
+                Array1::from_vec(vec![250.0_f64.ln()]),
+                Array1::from_vec(vec![250.0_f64.ln()]),
+            ],
+        );
+        (term, target, rho)
+    }
+
+    /// One atom's chart of its rank-`r` decoder manifold at `B = C·Uᵀ`:
+    /// `B(ξ) = (C + δC)·Q(W)ᵀ` with `Q(W) = (U + U⊥W)(I + WᵀW)^{−½}`, the polar
+    /// retraction, exactly column-orthonormal because `UᵀU⊥ = 0`. Its differential
+    /// at `ξ = 0` is the production lift `δC·Uᵀ + C·Wᵀ·U⊥ᵀ`, in the same
+    /// `(vec δC, vec W)` layout.
+    struct AtomChart {
+        coordinates: Array2<f64>,
+        frame: Array2<f64>,
+        complement: Array2<f64>,
+    }
+
+    impl AtomChart {
+        fn dim(&self) -> usize {
+            let (m, r) = self.coordinates.dim();
+            m * r + r * self.complement.ncols()
+        }
+
+        fn decoder(&self, xi: ArrayView1<'_, f64>) -> Array2<f64> {
+            let (m, r) = self.coordinates.dim();
+            let q = self.complement.ncols();
+            let delta_c = Array2::from_shape_fn((m, r), |(b, j)| xi[b * r + j]);
+            let w = Array2::from_shape_fn((q, r), |(i, j)| xi[m * r + i * r + j]);
+            let gram = Array2::<f64>::eye(r) + &w.t().dot(&w);
+            let (values, vectors) = gram.eigh(Side::Lower).expect("I + WᵀW is SPD");
+            let inverse_sqrt = vectors
+                .dot(&Array2::from_diag(&values.mapv(|value| 1.0 / value.sqrt())))
+                .dot(&vectors.t());
+            let rotated = (&self.frame + &self.complement.dot(&w)).dot(&inverse_sqrt);
+            (&self.coordinates + &delta_c).dot(&rotated.t())
+        }
+    }
+
+    /// Every atom's chart, concatenated in atom order as the production `ξ` layout.
+    struct FixedRankChart {
+        atoms: Vec<AtomChart>,
+    }
+
+    impl FixedRankChart {
+        fn at(term: &SaeManifoldTerm) -> Self {
+            let atoms = term
+                .atoms
+                .iter()
+                .map(|atom| {
+                    let frame = atom
+                        .decoder_frame
+                        .as_ref()
+                        .expect("every atom carries a learned frame")
+                        .frame()
+                        .to_owned();
+                    AtomChart {
+                        coordinates: atom.decoder_coefficients().dot(&frame),
+                        complement: orthonormal_frame_complement(frame.view())
+                            .expect("frame complement"),
+                        frame,
+                    }
+                })
+                .collect();
+            Self { atoms }
+        }
+
+        fn dim(&self) -> usize {
+            self.atoms.iter().map(AtomChart::dim).sum()
+        }
+
+        fn starts(&self) -> Vec<usize> {
+            self.atoms
+                .iter()
+                .scan(0usize, |cursor, atom| {
+                    let start = *cursor;
+                    *cursor += atom.dim();
+                    Some(start)
+                })
+                .collect()
+        }
+
+        fn decoders(&self, xi: &Array1<f64>) -> Vec<Array2<f64>> {
+            self.atoms
+                .iter()
+                .zip(self.starts())
+                .map(|(atom, start)| atom.decoder(xi.slice(s![start..start + atom.dim()])))
+                .collect()
+        }
+    }
+
+    fn penalized_objective_on_chart(
+        moving: &mut SaeManifoldTerm,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        chart: &FixedRankChart,
+        xi: &Array1<f64>,
+    ) -> f64 {
+        for (atom, decoder) in moving.atoms.iter_mut().zip(chart.decoders(xi)) {
+            atom.decoder_coefficients_mut().assign(&decoder);
+        }
+        moving
+            .penalized_objective_total(target, rho, None, 1.0)
+            .expect("the penalized objective evaluates along the chart")
+    }
+
+    /// Second differences of the penalized objective in the chart coordinates,
+    /// with the latent coordinates, logits and gates held at the state. Returns the
+    /// Hessian and the largest objective magnitude it read.
+    fn chart_hessian(
+        moving: &mut SaeManifoldTerm,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        chart: &FixedRankChart,
+        step: f64,
+    ) -> (Array2<f64>, f64) {
+        let dim = chart.dim();
+        let origin = Array1::<f64>::zeros(dim);
+        let centre = penalized_objective_on_chart(moving, target, rho, chart, &origin);
+        let mut largest = centre.abs();
+        let mut hessian = Array2::<f64>::zeros((dim, dim));
+        for i in 0..dim {
+            let mut plus = origin.clone();
+            plus[i] = step;
+            let mut minus = origin.clone();
+            minus[i] = -step;
+            let f_plus = penalized_objective_on_chart(moving, target, rho, chart, &plus);
+            let f_minus = penalized_objective_on_chart(moving, target, rho, chart, &minus);
+            largest = largest.max(f_plus.abs()).max(f_minus.abs());
+            hessian[[i, i]] = (f_plus - 2.0 * centre + f_minus) / (step * step);
+            for j in 0..i {
+                let mut sum = 0.0_f64;
+                for (sign_i, sign_j) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+                    let mut corner = origin.clone();
+                    corner[i] = sign_i * step;
+                    corner[j] = sign_j * step;
+                    let value = penalized_objective_on_chart(moving, target, rho, chart, &corner);
+                    largest = largest.max(value.abs());
+                    sum += sign_i * sign_j * value;
+                }
+                let entry = sum / (4.0 * step * step);
+                hessian[[i, j]] = entry;
+                hessian[[j, i]] = entry;
+            }
+        }
+        (hessian, largest)
+    }
+
+    fn frobenius(matrix: &Array2<f64>) -> f64 {
+        matrix.iter().map(|value| value * value).sum::<f64>().sqrt()
+    }
+
+    /// Central-difference step in chart units: decoder coordinates of order one
+    /// and frame angles in radians.
+    const CHART_ORACLE_STEP: f64 = 1.0e-2;
+
+    /// The `(ξ, ξ)` block of [`SaeManifoldTerm::frame_marginal_information`] must be
+    /// the chart Hessian of the penalized objective, with every latent coordinate,
+    /// logit and collapse-prevention gate held at what `term` holds.
+    ///
+    /// The oracle differentiates the scalar penalized objective along the polar
+    /// retraction chart of each atom's rank-2 manifold, on its own unframed clone
+    /// that declares `term`'s gates, and shares no code with the exact Hessian
+    /// applies or the tangent map. The chart's second-order terms are
+    /// `δC·Wᵀ·U⊥ᵀ − ½·C·WᵀW·Uᵀ`, so its Hessian is `TᵀA_BB·T + E + Q`, where `Q` is
+    /// `−I_{p−r} ⊗ sym((∇_B L·U)ᵀC)` on each atom's `W` block. Production omits `Q`
+    /// because `∇_C L = ∇_B L·U` vanishes at a C-stationary point. The oracle adds
+    /// it from the assembled gradient, so the comparison also holds away from a
+    /// root.
+    ///
+    /// Central second differences are `O(h²)`, so the Richardson combination
+    /// `(4·H(h/2) − H(h))/3` cancels the leading term and `‖H(h) − H(h/2)‖_F/3`
+    /// bounds what remains. Each objective sums `n·p` data scalars, so it carries at
+    /// most `n·p·ε·max|f|` of rounding, and each Hessian entry at step `h` at most
+    /// four such errors over `h²`. The tolerance is the sum of the truncation and
+    /// rounding bounds, with no tuned constant. With `cross_curvature_material`, the
+    /// same block without `E` must miss the oracle by more than that tolerance, so
+    /// the assertion is free to fail against an operator that omits the curvature.
+    fn assert_tangent_information_is_the_chart_hessian(
+        term: &SaeManifoldTerm,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        label: &str,
+        cross_curvature_material: bool,
+    ) {
+        let chart = FixedRankChart::at(term);
+        let fitted: Vec<Array2<f64>> = term
+            .atoms
+            .iter()
+            .map(|atom| atom.decoder_coefficients().to_owned())
+            .collect();
+        for (k, (decoder, expected)) in chart
+            .decoders(&Array1::zeros(chart.dim()))
+            .iter()
+            .zip(fitted.iter())
+            .enumerate()
+        {
+            let miss = frobenius(&(decoder - expected));
+            assert!(
+                miss <= 1.0e-12 * frobenius(expected),
+                "{label}: atom {k}'s chart must start at its decoder: miss {miss:.3e}"
+            );
+        }
+
+        let information = term
+            .frame_marginal_information(rho, target, None)
+            .expect("frame-marginal information at the state");
+        let total_t = information.total_t;
+        let with_cross = information
+            .joint
+            .operator
+            .slice(s![total_t.., total_t..])
+            .to_owned();
+        let cross_curvature = information.tangent.cross_curvature.clone();
+        assert_eq!(with_cross.dim(), (chart.dim(), chart.dim()), "{label}: tangent layout");
+
+        let mut moving = term.clone();
+        for atom in moving.atoms.iter_mut() {
+            atom.deactivate_decoder_frame();
+        }
+        moving.declare_collapse_prevention_gates(&term.collapse_prevention_gates());
+        let gradient = moving
+            .assemble_arrow_schur(target, rho, None)
+            .expect("oracle assembly at the state")
+            .gb
+            .clone();
+        let p = moving.output_dim();
+        let beta_ranges = moving.beta_block_offsets();
+        let mut chart_curvature = Array2::<f64>::zeros((chart.dim(), chart.dim()));
+        let mut normal_gradient_sq = 0.0_f64;
+        for ((atom, start), range) in chart
+            .atoms
+            .iter()
+            .zip(chart.starts())
+            .zip(beta_ranges.iter())
+        {
+            let (m, r) = atom.coordinates.dim();
+            let decoder_gradient = Array2::from_shape_fn((m, p), |(b, c)| gradient[range.start + b * p + c]);
+            let coupling = decoder_gradient.dot(&atom.frame).t().dot(&atom.coordinates);
+            let symmetric = (&coupling + &coupling.t()) * 0.5;
+            normal_gradient_sq += decoder_gradient
+                .dot(&atom.complement)
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>();
+            for i in 0..atom.complement.ncols() {
+                for j in 0..r {
+                    for jj in 0..r {
+                        chart_curvature[[start + m * r + i * r + j, start + m * r + i * r + jj]] =
+                            -symmetric[[j, jj]];
+                    }
+                }
+            }
+        }
+
+        let coarse_step = CHART_ORACLE_STEP;
+        let fine_step = 0.5 * coarse_step;
+        let (coarse, coarse_largest) = chart_hessian(&mut moving, target, rho, &chart, coarse_step);
+        let (fine, fine_largest) = chart_hessian(&mut moving, target, rho, &chart, fine_step);
+        let extrapolated = (&fine * 4.0 - &coarse) / 3.0;
+        let truncation = frobenius(&(&coarse - &fine)) / 3.0;
+        let evaluation_rounding =
+            target.len() as f64 * f64::EPSILON * coarse_largest.max(fine_largest);
+        let rounding = chart.dim() as f64
+            * 4.0
+            * evaluation_rounding
+            * (4.0 / (fine_step * fine_step) + 1.0 / (coarse_step * coarse_step))
+            / 3.0;
+        let tolerance = truncation + rounding;
+        let expected = &with_cross + &chart_curvature;
+        let miss = frobenius(&(&extrapolated - &expected));
+        let miss_without_cross = frobenius(&(&extrapolated - &(&expected - &cross_curvature)));
+        eprintln!(
+            "[#2933 F35 {label}] ‖∇_B L·U⊥‖_F = {:.3e}, ‖Q‖_F = {:.3e}, ‖H_chart‖_F = {:.3e}, \
+             miss with E {miss:.3e}, miss without E {miss_without_cross:.3e}, tolerance \
+             {tolerance:.3e} (truncation {truncation:.3e}, rounding {rounding:.3e})",
+            normal_gradient_sq.sqrt(),
+            frobenius(&chart_curvature),
+            frobenius(&extrapolated)
+        );
+        assert!(
+            miss <= tolerance,
+            "{label}: the tangent information must be the chart Hessian of the penalized \
+             objective: ‖H_chart − (TᵀAT + E + Q)‖_F = {miss:.3e} against tolerance \
+             {tolerance:.3e}"
+        );
+        if cross_curvature_material {
+            assert!(
+                miss_without_cross > tolerance,
+                "{label}: the normal gradient must make the cross curvature material: \
+                 ‖H_chart − (TᵀAT + Q)‖_F = {miss_without_cross:.3e} against tolerance \
+                 {tolerance:.3e}"
+            );
+        }
+    }
+
+    /// #2933 F35 — at a converged framed fit, the tangent information the
+    /// frame-marginal covariance inverts is the Hessian of the penalized objective
+    /// on the fixed-rank decoder manifold.
+    ///
+    /// The target adds a constant along an axis outside the initial frame span, but
+    /// the converged fit leaves only `‖∇_B L·U⊥‖_F ≈ 1.6e-4` there (L6 job 1129126).
+    /// Its cross curvature `E` is below this oracle's resolution, so this arm checks
+    /// agreement at a root only. The declared-gate arm, whose routed state is not a
+    /// root and has `‖∇_B L·U⊥‖_F ≈ 3.8`, requires `E` to be material.
+    #[test]
+    fn frame_tangent_information_is_the_fixed_rank_manifold_hessian_2933_f35() {
+        let (term, target, rho) = fitted_binding_circle();
+        let frame = term.atoms[0]
+            .decoder_frame
+            .as_ref()
+            .expect("the fit must activate a Grassmann frame at p = 12");
+        assert_eq!(frame.rank(), 2, "the frame must carry the circle's rank");
+        assert_tangent_information_is_the_chart_hessian(
+            &term,
+            target.view(),
+            &rho,
+            "binding circle",
+            false,
+        );
+    }
+
+    /// #2933 F35 — the frame-integrated operator reads the collapse-prevention gates
+    /// the term holds, not gates re-derived from the state. The outer objective
+    /// declares the gates of its first priced root and holds them for every later
+    /// drive, including the final uncertainty. An unframed clone starts with no
+    /// gates, so an assembly that refreshed them would price the separation barrier
+    /// with the routing of the state it is called at, while the criterion and the
+    /// fixed-frame covariance read the declared routing.
+    ///
+    /// The gates are those refreshed at uniform routing. The state routes the first
+    /// half of the rows mostly to the first atom and the rest to the second, so its
+    /// own coactivation `q` differs and the barrier `−½·log det(Q ∘ O)` has
+    /// different curvature along the overlapping decoders.
+    #[test]
+    fn frame_tangent_information_reads_the_declared_collapse_gates_2933_f35() {
+        let (mut uniform, _, _) = routed_overlapping_circles(Array2::<f64>::zeros((ROWS, 2)));
+        uniform.refresh_decoder_repulsion_gate();
+        uniform.refresh_barrier_coactivation_gate();
+        uniform.refresh_amplitude_barrier_gate();
+        let declared = uniform.collapse_prevention_gates();
+
+        let routing = Array2::from_shape_fn((ROWS, 2), |(row, atom)| {
+            let first_half = row < ROWS / 2;
+            if first_half == (atom == 0) { 1.0 } else { -1.0 }
+        });
+        let (mut term, target, rho) = routed_overlapping_circles(routing);
+        for (k, atom) in term.atoms.iter().enumerate() {
+            let frame = atom
+                .decoder_frame
+                .as_ref()
+                .expect("both atoms activate a Grassmann frame at p = 12");
+            assert_eq!(frame.rank(), 2, "atom {k}'s frame must carry its decoder's rank");
+        }
+        term.declare_collapse_prevention_gates(&declared);
+        let mut refreshed = term.clone();
+        refreshed.refresh_decoder_repulsion_gate();
+        refreshed.refresh_barrier_coactivation_gate();
+        refreshed.refresh_amplitude_barrier_gate();
+        let at_state = refreshed.collapse_prevention_gates();
+        eprintln!(
+            "[#2933 F35 declared gates] declared {:?}; re-derived at the state {:?}",
+            declared.barrier_coactivation, at_state.barrier_coactivation
+        );
+        assert!(
+            declared.barrier_coactivation.is_some(),
+            "the uniform routing must co-fire both atoms"
+        );
+        assert_ne!(
+            declared.barrier_coactivation, at_state.barrier_coactivation,
+            "the state's routing must re-derive a different separation-barrier gate"
+        );
+        assert_tangent_information_is_the_chart_hessian(
+            &term,
+            target.view(),
+            &rho,
+            "declared routing gates",
+            true,
+        );
     }
 }
