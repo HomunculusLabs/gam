@@ -1031,6 +1031,11 @@ pub(crate) struct SaeManifoldAtomSnapshot {
     pub(crate) homotopy_eta: f64,
     pub(crate) chart_canonicalized: bool,
     pub(crate) reduced_column_map: Option<Array2<f64>>,
+    /// `∂S/∂κ` and the geometry plan of a curvature-parameterised atom. They move
+    /// with `smooth_penalty`: a restore that brought back `S` alone would leave the
+    /// derivative at another width or chart.
+    pub(crate) smooth_penalty_kappa_derivative: Option<Array2<f64>>,
+    pub(crate) geometry_plan: Option<SaeAtomGeometryPlan>,
     /// Exact caches for an atom whose caller, rather than an evaluator, owns its
     /// basis. `None` on every evaluator-backed production atom, preserving the
     /// differential snapshot's O(1) cache cost there.

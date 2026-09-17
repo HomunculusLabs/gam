@@ -25,7 +25,7 @@ fn rescaled_penalty_representation(
         let basis_jacobian = atom.basis_jacobian.clone();
         let decoder = atom.decoder_coefficients().clone();
         let penalty = atom.smooth_penalty() * c;
-        atom.install_reparameterized_basis(basis_values, basis_jacobian, decoder, penalty)
+        atom.install_reparameterized_basis(basis_values, basis_jacobian, decoder, penalty, None)
             .expect("a positive multiple of a PSD Gram is a valid Gram");
     }
     let mut scaled_rho = rho.clone();
@@ -244,7 +244,9 @@ fn constant_curvature_term(kappa: f64) -> (SaeManifoldTerm, SaeManifoldRho) {
     .with_geometry_plan(plan)
     .expect("installed Gram is the plan's Gram");
     assert!(
-        atom.smooth_penalty_kappa_derivative().is_some(),
+        atom.smooth_penalty_kappa_derivative()
+            .expect("dS/dκ sits at the atom's basis width")
+            .is_some(),
         "a constant-curvature plan installs dS/dκ"
     );
     let mode = AssignmentMode::softmax(1.0);

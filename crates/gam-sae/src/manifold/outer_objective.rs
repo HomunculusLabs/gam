@@ -930,7 +930,7 @@ impl SaeManifoldOuterObjective {
                 .geometry_plan()
                 .and_then(SaeAtomGeometryPlan::constant_curvature)
                 .is_some_and(|current| current.to_bits() == kappa.to_bits())
-                && atom.smooth_penalty_kappa_derivative().is_some();
+                && atom.smooth_penalty_kappa_derivative()?.is_some();
             if !already_installed {
                 prepared.push((atom_index, atom.prepare_constant_curvature(kappa)?));
             }

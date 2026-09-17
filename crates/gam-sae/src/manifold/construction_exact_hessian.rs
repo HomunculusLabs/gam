@@ -2560,7 +2560,7 @@ impl SaeManifoldTerm {
                     self.atoms.len()
                 )
             })?;
-            let Some(ds) = atom.smooth_penalty_kappa_derivative() else {
+            let Some(ds) = atom.smooth_penalty_kappa_derivative()? else {
                 // An atom whose roughness is not curvature-parameterised has no
                 // κ to move; leaving the coordinate un-assembled is what makes
                 // its gradient entry exactly zero rather than silently wrong.
@@ -3234,7 +3234,7 @@ impl SaeManifoldTerm {
             // #2935 — raw sectional curvature enters the inner gradient only through
             // the penalty Gram: `∂g/∂κ_k = λ_k·(½(∂S_k/∂κ + ∂S_k/∂κᵀ) ⊗ I) C_k` on atom
             // `k`'s decoder block. An atom without `∂S/∂κ` has no curvature to move.
-            if let Some(ds) = self.atoms[target_atom].smooth_penalty_kappa_derivative() {
+            if let Some(ds) = self.atoms[target_atom].smooth_penalty_kappa_derivative()? {
                 let lambda = rho.lambda_smooth_for(target_atom)?;
                 self.decoder_penalty_ift_rhs_block(cache, target_atom, lambda, ds, &mut beta)?;
             }

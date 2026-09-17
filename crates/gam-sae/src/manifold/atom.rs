@@ -693,6 +693,8 @@ pub(crate) struct SaeManifoldAtomPreparedMutableState {
     homotopy_eta: f64,
     chart_canonicalized: bool,
     reduced_column_map: Option<Array2<f64>>,
+    smooth_penalty_kappa_derivative: Option<Array2<f64>>,
+    geometry_plan: Option<SaeAtomGeometryPlan>,
 }
 
 /// Detached curvature-dependent fields for one atom. Building this value is
@@ -722,8 +724,47 @@ impl SaeManifoldAtom {
     /// This is the ENTIRE κ channel of the criterion: a constant-curvature
     /// atom's basis is a monomial patch in the tangent coordinate and carries no
     /// κ, so the design does not move and only the penalty does.
-    pub(crate) fn smooth_penalty_kappa_derivative(&self) -> Option<&Array2<f64>> {
-        self.smooth_penalty_kappa_derivative.as_ref()
+    ///
+    /// The derivative must sit at the live basis width. A seam that replaced `S`
+    /// without it would leave `∂S/∂κ` at another width, and every κ consumer
+    /// multiplies the two, so this refuses instead of handing out that matrix.
+    pub(crate) fn smooth_penalty_kappa_derivative(&self) -> Result<Option<&Array2<f64>>, String> {
+        let m = self.basis_size();
+        match self.smooth_penalty_kappa_derivative.as_ref() {
+            Some(derivative) if derivative.dim() != (m, m) => Err(format!(
+                "SaeManifoldAtom '{}': ∂S/∂κ {:?} does not match the live basis width ({m}, {m})",
+                self.name,
+                derivative.dim()
+            )),
+            derivative => Ok(derivative),
+        }
+    }
+
+    /// The curvature state a mutable-state snapshot carries beside `S`: `∂S/∂κ` and
+    /// the geometry plan that produced both.
+    pub(crate) fn curvature_state(&self) -> (Option<Array2<f64>>, Option<SaeAtomGeometryPlan>) {
+        (
+            self.smooth_penalty_kappa_derivative.clone(),
+            self.geometry_plan.clone(),
+        )
+    }
+
+    /// Whether this atom holds a snapshot's curvature state: the same `∂S/∂κ` and
+    /// the same constant curvature on its plan.
+    pub(crate) fn curvature_state_matches(
+        &self,
+        derivative: Option<&Array2<f64>>,
+        plan: Option<&SaeAtomGeometryPlan>,
+    ) -> bool {
+        self.smooth_penalty_kappa_derivative.as_ref() == derivative
+            && self
+                .geometry_plan
+                .as_ref()
+                .and_then(SaeAtomGeometryPlan::constant_curvature)
+                .map(f64::to_bits)
+                == plan
+                    .and_then(SaeAtomGeometryPlan::constant_curvature)
+                    .map(f64::to_bits)
     }
 
     pub fn geometry_plan(&self) -> Option<&SaeAtomGeometryPlan> {
@@ -880,6 +921,17 @@ impl SaeManifoldAtom {
                 return Err("restored reduced-column map must be finite".to_string());
             }
         }
+        if let Some(derivative) = snapshot.smooth_penalty_kappa_derivative.as_ref() {
+            if derivative.dim() != (m, m) {
+                return Err(format!(
+                    "restored ∂S/∂κ shape {:?} != decoder basis shape ({m}, {m})",
+                    derivative.dim()
+                ));
+            }
+            if derivative.iter().any(|value| !value.is_finite()) {
+                return Err("restored ∂S/∂κ must be finite".to_string());
+            }
+        }
 
         let (basis_values, basis_jacobian) =
             match (&snapshot.basis_evaluator, &snapshot.caller_managed_basis) {
@@ -932,6 +984,8 @@ impl SaeManifoldAtom {
             homotopy_eta: snapshot.homotopy_eta,
             chart_canonicalized: snapshot.chart_canonicalized,
             reduced_column_map: snapshot.reduced_column_map.clone(),
+            smooth_penalty_kappa_derivative: snapshot.smooth_penalty_kappa_derivative.clone(),
+            geometry_plan: snapshot.geometry_plan.clone(),
         })
     }
 
@@ -953,6 +1007,8 @@ impl SaeManifoldAtom {
         self.homotopy_eta = restored.homotopy_eta;
         self.chart_canonicalized = restored.chart_canonicalized;
         self.reduced_column_map = restored.reduced_column_map;
+        self.smooth_penalty_kappa_derivative = restored.smooth_penalty_kappa_derivative;
+        self.geometry_plan = restored.geometry_plan;
     }
 
     #[must_use = "build error must be handled"]
@@ -1560,29 +1616,55 @@ impl SaeManifoldAtom {
     /// contract itself was re-derived at each site rather than checked once.
     /// Here it is checked once, and a partial update is impossible: on refusal
     /// the atom is restored exactly as it was and the error names both shapes.
+    ///
+    /// A curvature-parameterised atom's `∂S/∂κ` travels with its Gram: the seam
+    /// transports it by the same congruence, and an atom that carries one refuses a
+    /// reparameterization that does not supply it.
     pub(crate) fn install_reparameterized_basis(
         &mut self,
         basis_values: Array2<f64>,
         basis_jacobian: Array3<f64>,
         decoder: Array2<f64>,
         smooth_penalty: Array2<f64>,
+        smooth_penalty_kappa_derivative: Option<Array2<f64>>,
     ) -> Result<(), String> {
         let width = basis_values.ncols();
         let smooth_penalty =
             Self::validate_reference_function_gram(smooth_penalty, width, false).map_err(
                 |error| format!("SaeManifoldAtom::install_reparameterized_basis: {error}"),
             )?;
+        if smooth_penalty_kappa_derivative.is_some() != self.smooth_penalty_kappa_derivative.is_some() {
+            return Err(format!(
+                "SaeManifoldAtom::install_reparameterized_basis: atom '{}' has ∂S/∂κ = {}, but \
+                 the reparameterization supplies ∂S/∂κ = {}",
+                self.name,
+                self.smooth_penalty_kappa_derivative.is_some(),
+                smooth_penalty_kappa_derivative.is_some()
+            ));
+        }
+        if let Some(derivative) = smooth_penalty_kappa_derivative.as_ref()
+            && derivative.iter().any(|value| !value.is_finite())
+        {
+            return Err(
+                "SaeManifoldAtom::install_reparameterized_basis: ∂S/∂κ must be finite".to_string(),
+            );
+        }
         let previous = (
             std::mem::replace(&mut self.basis_values, basis_values),
             std::mem::replace(&mut self.basis_jacobian, basis_jacobian),
             std::mem::replace(&mut self.decoder_coefficients, decoder),
             std::mem::replace(&mut self.smooth_penalty, smooth_penalty),
+            std::mem::replace(
+                &mut self.smooth_penalty_kappa_derivative,
+                smooth_penalty_kappa_derivative,
+            ),
         );
         if let Err(error) = self.validate_shape_contract() {
             self.basis_values = previous.0;
             self.basis_jacobian = previous.1;
             self.decoder_coefficients = previous.2;
             self.smooth_penalty = previous.3;
+            self.smooth_penalty_kappa_derivative = previous.4;
             return Err(format!(
                 "SaeManifoldAtom::install_reparameterized_basis: {error}"
             ));
@@ -1597,6 +1679,7 @@ impl SaeManifoldAtom {
     /// basis_jacobian         : (n, m, latent_dim)
     /// decoder_coefficients   : (m, p)      with m > 0 and p > 0
     /// smooth_penalty         : (m, m)
+    /// ∂S/∂κ, when present    : (m, m)
     /// ```
     ///
     /// This is the precondition of every `[[basis, output]]` subscript on the
@@ -1641,6 +1724,15 @@ impl SaeManifoldAtom {
                 "SaeManifoldAtom '{}': reference Gram {:?} != (m, m) = ({m}, {m})",
                 self.name,
                 self.smooth_penalty.dim()
+            ));
+        }
+        if let Some(derivative) = self.smooth_penalty_kappa_derivative.as_ref()
+            && derivative.dim() != (m, m)
+        {
+            return Err(format!(
+                "SaeManifoldAtom '{}': ∂S/∂κ {:?} != (m, m) = ({m}, {m})",
+                self.name,
+                derivative.dim()
             ));
         }
         Ok(())
@@ -2220,6 +2312,7 @@ mod tests {
                 narrow_jet.clone(),
                 before.2.clone(),
                 Array2::<f64>::eye(2),
+                None,
             )
             .expect_err("a decoder that overruns its new basis is refused");
         assert!(error.contains("install_reparameterized_basis"), "{error}");
@@ -2234,6 +2327,7 @@ mod tests {
             narrow_jet,
             Array2::<f64>::zeros((2, 1)),
             Array2::<f64>::eye(2),
+            None,
         )
         .expect("a coherent reparameterization installs");
         assert_eq!(atom.basis_size(), 2);

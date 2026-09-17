@@ -1839,6 +1839,9 @@ impl SaeSupportSparseTerm {
             // `B_new = T B_old`, hence `S_new = T S_old Tᵀ` for orthogonal T.
             let smooth_left = fast_ab(&transport, self.atoms[atom_index].smooth_penalty());
             let smooth_penalty = smooth_left.dot(&transport.t());
+            let kappa_derivative = self.atoms[atom_index]
+                .smooth_penalty_kappa_derivative()?
+                .map(|derivative| fast_ab(&transport, derivative).dot(&transport.t()));
             let basis_values = self.atoms[atom_index].basis_values.clone();
             let basis_jacobian = self.atoms[atom_index].basis_jacobian.clone();
             self.atoms[atom_index].install_reparameterized_basis(
@@ -1846,6 +1849,7 @@ impl SaeSupportSparseTerm {
                 basis_jacobian,
                 decoder,
                 smooth_penalty,
+                kappa_derivative,
             )?;
             for (row, slot, coordinate) in shifted_coordinates {
                 self.assignment
@@ -1965,11 +1969,16 @@ impl SaeSupportSparseTerm {
 
             let basis_values = self.atoms[atom_index].basis_values.clone();
             let basis_jacobian = self.atoms[atom_index].basis_jacobian.clone();
+            // The Gram is kept, so its ∂S/∂κ is kept with it.
+            let kappa_derivative = self.atoms[atom_index]
+                .smooth_penalty_kappa_derivative()?
+                .cloned();
             self.atoms[atom_index].install_reparameterized_basis(
                 basis_values,
                 basis_jacobian,
                 new_decoder,
                 penalty,
+                kappa_derivative,
             )?;
             for (row, slot, coordinate) in profiled_coordinates {
                 self.assignment
@@ -2139,11 +2148,16 @@ impl SaeSupportSparseTerm {
 
             let basis_values = self.atoms[atom_index].basis_values.clone();
             let basis_jacobian = self.atoms[atom_index].basis_jacobian.clone();
+            // The Gram is kept, so its ∂S/∂κ is kept with it.
+            let kappa_derivative = self.atoms[atom_index]
+                .smooth_penalty_kappa_derivative()?
+                .cloned();
             self.atoms[atom_index].install_reparameterized_basis(
                 basis_values,
                 basis_jacobian,
                 new_decoder,
                 penalty,
+                kappa_derivative,
             )?;
             for (row, slot, coordinate) in profiled_coordinates {
                 self.assignment

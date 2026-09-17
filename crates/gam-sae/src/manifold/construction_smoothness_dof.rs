@@ -228,7 +228,7 @@ impl SaeManifoldTerm {
                     self.atoms.len()
                 )
             })?;
-            if let Some(ds) = atom.smooth_penalty_kappa_derivative() {
+            if let Some(ds) = atom.smooth_penalty_kappa_derivative()? {
                 out.push((flat, atom_idx, ds));
             }
         }

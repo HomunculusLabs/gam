@@ -489,8 +489,136 @@ fn curvature_trial_installs_the_reduced_congruence_of_the_full_gram_2935() {
         );
         assert!(
             atom.smooth_penalty_kappa_derivative()
+                .expect("dS/dκ sits at the reduced basis width")
                 .is_some_and(|derivative| derivative.dim() == (retained, retained)),
             "retained {retained}: the reduced dS/dκ must be installed at the reduced width"
         );
     }
+}
+
+/// An affine gauge re-expresses a curvature atom's decoder as `T·B`. Its `∂S/∂κ` must
+/// move by the same congruence as `S`, so the κ energy channel `½λ<B, ∂S/∂κ B>` stays
+/// the derivative of the same function energy. The reference is measured in the old
+/// chart from the untouched geometry plan.
+#[test]
+fn affine_gauge_transports_the_curvature_derivative_with_the_gram_2935() {
+    let (mut term, _target, rho) = curvature_fixture();
+    let rho = rho
+        .for_assignment(&term.assignment)
+        .with_curvature(vec![(0, KAPPA)]);
+    let lambda = rho.lambda_smooth_vec().expect("smoothing strengths");
+    let flat = rho
+        .kappa_flat_index(0)
+        .expect("the curvature atom owns an outer coordinate");
+    let old_decoder = term.atoms[0].decoder_coefficients().clone();
+    let plan = term.atoms[0]
+        .geometry_plan()
+        .expect("the fixture atom carries its geometry plan")
+        .clone();
+    let energy = |decoder: &Array2<f64>, gram: &Array2<f64>| -> f64 {
+        0.5 * lambda[0] * (decoder * &gram.dot(decoder)).sum()
+    };
+    let old_chart_energy = |kappa: f64| -> f64 {
+        let gram = plan
+            .at_constant_curvature(kappa)
+            .and_then(|at| at.build_reference_penalty())
+            .expect("plan Gram at the trial curvature");
+        energy(&old_decoder, &gram)
+    };
+    let energy_before = energy(&old_decoder, term.atoms[0].smooth_penalty());
+    term.canonicalize_atom_affine_gauge(0, None)
+        .expect("the affine gauge runs on the atom");
+    let new_decoder = term.atoms[0].decoder_coefficients().clone();
+    let decoder_scale = old_decoder
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    let decoder_moved = new_decoder
+        .iter()
+        .zip(old_decoder.iter())
+        .fold(0.0_f64, |acc, (a, b)| acc.max((a - b).abs()));
+    let energy_after = energy(&new_decoder, term.atoms[0].smooth_penalty());
+    let channel = term
+        .decoder_smoothness_kappa_energy_derivatives(&rho, &lambda)
+        .expect("κ energy channel after the gauge")
+        .into_iter()
+        .find(|(index, _)| *index == flat)
+        .map(|(_, value)| value)
+        .expect("the channel lands on the κ coordinate");
+    let step = 1.0e-3_f64;
+    let (fd, spread) = richardson(
+        (old_chart_energy(KAPPA + step) - old_chart_energy(KAPPA - step)) / (2.0 * step),
+        (old_chart_energy(KAPPA + 0.5 * step) - old_chart_energy(KAPPA - 0.5 * step)) / step,
+    );
+    println!(
+        "[#2935 transport] decoder moved {decoder_moved:.3e} of {decoder_scale:.3e}; energy \
+         {energy_before:.12e} -> {energy_after:.12e}; κ energy channel {channel:.12e} vs \
+         old-chart difference {fd:.12e} (spread {spread:.3e})"
+    );
+    assert!(
+        decoder_moved > 1.0e-3 * decoder_scale,
+        "the gauge must actually re-express the decoder for the check to mean anything"
+    );
+    assert!(
+        (energy_after - energy_before).abs() <= 1.0e-8 * energy_before.abs().max(1.0),
+        "the transported Gram prices the same function energy ({energy_before} vs {energy_after})"
+    );
+    let tolerance = 10.0 * spread + 1.0e-6 * fd.abs().max(1.0);
+    assert!(
+        fd.abs() > 1.0e3 * tolerance,
+        "the energy must move materially with κ ({fd} vs {tolerance:.3e})"
+    );
+    assert!(
+        (channel - fd).abs() <= tolerance,
+        "the κ energy channel {channel} after the gauge is not the energy's κ derivative {fd} \
+         (|Δ| = {}, tolerance {tolerance})",
+        (channel - fd).abs()
+    );
+}
+
+/// A restore brings back `∂S/∂κ` and the geometry plan with `S`. Restoring a
+/// full-width snapshot over a reduced atom must leave the κ channels at the restored
+/// width and value.
+#[test]
+fn snapshot_restore_carries_the_curvature_derivative_2935() {
+    let (mut term, _target, rho) = curvature_fixture();
+    let rho = rho
+        .for_assignment(&term.assignment)
+        .with_curvature(vec![(0, KAPPA)]);
+    let lambda = rho.lambda_smooth_vec().expect("smoothing strengths");
+    let full_width = term.atoms[0].basis_size();
+    let before = term
+        .decoder_smoothness_kappa_energy_derivatives(&rho, &lambda)
+        .expect("κ energy channel at the full width");
+    let snapshot = term.snapshot_mutable_state();
+    let mut q = Array2::<f64>::zeros((full_width, 2));
+    q[[0, 0]] = 1.0;
+    q[[1, 1]] = 1.0;
+    term.atoms[0]
+        .reduce_basis_to_subspace(&q)
+        .expect("the reduction retains orthonormal columns of the basis");
+    assert_eq!(term.atoms[0].basis_size(), 2, "the reduction narrowed the atom");
+    term.restore_mutable_state(&snapshot)
+        .expect("the full-width snapshot restores");
+    let after = term
+        .decoder_smoothness_kappa_energy_derivatives(&rho, &lambda)
+        .unwrap_or_else(|err| panic!("the κ energy channel refused the restored atom: {err}"));
+    println!(
+        "[#2935 restore] width {full_width} -> 2 -> {}; κ energy channel {before:?} -> {after:?}",
+        term.atoms[0].basis_size()
+    );
+    assert_eq!(
+        term.atoms[0].basis_size(),
+        full_width,
+        "the restore brought back the full width"
+    );
+    assert_eq!(before.len(), 1, "one curvature coordinate");
+    assert!(
+        before[0].1.abs() > 1.0e-3,
+        "the κ energy channel must be material ({})",
+        before[0].1
+    );
+    assert!(
+        after.len() == 1 && (after[0].1 - before[0].1).abs() <= 1.0e-12 * before[0].1.abs().max(1.0),
+        "the restored κ energy channel {after:?} is not the snapshot state's {before:?}"
+    );
 }

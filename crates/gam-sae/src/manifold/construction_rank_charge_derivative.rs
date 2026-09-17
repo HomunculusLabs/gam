@@ -145,7 +145,7 @@ impl SaeManifoldTerm {
             // `S(κ)`: `∂tr((G+λS)⁻¹G)/∂κ = −λ·tr((G+λS)⁻¹G(G+λS)⁻¹ ∂S/∂κ)`.
             let kappa_penalty_derivative = rho
                 .kappa_flat_index(atom_idx)
-                .zip(atom.smooth_penalty_kappa_derivative());
+                .zip(atom.smooth_penalty_kappa_derivative()?);
             if edf_is_interior {
                 // d tr((G+λS)⁻¹G) / dG = A⁻¹ − A⁻¹GA⁻¹.
                 // Writing this identity directly keeps the derivative paired to
