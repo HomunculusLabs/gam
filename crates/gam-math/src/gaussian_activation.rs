@@ -116,8 +116,8 @@
 //! constant mean, `K = σ(b) T_w σ(c)` and `∂_r K = σ'(b) T_w σ'(c)`.
 
 use crate::bivariate_normal::{
-    BivariateNormalError, bivariate_normal_cdf_partials_with_complement,
-    bivariate_normal_cdf_with_complement,
+    BIVARIATE_NORMAL_CDF_ERROR_BOUND, BivariateNormalError,
+    bivariate_normal_cdf_partials_with_complement, bivariate_normal_cdf_with_complement,
 };
 use crate::probability::{normal_cdf, normal_logcdf_derivatives, normal_pdf};
 use std::f64::consts::TAU;
@@ -338,13 +338,25 @@ pub struct PreactivationPair {
     pub covariance_rounding: f64,
 }
 
-/// `K = E[σ(X) σ(Y)]` and its covariance derivative.
+/// `K = E[σ(X) σ(Y)]` and its covariance derivative, each with a first-order
+/// bound on its absolute rounding at the projected law.
+///
+/// The bounds come from running error analysis of the closed forms under the
+/// module's standard model. For biased pairs they add the bivariate normal
+/// owner's bounds on `Φ₂` and its partials, and propagate the rounding of the
+/// standardized arguments `(h, k, ρ, 1 − ρ²)` through the partials of `Φ₂`. They
+/// are absolute. For `ρ < 0` in the lower tails the kernel itself can be far
+/// smaller than its bound, so no relative accuracy is claimed there (#2946).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PairKernel {
     /// `K = E[σ(X) σ(Y)]`.
     pub value: f64,
     /// `∂K/∂r = E[σ'(X) σ'(Y)]` at fixed means and variances (Price's theorem).
     pub covariance_derivative: f64,
+    /// A first-order bound on the absolute rounding of `value`.
+    pub value_rounding: f64,
+    /// A first-order bound on the absolute rounding of `covariance_derivative`.
+    pub covariance_derivative_rounding: f64,
 }
 
 /// The pair kernel `K_σ(b, c; v, w, r) = E[σ(X) σ(Y)]` with `∂_r K_σ`.
@@ -501,7 +513,7 @@ fn relu_smoothing(
         return Ok(());
     }
     let scale = variance.sqrt();
-    let unit = relu_smoothed_unit(t, scale);
+    let unit = relu_smoothed_unit(t, Bounded::exact(scale));
     if let Some(slot) = derivatives.get_mut(0) {
         *slot = unit.value.value;
     }
@@ -724,9 +736,8 @@ fn write_bounded(values: &mut [f64], bounds: &mut [f64], order: usize, entry: Bo
 
 /// ReLU at scale `s > 0`: `x = t/s`, `T = t Φ(x) + s φ(x)` and `T' = Φ(x)`, and for
 /// `x < 0` the left-tail forms `T = s φ q/λ` and `T' = φ/λ`.
-fn relu_smoothed_unit(t: f64, scale: f64) -> SmoothedUnit {
+fn relu_smoothed_unit(t: f64, spread: Bounded) -> SmoothedUnit {
     let location = Bounded::exact(t);
-    let spread = Bounded::exact(scale);
     let argument = location.div(spread);
     let density = bounded_normal_pdf(argument);
     let (value, slope) = if argument.value < 0.0 {
@@ -757,7 +768,7 @@ fn relu_hermite_coefficients(t: f64, scale: f64, coefficients: &mut [f64], bound
         }
         return;
     }
-    let unit = relu_smoothed_unit(t, scale);
+    let unit = relu_smoothed_unit(t, Bounded::exact(scale));
     write_bounded(coefficients, bounds, 0, unit.value);
     write_bounded(
         coefficients,
@@ -992,17 +1003,53 @@ fn relu_zero_mean_pair_kernel(
     law: ProjectedCovariance,
 ) -> PairKernel {
     if variance_x == 0.0 || variance_y == 0.0 {
-        return PairKernel {
-            value: 0.0,
-            covariance_derivative: 0.25,
-        };
+        return pair_kernel_from(Bounded::exact(0.0), Bounded::exact(0.25));
     }
-    let root_residual = law.residual.sqrt();
-    let orthant = root_residual.atan2(-law.covariance) / TAU;
+    let root_residual = bounded_residual(law).sqrt();
+    let orthant = bounded_orthant(root_residual, law.covariance);
+    let value = root_residual
+        .div(bounded_tau())
+        .add(Bounded::exact(law.covariance).mul(orthant));
+    pair_kernel_from(value, orthant)
+}
+
+fn pair_kernel_from(value: Bounded, derivative: Bounded) -> PairKernel {
     PairKernel {
-        value: root_residual / TAU + law.covariance * orthant,
-        covariance_derivative: orthant,
+        value: value.value,
+        covariance_derivative: derivative.value,
+        value_rounding: value.bound,
+        covariance_derivative_rounding: derivative.bound,
     }
+}
+
+/// `vw − r²` as the projection formed it: from two products and their exact
+/// rounding residuals, so it rounds by at most `3u` of itself.
+fn bounded_residual(law: ProjectedCovariance) -> Bounded {
+    Bounded {
+        value: law.residual,
+        bound: 3.0 * UNIT_ROUNDOFF * law.residual,
+    }
+}
+
+/// `2π` rounded to a double, within `u` of itself.
+fn bounded_tau() -> Bounded {
+    Bounded {
+        value: TAU,
+        bound: UNIT_ROUNDOFF * TAU,
+    }
+}
+
+/// `atan2(y, −r)/(2π)` for `y ≥ 0`: the `atan2` ulp, the height's bound through
+/// `|∂_y atan2(y, x)| = |x|/(x² + y²)`, and the rounding of `2π` and the division.
+fn bounded_orthant(height: Bounded, covariance: f64) -> Bounded {
+    let angle = height.value.atan2(-covariance);
+    Bounded {
+        value: angle,
+        bound: 2.0 * UNIT_ROUNDOFF * angle.abs()
+            + covariance.abs() * height.bound
+                / (covariance * covariance + height.value * height.value),
+    }
+    .div(bounded_tau())
 }
 
 /// `K = r H + (vw + r² q)/(2π √Δ)` and `∂_r K = H + r (1/A + 1/B + 1/Δ)/(2π √Δ)`
@@ -1013,20 +1060,27 @@ fn exact_gelu_zero_mean_pair_kernel(
     variance_y: f64,
     law: ProjectedCovariance,
 ) -> PairKernel {
-    let total_x = 1.0 + variance_x;
-    let total_y = 1.0 + variance_y;
-    let covariance = law.covariance;
-    let discriminant = 1.0 + variance_x + variance_y + law.residual;
+    let one = Bounded::exact(1.0);
+    let total_x = one.add(Bounded::exact(variance_x));
+    let total_y = one.add(Bounded::exact(variance_y));
+    let covariance = Bounded::exact(law.covariance);
+    let residual = bounded_residual(law);
+    let discriminant = one
+        .add(Bounded::exact(variance_x))
+        .add(Bounded::exact(variance_y))
+        .add(residual);
     let root_discriminant = discriminant.sqrt();
-    let orthant = root_discriminant.atan2(-covariance) / TAU;
-    let density = 1.0 / (TAU * root_discriminant);
-    let inverse_totals = total_x.recip() + total_y.recip();
-    let coupling = law.residual + covariance * covariance * inverse_totals;
-    PairKernel {
-        value: covariance * orthant + coupling * density,
-        covariance_derivative: orthant
-            + covariance * density * (inverse_totals + discriminant.recip()),
-    }
+    let orthant = bounded_orthant(root_discriminant, law.covariance);
+    let density = one.div(bounded_tau().mul(root_discriminant));
+    let inverse_totals = one.div(total_x).add(one.div(total_y));
+    let coupling = residual.add(covariance.mul(covariance).mul(inverse_totals));
+    let value = covariance.mul(orthant).add(coupling.mul(density));
+    let derivative = orthant.add(
+        covariance
+            .mul(density)
+            .mul(inverse_totals.add(one.div(discriminant))),
+    );
+    pair_kernel_from(value, derivative)
 }
 
 fn bivariate_normal_refusal(source: BivariateNormalError) -> GaussianActivationError {
@@ -1041,6 +1095,110 @@ fn limiting_step(x: f64) -> f64 {
         0.0
     } else {
         0.5
+    }
+}
+
+/// `H`, `∂_hΦ₂`, `∂_kΦ₂` and `φ₂` at a standardized law, each with its bound.
+struct StandardizedOrthant {
+    orthant: Bounded,
+    partial_h: Bounded,
+    partial_k: Bounded,
+    density: Bounded,
+}
+
+fn clamped_correlation(ratio: Bounded) -> Bounded {
+    Bounded {
+        value: ratio.value.clamp(-1.0, 1.0),
+        bound: ratio.bound,
+    }
+}
+
+fn capped_complement(ratio: Bounded) -> Bounded {
+    Bounded {
+        value: ratio.value.min(1.0),
+        bound: ratio.bound,
+    }
+}
+
+/// `Φ₂(h, k; ρ)` and its partials from the bivariate normal owner, with its own
+/// rounding bounds plus the standardized arguments' rounding propagated through
+/// the partials of `Φ₂`.
+/// - A rounded `1 − ρ²` moves the owner's `1 ∓ |ρ|`, and so the effective
+///   correlation, by at most its bound over `1 + |ρ|`.
+/// - With `c = 1 − ρ²`, `r_h = (h − ρk)/c` and `r_k = (k − ρh)/c`, the partials
+///   are: `∂_h ∂_hΦ₂ = −h ∂_hΦ₂ − ρφ₂`, `∂_k ∂_hΦ₂ = φ₂`, `∂_ρ ∂_hΦ₂ = −φ₂ r_h`,
+///   `∂_h φ₂ = −φ₂ r_h`, `∂_k φ₂ = −φ₂ r_k` and `∂_ρ φ₂ = φ₂ (ρ/c + r_h r_k)`
+///   (symmetrically in `k`).
+/// - On the degenerate law `c = 0` the partials take their limits `φ(h)·step`,
+///   `φ₂` vanishes, and `H` moves by at most `φ(h) δh + φ(k) δk`.
+fn standardized_orthant(
+    h: Bounded,
+    k: Bounded,
+    correlation: Bounded,
+    complement: Bounded,
+) -> Result<StandardizedOrthant, GaussianActivationError> {
+    let orthant = bivariate_normal_cdf_with_complement(h.value, k.value, correlation.value, complement.value)
+        .map_err(bivariate_normal_refusal)?;
+    let rho = correlation.value;
+    let correlation_bound = correlation.bound + complement.bound / (1.0 + rho.abs());
+    if complement.value > 0.0 {
+        let partials =
+            bivariate_normal_cdf_partials_with_complement(h.value, k.value, rho, complement.value)
+                .map_err(bivariate_normal_refusal)?;
+        let density = partials.d_rho;
+        let reduced_h = (h.value - rho * k.value) / complement.value;
+        let reduced_k = (k.value - rho * h.value) / complement.value;
+        Ok(StandardizedOrthant {
+            orthant: Bounded {
+                value: orthant,
+                bound: BIVARIATE_NORMAL_CDF_ERROR_BOUND
+                    + partials.d_h * h.bound
+                    + partials.d_k * k.bound
+                    + density * correlation_bound,
+            },
+            partial_h: Bounded {
+                value: partials.d_h,
+                bound: partials.d_h_rounding
+                    + (h.value * partials.d_h + rho * density).abs() * h.bound
+                    + density * k.bound
+                    + (density * reduced_h).abs() * correlation_bound,
+            },
+            partial_k: Bounded {
+                value: partials.d_k,
+                bound: partials.d_k_rounding
+                    + density * h.bound
+                    + (k.value * partials.d_k + rho * density).abs() * k.bound
+                    + (density * reduced_k).abs() * correlation_bound,
+            },
+            density: Bounded {
+                value: density,
+                bound: partials.d_rho_rounding
+                    + (density * reduced_h).abs() * h.bound
+                    + (density * reduced_k).abs() * k.bound
+                    + (density * (rho / complement.value + reduced_h * reduced_k)).abs()
+                        * correlation_bound,
+            },
+        })
+    } else {
+        let density_h = bounded_normal_pdf(h);
+        let density_k = bounded_normal_pdf(k);
+        let (step_h, step_k) = if rho > 0.0 {
+            (limiting_step(k.value - h.value), limiting_step(h.value - k.value))
+        } else {
+            let sum = limiting_step(h.value + k.value);
+            (sum, sum)
+        };
+        Ok(StandardizedOrthant {
+            orthant: Bounded {
+                value: orthant,
+                bound: BIVARIATE_NORMAL_CDF_ERROR_BOUND
+                    + density_h.value * h.bound
+                    + density_k.value * k.bound,
+            },
+            partial_h: density_h.mul(Bounded::exact(step_h)),
+            partial_k: density_k.mul(Bounded::exact(step_k)),
+            density: Bounded::exact(0.0),
+        })
     }
 }
 
@@ -1059,58 +1217,43 @@ fn relu_biased_pair_kernel(
         } else {
             (mean_y, mean_x, variance_x)
         };
-        let mut moments = [0.0; 2];
-        relu_smoothing(smoothed, variance, &mut moments)?;
-        return Ok(PairKernel {
-            value: constant.max(0.0) * moments[0],
-            covariance_derivative: limiting_step(constant) * moments[1],
-        });
+        let (moment, slope) = if variance == 0.0 {
+            (
+                Bounded::exact(smoothed.max(0.0)),
+                Bounded::exact(limiting_step(smoothed)),
+            )
+        } else {
+            let unit = relu_smoothed_unit(smoothed, Bounded::exact(variance).sqrt());
+            (unit.value, unit.slope)
+        };
+        return Ok(pair_kernel_from(
+            Bounded::exact(constant.max(0.0)).mul(moment),
+            Bounded::exact(limiting_step(constant)).mul(slope),
+        ));
     }
-    let root_x = variance_x.sqrt();
-    let root_y = variance_y.sqrt();
-    let scale = root_x * root_y;
-    let standardized_x = mean_x / root_x;
-    let standardized_y = mean_y / root_y;
-    let covariance = law.covariance;
-    let correlation = (covariance / scale).clamp(-1.0, 1.0);
-    let complement = (law.residual / (variance_x * variance_y)).min(1.0);
-    let orthant =
-        bivariate_normal_cdf_with_complement(standardized_x, standardized_y, correlation, complement)
-            .map_err(bivariate_normal_refusal)?;
-    let (partial_x, partial_y, density_term) = if complement > 0.0 {
-        let partials = bivariate_normal_cdf_partials_with_complement(
-            standardized_x,
-            standardized_y,
-            correlation,
-            complement,
-        )
-        .map_err(bivariate_normal_refusal)?;
-        (
-            partials.d_h,
-            partials.d_k,
-            scale * complement * partials.d_rho,
-        )
-    } else if correlation > 0.0 {
-        (
-            normal_pdf(standardized_x) * limiting_step(standardized_y - standardized_x),
-            normal_pdf(standardized_y) * limiting_step(standardized_x - standardized_y),
-            0.0,
-        )
-    } else {
-        let sum = standardized_x + standardized_y;
-        (
-            normal_pdf(standardized_x) * limiting_step(sum),
-            normal_pdf(standardized_y) * limiting_step(sum),
-            0.0,
-        )
-    };
-    Ok(PairKernel {
-        value: (mean_x * mean_y + covariance) * orthant
-            + mean_y * root_x * partial_x
-            + mean_x * root_y * partial_y
-            + density_term,
-        covariance_derivative: orthant,
-    })
+    let root_x = Bounded::exact(variance_x).sqrt();
+    let root_y = Bounded::exact(variance_y).sqrt();
+    let scale = root_x.mul(root_y);
+    let location_x = Bounded::exact(mean_x);
+    let location_y = Bounded::exact(mean_y);
+    let covariance = Bounded::exact(law.covariance);
+    let complement = capped_complement(
+        bounded_residual(law).div(Bounded::exact(variance_x).mul(Bounded::exact(variance_y))),
+    );
+    let standardized = standardized_orthant(
+        location_x.div(root_x),
+        location_y.div(root_y),
+        clamped_correlation(covariance.div(scale)),
+        complement,
+    )?;
+    let value = location_x
+        .mul(location_y)
+        .add(covariance)
+        .mul(standardized.orthant)
+        .add(location_y.mul(root_x).mul(standardized.partial_h))
+        .add(location_x.mul(root_y).mul(standardized.partial_k))
+        .add(scale.mul(complement).mul(standardized.density));
+    Ok(pair_kernel_from(value, standardized.orthant))
 }
 
 /// The exact GELU with means (the module's biased forms), with `A = 1 + v`, `B = 1 + w`,
@@ -1120,44 +1263,66 @@ fn exact_gelu_biased_pair_kernel(
     law: ProjectedCovariance,
 ) -> Result<PairKernel, GaussianActivationError> {
     let (mean_x, mean_y) = (pair.mean_x, pair.mean_y);
-    let (variance_x, variance_y) = (pair.variance_x, pair.variance_y);
-    let total_x = 1.0 + variance_x;
-    let total_y = 1.0 + variance_y;
+    let one = Bounded::exact(1.0);
+    let spread_x = Bounded::exact(pair.variance_x);
+    let spread_y = Bounded::exact(pair.variance_y);
+    let total_x = one.add(spread_x);
+    let total_y = one.add(spread_y);
     let root_total_x = total_x.sqrt();
     let root_total_y = total_y.sqrt();
-    let root_product = root_total_x * root_total_y;
-    let covariance = law.covariance;
-    let discriminant = 1.0 + variance_x + variance_y + law.residual;
-    let standardized_x = mean_x / root_total_x;
-    let standardized_y = mean_y / root_total_y;
-    let correlation = (covariance / root_product).clamp(-1.0, 1.0);
-    let complement = (discriminant / (total_x * total_y)).min(1.0);
-    let orthant =
-        bivariate_normal_cdf_with_complement(standardized_x, standardized_y, correlation, complement)
-            .map_err(bivariate_normal_refusal)?;
-    let partials = bivariate_normal_cdf_partials_with_complement(
-        standardized_x,
-        standardized_y,
-        correlation,
-        complement,
-    )
-    .map_err(bivariate_normal_refusal)?;
-    let partial_x = partials.d_h / root_total_x;
-    let partial_y = partials.d_k / root_total_y;
-    let density = partials.d_rho / root_product;
-    let reduced_x = (total_y * mean_x - covariance * mean_y) / discriminant;
-    let reduced_y = (total_x * mean_y - covariance * mean_x) / discriminant;
-    let coupling = law.residual + covariance * covariance * (total_x.recip() + total_y.recip());
-    Ok(PairKernel {
-        value: (mean_x * mean_y + covariance) * orthant
-            + (mean_y * variance_x + mean_x * covariance / total_x) * partial_x
-            + (mean_x * variance_y + mean_y * covariance / total_y) * partial_y
-            + coupling * density,
-        covariance_derivative: orthant
-            + (mean_x * partial_x + covariance * density) / total_x
-            + (mean_y * partial_y + covariance * density) / total_y
-            + (covariance / discriminant + reduced_x * reduced_y) * density,
-    })
+    let root_product = root_total_x.mul(root_total_y);
+    let covariance = Bounded::exact(law.covariance);
+    let residual = bounded_residual(law);
+    let discriminant = one.add(spread_x).add(spread_y).add(residual);
+    let location_x = Bounded::exact(mean_x);
+    let location_y = Bounded::exact(mean_y);
+    let standardized = standardized_orthant(
+        location_x.div(root_total_x),
+        location_y.div(root_total_y),
+        clamped_correlation(covariance.div(root_product)),
+        capped_complement(discriminant.div(total_x.mul(total_y))),
+    )?;
+    let partial_x = standardized.partial_h.div(root_total_x);
+    let partial_y = standardized.partial_k.div(root_total_y);
+    let density = standardized.density.div(root_product);
+    let reduced_x = total_y
+        .mul(location_x)
+        .sub(covariance.mul(location_y))
+        .div(discriminant);
+    let reduced_y = total_x
+        .mul(location_y)
+        .sub(covariance.mul(location_x))
+        .div(discriminant);
+    let coupling =
+        residual.add(covariance.mul(covariance).mul(one.div(total_x).add(one.div(total_y))));
+    let value = location_x
+        .mul(location_y)
+        .add(covariance)
+        .mul(standardized.orthant)
+        .add(
+            location_y
+                .mul(spread_x)
+                .add(location_x.mul(covariance).div(total_x))
+                .mul(partial_x),
+        )
+        .add(
+            location_x
+                .mul(spread_y)
+                .add(location_y.mul(covariance).div(total_y))
+                .mul(partial_y),
+        )
+        .add(coupling.mul(density));
+    let derivative = standardized
+        .orthant
+        .add(location_x.mul(partial_x).add(covariance.mul(density)).div(total_x))
+        .add(location_y.mul(partial_y).add(covariance.mul(density)).div(total_y))
+        .add(
+            covariance
+                .div(discriminant)
+                .add(reduced_x.mul(reduced_y))
+                .mul(density),
+        );
+    Ok(pair_kernel_from(value, derivative))
 }
 
 #[cfg(test)]
@@ -1479,6 +1644,49 @@ mod tests {
         }
     }
 
+    /// `atan` of a nonnegative double-double: three half-angle reductions
+    /// `t → t/(1 + √(1 + t²))` bring it below `tan(π/16) < 0.2`, where the
+    /// alternating series to twenty-five terms leaves under `1e-36`.
+    fn double_double_atan(argument: DoubleDouble) -> DoubleDouble {
+        let one = DoubleDouble::from(1.0);
+        let mut reduced = argument;
+        let mut halvings = 3;
+        while halvings > 0 {
+            reduced = reduced.div(one.add(one.add(reduced.mul(reduced)).sqrt()));
+            halvings -= 1;
+        }
+        let square = reduced.mul(reduced);
+        let mut power = reduced;
+        let mut sum = DoubleDouble::from(0.0);
+        let mut index = 0_i32;
+        while index < 25 {
+            let term = power.div(DoubleDouble::from(f64::from(2 * index + 1)));
+            sum = if index % 2 == 0 {
+                sum.add(term)
+            } else {
+                sum.add(term.negated())
+            };
+            power = power.mul(square);
+            index += 1;
+        }
+        sum.scaled(8.0)
+    }
+
+    /// `atan2(y, x)` for `y ≥ 0` in double-double.
+    fn double_double_atan2(height: DoubleDouble, abscissa: f64) -> DoubleDouble {
+        let pi = DoubleDouble {
+            high: PI,
+            low: 1.224_646_799_147_353_2e-16,
+        };
+        if abscissa > 0.0 {
+            double_double_atan(height.div(DoubleDouble::from(abscissa)))
+        } else if abscissa < 0.0 {
+            pi.add(double_double_atan(height.div(DoubleDouble::from(-abscissa))).negated())
+        } else {
+            pi.scaled(0.5)
+        }
+    }
+
     /// `|value − reference|` for a double-double reference.
     fn double_double_discrepancy(value: f64, reference: DoubleDouble) -> f64 {
         ((value - reference.high) - reference.low).abs()
@@ -1511,9 +1719,8 @@ mod tests {
         DoubleDouble::from(1.0).div(tail)
     }
 
-    /// The bivariate normal owner's absolute contract, from its module docs and
-    /// test model: `2 (3 + 7·2/24 + 1) ε + ε/6 < 10ε` per value of `Φ₂`.
-    const BIVARIATE_NORMAL_CONTRACT: f64 = 10.0 * f64::EPSILON;
+    /// The bivariate normal owner's published absolute bound per value of `Φ₂`.
+    const BIVARIATE_NORMAL_CONTRACT: f64 = BIVARIATE_NORMAL_CDF_ERROR_BOUND;
 
     /// `(H, ∂_hΦ₂, ∂_kΦ₂, φ₂)` at a standardized pair law, as the biased kernels
     /// form them, with the degenerate law's partials bounded by `φ(h)`, `φ(k)`.
@@ -2395,13 +2602,10 @@ mod tests {
                 }
             }
             // A constant pre-activation: K = σ(0) E σ(Y) = 0 and ∂_r K = σ'(0) E σ'(Y) = ¼.
-            let constant = PairKernel {
-                value: 0.0,
-                covariance_derivative: 0.25,
-            };
+            let moments = |kernel: PairKernel| (kernel.value, kernel.covariance_derivative);
             assert_eq!(
-                pair_kernel(activation, zero_mean(0.0, 2.0, 0.0)),
-                Ok(constant),
+                pair_kernel(activation, zero_mean(0.0, 2.0, 0.0)).map(moments),
+                Ok((0.0, 0.25)),
                 "{activation:?} with a zero variance"
             );
             let rounded = PreactivationPair {
@@ -2409,8 +2613,8 @@ mod tests {
                 ..zero_mean(0.0, 2.0, 0.1)
             };
             assert_eq!(
-                pair_kernel(activation, rounded),
-                Ok(constant),
+                pair_kernel(activation, rounded).map(moments),
+                Ok((0.0, 0.25)),
                 "{activation:?} with a zero variance and a covariance inside its rounding"
             );
             assert!(matches!(
@@ -2419,11 +2623,9 @@ mod tests {
             ));
         }
         assert_eq!(
-            pair_kernel(GaussianActivation::Relu, zero_mean(4.0, 9.0, 6.0)),
-            Ok(PairKernel {
-                value: 3.0,
-                covariance_derivative: 0.5
-            })
+            pair_kernel(GaussianActivation::Relu, zero_mean(4.0, 9.0, 6.0))
+                .map(|kernel| (kernel.value, kernel.covariance_derivative)),
+            Ok((3.0, 0.5))
         );
     }
 
@@ -3172,10 +3374,7 @@ mod tests {
         // ∂_r K = σ'(b) T_w σ'(c), with ReLU's Gaussian-limit slope ½ at the kink.
         let moments = smoothing(GaussianActivation::Relu, -0.3, 2.0, 2);
         for (constant, slope) in [(0.7, 1.0), (-0.5, 0.0), (0.0, 0.5)] {
-            let expected = PairKernel {
-                value: f64::max(constant, 0.0) * moments[0],
-                covariance_derivative: slope * moments[1],
-            };
+            let expected = (f64::max(constant, 0.0) * moments[0], slope * moments[1]);
             let constant_x = PreactivationPair {
                 mean_x: constant,
                 mean_y: -0.3,
@@ -3185,7 +3384,8 @@ mod tests {
                 covariance_rounding: 0.0,
             };
             assert_eq!(
-                pair_kernel(GaussianActivation::Relu, constant_x),
+                pair_kernel(GaussianActivation::Relu, constant_x)
+                    .map(|kernel| (kernel.value, kernel.covariance_derivative)),
                 Ok(expected),
                 "ReLU with X = {constant}"
             );
@@ -3197,7 +3397,8 @@ mod tests {
                 ..constant_x
             };
             assert_eq!(
-                pair_kernel(GaussianActivation::Relu, constant_y),
+                pair_kernel(GaussianActivation::Relu, constant_y)
+                    .map(|kernel| (kernel.value, kernel.covariance_derivative)),
                 Ok(expected),
                 "ReLU with Y = {constant}"
             );
@@ -3384,6 +3585,109 @@ mod tests {
         // Positive control: at exact arguments the propagated part of every bound is
         // zero, so the bounds are only as good as their rounding terms, and some
         // evaluation does round.
+        assert!(
+            largest_discrepancy > 0.0,
+            "no evaluation rounded, so the bounds were not exercised"
+        );
+    }
+
+    #[test]
+    fn zero_mean_pair_kernel_rounding_bounds_hold_against_a_double_double_reference() {
+        // The same closed forms carried in double-double at the same float law
+        // (the residual vw − r² from exact products, atan2 by half-angle reduction and
+        // series), so the discrepancy is the production rounding alone.
+        let pi = DoubleDouble {
+            high: PI,
+            low: 1.224_646_799_147_353_2e-16,
+        };
+        let two_pi = pi.scaled(2.0);
+        let one = DoubleDouble::from(1.0);
+        let relu_laws: [(f64, f64, f64); 5] = [
+            (1.0, 1.0, 0.3),
+            (0.25, 4.0, -0.9),
+            (9.0, 4.0, 5.994),
+            (4.0, 4.0, -4.0 * (1.0 - 1.0e-6)),
+            (16.0, 9.0, -6.0),
+        ];
+        let gelu_laws: [(f64, f64, f64); 5] = [
+            (1.0, 1.0, 0.3),
+            (9.0, 4.0, 5.994),
+            (64.0, 64.0, 63.9),
+            (4096.0, 4096.0, -4096.0),
+            (1.0e8, 1.0e8, -1.0e8),
+        ];
+        let mut largest_discrepancy = 0.0_f64;
+        for (activation, laws) in [
+            (GaussianActivation::Relu, relu_laws),
+            (GaussianActivation::ExactGelu, gelu_laws),
+        ] {
+            for (variance_x, variance_y, covariance) in laws {
+                let closed = pair_kernel(activation, zero_mean(variance_x, variance_y, covariance))
+                    .expect("zero-mean pair kernel");
+                let residual = DoubleDouble::from(variance_x)
+                    .mul(DoubleDouble::from(variance_y))
+                    .add(DoubleDouble::from(covariance).mul(DoubleDouble::from(covariance)).negated());
+                let (reference_value, reference_derivative) = match activation {
+                    GaussianActivation::Relu => {
+                        let root = if residual.high > 0.0 {
+                            residual.sqrt()
+                        } else {
+                            DoubleDouble::from(0.0)
+                        };
+                        let angle = double_double_atan2(root, -covariance);
+                        (
+                            root.add(DoubleDouble::from(covariance).mul(angle)).div(two_pi),
+                            angle.div(two_pi),
+                        )
+                    }
+                    GaussianActivation::ExactGelu => {
+                        let discriminant = one
+                            .add(DoubleDouble::from(variance_x))
+                            .add(DoubleDouble::from(variance_y))
+                            .add(residual);
+                        let root = discriminant.sqrt();
+                        let angle = double_double_atan2(root, -covariance);
+                        let density = one.div(two_pi.mul(root));
+                        let inverse = one
+                            .div(one.add(DoubleDouble::from(variance_x)))
+                            .add(one.div(one.add(DoubleDouble::from(variance_y))));
+                        let coupling = residual.add(
+                            DoubleDouble::from(covariance)
+                                .mul(DoubleDouble::from(covariance))
+                                .mul(inverse),
+                        );
+                        (
+                            DoubleDouble::from(covariance)
+                                .mul(angle)
+                                .div(two_pi)
+                                .add(coupling.mul(density)),
+                            angle.div(two_pi).add(
+                                DoubleDouble::from(covariance)
+                                    .mul(density)
+                                    .mul(inverse.add(one.div(discriminant))),
+                            ),
+                        )
+                    }
+                    GaussianActivation::Silu => unreachable!("SiLU has no closed form here"),
+                };
+                let value_error = double_double_discrepancy(closed.value, reference_value);
+                let derivative_error =
+                    double_double_discrepancy(closed.covariance_derivative, reference_derivative);
+                assert!(
+                    value_error <= closed.value_rounding,
+                    "{activation:?} K at v = {variance_x}, w = {variance_y}, r = {covariance}: error {value_error:e} beyond its bound {:e}",
+                    closed.value_rounding
+                );
+                assert!(
+                    derivative_error <= closed.covariance_derivative_rounding,
+                    "{activation:?} ∂_r K at v = {variance_x}, w = {variance_y}, r = {covariance}: error {derivative_error:e} beyond its bound {:e}",
+                    closed.covariance_derivative_rounding
+                );
+                largest_discrepancy = largest_discrepancy.max(value_error).max(derivative_error);
+            }
+        }
+        // Positive control: at exact float laws the bounds are only as good as their
+        // rounding terms, and some evaluation does round.
         assert!(
             largest_discrepancy > 0.0,
             "no evaluation rounded, so the bounds were not exercised"
