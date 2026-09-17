@@ -465,7 +465,7 @@ fn measure_jet_affine_value_basis(
 ///
 /// This is a function-space object: `vᵀH₀v` is the squared mass norm of the
 /// affine projection of the center values `v`. No coefficient metric enters.
-fn affine_function_nullspace_form(
+pub fn affine_function_nullspace_form(
     centers: ArrayView2<'_, f64>,
     masses: ArrayView1<'_, f64>,
 ) -> Result<Array2<f64>, BasisError> {
