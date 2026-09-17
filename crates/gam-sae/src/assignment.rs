@@ -365,6 +365,30 @@ impl AssignmentMode {
     }
 }
 
+/// A gate configuration the dense assignment state refuses to evaluate, because no
+/// derivative in the crate differentiates its forward map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateConfigurationRefusal {
+    /// #2933 F04 — softmax routing with ungated background atoms (see
+    /// [`SaeAssignment::ungated`]).
+    SoftmaxWithUngatedAtoms { ungated_atoms: Vec<usize> },
+}
+
+impl std::fmt::Display for GateConfigurationRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SoftmaxWithUngatedAtoms { ungated_atoms } => write!(
+                f,
+                "SaeAssignment: softmax routing refuses ungated atoms {ungated_atoms:?} \
+                 (#2933 F04): pinning a gate at 1 after a softmax over all K atoms is not the \
+                 map its logit JVP, entropy prior, logit Jacobian and reference-logit chart \
+                 differentiate, and a unit background plus a simplex over only the gated atoms \
+                 is not implemented"
+            ),
+        }
+    }
+}
+
 /// Per-row latent assignment state — the DENSE-CERTIFICATION / debug-and-research
 /// lane state only (#985 / E1), NOT the production route.
 ///
@@ -397,13 +421,21 @@ pub struct SaeAssignment {
     /// it is excluded from the other atoms' gate (for the column-separable
     /// ordered Beta--Bernoulli / threshold gate modes the remaining atoms are computed independently, so
     /// they are unaffected), and its logit is NOT a free parameter — its
-    /// logit-JVP, sparsity-prior gradient/curvature, and softmax majorizer
-    /// contributions are all zero, leaving its logit slot an inert
-    /// (ridge-regularized) null direction in the per-row Newton block. This lets
-    /// the linear tier carry FULL-RANK reconstructible variance
-    /// (`fitted = γ_ungated(x) + Σ_{gated} a_k·γ_k(x)`) so a linear SAE can reach
-    /// the rank-(K·d) PCA ceiling, while the gated curved atoms still add sparse
-    /// structure on the residual (#1026 routing-bound finding).
+    /// logit-JVP and sparsity-prior gradient/curvature are all zero, leaving its
+    /// logit slot an inert (ridge-regularized) null direction in the per-row
+    /// Newton block. This lets the linear tier carry FULL-RANK reconstructible
+    /// variance (`fitted = γ_ungated(x) + Σ_{gated} a_k·γ_k(x)`) so a linear SAE
+    /// can reach the rank-(K·d) PCA ceiling, while the gated curved atoms still
+    /// add sparse structure on the residual (#1026 routing-bound finding).
+    ///
+    /// Softmax refuses ungated atoms ([`GateConfigurationRefusal`], #2933 F04).
+    /// Its gates share one simplex, so pinning one of them at `1` after a softmax
+    /// over all `K` atoms is not the map its logit JVP, entropy prior, logit
+    /// Jacobian and reference-logit chart differentiate: with decoder values 2
+    /// and 3, atom 1 ungated and zero logits, the forward map is `2σ(ℓ) + 3` with
+    /// slope `0.5`, while the all-`K` softmax JVP reads `−1`. A unit background
+    /// plus a simplex over only the gated atoms is a different model, with its
+    /// own reference chart and jets, and is not implemented.
     pub ungated: Vec<bool>,
     /// #1033 — AMORTIZED / FROZEN routing. When `Some`, this `(n, K)` matrix is a
     /// ρ-INVARIANT predicted routing (the amortized `x → logits` map distilled
@@ -523,6 +555,22 @@ impl SaeAssignment {
         self.ungated.iter().any(|&u| u)
     }
 
+    /// Refuse a gate configuration whose forward map no derivative in the crate
+    /// differentiates. The forward seam and [`Self::validate_rho_domain`] call
+    /// this, so the value path and every prior/operator channel stop at the
+    /// same refusal. Frozen routing is not refused here: it holds every logit,
+    /// so the forward gates and all their logit derivatives are constant.
+    pub(crate) fn validate_gate_configuration(&self) -> Result<(), GateConfigurationRefusal> {
+        if matches!(self.mode, AssignmentMode::Softmax { .. }) && self.has_ungated() {
+            return Err(GateConfigurationRefusal::SoftmaxWithUngatedAtoms {
+                ungated_atoms: (0..self.ungated.len())
+                    .filter(|&atom| self.ungated[atom])
+                    .collect(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn n_obs(&self) -> usize {
         self.logits.nrows()
     }
@@ -615,6 +663,8 @@ impl SaeAssignment {
     }
 
     pub(crate) fn validate_rho_domain(&self, rho: &SaeManifoldRho) -> Result<(), String> {
+        self.validate_gate_configuration()
+            .map_err(|refusal| refusal.to_string())?;
         rho.validate_log_strength_domain()?;
         if let AssignmentMode::OrderedBetaBernoulli {
             alpha,
@@ -668,6 +718,8 @@ impl SaeAssignment {
         // not frozen.
         let routing = self.routing_logits_row(row);
         validate_finite_logits(routing, row)?;
+        self.validate_gate_configuration()
+            .map_err(|refusal| refusal.to_string())?;
         // Only Softmax collapses to a fixed assignment at K==1: its
         // assignment_coord_dim is K-1 = 0, so there is no free logit. OrderedBetaBernoulli and
         // threshold gate keep a free per-atom gate logit even at K==1
@@ -691,8 +743,9 @@ impl SaeAssignment {
         // column-separable ordered Beta--Bernoulli / threshold gate modes the other atoms' gates are
         // computed independently above, so overwriting the ungated entries to 1.0
         // leaves the gated atoms exactly as they were; the ungated atom then
-        // contributes `γ_k(t_k)` unweighted to every row. (Softmax + ungated would
-        // need a simplex renormalization, which is not performed here.)
+        // contributes `γ_k(t_k)` unweighted to every row. Softmax + ungated was
+        // refused above (#2933 F04): overwriting one simplex entry is not the map
+        // the softmax derivatives differentiate.
         if self.has_ungated() {
             for (k, gate) in row_gates.iter_mut().enumerate() {
                 if self.ungated[k] {
@@ -718,6 +771,8 @@ impl SaeAssignment {
         // fully overwrite indices `0..k_atoms()`.
         let routing = self.routing_logits_row(row);
         validate_finite_logits(routing, row)?;
+        self.validate_gate_configuration()
+            .map_err(|refusal| refusal.to_string())?;
         // Mirror the allocating early-return: only Softmax collapses to a fixed
         // unit assignment at K==1.
         if self.k_atoms() == 1 && matches!(self.mode, AssignmentMode::Softmax { .. }) {
@@ -1145,6 +1200,10 @@ pub(crate) fn fill_assignment_logit_jvp_rows(
             // the assignment-weighted fitted row. The dense row layout uses
             // the reference-logit chart, so only columns `0..K-1` are free;
             // the final reference logit is fixed at zero and has no row.
+            // `fitted` is `Σ_k a_k γ_k` over the whole simplex, which is only
+            // the right contraction because the forward seam refuses a softmax
+            // with an ungated background (#2933 F04); the skipped columns here
+            // are frozen routing's, where every logit is held.
             let inv_tau = 1.0 / temperature;
             for logit_col in 0..assignments.len() - 1 {
                 if is_ungated(logit_col) {
@@ -1833,7 +1892,8 @@ fn gate_logit_jacobian_at(
 ///
 /// A softmax row's prior is a density on the simplex, while the inner solve and the Laplace
 /// evidence integrate over its free logits. The chart holds the reference logit `K − 1` at
-/// zero, and a fixed logit (an ungated atom, or every atom under frozen routing) is held too.
+/// zero, and frozen routing holds every logit, leaving no free set. An ungated atom never
+/// reaches here: softmax refuses it ([`SaeAssignment::validate_gate_configuration`], #2933 F04).
 /// For the free set `F`, with `R = 1 − Σ_{i∈F} z_i` the mass on the held atoms, the change of
 /// variables has `|det ∂z_F/∂ℓ_F| = Π_{i∈F} z_i · R / τ^{|F|}` (#2080), so each row carries
 /// `J = −Σ_{i∈F} ln z_i − ln R + |F|·ln τ`. With `c = |F| + 1`, `∂J/∂ℓ_j = (c·z_j − 1)/τ` and
@@ -2595,5 +2655,249 @@ mod frozen_routing_1033_tests {
             a.fixed_logit_mask().iter().all(|&f| !f),
             "thaw must restore the free-logit path"
         );
+    }
+}
+
+#[cfg(test)]
+mod ungated_background_jvp_2933_tests {
+    //! #2933 F04 — an ungated atom's gate is pinned at 1 after the row's gates are computed.
+    //! For the column-separable sigmoid gates that pin is a derivative-consistent unit
+    //! background; after a softmax over all K atoms it is a different map from the one every
+    //! softmax derivative differentiates. Every configuration the forward seam admits must
+    //! have a production logit JVP equal to a central difference of the production forward
+    //! seam, and the configuration it cannot differentiate must be refused.
+    use super::*;
+
+    /// Decoder rows `γ_k` (K ≤ 3, p = 2), distinct per atom so no contraction cancels.
+    const DECODED: [[f64; 2]; 3] = [[2.0, -0.7], [3.0, 1.1], [-1.3, 0.4]];
+
+    fn one_row_assignment(
+        mode: AssignmentMode,
+        logits: &[f64],
+        ungated: Vec<bool>,
+    ) -> SaeAssignment {
+        let k = logits.len();
+        let mut assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+            Array2::from_shape_vec((1, k), logits.to_vec()).unwrap(),
+            vec![Array2::<f64>::zeros((1, 1)); k],
+            vec![LatentManifold::Euclidean; k],
+            mode,
+        )
+        .unwrap();
+        assignment.ungated = ungated;
+        assignment
+    }
+
+    /// `Σ_k a_k γ_k`, read through the production forward seam.
+    fn fitted_row(assignment: &SaeAssignment, decoded: &Array2<f64>) -> Array1<f64> {
+        let gates = assignment
+            .try_assignments_row(0)
+            .expect("an admitted configuration evaluates");
+        decoded.t().dot(&gates)
+    }
+
+    #[test]
+    fn gate_logit_jvp_matches_forward_difference_for_every_admitted_ungated_mix_2933() {
+        let modes = [
+            AssignmentMode::softmax(0.7),
+            AssignmentMode::ordered_beta_bernoulli(0.8, 1.3, false),
+            AssignmentMode::threshold_gate(0.9, 0.2),
+        ];
+        let base_logits = [0.4_f64, -0.6, 0.9];
+        let step = 1.0e-5;
+        let mut refused = 0usize;
+        let mut admitted = 0usize;
+        for mode in modes {
+            for k in [2usize, 3] {
+                let decoded = Array2::from_shape_fn((k, 2), |(atom, out)| DECODED[atom][out]);
+                // Every mask, including atom `K − 1`: softmax's reference-logit atom.
+                for mask in 0..(1usize << k) {
+                    let ungated: Vec<bool> = (0..k).map(|atom| mask & (1 << atom) != 0).collect();
+                    let label = format!("{} K={k} ungated={ungated:?}", mode.family_label());
+                    let assignment = one_row_assignment(mode, &base_logits[..k], ungated.clone());
+                    let softmax = matches!(mode, AssignmentMode::Softmax { .. });
+                    let gates = match assignment.try_assignments_row(0) {
+                        Ok(gates) => gates,
+                        Err(refusal) => {
+                            assert!(
+                                softmax && mask != 0,
+                                "{label}: refused a configuration with a consistent derivative: {refusal}"
+                            );
+                            let mut scratch = vec![f64::NAN; k];
+                            assert!(
+                                assignment.try_assignments_row_into(0, &mut scratch).is_err(),
+                                "{label}: the fill-into seam must refuse what the allocating seam refuses"
+                            );
+                            refused += 1;
+                            continue;
+                        }
+                    };
+                    admitted += 1;
+                    let fitted = decoded.t().dot(&gates);
+                    let mut jac = Array2::<f64>::zeros((assignment.row_block_dim(), 2));
+                    fill_assignment_logit_jvp_rows(
+                        assignment.mode,
+                        assignment.logits.row(0),
+                        gates.view(),
+                        decoded.view(),
+                        fitted.view(),
+                        &assignment.fixed_logit_mask(),
+                        &mut jac,
+                    );
+                    let mut live_slope = 0.0_f64;
+                    for slot in 0..assignment.assignment_coord_dim() {
+                        let mut plus = assignment.clone();
+                        let mut minus = assignment.clone();
+                        plus.logits[[0, slot]] += step;
+                        minus.logits[[0, slot]] -= step;
+                        let difference = (fitted_row(&plus, &decoded)
+                            - fitted_row(&minus, &decoded))
+                            / (2.0 * step);
+                        for out in 0..2 {
+                            assert!(
+                                (jac[[slot, out]] - difference[out]).abs()
+                                    <= 1.0e-8 + 1.0e-6 * difference[out].abs(),
+                                "{label}: logit slot {slot}, output {out}: JVP {} vs forward \
+                                 difference {}",
+                                jac[[slot, out]],
+                                difference[out]
+                            );
+                            live_slope = live_slope.max(difference[out].abs());
+                        }
+                    }
+                    if ungated.iter().any(|&u| !u) {
+                        assert!(
+                            live_slope > 5.0e-2,
+                            "{label}: no live logit slope ({live_slope:e})"
+                        );
+                    }
+                    // Row sums over the simplex portion only; a sigmoid background is exactly 1.
+                    if softmax {
+                        assert!(
+                            (gates.sum() - 1.0).abs() <= 1.0e-12,
+                            "{label}: softmax row mass {}",
+                            gates.sum()
+                        );
+                    }
+                    for atom in 0..k {
+                        if ungated[atom] {
+                            assert_eq!(gates[atom], 1.0, "{label}: ungated gate {atom}");
+                        } else {
+                            assert!(
+                                gates[atom] > 0.0 && gates[atom] < 1.0,
+                                "{label}: gated atom {atom} = {}",
+                                gates[atom]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Softmax refuses its 3 + 7 nonzero masks; each sigmoid family admits all 4 + 8.
+        assert_eq!(refused, 10, "softmax with any ungated atom must be refused");
+        assert_eq!(admitted, 2 + 2 * 12);
+    }
+
+    #[test]
+    fn softmax_with_ungated_background_is_refused_not_differentiated_as_another_map_2933() {
+        // The audit's two-atom counterexample: decoder values 2 and 3, atom 1 (softmax's
+        // reference-logit atom) ungated, zero logits, unit temperature. The overwritten
+        // forward map is `2σ(ℓ) + 3`, with slope 0.5 at zero; the all-K softmax JVP reads
+        // `0.5·(2 − 4) = −1`.
+        let assignment =
+            one_row_assignment(AssignmentMode::softmax(1.0), &[0.0, 0.0], vec![false, true]);
+        let decoded = Array2::from_shape_vec((2, 1), vec![2.0, 3.0]).unwrap();
+        match assignment.try_assignments_row(0) {
+            Err(refusal) => {
+                let mut scratch = [f64::NAN; 2];
+                assert!(assignment.try_assignments_row_into(0, &mut scratch).is_err());
+                let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::zeros(1); 2])
+                    .for_assignment(assignment.mode);
+                let rho_refusal = assignment
+                    .validate_rho_domain(&rho)
+                    .expect_err("the rho-domain seam must refuse too");
+                assert_eq!(rho_refusal, refusal);
+            }
+            Ok(gates) => {
+                let fitted = decoded.t().dot(&gates);
+                let mut jac = Array2::<f64>::zeros((assignment.row_block_dim(), 1));
+                fill_assignment_logit_jvp_rows(
+                    assignment.mode,
+                    assignment.logits.row(0),
+                    gates.view(),
+                    decoded.view(),
+                    fitted.view(),
+                    &assignment.fixed_logit_mask(),
+                    &mut jac,
+                );
+                let step = 1.0e-5;
+                let mut plus = assignment.clone();
+                let mut minus = assignment.clone();
+                plus.logits[[0, 0]] += step;
+                minus.logits[[0, 0]] -= step;
+                let difference = (fitted_row(&plus, &decoded)[0]
+                    - fitted_row(&minus, &decoded)[0])
+                    / (2.0 * step);
+                assert!(
+                    (difference - 0.5).abs() <= 1.0e-8,
+                    "the admitted forward map's slope is {difference}"
+                );
+                assert!(
+                    (jac[[0, 0]] - difference).abs() <= 1.0e-8,
+                    "softmax with an ungated background was admitted, but its logit JVP {} is \
+                     not the forward slope {difference}",
+                    jac[[0, 0]]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn softmax_ungated_refusal_is_typed_and_names_the_ungated_atoms_2933() {
+        let logits = [0.3_f64, -0.2, 0.5];
+        let check = |mode: AssignmentMode, ungated: Vec<bool>| {
+            one_row_assignment(mode, &logits, ungated).validate_gate_configuration()
+        };
+        let softmax = AssignmentMode::softmax(0.8);
+        assert_eq!(
+            check(softmax, vec![false, false, true]),
+            Err(GateConfigurationRefusal::SoftmaxWithUngatedAtoms {
+                ungated_atoms: vec![2]
+            }),
+            "the reference-logit atom K - 1 must be named"
+        );
+        assert_eq!(
+            check(softmax, vec![true, false, true]),
+            Err(GateConfigurationRefusal::SoftmaxWithUngatedAtoms {
+                ungated_atoms: vec![0, 2]
+            })
+        );
+        assert_eq!(check(softmax, vec![false; 3]), Ok(()));
+        for mode in [
+            AssignmentMode::ordered_beta_bernoulli(0.8, 1.3, false),
+            AssignmentMode::threshold_gate(0.9, 0.2),
+            AssignmentMode::top_k_support(2),
+        ] {
+            assert_eq!(
+                check(mode, vec![true, false, true]),
+                Ok(()),
+                "{}",
+                mode.family_label()
+            );
+        }
+        // Frozen routing holds every logit, so its softmax gates are constant in the free
+        // logits and stay admitted.
+        let mut frozen = one_row_assignment(softmax, &logits, vec![false; 3]);
+        frozen.frozen_logits = Some(frozen.logits.clone());
+        assert_eq!(frozen.validate_gate_configuration(), Ok(()));
+        // The String seams carry the typed refusal's text.
+        let refused = one_row_assignment(softmax, &logits, vec![false, true, false]);
+        let expected = GateConfigurationRefusal::SoftmaxWithUngatedAtoms {
+            ungated_atoms: vec![1],
+        }
+        .to_string();
+        assert_eq!(refused.try_assignments_row(0), Err(expected.clone()));
+        let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::zeros(1); 3]).for_assignment(softmax);
+        assert_eq!(refused.validate_rho_domain(&rho), Err(expected));
     }
 }
