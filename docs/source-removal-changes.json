@@ -1009,6 +1009,14 @@
     "evidence": "git grep -nw at the base finds each name only at its own definition, in doc or comment prose, and in two error-string labels. The three DesignMatrix PCG wrappers forwarded to LinearOperator methods that remain. No private helper, type or constant loses its last reference, and a per-file control finds no import newly unused."
   },
   {
+    "base": "f076f9d85b6ee012f4c3ee9733991a37a1bda8c4",
+    "items": [
+      "crates/gam-math/src/bivariate_normal.rs:fn:contract"
+    ],
+    "reason": "#2946 (fr-bvn): be06286325 deleted the test-scoped helper contract(), the bivariate normal tests' own error model 2(3 + 7*2/24 + 1)eps + eps/6. That model omitted the computed rule's weight and node error, the reductions' internal argument rounding and the partial-sum roundings, so every former call site now asserts the published BIVARIATE_NORMAL_CDF_ERROR_BOUND. The landing commit omitted this acknowledgement, and a follow-up commit adds it, keyed to the removal's own parent.",
+    "evidence": "contract() was a private fn inside the tests module of crates/gam-math/src/bivariate_normal.rs, and at be06286325 every call site there reads BIVARIATE_NORMAL_CDF_ERROR_BOUND instead. Post-landing gx8 job 1191714 at be06286325: touch build.rs; cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited RC_CHECK=0, public_api_census.py passed, and source_removal_guard.py --base f076f9d85b reported exactly this one identity without an acknowledgement (RC_GUARD=1)."
+  },
+  {
     "base": "b66b773539570a06e7c238eafe15a107e66e06cf",
     "items": [
       "crates/gam-data/src/lib.rs:fn:column_major_matches_record_driven_inferred_encode",
