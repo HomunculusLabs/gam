@@ -16,9 +16,8 @@ pub(crate) fn reject_marginal_slope_controls_for_transformation_normal(
     config: &FitConfig,
 ) -> Result<(), WorkflowError> {
     if requests_bernoulli_marginal_slope(config) {
-        return Err(WorkflowError::InvalidConfig {
-            reason: "transformation_normal cannot be combined with marginal-slope family controls"
-                .to_string(),
+        return Err(WorkflowError::TransformationNormalConflict {
+            conflict: TransformationNormalConflict::MarginalSlopeControls,
         });
     }
     Ok(())

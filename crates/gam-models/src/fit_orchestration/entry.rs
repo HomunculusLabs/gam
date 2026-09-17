@@ -2647,10 +2647,8 @@ fn materialize_impl<'a>(
     if let Some((left_col, right_col, event_col)) = parse_surv_interval_response(&parsed.response)?
     {
         if effective_config.transformation_normal {
-            return Err(WorkflowError::InvalidConfig {
-                reason:
-                    "transformation_normal cannot be combined with a SurvInterval(...) response"
-                        .to_string(),
+            return Err(WorkflowError::TransformationNormalConflict {
+                conflict: TransformationNormalConflict::SurvIntervalResponse,
             });
         }
         // Interval censoring `T ∈ (L, R]` is only defined for the latent
@@ -2673,9 +2671,8 @@ fn materialize_impl<'a>(
         )
     } else if let Some((entry_col, exit_col, event_col)) = parse_surv_response(&parsed.response)? {
         if effective_config.transformation_normal {
-            return Err(WorkflowError::InvalidConfig {
-                reason: "transformation_normal cannot be combined with a Surv(...) response"
-                    .to_string(),
+            return Err(WorkflowError::TransformationNormalConflict {
+                conflict: TransformationNormalConflict::SurvResponse,
             });
         }
         // `materialize_*` now return `WorkflowError` directly so the typed
@@ -2719,9 +2716,8 @@ fn materialize_impl<'a>(
             // hard configuration error for marginal-slope requests.
             reject_marginal_slope_controls_for_transformation_normal(effective_config)?;
             if effective_config.noise_formula.is_some() {
-                return Err(WorkflowError::InvalidConfig {
-                    reason: "transformation_normal cannot be combined with noise_formula"
-                        .to_string(),
+                return Err(WorkflowError::TransformationNormalConflict {
+                    conflict: TransformationNormalConflict::NoiseFormula,
                 });
             }
             materialize_transformation_normal(&parsed, data, &col_map, effective_config)

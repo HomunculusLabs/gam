@@ -31,6 +31,22 @@ pub enum MarginalSlopeLinkRefusal {
     },
 }
 
+/// Why a transformation-normal fit refuses a request. The CTN model is its own response
+/// model, so a request that also selects another response model is refused by the control
+/// that selects it rather than fitted as either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformationNormalConflict {
+    /// A `SurvInterval(...)` response selects the interval-censored survival likelihood.
+    SurvIntervalResponse,
+    /// A `Surv(...)` response selects a survival likelihood.
+    SurvResponse,
+    /// `noise_formula` selects a location-scale model.
+    NoiseFormula,
+    /// A marginal-slope family, `slope_formula`, `z_column` or `ctn_stage1` selects a
+    /// marginal-slope model.
+    MarginalSlopeControls,
+}
+
 /// Typed error category for the `solver::fit_orchestration` materialization and
 /// fitting pipeline.
 ///
@@ -96,6 +112,10 @@ pub enum WorkflowError {
     MarginalSlopeLink {
         context: &'static str,
         refusal: MarginalSlopeLinkRefusal,
+    },
+    /// A transformation-normal fit named a control that selects another response model.
+    TransformationNormalConflict {
+        conflict: TransformationNormalConflict,
     },
 }
 
@@ -173,6 +193,19 @@ impl std::fmt::Display for WorkflowError {
                     "link({parameter}=...) requires link(type={requires}), which {context} does not support"
                 ),
             },
+            WorkflowError::TransformationNormalConflict { conflict } => {
+                let control = match conflict {
+                    TransformationNormalConflict::SurvIntervalResponse => {
+                        "a SurvInterval(...) response"
+                    }
+                    TransformationNormalConflict::SurvResponse => "a Surv(...) response",
+                    TransformationNormalConflict::NoiseFormula => "noise_formula",
+                    TransformationNormalConflict::MarginalSlopeControls => {
+                        "marginal-slope family controls"
+                    }
+                };
+                write!(f, "transformation_normal cannot be combined with {control}")
+            }
         }
     }
 }
@@ -188,7 +221,8 @@ impl std::error::Error for WorkflowError {
             | WorkflowError::InvalidData { .. }
             | WorkflowError::SpatialUnderresolved { .. }
             | WorkflowError::ColumnNotFound { .. }
-            | WorkflowError::MarginalSlopeLink { .. } => None,
+            | WorkflowError::MarginalSlopeLink { .. }
+            | WorkflowError::TransformationNormalConflict { .. } => None,
         }
     }
 }

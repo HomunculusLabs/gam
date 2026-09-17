@@ -990,13 +990,17 @@ fn issue_789_transformation_normal_rejects_marginal_slope_controls_before_dispat
         ..FitConfig::default()
     };
 
-    let err = materialize("event ~ bmi", &data, &config)
-        .err()
-        .expect("transformation_normal must not steal marginal-slope fits");
-
+    let err = materialize("event ~ bmi", &data, &config).err();
     assert!(
-        err.to_string()
-            .contains("transformation_normal cannot be combined with marginal-slope")
+        matches!(
+            err,
+            Some(WorkflowError::TransformationNormalConflict {
+                conflict: TransformationNormalConflict::MarginalSlopeControls,
+            })
+        ),
+        "transformation_normal must not steal marginal-slope fits: the refusal must be the typed \
+         marginal-slope conflict, got {:?}",
+        err.map(|error| error.to_string())
     );
 }
 
@@ -1053,18 +1057,23 @@ fn family_transformation_normal_uses_ctn_conflict_validation() {
     let data = workflow_test_dataset();
     let config = FitConfig {
         family: Some("transformation_normal".to_string()),
-        noise_formula: Some("~ 1".to_string()),
+        // An auxiliary formula is its right-hand side alone; "~ 1" is refused by the
+        // formula service before any model is selected, so it cannot reach the conflict.
+        noise_formula: Some("1".to_string()),
         ..FitConfig::default()
     };
 
-    let err = materialize("bmi ~ s(age_entry, k=4)", &data, &config)
-        .err()
-        .expect("family='transformation-normal' must reject CTN-incompatible controls");
-
+    let err = materialize("bmi ~ s(age_entry, k=4)", &data, &config).err();
     assert!(
-        err.to_string()
-            .contains("transformation_normal cannot be combined with noise_formula"),
-        "unexpected error: {err}"
+        matches!(
+            err,
+            Some(WorkflowError::TransformationNormalConflict {
+                conflict: TransformationNormalConflict::NoiseFormula,
+            })
+        ),
+        "family='transformation-normal' must refuse a noise_formula as the typed CTN conflict, \
+         got {:?}",
+        err.map(|error| error.to_string())
     );
 }
 
