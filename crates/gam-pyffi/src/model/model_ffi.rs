@@ -4673,30 +4673,12 @@ fn with_tierney_kadane_normalizer_from_view(view: &RemlFitView<'_>, score: f64) 
     let Some(null_dim) = extract_null_dim_from_view(view)? else {
         return Ok(score);
     };
-    comparable_reml_score(
+    gam::solver::topology_selector::comparable_reml_score(
         score,
         Some(null_dim),
         extract_float_metadata_from_view(view, NULL_HESSIAN_LOGDET_KEYS)?,
     )
     .map_err(PyValueError::new_err)
-}
-
-fn comparable_reml_score(
-    raw_reml_score: f64,
-    null_dim: Option<f64>,
-    null_space_logdet: Option<f64>,
-) -> Result<f64, String> {
-    let Some(null_dim) = null_dim else {
-        return Ok(raw_reml_score);
-    };
-    gam::solver::topology_selector::tk_normalized_score(
-        raw_reml_score,
-        null_dim,
-        null_space_logdet,
-        1.0,
-        1,
-        gam::solver::evidence::TopologyScoreScale::PerObservation,
-    )
 }
 
 /// Occam-penalised conditional-AIC ranking score for a saved-model summary

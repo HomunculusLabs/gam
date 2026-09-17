@@ -4051,6 +4051,24 @@ impl UnifiedFitResult {
             .filter(|_| !self.at_zero_dispersion_boundary())
     }
 
+    /// [`Self::reml_score`] made comparable across models by the Tierney-Kadane
+    /// normalizer over this fit's penalty null space
+    /// ([`crate::topology_selector::comparable_reml_score`]).
+    ///
+    /// `Ok(None)` exactly when [`Self::reml_score`] is `None`: the normalizer is a
+    /// correction to a criterion, so a fit without one has no comparable score.
+    pub fn comparable_reml_score(&self) -> Result<Option<f64>, String> {
+        self.reml_score()
+            .map(|raw| {
+                crate::topology_selector::comparable_reml_score(
+                    raw,
+                    self.artifacts.null_space_dim.map(|dim| dim as f64),
+                    self.artifacts.null_space_logdet,
+                )
+            })
+            .transpose()
+    }
+
     /// `true` at the exact-fit Gaussian boundary: a profiled Gaussian scale
     /// estimated as exactly zero.
     ///

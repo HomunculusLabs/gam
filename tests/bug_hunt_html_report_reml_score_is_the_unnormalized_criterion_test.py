@@ -1,11 +1,9 @@
-"""Bug hunt: ``Model.report()`` prints the UN-normalized outer-optimizer
+"""Bug hunt: ``Model.report()`` printed the UN-normalized outer-optimizer
 criterion under the label ``REML / LAML``, while ``Model.summary()`` publishes the
 rank-aware normalized one under the same name. Two first-party surfaces of one
-fitted model, one label, two different numbers -- and the gap is model-dependent,
-so it is not a convention a reader can subtract out.
+fitted model, one label, two different numbers.
 
-``Summary`` deliberately carries both, and says which is which
-(``crates/gam-pyffi/src/model/model_ffi.rs:272-284``)::
+``Summary`` deliberately carries both, and says which is which::
 
     /// Cross-model comparable criterion: `raw_reml_score` plus the rank-aware
     /// Tierney-Kadane normalizer over the penalty null space.
@@ -14,13 +12,12 @@ so it is not a convention a reader can subtract out.
     raw_reml_score: Option<f64>,
 
 ``docs/getting-started.md`` points a reader at the first one ("REML/LAML
-criterion (in the ``reml_score`` field)"). The report is wired to the second:
-``crates/gam-report/src/lib.rs:18-20`` documents its own field as
-``UnifiedFitResult::reml_score`` -- the raw one -- and renders it at
-``crates/gam-report/src/lib.rs:546`` with the row label ``"REML / LAML"``.
+criterion (in the ``reml_score`` field)"). The report was wired to the second:
+``ReportInput::reml_score`` was filled from ``UnifiedFitResult::reml_score`` --
+the raw one -- and rendered with the row label ``"REML / LAML"``.
 
 Measured (n=500, ``y = sin(2*pi*x) + 0.15*z + N(0, 0.3)``, one seed; the report's
-value equals ``summary().raw_reml_score`` to its printed precision in every row):
+value equalled ``summary().raw_reml_score`` to its printed precision in every row):
 
     formula                summary().reml_score   report "REML / LAML"   gap    null_dim
     y ~ s(x)                    142.39836              140.21000        2.188      1
@@ -31,33 +28,15 @@ value equals ``summary().raw_reml_score`` to its printed precision in every row)
     y ~ w + v + z + s(x)        174.09721              166.55231        7.545      4
 
 The gap is exactly the normalizer the summary applies,
-``0.5*null_space_logdet - 0.5*null_dim*log(2*pi)`` (checked against
-``summary()["null_space_logdet"]`` / ``summary()["null_dim"]``: at n=500 with
-``null_dim=1``, ``null_space_logdet = log(500) = 6.2146`` and
-``0.5*6.2146 - 0.5*log(2*pi) = 2.1884``). It therefore GROWS with the model's
-unpenalized dimension -- 2.19 to 7.55 across the six models above, on identical
-rows -- so two models read off their reports are separated by a different number
-of log-evidence units than the same two models read off ``summary()`` or ranked
-by ``gamfit.compare_models``.
+``0.5*null_space_logdet - 0.5*null_dim*log(2*pi)``. At 69befd10c5 every formula
+above reports ``null_dim == 1``, so the gap measured 2.188 in all six rows, but the
+two surfaces still disagreed on the one label they share.
 
-That normalizer is not decorative. It is the whole reason `Summary` keeps the two
-apart: the raw criterion is the optimizer's own objective at the fitted lambda,
-and the codebase's own comparison surfaces refuse to rank on quantities that are
-not made comparable first (see the `n_obs` guard on the same struct, #1384/#2595).
-The report is the artifact a user hands to someone else, with no second column
-and nothing saying which criterion it is.
-
-Every other headline field in the report agrees with `summary()` exactly
-(deviance, total EDF, observation count), which is what makes this one field a
-defect rather than a different report design.
-
-Observed: ``report()`` and ``summary()`` disagree on ``REML / LAML`` by a
-model-dependent 2.19-7.55 on the same rows; the report shows
-``summary().raw_reml_score``.
-
-Expected: the report's ``REML / LAML`` row is the criterion ``summary()`` calls
-``reml_score`` -- or, if the raw value is what a report should carry, it is
-labelled as the raw value and the normalized one appears beside it.
+The comparable criterion is now one Rust function,
+``gam_solve::topology_selector::comparable_reml_score`` (reached through
+``UnifiedFitResult::comparable_reml_score``). The summary, ``compare_models``, and
+both report producers (``gam report`` and ``Model.report()``) read it, so the
+report's ``REML / LAML`` row is the criterion ``summary()`` calls ``reml_score``.
 """
 
 from __future__ import annotations
@@ -120,8 +99,8 @@ def _close(a: float, b: float) -> bool:
 
 @pytest.mark.parametrize("formula", FORMULAS)
 def test_control_the_other_headline_fields_agree(formula: str, tmp_path: Any) -> None:
-    """Green today: deviance, total EDF and the observation count round-trip into
-    the report exactly, so the report is faithful everywhere else."""
+    """Deviance, total EDF and the observation count round-trip into the report
+    exactly, so the report is faithful everywhere else."""
     model = gamfit.fit(_data(), formula, family="gaussian")
     summary = model.summary()
     rows = _report_rows(model, tmp_path)
@@ -131,13 +110,26 @@ def test_control_the_other_headline_fields_agree(formula: str, tmp_path: Any) ->
 
 
 @pytest.mark.parametrize("formula", FORMULAS)
-def test_control_the_report_value_is_the_raw_criterion(formula: str, tmp_path: Any) -> None:
-    """Green today, and the diagnosis: the number the report prints is
-    ``summary().raw_reml_score``, not ``summary().reml_score``."""
+def test_control_the_report_value_is_the_raw_criterion_plus_the_normalizer(
+    formula: str, tmp_path: Any
+) -> None:
+    """The report's row sits above ``summary().raw_reml_score`` by exactly the
+    null-space normalizer. Every formula here has a nonzero normalizer, so a
+    report that went back to printing the raw criterion fails this check."""
     model = gamfit.fit(_data(), formula, family="gaussian")
     summary = model.summary()
     rows = _report_rows(model, tmp_path)
-    assert _close(rows["REML / LAML"], float(summary.raw_reml_score))
+    null_dim = float(summary["null_dim"])
+    normalizer = 0.5 * float(summary["null_space_logdet"]) - 0.5 * null_dim * math.log(
+        2.0 * math.pi
+    )
+    assert abs(normalizer) > 1.0e-2, (
+        f"{formula}: normalizer {normalizer} is too small to tell the raw criterion apart"
+    )
+    gap = rows["REML / LAML"] - float(summary.raw_reml_score)
+    assert _close(gap, normalizer), (
+        f"{formula}: report sits {gap} above raw_reml_score, not the normalizer {normalizer}"
+    )
 
 
 @pytest.mark.parametrize("formula", FORMULAS)
@@ -148,32 +140,4 @@ def test_report_reml_matches_the_summary_criterion(formula: str, tmp_path: Any) 
     assert _close(rows["REML / LAML"], float(summary.reml_score)), (
         f"{formula}: report prints {rows['REML / LAML']} where summary().reml_score "
         f"is {summary.reml_score} (raw_reml_score {summary.raw_reml_score})"
-    )
-
-
-def test_the_discrepancy_is_not_a_fixed_offset(tmp_path: Any) -> None:
-    """A constant convention gap could be read around. This one tracks the
-    model's unpenalized dimension, so report-to-report gaps between two models
-    are not the summary's gaps."""
-    data = _data()
-    gaps: list[tuple[str, float, float]] = []
-    for formula in FORMULAS:
-        model = gamfit.fit(data, formula, family="gaussian")
-        summary = model.summary()
-        rows = _report_rows(model, tmp_path)
-        gap = float(summary.reml_score) - rows["REML / LAML"]
-        null_dim = float(summary["null_dim"])
-        # The gap is exactly the Tierney-Kadane normalizer the summary applies.
-        predicted = 0.5 * float(summary["null_space_logdet"]) - 0.5 * null_dim * math.log(
-            2.0 * math.pi
-        )
-        assert abs(gap - predicted) < 1.0e-3, (
-            f"{formula}: gap {gap} is not the null-space normalizer {predicted}"
-        )
-        gaps.append((formula, null_dim, gap))
-
-    spread = max(g for _, _, g in gaps) - min(g for _, _, g in gaps)
-    assert spread < 1.0e-3, (
-        "the report/summary REML gap varies with the model's unpenalized "
-        f"dimension, so report-to-report comparisons are not summary comparisons: {gaps}"
     )

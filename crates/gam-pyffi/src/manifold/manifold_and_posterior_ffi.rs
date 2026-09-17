@@ -1531,16 +1531,9 @@ fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
     // term is a correction TO a score, not a score, so applying it to a stand-in
     // would manufacture exactly the comparable number this fit cannot have.
     let raw_reml_score = fit.reml_score();
-    let reml_score = raw_reml_score
-        .map(|raw| {
-            comparable_reml_score(
-                raw,
-                fit.artifacts.null_space_dim.map(|dim| dim as f64),
-                fit.artifacts.null_space_logdet,
-            )
-            .map_err(|err| format!("failed to compute comparable REML score: {err}"))
-        })
-        .transpose()?;
+    let reml_score = fit
+        .comparable_reml_score()
+        .map_err(|err| format!("failed to compute comparable REML score: {err}"))?;
     let payload = SummaryPayload {
         formula: model.payload().formula.clone(),
         family_name: model.display_family_name(),
@@ -2165,7 +2158,9 @@ fn report_html_impl(model_bytes: &[u8]) -> Result<String, String> {
         formula: model.payload().formula.clone(),
         n_obs: Some(fit.training_sample_size()),
         deviance: fit.deviance,
-        reml_score: fit.reml_score(),
+        reml_score: fit
+            .comparable_reml_score()
+            .map_err(|err| format!("failed to compute comparable REML score: {err}"))?,
         iterations: fit.outer_iterations,
         convergence_status: fit
             .convergence_evidence()

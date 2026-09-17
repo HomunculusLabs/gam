@@ -1016,7 +1016,9 @@ pub(crate) fn run_report(args: ReportArgs) -> Result<(), String> {
         formula: model.formula.clone(),
         n_obs,
         deviance: fit.deviance,
-        reml_score: fit.reml_score(),
+        reml_score: fit
+            .comparable_reml_score()
+            .map_err(|err| format!("failed to compute comparable REML score: {err}"))?,
         iterations: fit.outer_iterations,
         convergence_status: fit
             .convergence_evidence()

@@ -13,10 +13,11 @@ pub struct ReportInput {
     pub formula: String,
     pub n_obs: Option<usize>,
     pub deviance: f64,
-    /// The fit's REML/LAML criterion, or `None` when the fit has none at all
-    /// (an exactly-interpolating Gaussian fit; see
-    /// `UnifiedFitResult::reml_score`). The report prints the absence rather
-    /// than a stand-in number (#2595).
+    /// The fit's cross-model comparable REML/LAML criterion, the number the
+    /// saved-model summary publishes as `reml_score`
+    /// (`UnifiedFitResult::comparable_reml_score`), or `None` when the fit has
+    /// no criterion at all (an exactly-interpolating Gaussian fit). The report
+    /// prints the absence rather than a stand-in number (#2595).
     pub reml_score: Option<f64>,
     pub iterations: usize,
     /// Human-readable P-IRLS / outer convergence status (e.g. "Converged",

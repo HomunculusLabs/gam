@@ -1056,6 +1056,31 @@ pub fn tk_normalized_score(
     .map(|(score, _)| score)
 }
 
+/// One fit's cross-model comparable REML/LAML criterion: its raw criterion plus
+/// the rank-aware Tierney-Kadane normalizer over the penalty null space,
+/// unscaled.
+///
+/// Every surface that publishes a `reml_score` beside the raw criterion reads it
+/// here: the saved-model summary, `compare_models`, and the HTML report. A fit
+/// with no null-space metadata keeps its raw criterion.
+pub fn comparable_reml_score(
+    raw_reml_score: f64,
+    null_dim: Option<f64>,
+    null_space_logdet: Option<f64>,
+) -> Result<f64, String> {
+    let Some(null_dim) = null_dim else {
+        return Ok(raw_reml_score);
+    };
+    tk_normalized_score(
+        raw_reml_score,
+        null_dim,
+        null_space_logdet,
+        1.0,
+        1,
+        TopologyScoreScale::PerObservation,
+    )
+}
+
 /// [`tk_normalized_score`] carrying the score's own numerical RESOLUTION
 /// through the same normalization (#2729).
 ///
