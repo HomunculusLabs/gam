@@ -931,7 +931,7 @@ fn audit_identifiability_impl(
         gam_linalg::faer_ndarray::fast_xt_diag_x_with_parallelism(
             &x_joint,
             &unit_weights,
-            faer::get_global_parallelism(),
+            gam_linalg::faer_ndarray::pool_parallelism(),
         )
     };
 
@@ -3284,7 +3284,7 @@ pub fn check_map_uniqueness(
         gam_linalg::faer_ndarray::fast_xt_diag_x_with_parallelism(
             j_joint,
             &unit_weights,
-            faer::get_global_parallelism(),
+            gam_linalg::faer_ndarray::pool_parallelism(),
         )
     } else {
         let mut g = Array2::<f64>::zeros((p, p));

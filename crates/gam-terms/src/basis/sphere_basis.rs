@@ -471,8 +471,7 @@ fn solve_least_squares_columns(
     a: ArrayView2<'_, f64>,
     b: ArrayView2<'_, f64>,
 ) -> Result<Array2<f64>, BasisError> {
-    use faer::prelude::*;
-    use gam_linalg::faer_ndarray::FaerArrayView;
+    use gam_linalg::faer_ndarray::{FaerArrayView, col_piv_qr_solve_lstsq};
 
     if a.nrows() == 0 || a.ncols() == 0 || a.nrows() < a.ncols() || b.nrows() != a.nrows() {
         crate::bail_dim_basis!(
@@ -490,7 +489,7 @@ fn solve_least_squares_columns(
     let b_owned = b.to_owned();
     let a_view = FaerArrayView::new(&a_owned);
     let b_view = FaerArrayView::new(&b_owned);
-    let solved = a_view.as_ref().col_piv_qr().solve_lstsq(b_view.as_ref());
+    let solved = col_piv_qr_solve_lstsq(a_view.as_ref(), b_view.as_ref());
     let mut out = Array2::<f64>::zeros((a.ncols(), b.ncols()));
     for col in 0..out.ncols() {
         for row in 0..out.nrows() {

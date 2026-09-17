@@ -2144,7 +2144,7 @@ pub(crate) fn build_duchon_basis_designwithworkspace(
             // here because the chunk loop is already the parallel region — the
             // pool is saturated by chunks, not by one product (#2735).
             let mut product = Array2::<f64>::zeros((rows, kernel_cols));
-            gam_linalg::faer_ndarray::with_faer_sequential(|| {
+            gam_linalg::faer_ndarray::with_nested_parallel(|| {
                 gam_linalg::faer_ndarray::fast_ab_into(&kernel_block, &z, &mut product)
             });
             chunk.slice_mut(s![.., ..kernel_cols]).assign(&product);

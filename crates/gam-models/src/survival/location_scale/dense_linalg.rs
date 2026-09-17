@@ -233,7 +233,12 @@ pub(crate) fn weighted_crossprod_dense(
     weights: &Array1<f64>,
     right: &Array2<f64>,
 ) -> Result<Array2<f64>, String> {
-    weighted_crossprod_dense_with_parallelism(left, weights, right, faer::get_global_parallelism())
+    weighted_crossprod_dense_with_parallelism(
+        left,
+        weights,
+        right,
+        gam_linalg::faer_ndarray::pool_parallelism(),
+    )
 }
 
 pub(crate) fn weighted_crossprod_dense_with_parallelism(

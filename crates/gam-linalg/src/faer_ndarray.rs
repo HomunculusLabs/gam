@@ -2,7 +2,7 @@ use dyn_stack::{MemBuffer, MemStack};
 use faer::diag::{Diag, DiagRef};
 use faer::linalg::solvers;
 use faer::linalg::svd::{self, ComputeSvdVectors};
-use faer::perm::Perm;
+use faer::perm::{Perm, PermRef};
 use faer::prelude::ReborrowMut;
 use faer::{Conj, Mat, MatMut, MatRef, Par, Side, get_global_parallelism};
 use ndarray::{Array1, Array2, ArrayBase, ArrayView1, ArrayViewMut1, Data, Ix1, Ix2};
@@ -255,7 +255,7 @@ impl std::fmt::Display for ParallelismSnapshot {
 /// 2000, LLT 2000 and Gram 200k×100 at degrees Seq/4/8/16/24/48 on pools of
 /// 1/4/24 threads; pool job 1120486), so the degree moves only the wall time.
 #[inline]
-pub(crate) fn pool_parallelism() -> Par {
+pub fn pool_parallelism() -> Par {
     if in_nested_parallel_region() || faer_sequential_scope_depth() > 0 {
         Par::Seq
     } else {
@@ -721,6 +721,7 @@ struct ColumnPivotedQr {
     coeff: Mat<f64>,
     r: Mat<f64>,
     forward: Vec<usize>,
+    inverse: Vec<usize>,
 }
 
 impl ColumnPivotedQr {
@@ -757,6 +758,7 @@ impl ColumnPivotedQr {
             coeff,
             r,
             forward,
+            inverse,
         }
     }
 
@@ -764,6 +766,38 @@ impl ColumnPivotedQr {
     fn thin_r(&self) -> MatRef<'_, f64> {
         self.r.as_ref()
     }
+}
+
+/// #2627 — the least-squares solution `X = argmin ‖A X − B‖` of a tall `A`
+/// (`nrows ≥ ncols`) by column-pivoted Householder QR at
+/// [`decomposition_parallelism`], replacing `col_piv_qr().solve_lstsq`, which
+/// reads faer's process-global parallelism.
+pub fn col_piv_qr_solve_lstsq(a: MatRef<'_, f64>, rhs: MatRef<'_, f64>) -> Mat<f64> {
+    let (m, n) = a.shape();
+    let qr = ColumnPivotedQr::new(a);
+    let par = decomposition_parallelism();
+    let columns = rhs.ncols();
+    let mut out = rhs.to_owned();
+    faer::linalg::qr::col_pivoting::solve::solve_lstsq_in_place_with_conj(
+        qr.basis.as_ref(),
+        qr.coeff.as_ref(),
+        qr.r.as_ref(),
+        PermRef::new_checked(&qr.forward, &qr.inverse, n),
+        Conj::No,
+        out.as_mut(),
+        par,
+        MemStack::new(&mut MemBuffer::new(
+            faer::linalg::qr::col_pivoting::solve::solve_lstsq_in_place_scratch::<usize, f64>(
+                m,
+                n,
+                qr.coeff.nrows(),
+                columns,
+                par,
+            ),
+        )),
+    );
+    out.truncate(n, columns);
+    out
 }
 
 pub enum FaerSymmetricFactor {
@@ -2759,7 +2793,7 @@ pub trait FaerEigh {
 
 /// Self-adjoint eigendecomposition `A = U diag(S) Uᵀ` of the triangle `side`
 /// names, at [`decomposition_parallelism`].
-fn self_adjoint_evd(a: MatRef<'_, f64>, side: Side) -> Result<(Diag<f64>, Mat<f64>), solvers::EvdError> {
+pub fn self_adjoint_evd(a: MatRef<'_, f64>, side: Side) -> Result<(Diag<f64>, Mat<f64>), solvers::EvdError> {
     let n = a.nrows();
     let par = decomposition_parallelism();
     let lower = match side {

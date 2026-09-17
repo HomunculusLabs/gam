@@ -33,6 +33,5 @@ fn initialize_cpu_fitting() {
             .stack_size(64 << 20)
             .build_global()
             .expect("initialize the survival acceptance worker pool");
-        faer::set_global_parallelism(faer::Par::rayon(0));
     });
 }

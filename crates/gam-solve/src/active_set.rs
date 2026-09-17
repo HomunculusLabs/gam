@@ -1,9 +1,8 @@
 use crate::estimate::EstimationError;
-use faer::linalg::solvers::SolveLstsq;
 use faer::Side;
 use gam_linalg::faer_ndarray::{
     FaerArrayView, FaerCholesky, FaerLinalgError, FaerSvd, array1_to_col_matmut,
-    default_rrqr_rank_alpha, rrqr_nullspace_basis,
+    col_piv_qr_solve_lstsq, default_rrqr_rank_alpha, rrqr_nullspace_basis,
 };
 use gam_linalg::utils::{KahanSum, StableSolver, array_is_finite};
 use gam_problem::{
@@ -293,7 +292,7 @@ fn least_squares_min_norm_any_shape(a: &Array2<f64>, b: &Array1<f64>) -> Option<
         rhs.column_mut(0).assign(b);
         let a_view = FaerArrayView::new(a);
         let rhs_view = FaerArrayView::new(&rhs);
-        let solved = a_view.as_ref().col_piv_qr().solve_lstsq(rhs_view.as_ref());
+        let solved = col_piv_qr_solve_lstsq(a_view.as_ref(), rhs_view.as_ref());
         let mut z = Array1::<f64>::zeros(k);
         for c in 0..k {
             let value = solved[(c, 0)];

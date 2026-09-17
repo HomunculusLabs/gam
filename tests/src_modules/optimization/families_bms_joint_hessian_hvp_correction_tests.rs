@@ -2688,14 +2688,6 @@ fn profiled_theta_hvp_outer_hessian_matches_fd_of_gradient_psi_and_mixed() {
         freeze_term_collection_from_design,
     };
 
-    // #1521 carve: the monolith's `gam::init_parallelism()` lives in the root
-    // `gam` crate, which this leaf (`gam-models`) cannot depend on. Its sampler/
-    // GPU/rho-posterior hook registrations are irrelevant to this FD-of-gradient
-    // joint-hyper test; the only numerically-relevant part is enabling faer's
-    // global Rayon parallelism, which we reproduce here (idempotent, first call
-    // wins) so the parallel matmul/factorization paths match the monolith run.
-    faer::set_global_parallelism(faer::Par::rayon(0));
-
     // Larger, well-identified, NON-separable fixture so the coupled
     // marginal-slope inner Newton converges (a hard-threshold y on small n +
     // an intercept-only marginal triggers the #979 phantom-multiplier grind).

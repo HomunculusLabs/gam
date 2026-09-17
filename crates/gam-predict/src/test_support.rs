@@ -9,8 +9,7 @@ const RAYON_WORKER_STACK_SIZE: usize = 64 << 20;
 /// The root crate's `gam::init_parallelism` without its CUDA GEMM dispatch hook,
 /// which lives in the root crate and is out of gam-predict's reach. It registers
 /// the deterministic Laplace marginal corrector and the rho-posterior escalator,
-/// builds the wide-stack global Rayon pool, and points faer at that pool. Only
-/// the first call has effect.
+/// builds the wide-stack global Rayon pool. Only the first call has effect.
 pub(crate) fn init_parallelism() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
@@ -27,6 +26,5 @@ pub(crate) fn init_parallelism() {
                 .stack_size(RAYON_WORKER_STACK_SIZE)
                 .build_global(),
         );
-        faer::set_global_parallelism(faer::Par::rayon(0));
     });
 }

@@ -117,7 +117,6 @@ fn init_parallelism() {
     if log::set_logger(&STDERR_LOGGER).is_ok() {
         log::set_max_level(log::LevelFilter::Warn);
     }
-    faer::set_global_parallelism(faer::Par::rayon(0));
 }
 
 /// One parsed penguin row: four numeric body measurements and the species label

@@ -55,7 +55,6 @@ fn laplace_options() -> BlockwiseFitOptions {
 }
 
 fn check_outer_derivatives(armed: bool) {
-    faer::set_global_parallelism(faer::Par::rayon(0));
     let family = quasi_separated_family(armed);
     let specs = family.build_block_specs();
     let options = laplace_options();
@@ -159,7 +158,6 @@ fn jeffreys_outer_gradient_and_hessian_match_the_criterion() {
 /// there, and the verdict says nothing about the Jeffreys curvature.
 #[test]
 fn armed_fit_certifies_on_the_exact_jeffreys_outer_hessian_2898() {
-    faer::set_global_parallelism(faer::Par::rayon(0));
     let family = quasi_separated_family(true);
     let specs = family.build_block_specs();
     let options = BlockwiseFitOptions {

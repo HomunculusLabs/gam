@@ -392,20 +392,9 @@ pub(crate) fn robust_eigh_faer(
         },
         sanitize_symmetric_faer,
         |candidate| {
-            let eig = candidate.as_ref().self_adjoint_eigen(side)?;
-            let diag = eig.S();
-            let mut eigenvalues = Vec::with_capacity(diag.dim());
-            for idx in 0..diag.dim() {
-                eigenvalues.push(diag[idx]);
-            }
-
-            let vectors_ref = eig.U();
-            let mut eigenvectors = Mat::<f64>::zeros(vectors_ref.nrows(), vectors_ref.ncols());
-            for i in 0..vectors_ref.nrows() {
-                for j in 0..vectors_ref.ncols() {
-                    eigenvectors[(i, j)] = vectors_ref[(i, j)];
-                }
-            }
+            let (values, eigenvectors) =
+                gam_linalg::faer_ndarray::self_adjoint_evd(candidate.as_ref(), side)?;
+            let eigenvalues = (0..values.dim()).map(|idx| values[idx]).collect();
             Ok((eigenvalues, eigenvectors))
         },
         |err, _| {
