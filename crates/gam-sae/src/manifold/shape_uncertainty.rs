@@ -39,9 +39,9 @@ pub struct SaeAtomShapeUncertainty {
     /// `None` when materializing it would exceed
     /// [`SAE_DECODER_COV_PAYLOAD_MAX_ENTRIES`] (LLM-scale ambient `p`: at
     /// `(M=8, p=2048)` the dense block is 2 GiB *per atom*, at
-    /// `(M=16, p=5120)` ~50 GiB). The band quantities below are still exact
-    /// in that case — they are computed directly from the factored
-    /// `(M_k·r_k)²` frame covariance without ever lifting it.
+    /// `(M=16, p=5120)` ~50 GiB). The band quantities below are then computed
+    /// from the factored `(M_k·r_k)²` frame covariance without lifting it, which
+    /// holds the frame at its fitted value (see [`SaeFrameConditioning`]).
     pub decoder_covariance: Option<Array2<f64>>,
     /// Coordinates at which the band is evaluated, shape `(G, d_k)`.
     pub band_coords: Option<Array2<f64>>,
@@ -78,10 +78,11 @@ pub struct SaeAtomShapeUncertainty {
     ///   come from one loss, so a known or estimated noise scale cancels and no
     ///   dispersion multiplies it.
     /// * Randomness included: independent sampling of rows. The smoothing and ARD
-    ///   hyperparameters, the frozen collapse gates, the learned decoder frames,
-    ///   the row metric and the support/structure selection are held at their
-    ///   fitted values. Dependence between rows of one sequence is not modelled:
-    ///   the fit carries no row cluster structure.
+    ///   hyperparameters, the frozen collapse gates, the row metric and the
+    ///   support/structure selection are held at their fitted values. The learned
+    ///   decoder frames are integrated or held fixed exactly as the model-based
+    ///   band's [`SaeFrameConditioning`] records. Dependence between rows of one
+    ///   sequence is not modelled: the fit carries no row cluster structure.
     ///
     /// Reported ALONGSIDE the model-based band, never in place of it. `Err`
     /// carries the reason no bread exists.
@@ -141,6 +142,43 @@ impl SaeReconstructionDispersion {
     }
 }
 
+/// Whether a shape covariance integrates over the learned Grassmann decoder
+/// frames or holds them at their fitted values (#2933 F35).
+///
+/// A framed decoder `B_k = C_k U_kᵀ` moves along `δB_k = δC_k U_kᵀ + C_k δU_kᵀ`.
+/// The lift `(I ⊗ U_k)·Cov(vec C_k)·(I ⊗ U_k)ᵀ` keeps the first term only: with
+/// `U = e₁` in two outputs, `C = 3` and angular variance `0.01` it reports zero
+/// variance along `e₂`, where the frame rotation contributes `C²·0.01 = 0.09`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaeFrameConditioning {
+    /// No atom carries a learned frame, so there is nothing to integrate.
+    NoLearnedFrames,
+    /// The Laplace covariance on the product of the fixed-rank decoder manifolds.
+    /// The observed information is written in the identified tangent coordinates
+    /// `(vec δC_k, vec W_k)` with `δU_k = U_k⊥ W_k`, including the bilinear cross
+    /// curvature `⟨∇_B L, δC_k W_kᵀ U_k⊥ᵀ⟩`, and its pseudo-inverse is pushed
+    /// forward to `vec B_k`. The `GL(r_k)` factorization gauge never enters: the
+    /// tangent coordinates name physical decoder motions only.
+    MarginalOverLearnedFrames,
+    /// Every frame is held at its fitted `U_k`: orientation uncertainty is omitted.
+    ConditionalOnFittedFrames(SaeFrameMarginalUnavailable),
+}
+
+/// Why a framed fit reports a covariance conditional on its fitted frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaeFrameMarginalUnavailable {
+    /// The execution plan does not admit the dense observed information of the
+    /// unframed decoder `(t, vec B)`, from which the tangent operator is formed.
+    UnframedObservedInformationNotAdmitted,
+    /// Atom `atom`'s dense `(M_k·p)²` decoder covariance exceeds
+    /// [`SAE_DECODER_COV_PAYLOAD_MAX_ENTRIES`].
+    DecoderCovarianceExceedsPayload { atom: usize },
+    /// Atom `atom`'s decoder has numerical rank below its frame rank. The
+    /// fixed-rank manifold is singular there and has no tangent space of
+    /// dimension `r_k(M_k + p − r_k)`.
+    FrameCoordinatesRankDeficient { atom: usize },
+}
+
 /// Selected inverse blocks of the exact observed information on its identified
 /// space, one per atom (#2933 F33).
 ///
@@ -161,8 +199,10 @@ impl SaeReconstructionDispersion {
 /// at assembly.
 #[derive(Debug, Clone)]
 pub struct SaeObservedInformationCovariance {
-    /// `[A⁺]_ββ[r_k, r_k]` per atom, in the cache's border layout (the
-    /// factored `(M_k·r_k)` block when frames are active).
+    /// `[A⁺]_ββ[r_k, r_k]` per atom. Under
+    /// [`SaeFrameConditioning::ConditionalOnFittedFrames`] it is in the cache's
+    /// factored `(M_k·r_k)` layout; otherwise it is the full `(M_k·p)` decoder
+    /// block.
     pub(crate) blocks: Vec<Array2<f64>>,
     /// `([A⁺]_ββ J_ββ [A⁺]_ββ)[r_k, r_k]` per atom in the same layout: the
     /// row-sandwich covariance with the per-row data-score meat `J_ββ`, never
@@ -172,6 +212,9 @@ pub struct SaeObservedInformationCovariance {
     pub(crate) identified_rank: usize,
     /// Dimension of the joint `(t, β)` operator.
     pub(crate) ambient_dim: usize,
+    /// Whether the blocks integrate the learned frames, and so which layout they
+    /// are in.
+    pub(crate) frame_conditioning: SaeFrameConditioning,
 }
 
 /// The information a shape covariance is assembled from, or why none exists.
@@ -206,6 +249,7 @@ pub enum SaeShapeCovarianceOperator {
     ObservedInformation {
         identified_rank: usize,
         ambient_dim: usize,
+        frame_conditioning: SaeFrameConditioning,
     },
     /// No covariance was produced; every band field is `None`.
     Unavailable(SaeShapeCovarianceUnavailable),
@@ -215,7 +259,18 @@ impl SaeShapeCovarianceOperator {
     /// Wire name of the operator, owned here so bindings marshal rather than map.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::ObservedInformation { .. } => "observed_information",
+            Self::ObservedInformation {
+                frame_conditioning: SaeFrameConditioning::NoLearnedFrames,
+                ..
+            } => "observed_information",
+            Self::ObservedInformation {
+                frame_conditioning: SaeFrameConditioning::MarginalOverLearnedFrames,
+                ..
+            } => "observed_information_marginal_over_learned_frames",
+            Self::ObservedInformation {
+                frame_conditioning: SaeFrameConditioning::ConditionalOnFittedFrames(_),
+                ..
+            } => "observed_information_conditional_on_fitted_frames",
             Self::Unavailable(SaeShapeCovarianceUnavailable::NoDenseObservedInformation) => {
                 "unavailable_no_dense_observed_information"
             }

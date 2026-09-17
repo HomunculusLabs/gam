@@ -1853,9 +1853,10 @@ impl SaeManifoldOuterObjective {
         let dispersion =
             self.term
                 .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))?;
-        let information = self.term.exact_observed_information_shape_covariance(
+        let information = self.term.shape_information(
             &rho,
             self.target.view(),
+            self.registry.as_ref(),
             &cache,
         )?;
         self.term.assemble_shape_uncertainty(&information, dispersion)

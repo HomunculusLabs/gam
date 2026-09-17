@@ -1657,3 +1657,220 @@ mod shape_uncertainty_joint_recompute_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod learned_frame_shape_covariance_2933_f35_tests {
+    use crate::basis::SaeBasisEvaluator;
+    use crate::manifold::{
+        FaerCholesky, SaeFrameConditioning, SaeManifoldRho, SaeManifoldTerm,
+        SaeShapeCovarianceOperator, SaeShapeInformation, SaeShapeUncertainty, Side,
+    };
+    use ndarray::{Array1, Array2};
+    use std::sync::Arc;
+
+    /// One periodic atom `m(t) = B·[1, sin 2πt, cos 2πt]` in `p = 12` outputs.
+    /// The decoder and the target lie in the span of the first `rank` output
+    /// axes, so the fit activates a rank-`rank` Grassmann frame on exactly that
+    /// span, and the residual never leaves it.
+    fn framed_circle_2933_f35(rank: usize) -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
+        let (n, p, m) = (24usize, 12usize, 3usize);
+        let evaluator =
+            Arc::new(crate::basis::PeriodicHarmonicEvaluator::new(m).expect("periodic basis"));
+        let coords = Array2::from_shape_fn((n, 1), |(row, _)| (row as f64 + 0.25) / n as f64);
+        let (phi, jet) = evaluator.evaluate(coords.view()).expect("periodic jets");
+        let mut decoder = Array2::<f64>::zeros((m, p));
+        decoder[[1, 0]] = 0.9;
+        decoder[[1, 1]] = 0.2;
+        decoder[[2, 0]] = -0.1;
+        decoder[[2, 1]] = 0.8;
+        if rank == 3 {
+            decoder[[0, 2]] = 0.35;
+        }
+        let mut target = phi.dot(&decoder);
+        for row in 0..n {
+            let x = row as f64;
+            target[[row, 0]] += 0.02 * (1.7 * x).sin();
+            target[[row, 1]] += 0.02 * (1.3 * x).cos();
+            if rank == 3 {
+                target[[row, 2]] += 0.02 * (0.9 * x).sin();
+            }
+        }
+        let atom = crate::manifold::SaeManifoldAtom::new_with_provided_function_gram(
+            "framed_circle",
+            crate::manifold::SaeAtomBasisKind::Periodic,
+            1,
+            phi,
+            jet,
+            decoder,
+            Array2::<f64>::eye(m),
+        )
+        .expect("atom shapes agree")
+        .with_basis_second_jet(evaluator);
+        let assignment = crate::assignment::SaeAssignment::from_blocks_with_mode_and_manifolds(
+            Array2::<f64>::zeros((n, 1)),
+            vec![coords],
+            vec![gam_terms::latent::LatentManifold::Circle { period: 1.0 }],
+            crate::assignment::AssignmentMode::softmax(1.0),
+        )
+        .expect("assignment shapes agree");
+        let term = SaeManifoldTerm::new(vec![atom], assignment).expect("term");
+        let rho = SaeManifoldRho::new(
+            0.0,
+            0.8_f64.ln(),
+            vec![Array1::from_vec(vec![250.0_f64.ln()])],
+        );
+        (term, target, rho)
+    }
+
+    /// Fit the fixture, check the frame activated at the decoder's rank, and
+    /// return the fitted term with its joint shape uncertainty.
+    fn fitted_framed_circle_2933_f35(
+        rank: usize,
+    ) -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho, SaeShapeUncertainty) {
+        let (mut term, target, rho) = framed_circle_2933_f35(rank);
+        let shape = term
+            .recompute_joint_shape_uncertainty(target.view(), &rho, None, 40, 0.4, 1.0e-6, 1.0e-6)
+            .expect("joint shape uncertainty");
+        let frame = term.atoms[0]
+            .decoder_frame
+            .as_ref()
+            .expect("the fit must activate a Grassmann frame at p = 12");
+        assert_eq!(frame.rank(), rank, "the frame must carry the decoder's rank");
+        (term, target, rho, shape)
+    }
+
+    /// Checked after the values, so a fixed-frame covariance fails on the number.
+    fn assert_integrates_learned_frames_2933_f35(shape: &SaeShapeUncertainty) {
+        assert!(
+            matches!(
+                shape.operator,
+                SaeShapeCovarianceOperator::ObservedInformation {
+                    frame_conditioning: SaeFrameConditioning::MarginalOverLearnedFrames,
+                    ..
+                }
+            ),
+            "a small framed fit must integrate its frame: {:?}",
+            shape.operator
+        );
+    }
+
+    /// #2933 F35 — the audit's rank-one counterexample in general form. A framed
+    /// decoder moves along `δB = δC·Uᵀ + C·δUᵀ`, and the lift
+    /// `(I ⊗ U)·Cov(vec C)·(I ⊗ U)ᵀ` kept the first term only: every output axis
+    /// outside the frame span reported zero variance, where the frame rotation
+    /// contributes `C²·Var(δφ)` (0.09 for `C = 3`, `Var(δφ) = 0.01`).
+    ///
+    /// Here the decoder has rank 2 on a 3-column basis, so the rank constraint
+    /// binds. The target lies in the frame span, so the residual, the decoder
+    /// gradient and every coordinate coupling vanish off it. Along a transverse
+    /// axis the observed information is exactly `(G + λS) ⊗ P_⊥` with
+    /// `G = Σ_i φ_i φ_iᵀ`, and in the tangent coordinates `δU = U_⊥ W` the band
+    /// variance there is `φ̂·ĉ(t)ᵀ (Cᵀ(G + λS)C)⁻¹ ĉ(t)` with `ĉ(t) = Cᵀφ(t)`.
+    #[test]
+    fn learned_frame_band_carries_transverse_orientation_variance_2933_f35() {
+        let (term, _target, rho, shape) = fitted_framed_circle_2933_f35(2);
+        let atom = &term.atoms[0];
+        let frame = atom.decoder_frame.as_ref().expect("frame");
+        let u = frame.frame();
+        let r = u.ncols();
+        let c_coords = atom.decoder_coefficients().dot(&u);
+        let basis = &atom.basis_values;
+        let precision =
+            basis.t().dot(basis) + &(atom.smooth_penalty() * rho.log_lambda_smooth[0].exp());
+        let projected = c_coords.t().dot(&precision).dot(&c_coords);
+        let projected_inverse = projected
+            .cholesky(Side::Lower)
+            .expect("the frame coordinates carry full rank")
+            .solve_mat(&Array2::<f64>::eye(r));
+        let scale = shape.dispersion.posterior_covariance_scale();
+        let band = shape.atoms[0].band_sd.as_ref().expect("model-based band");
+        assert_eq!(band.nrows(), term.n_obs(), "every row is a band point at n = 24");
+        let mut in_frame_variance = 0.0_f64;
+        let mut transverse_variance = 0.0_f64;
+        for row in 0..term.n_obs() {
+            let c_hat = c_coords.t().dot(&basis.row(row));
+            let expected = scale * c_hat.dot(&projected_inverse.dot(&c_hat));
+            for c in 0..term.output_dim() {
+                let frame_loading: f64 = (0..r).map(|j| u[[c, j]] * u[[c, j]]).sum();
+                let got = band[[row, c]] * band[[row, c]];
+                if frame_loading > 1.0e-12 {
+                    in_frame_variance = in_frame_variance.max(got);
+                    continue;
+                }
+                transverse_variance = transverse_variance.max(expected);
+                assert!(
+                    (got - expected).abs() <= 1.0e-6 * expected + 1.0e-15,
+                    "row {row}, transverse channel {c}: band variance {got:.6e} must be the \
+                     frame-rotation variance {expected:.6e}"
+                );
+            }
+        }
+        assert!(
+            transverse_variance > 1.0e-3 * in_frame_variance,
+            "the transverse orientation variance {transverse_variance:.3e} must be material \
+             against the in-frame variance {in_frame_variance:.3e}"
+        );
+        assert_integrates_learned_frames_2933_f35(&shape);
+    }
+
+    /// #2933 F35 — at frame rank equal to the basis width there is no rank
+    /// constraint: every decoder is a rank-`M` matrix, so `B = C·Uᵀ` is a pure
+    /// factorization gauge of the unframed model at the same state. The decoder
+    /// covariance integrated over the frame must equal the unframed observed
+    /// information's `φ̂·[A⁺]_ββ`, formed here directly in `vec B` coordinates. The
+    /// fixed-frame lift was zero outside the frame span.
+    #[test]
+    fn framed_covariance_equals_unframed_observed_information_at_full_rank_2933_f35() {
+        let (term, target, rho, shape) = fitted_framed_circle_2933_f35(3);
+        let mut unframed = term.clone();
+        for atom in unframed.atoms.iter_mut() {
+            atom.deactivate_decoder_frame();
+        }
+        let mut sys = unframed
+            .assemble_arrow_schur(target.view(), &rho, None)
+            .expect("unframed assembly at the fitted state");
+        SaeManifoldTerm::ensure_row_gauge_deflation_for_quasi_laplace(&mut sys);
+        let (_delta_t, _delta_beta, cache) = crate::manifold::solve_arrow_newton_step_with_options(
+            &sys,
+            0.0,
+            0.0,
+            &unframed.evidence_factor_options(),
+        )
+        .expect("frozen unframed evidence factor");
+        let covariance = match unframed
+            .exact_observed_information_shape_covariance(&rho, target.view(), &cache)
+            .expect("unframed observed information")
+        {
+            SaeShapeInformation::ObservedInformation(covariance) => covariance,
+            other => panic!("the unframed state must be a mode: {other:?}"),
+        };
+        let scale = shape.dispersion.posterior_covariance_scale();
+        let expected = covariance.blocks[0].mapv(|v| v * scale);
+        let got = shape.atoms[0]
+            .decoder_covariance
+            .as_ref()
+            .expect("dense decoder covariance");
+        assert_eq!(got.dim(), expected.dim(), "decoder covariance layout");
+        let norm = expected.mapv(|v| v * v).sum().sqrt();
+        let miss = (got - &expected).mapv(|v| v * v).sum().sqrt();
+        assert!(norm > 0.0, "the unframed covariance must be nonzero");
+        assert!(
+            miss <= 1.0e-6 * norm,
+            "framed covariance must equal the unframed observed information: \
+             ‖Cov_framed − Cov_unframed‖_F = {miss:.3e} against {norm:.3e}"
+        );
+        let p = term.output_dim();
+        let m = term.atoms[0].basis_size();
+        let largest = (0..m * p).map(|i| expected[[i, i]]).fold(0.0_f64, f64::max);
+        let transverse = (0..m)
+            .flat_map(|b| (3..p).map(move |c| b * p + c))
+            .map(|i| expected[[i, i]])
+            .fold(0.0_f64, f64::max);
+        assert!(
+            transverse > 1.0e-3 * largest,
+            "outside the frame span the unframed variance {transverse:.3e} must be material \
+             against {largest:.3e}"
+        );
+        assert_integrates_learned_frames_2933_f35(&shape);
+    }
+}

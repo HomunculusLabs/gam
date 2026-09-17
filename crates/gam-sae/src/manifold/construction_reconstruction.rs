@@ -760,6 +760,11 @@ impl SaeManifoldTerm {
     /// metric as the likelihood, so under a whitening metric it already carries
     /// the metric's variance scale and the multiplier is dimensionless: scaling
     /// every observation unit by `c` (with `Σ → c²Σ`) scales `Cov(β)` by `c²`.
+    ///
+    /// The information's [`SaeFrameConditioning`] names its layout. Integrated
+    /// over the learned frames (or with no frames) each block is already the
+    /// `(M_k·p)` decoder covariance; held at the fitted frames it is the factored
+    /// `(M_k·r_k)` coordinate covariance, lifted through `U_k` (#2933 F35).
     pub fn assemble_shape_uncertainty(
         &self,
         information: &SaeShapeInformation,
@@ -773,16 +778,23 @@ impl SaeManifoldTerm {
         };
         let p = self.output_dim();
         let covariance_scale = dispersion.posterior_covariance_scale();
-        // #972 / #977 T1: the β block is the FACTORED border when frames are
-        // active, so each atom's selected inverse block is the `(M_k·r_k)`
-        // coordinate covariance `Cov(vec C_k)`. We LIFT it to the full
-        // `(M_k·p)` decoder covariance `Cov(vec B_k) = (I_{M_k} ⊗ U_k) Cov(vec
-        // C_k)(I_{M_k} ⊗ U_k)ᵀ` (since `B_k = C_k U_kᵀ`) so the downstream band
-        // code — which reads the `b·p + c` flat layout — is unchanged. On the
-        // full-`B` path the block is already `(M_k·p)` and the lift is skipped.
-        let frames_active = self.frames_active();
+        // #972 / #977 T1: held at the fitted frames, each atom's selected inverse
+        // block is the FACTORED `(M_k·r_k)` coordinate covariance `Cov(vec C_k)`.
+        // We LIFT it to the `(M_k·p)` decoder covariance `Cov(vec B_k) =
+        // (I_{M_k} ⊗ U_k) Cov(vec C_k)(I_{M_k} ⊗ U_k)ᵀ` (since `B_k = C_k U_kᵀ`) so
+        // the band code reads the `b·p + c` flat layout; that lift is conditional
+        // on `U_k` (#2933 F35). Integrated over the frames, or with no frames, the
+        // block is already `(M_k·p)` and the lift is skipped.
+        let factored_layout = matches!(
+            covariance.frame_conditioning,
+            SaeFrameConditioning::ConditionalOnFittedFrames(_)
+        );
         let frame_projection = FrameProjection::new(self);
-        let block_ranges = self.shape_covariance_border_ranges();
+        let block_ranges = if factored_layout {
+            self.shape_covariance_border_ranges()
+        } else {
+            self.beta_block_offsets().to_vec()
+        };
         if covariance.blocks.len() != self.k_atoms() {
             return Err(format!(
                 "assemble_shape_uncertainty: the information carries {} atom blocks for K={}",
@@ -823,7 +835,7 @@ impl SaeManifoldTerm {
                 }
             }
 
-            let framed = frames_active && atom.decoder_frame.is_some();
+            let framed = factored_layout && atom.decoder_frame.is_some();
             let dense_entries = (m * p).saturating_mul(m * p);
             let cov = if framed && dense_entries > SAE_DECODER_COV_PAYLOAD_MAX_ENTRIES {
                 // LLM-scale ambient `p`: the dense `(M_k·p)²` lift would be
@@ -885,7 +897,11 @@ impl SaeManifoldTerm {
             for (gi, &row) in eval_rows.iter().enumerate() {
                 let basis = atom.basis_values.row(row);
                 for c in 0..p {
-                    let var = frame_projection.output_variance(k, robust_block.view(), basis, c);
+                    let var = if framed {
+                        frame_projection.output_variance(k, robust_block.view(), basis, c)
+                    } else {
+                        frame_projection.full_output_variance(k, robust_block.view(), basis, c)
+                    };
                     band_sd_robust[[gi, c]] = var.max(0.0).sqrt();
                 }
             }
@@ -902,6 +918,7 @@ impl SaeManifoldTerm {
             operator: SaeShapeCovarianceOperator::ObservedInformation {
                 identified_rank: covariance.identified_rank,
                 ambient_dim: covariance.ambient_dim,
+                frame_conditioning: covariance.frame_conditioning,
             },
             atoms,
         })
@@ -972,7 +989,7 @@ impl SaeManifoldTerm {
         let residual = self.reconstruction_residual(target, rho)?;
         let dispersion =
             self.reconstruction_dispersion(&loss, &cache, rho, Some(residual.view()))?;
-        let information = self.exact_observed_information_shape_covariance(rho, target, &cache)?;
+        let information = self.shape_information(rho, target, registry, &cache)?;
         self.assemble_shape_uncertainty(&information, dispersion)
     }
 

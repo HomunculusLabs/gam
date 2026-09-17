@@ -7986,12 +7986,17 @@ impl SaeManifoldTerm {
     /// The same `A⁺` is the bread of the row-sandwich companion
     /// [`SaeAtomShapeUncertainty::band_sd_robust`], whose meat is the outer
     /// product of the per-row data scores at `target`.
+    ///
+    /// On a framed state this holds every learned frame at its fitted `U_k`, so
+    /// it is the route only where the frames cannot be integrated; see
+    /// [`Self::shape_information`].
     pub(crate) fn exact_observed_information_shape_covariance(
         &self,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
         cache: &ArrowFactorCache,
     ) -> Result<SaeShapeInformation, String> {
+        let frame_conditioning = self.fixed_frame_conditioning()?;
         let total_t = cache.delta_t_len();
         let joint = self.materialize_exact_stationarity_geometry(rho, target, cache)?;
         let meat = self.reconstruction_border_score_meat(target)?;
@@ -7999,6 +8004,175 @@ impl SaeManifoldTerm {
             total_t,
             &self.shape_covariance_border_ranges(),
             meat.view(),
+            frame_conditioning,
+        )
+    }
+
+    /// #2933 F35 — the shape information production reports at a converged state.
+    ///
+    /// A learned frame is estimated, so the covariance integrates it wherever the
+    /// dense observed information of the unframed decoder is admitted
+    /// ([`Self::frame_marginal_shape_information`]). Otherwise, and with no frames
+    /// at all, it is [`Self::exact_observed_information_shape_covariance`] on
+    /// `cache`, tagged with why the frames are held fixed.
+    pub(crate) fn shape_information(
+        &self,
+        rho: &SaeManifoldRho,
+        target: ArrayView2<'_, f64>,
+        registry: Option<&AnalyticPenaltyRegistry>,
+        cache: &ArrowFactorCache,
+    ) -> Result<SaeShapeInformation, String> {
+        if self.frames_active() && self.frame_marginal_admission()?.is_none() {
+            self.frame_marginal_shape_information(rho, target, registry)
+        } else {
+            self.exact_observed_information_shape_covariance(rho, target, cache)
+        }
+    }
+
+    /// Why this state's learned frames cannot be integrated, or `None` when they
+    /// can: the unframed `(t, vec B)` observed information must be admitted on the
+    /// same dense route the criterion prices, every framed atom's `(M_k·p)²`
+    /// covariance must fit the payload budget, and every framed decoder must have
+    /// the frame's rank, where the fixed-rank manifold has a tangent space.
+    pub(crate) fn frame_marginal_admission(
+        &self,
+    ) -> Result<Option<SaeFrameMarginalUnavailable>, String> {
+        let n = self.n_obs();
+        let p = self.output_dim();
+        let k_atoms = self.k_atoms();
+        let total_basis: usize = self.atoms.iter().map(|atom| atom.basis_size()).sum();
+        let d_max = self
+            .atoms
+            .iter()
+            .map(SaeManifoldAtom::latent_dim)
+            .max()
+            .unwrap_or(0);
+        let unframed_plan = sae_streaming_plan_for_shape_with_available(
+            n,
+            total_basis,
+            k_atoms,
+            d_max,
+            self.beta_dim(),
+            self.gpu_policy,
+            self.host_available_bytes,
+        )?;
+        if !unframed_plan
+            .admitted_or_error(n, p, k_atoms)
+            .is_ok_and(|plan| plan.direct_logdet_admitted())
+        {
+            return Ok(Some(
+                SaeFrameMarginalUnavailable::UnframedObservedInformationNotAdmitted,
+            ));
+        }
+        for (atom_idx, atom) in self.atoms.iter().enumerate() {
+            let Some(frame) = atom.decoder_frame.as_ref() else {
+                continue;
+            };
+            let width = atom.basis_size() * p;
+            if width.saturating_mul(width) > SAE_DECODER_COV_PAYLOAD_MAX_ENTRIES {
+                return Ok(Some(
+                    SaeFrameMarginalUnavailable::DecoderCovarianceExceedsPayload { atom: atom_idx },
+                ));
+            }
+            if atom.decoder_numerical_rank()? < frame.rank() {
+                return Ok(Some(
+                    SaeFrameMarginalUnavailable::FrameCoordinatesRankDeficient { atom: atom_idx },
+                ));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The conditioning of a covariance that holds every learned frame fixed. A
+    /// framed state whose frames can be integrated is refused: a fixed-frame
+    /// covariance there would omit orientation variance production reports.
+    fn fixed_frame_conditioning(&self) -> Result<SaeFrameConditioning, String> {
+        if !self.frames_active() {
+            return Ok(SaeFrameConditioning::NoLearnedFrames);
+        }
+        match self.frame_marginal_admission()? {
+            Some(reason) => Ok(SaeFrameConditioning::ConditionalOnFittedFrames(reason)),
+            None => Err(
+                "exact observed-information shape covariance: every learned frame admits \
+                 integration, so holding it fixed would omit its orientation variance; use \
+                 shape_information"
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// #2933 F35 — the shape information integrated over every learned Grassmann
+    /// frame: the Laplace covariance on the product of the fixed-rank decoder
+    /// manifolds, in the same observed information the criterion prices.
+    ///
+    /// The decoder `B_k` is authoritative on a framed atom, so dropping every frame
+    /// leaves the state unchanged and exposes the unframed model at it. Its frozen
+    /// evidence factor carries `A_B = ∇²L` in `(t, vec B)`. A framed atom moves only
+    /// along `δB_k = δC_k U_kᵀ + C_k W_kᵀ U_k⊥ᵀ`, so with `vec B = T·ξ` the observed
+    /// information in the identified coordinates `(t, ξ)` is
+    ///
+    /// ```text
+    ///   [[A_tt, A_tB·T], [Tᵀ·A_Bt, Tᵀ·A_BB·T + E]],   ξᵀEξ = 2⟨∇_B L, δC·Wᵀ·U⊥ᵀ⟩.
+    /// ```
+    ///
+    /// `E` is the curvature of the bilinear parametrization. It vanishes unless the
+    /// rank constraint binds, where `∇_B L` is normal to the manifold. The
+    /// `−½·C·WᵀW·Uᵀ` second-order frame term contributes nothing, because
+    /// `∇_B L·U = 0` at a C-stationary point. The pseudo-inverse over the retained
+    /// directions is pushed forward, `Cov(vec B_k) = T_k·Σ_ξ·T_kᵀ`, and the row
+    /// sandwich uses the meat `Tᵀ·J·T`. The tangent coordinates name physical
+    /// decoder motions only, so the `GL(r_k)` factorization gauge never enters.
+    pub(crate) fn frame_marginal_shape_information(
+        &self,
+        rho: &SaeManifoldRho,
+        target: ArrayView2<'_, f64>,
+        registry: Option<&AnalyticPenaltyRegistry>,
+    ) -> Result<SaeShapeInformation, String> {
+        let mut unframed = self.clone();
+        for atom in unframed.atoms.iter_mut() {
+            atom.deactivate_decoder_frame();
+        }
+        let mut sys = unframed.assemble_arrow_schur(target, rho, registry)?;
+        let tangent = LearnedFrameTangentMap::new(self, sys.gb.view())?;
+        Self::ensure_row_gauge_deflation_for_quasi_laplace(&mut sys);
+        let (_delta_t, _delta_beta, cache) = solve_arrow_newton_step_with_options(
+            &sys,
+            0.0,
+            0.0,
+            &unframed.evidence_factor_options(),
+        )
+        .map_err(|err| format!("frame-marginal shape covariance: unframed evidence factor: {err}"))?;
+        let total_t = cache.delta_t_len();
+        let (a, e_beta) =
+            unframed.materialize_exact_hessian_dense_with_gap_border(rho, target, &cache)?;
+        let e_diag = unframed.materialize_ard_concave_clamp_diagonal(rho, &cache)?;
+        let operator = tangent.joint_operator(&a, total_t)?;
+        let e_tangent = e_beta.as_ref().map(|gap| tangent.congruence(gap));
+        let joint = Self::exact_hessian_spectral_block(
+            operator,
+            &e_diag,
+            e_tangent.as_ref(),
+            total_t,
+            ArrowMetric::JointLifted {
+                cache: &cache,
+                lift: &tangent.lift,
+            },
+        )?;
+        let meat = tangent.congruence(&unframed.reconstruction_border_score_meat(target)?);
+        Ok(
+            match joint.border_selected_inverse_blocks(
+                total_t,
+                &tangent.ranges,
+                meat.view(),
+                SaeFrameConditioning::MarginalOverLearnedFrames,
+            )? {
+                SaeShapeInformation::ObservedInformation(mut covariance) => {
+                    covariance.blocks = tangent.push_forward(&covariance.blocks);
+                    covariance.robust_blocks = tangent.push_forward(&covariance.robust_blocks);
+                    SaeShapeInformation::ObservedInformation(covariance)
+                }
+                unavailable => unavailable,
+            },
         )
     }
 
@@ -8026,6 +8200,7 @@ impl ExactHessianSpectralBlock {
         total_t: usize,
         ranges: &[std::ops::Range<usize>],
         meat: ArrayView2<'_, f64>,
+        frame_conditioning: SaeFrameConditioning,
     ) -> Result<SaeShapeInformation, String> {
         let dim = self.eigenvalues.len();
         if self.eigenvectors.dim() != (dim, dim) || total_t > dim {
@@ -8069,9 +8244,172 @@ impl ExactHessianSpectralBlock {
                 robust_blocks,
                 identified_rank: retained.len(),
                 ambient_dim: dim,
+                frame_conditioning,
             },
         ))
     }
+}
+
+/// Rank-`r_k` tangent coordinates of the learned frames, written into the
+/// unframed decoder layout (#2933 F35).
+///
+/// On a framed atom `ξ_k = (vec δC_k, vec W_k)` with `δC_k ∈ ℝ^{M_k×r_k}` and
+/// `W_k ∈ ℝ^{(p−r_k)×r_k}`, `δB_k = δC_k U_kᵀ + C_k W_kᵀ U_k⊥ᵀ`: `M_k r_k + r_k(p − r_k)`
+/// coordinates, the dimension of the fixed-rank manifold. An unframed atom keeps
+/// its `M_k·p` decoder coordinates.
+struct LearnedFrameTangentMap {
+    /// `T` in `vec B = T·ξ`, shape `(beta_dim, ξ_dim)`, flat decoder index `b·p + c`.
+    lift: Array2<f64>,
+    /// `E` with `ξᵀEξ = 2⟨∇_B L, δC·Wᵀ·U⊥ᵀ⟩`, shape `(ξ_dim, ξ_dim)`.
+    cross_curvature: Array2<f64>,
+    /// Each atom's `ξ` range.
+    ranges: Vec<std::ops::Range<usize>>,
+    /// Each atom's `vec B` range.
+    beta_ranges: Vec<std::ops::Range<usize>>,
+}
+
+impl LearnedFrameTangentMap {
+    /// `decoder_gradient` is `∇_B L` in the unframed layout at the same state.
+    fn new(term: &SaeManifoldTerm, decoder_gradient: ArrayView1<'_, f64>) -> Result<Self, String> {
+        let p = term.output_dim();
+        let beta_dim = term.beta_dim();
+        if decoder_gradient.len() != beta_dim {
+            return Err(format!(
+                "learned frame tangent map: decoder gradient length {} != beta dimension {beta_dim}",
+                decoder_gradient.len()
+            ));
+        }
+        let beta_ranges = term.beta_block_offsets().to_vec();
+        let mut ranges = Vec::with_capacity(term.k_atoms());
+        let mut cursor = 0usize;
+        for atom in &term.atoms {
+            let m = atom.basis_size();
+            let width = match atom.decoder_frame.as_ref() {
+                Some(frame) => m * frame.rank() + frame.rank() * (p - frame.rank()),
+                None => m * p,
+            };
+            ranges.push(cursor..cursor + width);
+            cursor += width;
+        }
+        let mut lift = Array2::<f64>::zeros((beta_dim, cursor));
+        let mut cross_curvature = Array2::<f64>::zeros((cursor, cursor));
+        for (atom_idx, atom) in term.atoms.iter().enumerate() {
+            let m = atom.basis_size();
+            let beta_start = beta_ranges[atom_idx].start;
+            let xi_start = ranges[atom_idx].start;
+            let Some(frame) = atom.decoder_frame.as_ref() else {
+                for index in 0..m * p {
+                    lift[[beta_start + index, xi_start + index]] = 1.0;
+                }
+                continue;
+            };
+            let u = frame.frame();
+            let r = u.ncols();
+            let coordinates = atom.decoder_coefficients().dot(&u);
+            let complement = orthonormal_frame_complement(u)?;
+            let w_start = xi_start + m * r;
+            for b in 0..m {
+                for c in 0..p {
+                    let row = beta_start + b * p + c;
+                    for j in 0..r {
+                        lift[[row, xi_start + b * r + j]] = u[[c, j]];
+                        for i in 0..p - r {
+                            lift[[row, w_start + i * r + j]] = coordinates[[b, j]] * complement[[c, i]];
+                        }
+                    }
+                }
+            }
+            // `⟨G, δC·Wᵀ·U⊥ᵀ⟩ = Σ_{b,i,j} (G·U⊥)[b,i]·δC[b,j]·W[i,j]` with
+            // `G = ∇_{B_k} L`; each symmetric pair is written once per triangle.
+            let gradient = Array2::from_shape_fn((m, p), |(b, c)| {
+                decoder_gradient[beta_start + b * p + c]
+            });
+            let normal_gradient = gradient.dot(&complement);
+            for b in 0..m {
+                for i in 0..p - r {
+                    let value = normal_gradient[[b, i]];
+                    for j in 0..r {
+                        let c_index = xi_start + b * r + j;
+                        let w_index = w_start + i * r + j;
+                        cross_curvature[[c_index, w_index]] += value;
+                        cross_curvature[[w_index, c_index]] += value;
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            lift,
+            cross_curvature,
+            ranges,
+            beta_ranges,
+        })
+    }
+
+    /// The joint `(t, ξ)` operator from the joint `(t, vec B)` observed information.
+    fn joint_operator(&self, a: &Array2<f64>, total_t: usize) -> Result<Array2<f64>, String> {
+        let beta_dim = self.lift.nrows();
+        let xi_dim = self.lift.ncols();
+        if a.dim() != (total_t + beta_dim, total_t + beta_dim) {
+            return Err(format!(
+                "learned frame tangent map: observed information {:?} does not match t dimension \
+                 {total_t} plus beta dimension {beta_dim}",
+                a.dim()
+            ));
+        }
+        let coupling = a.slice(s![..total_t, total_t..]).dot(&self.lift);
+        let border = self.congruence(&a.slice(s![total_t.., total_t..]).to_owned())
+            + &self.cross_curvature;
+        let mut operator = Array2::<f64>::zeros((total_t + xi_dim, total_t + xi_dim));
+        operator
+            .slice_mut(s![..total_t, ..total_t])
+            .assign(&a.slice(s![..total_t, ..total_t]));
+        operator.slice_mut(s![..total_t, total_t..]).assign(&coupling);
+        operator.slice_mut(s![total_t.., ..total_t]).assign(&coupling.t());
+        operator.slice_mut(s![total_t.., total_t..]).assign(&border);
+        Ok(operator)
+    }
+
+    /// `Tᵀ·M·T` for a border-layout matrix `M`.
+    fn congruence(&self, matrix: &Array2<f64>) -> Array2<f64> {
+        fast_atb(&self.lift, &fast_ab(matrix, &self.lift))
+    }
+
+    /// `T_k·Σ_k·T_kᵀ` per atom: tangent-coordinate blocks to decoder blocks.
+    fn push_forward(&self, blocks: &[Array2<f64>]) -> Vec<Array2<f64>> {
+        blocks
+            .iter()
+            .enumerate()
+            .map(|(atom, block)| {
+                let local = self
+                    .lift
+                    .slice(s![self.beta_ranges[atom].clone(), self.ranges[atom].clone()])
+                    .to_owned();
+                fast_ab(&fast_ab(&local, block), &local.t().to_owned())
+            })
+            .collect()
+    }
+}
+
+/// Orthonormal basis `U⊥` (`p × (p − r)`) of the complement of a column-orthonormal
+/// frame, read off `I − UUᵀ`, whose eigenvalues are exactly `1` on the complement
+/// and `0` on the span; `½` separates the two.
+fn orthonormal_frame_complement(frame: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+    let (p, r) = frame.dim();
+    let projector = Array2::<f64>::eye(p) - &frame.dot(&frame.t());
+    let (values, vectors) = projector
+        .eigh(Side::Lower)
+        .map_err(|err| format!("learned frame complement: eigendecomposition failed: {err:?}"))?;
+    let columns: Vec<usize> = (0..p).filter(|&index| values[index] > 0.5).collect();
+    if columns.len() != p - r {
+        return Err(format!(
+            "learned frame complement: I − UUᵀ has {} unit eigenvalues for p − r = {}",
+            columns.len(),
+            p - r
+        ));
+    }
+    Ok(Array2::from_shape_fn((p, p - r), |(row, col)| {
+        vectors[[row, columns[col]]]
+    }))
 }
 
 #[cfg(test)]
@@ -8424,6 +8762,7 @@ mod shape_covariance_observed_information_tests_2933_f33 {
                 total_t,
                 &term.shape_covariance_border_ranges(),
                 meat.view(),
+                SaeFrameConditioning::NoLearnedFrames,
             )
             .expect("selected inverse of B");
         let SaeShapeInformation::ObservedInformation(covariance) = information else {

@@ -194,11 +194,28 @@ struct ExactHessianSpectralBlock {
 pub(crate) enum ArrowMetric<'a> {
     /// `B` on the joint `(t, β)` coordinates.
     Joint(&'a ArrowFactorCache),
+    /// `B` on joint `(t, ξ)` coordinates whose border names other variables,
+    /// `β = lift·ξ` (#2933 F35): the rank-`r_k` tangent coordinates of learned
+    /// Grassmann frames, lifted into the unframed cache's decoder layout. The
+    /// pulled-back metric is `diag(I, liftᵀ)·B·diag(I, lift)`.
+    JointLifted {
+        cache: &'a ArrowFactorCache,
+        lift: &'a Array2<f64>,
+    },
 }
 
 impl ArrowMetric<'_> {
     pub(crate) fn quadratic_form(&self, v: ArrayView1<'_, f64>) -> Result<f64, String> {
         Ok(v.dot(&self.apply(v)?))
+    }
+
+    /// The cache every apply goes through and the border width a direction
+    /// carries in this metric's coordinates.
+    fn cache_and_border_width(&self) -> (&ArrowFactorCache, usize) {
+        match self {
+            Self::Joint(cache) => (cache, cache.k),
+            Self::JointLifted { cache, lift } => (cache, lift.ncols()),
+        }
     }
 
     /// `vᵀ(Φ(B_raw) − B_raw)v`: the part of [`Self::quadratic_form`] the evidence
@@ -208,46 +225,57 @@ impl ArrowMetric<'_> {
     /// only `t` enters. A direction whose pins lower curvature more than they raise
     /// it carries no substituted stiffness, so the total is clamped at zero.
     pub(crate) fn substituted_stiffness(&self, v: ArrayView1<'_, f64>) -> Result<f64, String> {
-        match self {
-            Self::Joint(cache) => {
-                let total_t = cache.delta_t_len();
-                if v.len() != total_t + cache.k {
-                    return Err(format!(
-                        "ArrowMetric::Joint: direction length {} != joint dimension {}",
-                        v.len(),
-                        total_t + cache.k
-                    ));
-                }
-                let v_t = v.slice(s![..total_t]);
-                let mut raw_minus_conditioned = Array1::<f64>::zeros(total_t);
-                add_raw_row_deflation_correction(
-                    cache,
-                    v_t,
-                    raw_minus_conditioned.view_mut(),
-                    "ArrowMetric::substituted_stiffness",
-                )?;
-                Ok((-v_t.dot(&raw_minus_conditioned)).max(0.0))
-            }
+        let (cache, border_width) = self.cache_and_border_width();
+        let total_t = cache.delta_t_len();
+        if v.len() != total_t + border_width {
+            return Err(format!(
+                "ArrowMetric: direction length {} != joint dimension {}",
+                v.len(),
+                total_t + border_width
+            ));
         }
+        let v_t = v.slice(s![..total_t]);
+        let mut raw_minus_conditioned = Array1::<f64>::zeros(total_t);
+        add_raw_row_deflation_correction(
+            cache,
+            v_t,
+            raw_minus_conditioned.view_mut(),
+            "ArrowMetric::substituted_stiffness",
+        )?;
+        Ok((-v_t.dot(&raw_minus_conditioned)).max(0.0))
     }
 
     fn apply(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String> {
+        let (cache, border_width) = self.cache_and_border_width();
+        let total_t = cache.delta_t_len();
+        if v.len() != total_t + border_width {
+            return Err(format!(
+                "ArrowMetric: direction length {} != joint dimension {}",
+                v.len(),
+                total_t + border_width
+            ));
+        }
         match self {
             Self::Joint(cache) => {
-                let total_t = cache.delta_t_len();
-                if v.len() != total_t + cache.k {
-                    return Err(format!(
-                        "ArrowMetric::Joint: direction length {} != joint dimension {}",
-                        v.len(),
-                        total_t + cache.k
-                    ));
-                }
                 let b_v = apply_cached_arrow_hessian(
                     cache,
                     v.slice(s![..total_t]),
                     v.slice(s![total_t..]),
                 )?;
                 Ok(Array1::from_iter(b_v.t.iter().chain(b_v.beta.iter()).copied()))
+            }
+            Self::JointLifted { cache, lift } => {
+                if lift.nrows() != cache.k {
+                    return Err(format!(
+                        "ArrowMetric::JointLifted: lift has {} rows for a border of {}",
+                        lift.nrows(),
+                        cache.k
+                    ));
+                }
+                let beta = lift.dot(&v.slice(s![total_t..]));
+                let b_v = apply_cached_arrow_hessian(cache, v.slice(s![..total_t]), beta.view())?;
+                let pulled_back = lift.t().dot(&b_v.beta);
+                Ok(Array1::from_iter(b_v.t.iter().chain(pulled_back.iter()).copied()))
             }
         }
     }
