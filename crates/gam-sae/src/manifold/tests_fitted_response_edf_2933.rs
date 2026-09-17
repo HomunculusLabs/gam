@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! #2933 F40 — the reconstruction dispersion's scale equation uses the residual
 //! degrees of freedom `‖I − R‖²_F` of its fitted response, not `N − tr R`.
 //!
@@ -98,8 +99,15 @@ impl SaeBasisEvaluator for FixedRowBasis {
 
     fn third_jet_dyn(
         &self,
-        _coords: ArrayView2<'_, f64>,
+        coords: ArrayView2<'_, f64>,
     ) -> Result<SaeBasisThirdJetCapability, String> {
+        if coords.nrows() != self.phi.nrows() {
+            return Err(format!(
+                "FixedRowBasis: {} coordinate rows for {} basis rows",
+                coords.nrows(),
+                self.phi.nrows()
+            ));
+        }
         Ok(SaeBasisThirdJetCapability::CertifiedZero)
     }
 }

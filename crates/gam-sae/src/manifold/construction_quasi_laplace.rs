@@ -5247,94 +5247,6 @@ impl SaeManifoldTerm {
         Ok(per_atom)
     }
 
-    /// Per-atom effective penalized dof of the decoder smoothness penalty
-    /// (#1556): entry `k` is `tr(S_β⁻¹ · M_k)` with `M_k = (λ_smooth[k]·S_k) ⊗ I`
-    /// and `S_β⁻¹ = (H⁻¹)_ββ` the Schur-complement inverse, each atom scaled by
-    /// its OWN `lambda_smooth[atom_idx]`. Built on
-    /// [`ArrowFactorCache::schur_inverse_apply`]: column `(k,μ,oc)` of `M_k` is
-    /// `λ_k·S_k[:,μ] ⊗ e_oc` (sparse), so we apply `S_β⁻¹` to that K-vector and
-    /// read back `result[col]`. The total edf is the sum of the returned vector
-    /// (a uniform/broadcast λ reproduces the historical global trace).
-    ///
-    /// At `K ≥ SMOOTHNESS_DOF_HUTCHINSON_MIN_ATOMS` this delegates to the
-    /// matrix-free Hutchinson estimator (the exact `K·M·p`-solve trace is
-    /// infeasible at that scale); below it the exact column solve is used
-    /// unchanged.
-    #[cfg(test)]
-    pub(crate) fn decoder_smoothness_effective_dof_per_atom(
-        &self,
-        cache: &ArrowFactorCache,
-        lambda_smooth: &[f64],
-    ) -> Result<Vec<f64>, ArrowSchurError> {
-        let p = self.output_dim();
-        let frames_active = self.frames_active();
-        let (offsets, out_dim): (Vec<usize>, Box<dyn Fn(usize) -> usize>) = if frames_active {
-            let ranks: Vec<usize> = self.atoms.iter().map(|a| a.border_frame_rank()).collect();
-            (
-                self.factored_beta_offsets(),
-                Box::new(move |k: usize| ranks[k]),
-            )
-        } else {
-            (self.beta_offsets(), Box::new(move |_: usize| p))
-        };
-        let k = cache.k;
-        if self.atoms.len() >= Self::SMOOTHNESS_DOF_HUTCHINSON_MIN_ATOMS {
-            // Massive-K: `Σ_k M_k·r_k` exact solves is infeasible — estimate every
-            // atom's trace matrix-free with one `S_β⁻¹` solve per Hutchinson probe.
-            return self
-                .decoder_smoothness_effective_dof_per_atom_hutchinson(
-                    k,
-                    &offsets,
-                    out_dim.as_ref(),
-                    lambda_smooth,
-                    Self::SMOOTHNESS_DOF_HUTCHINSON_PROBES,
-                    Self::SMOOTHNESS_DOF_HUTCHINSON_SEED,
-                    |rhs| {
-                        cache
-                            .schur_inverse_apply(rhs)
-                            .map_err(|e| format!("schur_inverse_apply: {e:?}"))
-                    },
-                )
-                .map_err(|reason| ArrowSchurError::SchurFactorFailed { reason });
-        }
-        // #2253/#2228 λ→0 boundary: the plain per-column back-substitution
-        // divides by the doubly-null (data-null ∧ penalty-null) β-Schur pivots
-        // at the ρ lower face and returns `Inf`/`NaN` — the EDF value is the
-        // ONLY outer-gradient piece that contracts `(H⁻¹)_ββ`, so it is the
-        // piece that diverges while the criterion value stays finite. Route
-        // every column through the deflated spectral pseudo-inverse instead:
-        // the eigendecomposition happens ONCE (`schur_deflated_applier`), a
-        // doubly-null direction contributes exactly 0 dof (it is
-        // unidentifiable, not a real degree of freedom), and in the interior
-        // no direction deflates so the trace matches the plain path to
-        // round-off.
-        let apply = cache.schur_deflated_applier()?;
-        let mut per_atom = vec![0.0_f64; self.atoms.len()];
-        let mut m_col = Array1::<f64>::zeros(k);
-        for (atom_idx, atom) in self.atoms.iter().enumerate() {
-            let s = atom.smooth_penalty();
-            let m = atom.basis_size();
-            let off = offsets[atom_idx];
-            let r = out_dim(atom_idx);
-            let lambda = lambda_smooth[atom_idx];
-            let mut trace = 0.0_f64;
-            for mu in 0..m {
-                for oc in 0..r {
-                    let col = off + mu * r + oc;
-                    m_col.fill(0.0);
-                    for nu in 0..m {
-                        let s_nu_mu = 0.5 * (s[[nu, mu]] + s[[mu, nu]]);
-                        m_col[off + nu * r + oc] = lambda * s_nu_mu;
-                    }
-                    let z = apply(m_col.view());
-                    trace += z[col];
-                }
-            }
-            per_atom[atom_idx] = trace;
-        }
-        Ok(per_atom)
-    }
-
     /// Per-atom effective penalized dof via the deflated solver (#1556): entry
     /// `k` is `tr((H⁻¹)_ββ · M_k)` for `M_k = (λ_smooth[k]·S_k) ⊗ I`, each atom
     /// scaled by its OWN `lambda_smooth[atom_idx]`. The total is the sum.
@@ -8891,6 +8803,100 @@ mod shape_covariance_observed_information_2933_f33_tests {
                     && entry.band_sd.is_none(),
                 "a refused covariance reports no band"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod smoothness_dof_exact_oracle_tests {
+    use super::*;
+
+    impl SaeManifoldTerm {
+        /// Per-atom effective penalized dof of the decoder smoothness penalty
+        /// (#1556): entry `k` is `tr(S_β⁻¹ · M_k)` with `M_k = (λ_smooth[k]·S_k) ⊗ I`
+        /// and `S_β⁻¹ = (H⁻¹)_ββ` the Schur-complement inverse, each atom scaled by
+        /// its OWN `lambda_smooth[atom_idx]`. Built on
+        /// [`ArrowFactorCache::schur_inverse_apply`]: column `(k,μ,oc)` of `M_k` is
+        /// `λ_k·S_k[:,μ] ⊗ e_oc` (sparse), so we apply `S_β⁻¹` to that K-vector and
+        /// read back `result[col]`. The total edf is the sum of the returned vector
+        /// (a uniform/broadcast λ reproduces the historical global trace).
+        ///
+        /// At `K ≥ SMOOTHNESS_DOF_HUTCHINSON_MIN_ATOMS` this delegates to the
+        /// matrix-free Hutchinson estimator (the exact `K·M·p`-solve trace is
+        /// infeasible at that scale); below it the exact column solve is used
+        /// unchanged.
+        pub(crate) fn decoder_smoothness_effective_dof_per_atom(
+            &self,
+            cache: &ArrowFactorCache,
+            lambda_smooth: &[f64],
+        ) -> Result<Vec<f64>, ArrowSchurError> {
+            let p = self.output_dim();
+            let frames_active = self.frames_active();
+            let (offsets, out_dim): (Vec<usize>, Box<dyn Fn(usize) -> usize>) = if frames_active {
+                let ranks: Vec<usize> = self.atoms.iter().map(|a| a.border_frame_rank()).collect();
+                (
+                    self.factored_beta_offsets(),
+                    Box::new(move |k: usize| ranks[k]),
+                )
+            } else {
+                (self.beta_offsets(), Box::new(move |_: usize| p))
+            };
+            let k = cache.k;
+            if self.atoms.len() >= Self::SMOOTHNESS_DOF_HUTCHINSON_MIN_ATOMS {
+                // Massive-K: `Σ_k M_k·r_k` exact solves is infeasible — estimate every
+                // atom's trace matrix-free with one `S_β⁻¹` solve per Hutchinson probe.
+                return self
+                    .decoder_smoothness_effective_dof_per_atom_hutchinson(
+                        k,
+                        &offsets,
+                        out_dim.as_ref(),
+                        lambda_smooth,
+                        Self::SMOOTHNESS_DOF_HUTCHINSON_PROBES,
+                        Self::SMOOTHNESS_DOF_HUTCHINSON_SEED,
+                        |rhs| {
+                            cache
+                                .schur_inverse_apply(rhs)
+                                .map_err(|e| format!("schur_inverse_apply: {e:?}"))
+                        },
+                    )
+                    .map_err(|reason| ArrowSchurError::SchurFactorFailed { reason });
+            }
+            // #2253/#2228 λ→0 boundary: the plain per-column back-substitution
+            // divides by the doubly-null (data-null ∧ penalty-null) β-Schur pivots
+            // at the ρ lower face and returns `Inf`/`NaN` — the EDF value is the
+            // ONLY outer-gradient piece that contracts `(H⁻¹)_ββ`, so it is the
+            // piece that diverges while the criterion value stays finite. Route
+            // every column through the deflated spectral pseudo-inverse instead:
+            // the eigendecomposition happens ONCE (`schur_deflated_applier`), a
+            // doubly-null direction contributes exactly 0 dof (it is
+            // unidentifiable, not a real degree of freedom), and in the interior
+            // no direction deflates so the trace matches the plain path to
+            // round-off.
+            let apply = cache.schur_deflated_applier()?;
+            let mut per_atom = vec![0.0_f64; self.atoms.len()];
+            let mut m_col = Array1::<f64>::zeros(k);
+            for (atom_idx, atom) in self.atoms.iter().enumerate() {
+                let s = atom.smooth_penalty();
+                let m = atom.basis_size();
+                let off = offsets[atom_idx];
+                let r = out_dim(atom_idx);
+                let lambda = lambda_smooth[atom_idx];
+                let mut trace = 0.0_f64;
+                for mu in 0..m {
+                    for oc in 0..r {
+                        let col = off + mu * r + oc;
+                        m_col.fill(0.0);
+                        for nu in 0..m {
+                            let s_nu_mu = 0.5 * (s[[nu, mu]] + s[[mu, nu]]);
+                            m_col[off + nu * r + oc] = lambda * s_nu_mu;
+                        }
+                        let z = apply(m_col.view());
+                        trace += z[col];
+                    }
+                }
+                per_atom[atom_idx] = trace;
+            }
+            Ok(per_atom)
         }
     }
 }
