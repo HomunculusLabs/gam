@@ -13,6 +13,8 @@ fn fatal_optimizer_evaluation_retains_exact_typed_source_2658() {
         theta_dim: 4,
         rho_dim: 3,
         psi_dim: 1,
+        cycle_budget: Some(40),
+        carrying_block: Some("slope_surface".to_string()),
     });
     let boundary = EstimationError::fatal_objective_evaluation(
         "outer fixed-point evaluation",
@@ -36,6 +38,7 @@ fn fatal_optimizer_evaluation_retains_exact_typed_source_2658() {
         theta_dim,
         rho_dim,
         psi_dim,
+        ..
     })) = source.estimation_error()
     else {
         panic!("the typed inner-solve evidence was flattened or replaced");

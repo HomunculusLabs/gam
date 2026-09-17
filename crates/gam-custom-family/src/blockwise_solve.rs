@@ -280,6 +280,7 @@ pub(crate) fn correct_labeled_coefficient_mode<
     if !inner.converged {
         return Err(inner_solve_not_converged_error(
             &inner,
+            labeled_options.as_ref(),
             physical_rho.len(),
             0,
         ));

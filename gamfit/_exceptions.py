@@ -109,11 +109,13 @@ MissingDependencyError: type = _rust.MissingDependencyError
 
 # Fit-failure categories (#2937). A failure of a fit's solve raises the class of
 # its category; instances carry `variant`, `category`, `causes` and `fields`. `FitError`
-# itself is a failure with no category to claim. `PirlsConvergenceError` and
-# `RemlConvergenceError` are `FitConvergenceError` subclasses, and
-# `IntegrationError` is now raised only for genuine quadrature failures.
+# itself is a failure with no category to claim. `PirlsConvergenceError`,
+# `RemlConvergenceError` and `InnerModeConvergenceError` (gam#2943) are
+# `FitConvergenceError` subclasses, and `IntegrationError` is now raised only for
+# genuine quadrature failures.
 FitError: type = _rust.FitError
 FitConvergenceError: type = _rust.FitConvergenceError
+InnerModeConvergenceError: type = _rust.InnerModeConvergenceError
 FitSeedError: type = _rust.FitSeedError
 FitInvariantError: type = _rust.FitInvariantError
 FitInputError: type = _rust.FitInputError

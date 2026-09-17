@@ -210,6 +210,17 @@ create_exception!(
 
 create_exception!(
     _rust,
+    InnerModeConvergenceError,
+    FitConvergenceError,
+    "The fit ended holding an inner coefficient solve that never certified its \
+     mode, with no outer search left to step away from it (gam#2943). `fields` \
+     and plain attributes carry the terminal solve's evidence: `carrying_block`, \
+     `cycles`, `cycle_budget`, `kkt_residual`, `kkt_tol` and `terminal_reason`, \
+     each optional one None where the solve did not record it."
+);
+
+create_exception!(
+    _rust,
     DictionaryConvergenceError,
     GamError,
     "A dictionary optimizer failed to reach its certified fixed point. Instances \
@@ -713,6 +724,14 @@ fn estimation_error_to_pyerr_with_message(err: &EstimationError, message: String
         // The fitted posterior's second-order model cannot publish a spread; the
         // prediction request is what declines, not the fit (#1082).
         EstimationError::PredictiveIntervalsDeclined { .. } => PredictionError::new_err(message),
+        // A fit that ended holding an uncertified inner solve (gam#2943). Only
+        // that variant carries terminal inner-mode evidence. It precedes the
+        // catch-all below, whose class is not a `FitError`.
+        EstimationError::CustomFamily(family_error)
+            if family_error.terminal_inner_mode_evidence().is_some() =>
+        {
+            InnerModeConvergenceError::new_err(message)
+        }
         EstimationError::CustomFamily(_) => CustomFamilyError::new_err(message),
         // Invalid stabilization metadata is a model/solver specification
         // defect, not a data problem.
@@ -956,6 +975,7 @@ pub(crate) fn workflow_error_to_pyerr(py: Python<'_>, err: WorkflowError) -> PyE
                 category: failure.category(),
                 causes: failure.causes(),
                 estimation_error: failure.estimation_error(),
+                terminal_inner_mode: failure.terminal_inner_mode_evidence(),
             },
         ),
         WorkflowError::InvalidData { column, problem } => {
@@ -965,19 +985,24 @@ pub(crate) fn workflow_error_to_pyerr(py: Python<'_>, err: WorkflowError) -> PyE
         // category; otherwise the resolution search itself did not converge.
         WorkflowError::SpatialUnderresolved {
             ref refit_failure, ..
-        } => fit_failure_to_pyerr(
-            py,
-            FitFailureReport {
-                message: err.to_string(),
-                variant: err.variant_name(),
-                category: err.failure_category(),
-                causes: vec![err.to_string()],
-                estimation_error: match refit_failure.as_deref() {
-                    Some(WorkflowError::Fit(failure)) => failure.estimation_error(),
-                    _ => None,
+        } => {
+            let refit = match refit_failure.as_deref() {
+                Some(WorkflowError::Fit(failure)) => Some(failure),
+                _ => None,
+            };
+            fit_failure_to_pyerr(
+                py,
+                FitFailureReport {
+                    message: err.to_string(),
+                    variant: err.variant_name(),
+                    category: err.failure_category(),
+                    causes: vec![err.to_string()],
+                    estimation_error: refit.and_then(|failure| failure.estimation_error()),
+                    terminal_inner_mode: refit
+                        .and_then(|failure| failure.terminal_inner_mode_evidence()),
                 },
-            },
-        ),
+            )
+        }
         WorkflowError::FormulaDsl { .. } => FormulaError::new_err(err.to_string()),
         WorkflowError::MarginalSlopeLink { .. } => InvalidConfigurationError::new_err(err.to_string()),
         WorkflowError::TransformationNormalConflict { .. } => {
@@ -993,6 +1018,9 @@ struct FitFailureReport<'a> {
     category: gam::FailureCategory,
     causes: Vec<String>,
     estimation_error: Option<&'a EstimationError>,
+    /// The terminal inner solve's facts, when the fit ended without a
+    /// certified inner mode (gam#2943).
+    terminal_inner_mode: Option<gam::TerminalInnerModeEvidence<'a>>,
 }
 
 /// The exception class of a fit failure's category. `Unclassified` raises the
@@ -1028,6 +1056,7 @@ fn fit_failure_to_pyerr(py: Python<'_>, report: FitFailureReport<'_>) -> PyErr {
         category,
         causes,
         estimation_error,
+        terminal_inner_mode,
     } = report;
     let mut message = format!(
         "{message}\nvariant: {variant}\ncategory: {}",
@@ -1037,9 +1066,15 @@ fn fit_failure_to_pyerr(py: Python<'_>, report: FitFailureReport<'_>) -> PyErr {
         message.push_str("\nhelp: ");
         message.push_str(&advice);
     }
-    let specific = estimation_error
-        .map(|source| estimation_error_to_pyerr_with_message(source, message.clone()))
-        .filter(|candidate| candidate.is_instance_of::<FitError>(py));
+    // A fit that ended without a certified inner mode raises its own class
+    // whichever leaf carried it; the fit boundary mints it on a custom-family
+    // leaf, which carries no estimation error (gam#2943).
+    let specific = match terminal_inner_mode {
+        Some(_) => Some(InnerModeConvergenceError::new_err(message.clone())),
+        None => estimation_error
+            .map(|source| estimation_error_to_pyerr_with_message(source, message.clone()))
+            .filter(|candidate| candidate.is_instance_of::<FitError>(py)),
+    };
     let exc = specific.unwrap_or_else(|| fit_category_error(category, message));
     let bound = exc.value(py);
     // As for `ColumnNotFoundError`: the class is the contract, the attributes
@@ -1049,10 +1084,23 @@ fn fit_failure_to_pyerr(py: Python<'_>, report: FitFailureReport<'_>) -> PyErr {
         bound.setattr("variant", variant)?;
         bound.setattr("category", category.label())?;
         bound.setattr("causes", causes)?;
-        // The typed evidence a variant exposes, by field name. No variant of
-        // this boundary exposes any yet, so the contract is an empty dict
-        // rather than a missing attribute.
-        bound.setattr("fields", pyo3::types::PyDict::new(py))?;
+        // The typed evidence a variant exposes, by field name, each also set as
+        // a plain attribute. Only a fit that ended without a certified inner
+        // mode exposes any yet (gam#2943); every other variant gets an empty
+        // dict rather than a missing attribute.
+        let fields = pyo3::types::PyDict::new(py);
+        if let Some(evidence) = terminal_inner_mode {
+            fields.set_item("carrying_block", evidence.carrying_block)?;
+            fields.set_item("cycles", evidence.cycles)?;
+            fields.set_item("cycle_budget", evidence.cycle_budget)?;
+            fields.set_item("kkt_residual", evidence.kkt_residual)?;
+            fields.set_item("kkt_tol", evidence.kkt_tol)?;
+            fields.set_item("terminal_reason", evidence.terminal_reason)?;
+        }
+        for (name, value) in fields.iter() {
+            bound.setattr(name.str()?, value)?;
+        }
+        bound.setattr("fields", fields)?;
         Ok(())
     })();
     if let Err(attach_err) = attach_result {
@@ -1281,6 +1329,130 @@ mod fit_failure_dispatch_tests {
                 !trace.is_instance_of::<IntegrationError>(py),
                 "only a genuine integration failure is an IntegrationError"
             );
+        });
+    }
+
+    fn uncertified_inner_solve() -> gam::families::custom_family::CustomFamilyError {
+        gam::families::custom_family::CustomFamilyError::InnerSolveNotConverged {
+            cycles: 8,
+            terminal: None,
+            kkt_residual: Some(1.081e3),
+            kkt_tol: Some(5.352e-2),
+            theta_dim: 5,
+            rho_dim: 3,
+            psi_dim: 2,
+            cycle_budget: Some(8),
+            carrying_block: Some("slope_surface".to_string()),
+        }
+    }
+
+    #[test]
+    fn a_fit_ending_without_a_certified_inner_mode_raises_its_class_with_the_evidence_2943() {
+        use gam::families::custom_family::CustomFamilyError as EngineCustomFamilyError;
+        Python::attach(|py| {
+            let terminal = EngineCustomFamilyError::fit_ended_without_certified_inner_mode(
+                uncertified_inner_solve(),
+            );
+            // The fit boundary mints the variant on a custom-family leaf, under
+            // the context of the layers above it.
+            let err = raise(FitFailure::from(terminal.clone()).context("CTN fold 1 failed"));
+            assert!(err.is_instance_of::<InnerModeConvergenceError>(py));
+            assert!(err.is_instance_of::<FitConvergenceError>(py));
+            assert!(!err.is_instance_of::<RemlConvergenceError>(py));
+            let value = err.value(py);
+            let variant: String = value
+                .getattr("variant")
+                .expect("variant attribute")
+                .extract()
+                .expect("variant is a str");
+            assert_eq!(variant, "CustomFamilyError::FitEndedWithoutCertifiedInnerMode");
+            let category: String = value
+                .getattr("category")
+                .expect("category attribute")
+                .extract()
+                .expect("category is a str");
+            assert_eq!(category, "convergence");
+
+            let cycles: usize = value
+                .getattr("cycles")
+                .expect("cycles attribute")
+                .extract()
+                .expect("cycles is an int");
+            assert_eq!(cycles, 8);
+            let cycle_budget: Option<usize> = value
+                .getattr("cycle_budget")
+                .expect("cycle_budget attribute")
+                .extract()
+                .expect("cycle_budget is an int or None");
+            assert_eq!(cycle_budget, Some(8));
+            let carrying_block: Option<String> = value
+                .getattr("carrying_block")
+                .expect("carrying_block attribute")
+                .extract()
+                .expect("carrying_block is a str or None");
+            assert_eq!(carrying_block.as_deref(), Some("slope_surface"));
+            let kkt_residual: Option<f64> = value
+                .getattr("kkt_residual")
+                .expect("kkt_residual attribute")
+                .extract()
+                .expect("kkt_residual is a float or None");
+            assert_eq!(kkt_residual, Some(1.081e3));
+            let kkt_tol: Option<f64> = value
+                .getattr("kkt_tol")
+                .expect("kkt_tol attribute")
+                .extract()
+                .expect("kkt_tol is a float or None");
+            assert_eq!(kkt_tol, Some(5.352e-2));
+            assert!(
+                value
+                    .getattr("terminal_reason")
+                    .expect("terminal_reason attribute")
+                    .is_none(),
+                "a refusal with no terminal verdict reports None"
+            );
+
+            let fields = value.getattr("fields").expect("fields attribute");
+            let fields = fields
+                .cast::<pyo3::types::PyDict>()
+                .expect("fields is a dict");
+            assert_eq!(fields.len(), 6);
+            for name in [
+                "carrying_block",
+                "cycles",
+                "cycle_budget",
+                "kkt_residual",
+                "kkt_tol",
+                "terminal_reason",
+            ] {
+                let from_fields = fields
+                    .get_item(name)
+                    .expect("dict lookup")
+                    .expect("every evidence key is in fields");
+                let attribute = value.getattr(name).expect("every evidence key is an attribute");
+                assert!(
+                    from_fields.eq(attribute).expect("evidence values compare"),
+                    "fields[{name}] and the {name} attribute disagree"
+                );
+            }
+
+            // The same variant carried as an estimation error, through a fit or
+            // a direct estimation entry point, raises the same class.
+            let estimation =
+                raise(FitFailure::from(EstimationError::CustomFamily(terminal.clone())));
+            assert!(estimation.is_instance_of::<InnerModeConvergenceError>(py));
+            let direct = estimation_error_to_pyerr(EstimationError::CustomFamily(terminal));
+            assert!(direct.is_instance_of::<InnerModeConvergenceError>(py));
+
+            // A refusal that never ended a fit keeps the category class and
+            // exposes no evidence.
+            let trial = raise(FitFailure::from(uncertified_inner_solve()));
+            assert!(trial.is_instance_of::<FitConvergenceError>(py));
+            assert!(!trial.is_instance_of::<InnerModeConvergenceError>(py));
+            let trial_fields = trial.value(py).getattr("fields").expect("fields attribute");
+            let trial_fields = trial_fields
+                .cast::<pyo3::types::PyDict>()
+                .expect("fields is a dict");
+            assert!(trial_fields.is_empty(), "only the fit-ending variant exposes evidence");
         });
     }
 }

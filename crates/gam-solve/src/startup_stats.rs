@@ -952,6 +952,8 @@ mod tests {
                 theta_dim: 7,
                 rho_dim: 5,
                 psi_dim: 2,
+                cycle_budget: None,
+                carrying_block: None,
             });
         let objective_error =
             ObjectiveEvalError::recoverable_from(source).with_context("outer eval failed");
@@ -969,6 +971,7 @@ mod tests {
                         theta_dim,
                         rho_dim,
                         psi_dim,
+                        ..
                     },
                 message,
             } => {

@@ -40,6 +40,7 @@ pub(crate) fn cached_inner_mode_from_result(result: &BlockwiseInnerResult) -> Ca
 /// terminal decision variables #2658 exists to surface.
 pub(crate) fn inner_solve_not_converged_error(
     inner: &BlockwiseInnerResult,
+    options: &BlockwiseFitOptions,
     rho_dim: usize,
     psi_dim: usize,
 ) -> CustomFamilyError {
@@ -57,6 +58,12 @@ pub(crate) fn inner_solve_not_converged_error(
         theta_dim: rho_dim + psi_dim,
         rho_dim,
         psi_dim,
+        // The budget the solve actually ran against: the configured cap after
+        // any seed-screening cap, exactly as the inner loop derives it.
+        cycle_budget: Some(capped_inner_max_cycles(options, options.inner_max_cycles)),
+        // Recorded by the exact joint route from its KKT refusal report; the
+        // terminal `kkt_residual` is `None` off a converged iterate by design.
+        carrying_block: inner.terminal_carrying_block.clone(),
     }
 }
 

@@ -2297,6 +2297,8 @@ mod trial_infeasibility_classification_tests {
             theta_dim: 5,
             rho_dim: 3,
             psi_dim: 2,
+            cycle_budget: None,
+            carrying_block: None,
         });
         assert!(err.is_trial_point_infeasible());
 
@@ -2351,6 +2353,8 @@ mod trial_infeasibility_classification_tests {
             theta_dim: 1,
             rho_dim: 1,
             psi_dim: 0,
+            cycle_budget: None,
+            carrying_block: None,
         });
         let structural =
             EstimationError::CustomFamily(CustomFamilyError::UnsupportedConfiguration {

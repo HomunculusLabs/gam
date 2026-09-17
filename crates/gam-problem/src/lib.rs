@@ -113,6 +113,7 @@ pub use custom_family_error::{
     DescendingRayExit,
     InnerConvergenceTerminalState,
     ConstrainedFixedPointCondition, JointNewtonTerminalReason, RayRestoration,
+    TerminalInnerModeEvidence,
     relative_stationarity,
 };
 pub use dispersion::{Dispersion, DispersionError};

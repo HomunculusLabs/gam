@@ -2372,6 +2372,8 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
             theta_dim,
             rho_dim,
             psi_dim,
+            cycle_budget: Some(capped_inner_max_cycles(options, options.inner_max_cycles)),
+            carrying_block: inner.terminal_carrying_block.clone(),
         });
     }
 

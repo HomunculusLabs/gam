@@ -157,6 +157,8 @@ fn post_seed_custom_family_refusal_retains_typed_terminal_state_2658() {
                         theta_dim: 3,
                         rho_dim: 3,
                         psi_dim: 0,
+                        cycle_budget: None,
+                        carrying_block: None,
                     },
                 ))
             })
@@ -207,6 +209,7 @@ fn post_seed_custom_family_refusal_retains_typed_terminal_state_2658() {
             theta_dim: 3,
             rho_dim: 3,
             psi_dim: 0,
+            ..
         }) if *observed_terminal == terminal
     ));
     let rejection = SeedRejection::from_objective_error(0, "solver", objective_error);

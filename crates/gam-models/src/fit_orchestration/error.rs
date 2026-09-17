@@ -434,6 +434,30 @@ impl FitFailure {
         }
     }
 
+    /// The typed facts of the uncertified inner solve this failure ends in,
+    /// when the fit ended without a certified inner mode (gam#2943), seen
+    /// through the wrappers that only carry it. The fit boundary mints that
+    /// variant on a custom-family leaf, which [`Self::estimation_error`] does
+    /// not see.
+    #[must_use]
+    pub fn terminal_inner_mode_evidence(&self) -> Option<gam_problem::TerminalInnerModeEvidence<'_>> {
+        match self {
+            Self::Context { source, .. } | Self::Annotated { source, .. } => {
+                source.terminal_inner_mode_evidence()
+            }
+            Self::CustomFamily(err) => err.terminal_inner_mode_evidence(),
+            Self::Estimation(err) => match err.innermost_estimation_error() {
+                EstimationError::CustomFamily(err) => err.terminal_inner_mode_evidence(),
+                _ => None,
+            },
+            Self::Workflow(err) => match err.as_ref() {
+                WorkflowError::Fit(failure) => failure.terminal_inner_mode_evidence(),
+                _ => None,
+            },
+            Self::SurvivalMarginalSlope(_) | Self::Raised { .. } => None,
+        }
+    }
+
     /// The message chain, outermost first: each layer's context, then the
     /// message of the error that stopped the fit, then the notes appended after
     /// it, innermost first.

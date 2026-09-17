@@ -283,6 +283,7 @@ from ._exceptions import (
     HmcError,
     IdentifiabilityCompilerError,
     IllConditionedError,
+    InnerModeConvergenceError,
     IntegrationError,
     InvalidConfigurationError,
     InvalidInputError,

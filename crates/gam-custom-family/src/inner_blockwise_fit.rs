@@ -3393,6 +3393,7 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
                     cycles: cached.cycles,
                     converged: cached.converged,
                     terminal_convergence_state: None,
+                    terminal_carrying_block: None,
                     block_logdet_h: if product.requires_laplace_artifacts() {
                         cached.block_logdet_h
                     } else {
@@ -4697,6 +4698,8 @@ fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + Sync + 'stat
         cycles: cycles_done,
         converged,
         terminal_convergence_state,
+        // The blockwise route builds no KKT refusal report.
+        terminal_carrying_block: None,
         block_logdet_h,
         block_logdet_s,
         s_lambdas,

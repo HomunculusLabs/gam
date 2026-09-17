@@ -3483,6 +3483,10 @@ mod run_plan_caller_requirement_2568_tests;
 #[path = "run_fixed_point_continuation_tests.rs"]
 mod run_fixed_point_continuation_tests;
 
+#[cfg(test)]
+#[path = "run_trial_inner_nonconvergence_retreat_2943_tests.rs"]
+mod run_trial_inner_nonconvergence_retreat_2943_tests;
+
 /// Is `seed` a prior fit's terminal certificate that is STILL stationary here?
 ///
 /// `Some(cost)` only when all of: the seed is the resumed rho itself; a first

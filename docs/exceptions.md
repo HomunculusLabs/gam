@@ -43,7 +43,8 @@ Exception
 │       ├── FitError
 │       │   ├── FitConvergenceError
 │       │   │   ├── PirlsConvergenceError
-│       │   │   └── RemlConvergenceError
+│       │   │   ├── RemlConvergenceError
+│       │   │   └── InnerModeConvergenceError
 │       │   ├── FitSeedError
 │       │   ├── FitInvariantError
 │       │   ├── FitInputError
@@ -150,7 +151,8 @@ from the typed engine error that stopped the fit, never from its message:
 
 | Class | Category | Raised when |
 | --- | --- | --- |
-| `FitConvergenceError` | `convergence` | An outer smoothing search or an inner coefficient solve ended without its convergence certificate. `PirlsConvergenceError` and `RemlConvergenceError` are its subclasses. |
+| `FitConvergenceError` | `convergence` | An outer smoothing search or an inner coefficient solve ended without its convergence certificate. `PirlsConvergenceError`, `RemlConvergenceError` and `InnerModeConvergenceError` are its subclasses. |
+| `InnerModeConvergenceError` | `convergence` | The fit ended holding an inner coefficient solve that never certified its mode, with no outer search left to step away from it (gam#2943). `fields` and plain attributes carry `carrying_block` (the block holding the largest unresolved KKT residual), `cycles`, `cycle_budget`, `kkt_residual`, `kkt_tol` and `terminal_reason`; each optional one is `None` where the solve did not record it. |
 | `FitSeedError` | `startup_seeds` | Outer startup validation refused every candidate seed, so no outer solver started. |
 | `FitInvariantError` | `invariant` | The engine's own consistency contract was violated, e.g. an inference covariance disagreeing with the top-level covariance (gam#1789). An engine defect; please report it. |
 | `FitInputError` | `input` | The solve refused the configuration, the data or the problem's size (separation, rank deficiency, an unsupported option). |

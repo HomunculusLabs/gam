@@ -2257,7 +2257,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             // The terminal verdict travels typed, as the fixed-log-lambda route
             // returns it (#1561): the Jeffreys arming lifecycle reads its terminal
             // reason as arming evidence, and text carries none (#979).
-            let mut refusal = inner_solve_not_converged_error(&inner, 0, 0);
+            let mut refusal = inner_solve_not_converged_error(&inner, options, 0, 0);
             refusal.map_descending_ray_direction(&|reduced| {
                 lift_direction_to_raw(&canonical.gauge, reduced)
             });
@@ -2791,7 +2791,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                             eval.objective
                         ))
                     } else {
-                        inner_solve_not_converged_error(&eval.inner, rho.len(), 0)
+                        inner_solve_not_converged_error(&eval.inner, &outer_options, rho.len(), 0)
                     };
                     // A value probe never seeds the next evaluation (#2668), and an
                     // unconverged solve never does either (#2902).
@@ -2860,7 +2860,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             },
         ) {
             Ok(eval) if !eval.inner_converged => {
-                let failure = inner_solve_not_converged_error(&eval.inner, rho.len(), 0);
+                let failure = inner_solve_not_converged_error(&eval.inner, &outer_options, rho.len(), 0);
                 // An unconverged solve never seeds the next evaluation (#2902).
                 outer.last_error = Some(failure);
                 // Recoverable at the trial level: the outer optimizer may
@@ -3014,7 +3014,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                             eval.objective
                         ))
                     } else {
-                        inner_solve_not_converged_error(&eval.inner, rho.len(), 0)
+                        inner_solve_not_converged_error(&eval.inner, &outer_options, rho.len(), 0)
                     };
                     // A value probe never seeds the next evaluation (#2668), and an
                     // unconverged solve never does either (#2902).
@@ -3082,7 +3082,8 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     Ok(eval)
                 }
                 Ok((_eval, _warm, false, inner)) => {
-                    let failure = inner_solve_not_converged_error(&inner, rho.len(), 0);
+                    let failure =
+                        inner_solve_not_converged_error(&inner, &outer_options, rho.len(), 0);
                     // An unconverged solve never seeds the next evaluation (#2902).
                     outer.last_error = Some(failure.clone());
                     // EFS cannot form a valid fixed-point update away from an
@@ -3660,7 +3661,7 @@ fn fit_custom_family_user_fixed_log_lambdas_impl<
         // reported "did not converge after 0 cycles" for a joint-Newton solve
         // that refused inside its first cycle, and hid which guard refused it
         // (#1561). The producer used by every outer route keeps that verdict.
-        return Err(inner_solve_not_converged_error(&inner, rho.len(), 0));
+        return Err(inner_solve_not_converged_error(&inner, options, rho.len(), 0));
     }
     let penalized_objective = inner_penalized_objective(
         &inner,

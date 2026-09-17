@@ -92,6 +92,12 @@ impl CustomFamilyError {
                 Self::OuterSmoothingFailed { last_refusal, .. } => last_refusal
                     .as_deref()
                     .and_then(Self::jeffreys_arming_evidence),
+                // A fit-ending refusal carries the same verdict as the refusal
+                // it wraps, so the arm-and-retry lifecycle must still read it
+                // (gam#2943).
+                Self::FitEndedWithoutCertifiedInnerMode { refusal } => {
+                    refusal.jeffreys_arming_evidence()
+                }
                 _ => None,
             };
         };
@@ -176,6 +182,10 @@ impl CustomFamilyError {
         {
             refusal.map_descending_ray_direction(lift);
         }
+        // A fit-ending refusal holds its terminal refusal whole (gam#2943).
+        if let Self::FitEndedWithoutCertifiedInnerMode { refusal } = self {
+            refusal.map_descending_ray_direction(lift);
+        }
         if let Self::InnerSolveNotConverged {
             terminal:
                 Some(InnerConvergenceTerminalState::JointNewton {
@@ -220,7 +230,55 @@ mod tests {
             theta_dim: 3,
             rho_dim: 3,
             psi_dim: 0,
+            cycle_budget: Some(9),
+            carrying_block: None,
         }
+    }
+
+    #[test]
+    fn a_fit_ending_refusal_keeps_its_arming_evidence_and_ray_lift_2943() {
+        let ray = RayRestoration {
+            block: 1,
+            rho_first: 2,
+            rho_count: 1,
+            log_strength_ratio: 0.75,
+            likelihood_slope: -3.0,
+            penalty_slope: 1.4,
+            block_step_inf: 0.2,
+            direction: std::sync::Arc::from(vec![0.1, -0.2, 0.3]),
+        };
+        let stalled = joint_newton_refusal(
+            JointNewtonTerminalReason::StalledOnDescendingRay {
+                residual: 1.0e-1,
+                residual_tol: 1.0e-6,
+                cycles: 9,
+                ray,
+            },
+            false,
+        );
+        let unwrapped = stalled.jeffreys_arming_evidence();
+        assert!(unwrapped.is_some(), "the fixture must carry arming evidence");
+
+        let mut ended = CustomFamilyError::fit_ended_without_certified_inner_mode(stalled);
+        assert_eq!(
+            ended.jeffreys_arming_evidence(),
+            unwrapped,
+            "the arm-and-retry lifecycle must read the verdict a fit-ending refusal wraps"
+        );
+        ended.map_descending_ray_direction(&|direction| {
+            std::sync::Arc::from(direction.iter().map(|value| 2.0 * value).collect::<Vec<_>>())
+        });
+        assert_eq!(
+            ended.jeffreys_arming_evidence(),
+            Some(JeffreysArmingEvidence::DescendingRay {
+                block: 1,
+                log_strength_ratio: 0.75,
+                likelihood_slope: -3.0,
+                penalty_slope: 1.4,
+                direction: vec![0.2, -0.4, 0.6],
+            }),
+            "the gauge lift must reach the ray inside a fit-ending refusal"
+        );
     }
 
     #[test]

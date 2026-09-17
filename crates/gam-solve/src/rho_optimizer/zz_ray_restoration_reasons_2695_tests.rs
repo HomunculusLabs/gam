@@ -44,6 +44,8 @@ fn refusal(reason: gam_problem::JointNewtonTerminalReason) -> EstimationError {
         theta_dim: 8,
         rho_dim: 5,
         psi_dim: 0,
+        cycle_budget: None,
+        carrying_block: None,
     })
 }
 

@@ -646,6 +646,7 @@ pub(crate) fn joint_outer_gradient_uses_projected_trace_for_rank_deficient_penal
         cycles: 1,
         converged: true,
         terminal_convergence_state: None,
+        terminal_carrying_block: None,
         block_logdet_h: Some(0.0),
         block_logdet_s: Some(0.0),
         s_lambdas: vec![s_lambda.clone()],
@@ -821,6 +822,7 @@ pub(crate) fn joint_outer_gradient_projected_trace_drops_joint_null() {
         cycles: 1,
         converged: true,
         terminal_convergence_state: None,
+        terminal_carrying_block: None,
         block_logdet_h: Some(0.0),
         block_logdet_s: Some(0.0),
         s_lambdas: vec![s_lambda.clone()],
@@ -962,6 +964,7 @@ pub(crate) fn large_scale_rho_scan_joint_outer_evaluate_is_projection_invariant(
             cycles: 1,
             converged: true,
             terminal_convergence_state: None,
+            terminal_carrying_block: None,
             block_logdet_h: Some(0.0),
             block_logdet_s: Some(0.0),
             s_lambdas: vec![s_lambda.clone()],
@@ -1339,6 +1342,7 @@ pub(crate) fn large_scale_multiblock_outer_gradient_with_realistic_drift_is_boun
         cycles: 1,
         converged: true,
         terminal_convergence_state: None,
+        terminal_carrying_block: None,
         block_logdet_h: Some(0.0),
         block_logdet_s: Some(0.0),
         s_lambdas: s_lambdas_local,
@@ -3769,6 +3773,65 @@ pub(crate) fn custom_family_outer_derivatives_keeps_strict_second_order_geometry
     let (gradient, hessian) = custom_family_outer_derivatives(&StrictFamily, &specs, &options);
     assert_eq!(gradient, gam_problem::Derivative::Analytic);
     assert_eq!(hessian, gam_problem::DeclaredHessianForm::Either);
+}
+
+#[test]
+fn an_uncertified_fixed_lambda_fit_records_its_cycle_budget_2943() {
+    // gam#2943: the refusal records the budget the inner solve ran against where
+    // the refusal is built, so the boundary that ends a fit can report cycles of
+    // budget without a handle on the options.
+    let spec = ParameterBlockSpec {
+        name: "quartic".to_string(),
+        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
+        offset: array![0.0],
+        penalties: vec![PenaltyMatrix::Dense(array![[1.0]])],
+        nullspace_dims: vec![],
+        initial_log_lambdas: array![0.0],
+        initial_beta: Some(array![0.0]),
+        gauge_priority: 100,
+        jacobian_callback: None,
+        stacked_design: None,
+        stacked_offset: None,
+    };
+    let options = BlockwiseFitOptions {
+        inner_max_cycles: 1,
+        inner_tol: 1e-11,
+        use_remlobjective: false,
+        compute_covariance: false,
+        ..BlockwiseFitOptions::default()
+    };
+    let refusal = match fit_custom_family_fixed_log_lambdas(
+        &OneBlockQuarticExactFamily {
+            linear: 3.0,
+            curvature: 0.5,
+            second_scale: 1.0,
+        },
+        &[spec],
+        &options,
+        None,
+    ) {
+        Err(refusal) => refusal,
+        Ok(_) => panic!("one Newton cycle from beta = 0 cannot certify the quartic's mode"),
+    };
+    let CustomFamilyError::InnerSolveNotConverged {
+        cycles,
+        cycle_budget,
+        carrying_block,
+        ..
+    } = &refusal
+    else {
+        panic!("an uncertified fixed-lambda fit must refuse as InnerSolveNotConverged, got {refusal}");
+    };
+    assert_eq!(*cycle_budget, Some(1), "{refusal}");
+    assert!(*cycles <= 1, "{refusal}");
+    assert!(
+        carrying_block.as_deref().is_none_or(|name| name == "quartic"),
+        "a recorded carrying block must name a block of this fit: {refusal}"
+    );
+    assert!(
+        refusal.is_trial_point_infeasible(),
+        "inside the fit the refusal stays a trial-point refusal"
+    );
 }
 
 #[derive(Clone)]

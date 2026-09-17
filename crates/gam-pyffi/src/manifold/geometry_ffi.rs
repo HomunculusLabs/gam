@@ -4707,6 +4707,10 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "FitConvergenceError",
         module.py().get_type::<FitConvergenceError>(),
     )?;
+    module.add(
+        "InnerModeConvergenceError",
+        module.py().get_type::<InnerModeConvergenceError>(),
+    )?;
     module.add("FitSeedError", module.py().get_type::<FitSeedError>())?;
     module.add(
         "FitInvariantError",

@@ -3354,6 +3354,35 @@ mod spatial_trial_recovery_tests {
     }
 
     #[test]
+    fn a_trial_inner_non_convergence_still_retreats_and_only_a_fit_ending_one_is_fatal_2943() {
+        // A κ trial whose inner solve did not certify is valley escape: the
+        // producer's refusal, now carrying its budget and carrying block, must
+        // still make the spatial driver retreat to another κ.
+        let refusal = gam_problem::CustomFamilyError::InnerSolveNotConverged {
+            cycles: 8,
+            terminal: None,
+            kkt_residual: Some(1.081e3),
+            kkt_tol: Some(5.352e-2),
+            theta_dim: 2,
+            rho_dim: 2,
+            psi_dim: 0,
+            cycle_budget: Some(8),
+            carrying_block: Some("slope_surface".to_string()),
+        };
+        assert!(
+            is_recoverable_trial_point_error(&EstimationError::CustomFamily(refusal.clone())),
+            "an uncertified trial must let the spatial κ search retreat, not abort the fit"
+        );
+        // The fit-ending form is minted only where a fit is handed to its caller,
+        // with no search left above it; the driver must not treat it as a trial.
+        let ended = gam_problem::CustomFamilyError::fit_ended_without_certified_inner_mode(refusal);
+        assert!(
+            !is_recoverable_trial_point_error(&EstimationError::CustomFamily(ended)),
+            "a fit that has ended is not a trial point"
+        );
+    }
+
+    #[test]
     fn arbitrary_invalid_input_remains_fatal_trial_point_error() {
         let err = EstimationError::InvalidInput("outer rho bounds are invalid".to_string());
 

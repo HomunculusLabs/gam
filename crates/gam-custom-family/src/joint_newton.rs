@@ -5063,6 +5063,13 @@ pub(crate) fn compute_kkt_refusal_report(
 }
 
 impl KktRefusalReport {
+    /// The spec name of the block carrying the largest unresolved residual, as
+    /// data rather than the rendered label below (gam#2943).
+    pub(crate) fn carrying_block_name(&self) -> Option<String> {
+        self.block_carrying_residual
+            .and_then(|index| self.block_names.get(index).cloned())
+    }
+
     pub(crate) fn carrying_block_label(&self) -> String {
         match self.block_carrying_residual {
             Some(idx) => format!(

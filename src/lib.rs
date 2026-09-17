@@ -245,7 +245,8 @@ pub use gam_problem::{
     DeclaredHessianForm, Derivative, EfsEval, FailureCategory, HessianMaterialization,
     HessianOperator,
     HessianValue, IndexedResponseError, ObjectiveEvalError, OuterEval, OuterStrategyError,
-    SeparableCellMeasure, checked_exp_log_strength, checked_log_strength,
+    SeparableCellMeasure, TerminalInnerModeEvidence, checked_exp_log_strength,
+    checked_log_strength,
 };
 pub use gam_runtime::resource::{
     ByteLruCache, DerivativeStorageMode, MaterializationPolicy, MatrixMaterializationError,

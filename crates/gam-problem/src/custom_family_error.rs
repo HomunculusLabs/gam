@@ -566,6 +566,98 @@ fn render_projected_kkt_comparison(residual: Option<f64>, tol: Option<f64>) -> S
     }
 }
 
+impl JointNewtonTerminalReason {
+    /// A stable snake_case label for this verdict, for language boundaries that
+    /// need to branch on the reason without parsing its rendered text. The
+    /// match is exhaustive so a new reason must be named when it is added.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::CycleBudget => "cycle_budget",
+            Self::FullyRejectedExactFixedPoint { .. } => "fully_rejected_exact_fixed_point",
+            Self::FullyRejectedAtTrustRegionFloor { .. } => "fully_rejected_at_trust_region_floor",
+            Self::SlowGeometricRate { .. } => "slow_geometric_rate",
+            Self::ResidualNotContracting { .. } => "residual_not_contracting",
+            Self::StalledOnDescendingRay { .. } => "stalled_on_descending_ray",
+            Self::ConstrainedFixedPointDeclined { .. } => "constrained_fixed_point_declined",
+            Self::NonFiniteCurvature { .. } => "non_finite_curvature",
+            Self::NonFiniteInnerState { .. } => "non_finite_inner_state",
+            Self::KktCertificateRefused { .. } => "kkt_certificate_refused",
+            Self::ResidualStall { .. } => "residual_stall",
+            Self::FlatResidualStall { .. } => "flat_residual_stall",
+        }
+    }
+}
+
+impl InnerConvergenceTerminalState {
+    /// The stable label of the verdict this terminal state records: the
+    /// joint-Newton termination reason, or the blockwise route's own exit.
+    #[must_use]
+    pub fn reason_label(&self) -> &'static str {
+        match self {
+            Self::Blockwise { .. } => "blockwise_not_converged",
+            Self::JointNewton {
+                termination_reason, ..
+            } => termination_reason.label(),
+        }
+    }
+}
+
+/// The facts a fit-ending non-convergence carries, read from its terminal
+/// refusal for language boundaries (gam#2943). Every field is typed data; the
+/// rendered message is built from the same facts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TerminalInnerModeEvidence<'a> {
+    /// Spec name of the block holding the largest unresolved KKT residual.
+    pub carrying_block: Option<&'a str>,
+    /// Cycles the terminal inner solve ran.
+    pub cycles: usize,
+    /// The inner cycle budget it ran against, where the producer recorded one.
+    pub cycle_budget: Option<usize>,
+    /// Sup-norm of the projected KKT residual at the terminal iterate.
+    pub kkt_residual: Option<f64>,
+    /// The stationarity tolerance that residual was compared against.
+    pub kkt_tol: Option<f64>,
+    /// [`InnerConvergenceTerminalState::reason_label`] of the terminal verdict.
+    pub terminal_reason: Option<&'static str>,
+}
+
+/// The message of [`CustomFamilyError::FitEndedWithoutCertifiedInnerMode`],
+/// built from the terminal refusal's facts. It never reuses that refusal's own
+/// text, which says the outer search may step away: untrue once the fit has
+/// ended (gam#2943).
+fn render_fit_ended_without_certified_inner_mode(refusal: &CustomFamilyError) -> String {
+    let CustomFamilyError::InnerSolveNotConverged {
+        cycles,
+        terminal,
+        kkt_residual,
+        kkt_tol,
+        cycle_budget,
+        carrying_block,
+        ..
+    } = refusal
+    else {
+        return "custom-family fit ended without a certified inner mode; no fitted model was \
+                assembled"
+            .to_string();
+    };
+    let cycles_run = match cycle_budget {
+        Some(budget) => format!("{cycles} of {budget} cycle(s)"),
+        None => format!("{cycles} cycle(s) (no budget was recorded)"),
+    };
+    format!(
+        "custom-family fit ended without a certified inner mode, so no fitted model was \
+         assembled: the terminal inner solve stopped after {cycles_run} without certifying; \
+         carrying block: {}; {}; terminal verdict: {}",
+        carrying_block.as_deref().unwrap_or("not identified"),
+        render_projected_kkt_comparison(*kkt_residual, *kkt_tol),
+        match terminal {
+            Some(state) => state.to_string(),
+            None => "no terminal convergence state was recorded".to_string(),
+        },
+    )
+}
+
 #[derive(Debug, Clone, Error)]
 pub enum CustomFamilyError {
     #[error("custom-family invalid input in {context}: {reason}")]
@@ -634,7 +726,27 @@ pub enum CustomFamilyError {
         theta_dim: usize,
         rho_dim: usize,
         psi_dim: usize,
+        /// The inner cycle budget the solve ran against (`inner_max_cycles`),
+        /// recorded where the refusal is built, or `None` where the producer
+        /// had no budget in hand. A fit-ending boundary reads it here because
+        /// it has no uniform handle on the options (gam#2943).
+        cycle_budget: Option<usize>,
+        /// The spec name of the block holding the largest unresolved projected
+        /// KKT residual, where that residual is laid out in joint coefficient
+        /// order; `None` where no such layout exists (gam#2943).
+        carrying_block: Option<String>,
     },
+    /// The fit ENDED without a certified inner mode, so no model was assembled.
+    ///
+    /// [`Self::InnerSolveNotConverged`] rejects one trial point that the outer
+    /// search may step away from; this variant says that nothing stepped away
+    /// and the fit is over. `refusal` is that terminal `InnerSolveNotConverged`
+    /// record, held whole, so there is one field list for cycles, budget,
+    /// carrying block and verdict. It is built only by
+    /// [`CustomFamilyError::fit_ended_without_certified_inner_mode`], at the
+    /// boundary that hands a fit to its caller, never inside a trial (gam#2943).
+    #[error("{}", render_fit_ended_without_certified_inner_mode(refusal))]
+    FitEndedWithoutCertifiedInnerMode { refusal: Box<CustomFamilyError> },
     #[error("{reason}")]
     BasisDecompositionFailed { reason: String },
     /// Pre-fit cross-block identifiability audit refused the fit. The
@@ -822,6 +934,91 @@ impl From<String> for CustomFamilyError {
 mod tests {
     use super::*;
 
+    fn budget_exhausted_refusal() -> CustomFamilyError {
+        CustomFamilyError::InnerSolveNotConverged {
+            cycles: 8,
+            terminal: Some(InnerConvergenceTerminalState::JointNewton {
+                cycle: 8,
+                stationarity_residual: 1.081e3,
+                residual_tol: 1.338e-2,
+                stationarity_scale: 1.0,
+                step_inf: 7.314e-2,
+                step_tol: 1.0e-8,
+                resolvable_negative_curvature: false,
+                best_stationarity_residual: 1.081e3,
+                cycles_since_best_residual: 0,
+                termination_reason: JointNewtonTerminalReason::CycleBudget,
+            }),
+            kkt_residual: Some(1.081e3),
+            kkt_tol: Some(5.352e-2),
+            theta_dim: 2,
+            rho_dim: 2,
+            psi_dim: 0,
+            cycle_budget: Some(8),
+            carrying_block: Some("slope_surface".to_string()),
+        }
+    }
+
+    #[test]
+    fn a_fit_ending_refusal_wraps_only_an_uncertified_inner_solve_2943() {
+        let refusal = budget_exhausted_refusal();
+        assert!(refusal.is_trial_point_infeasible());
+        assert!(
+            refusal.terminal_inner_mode_evidence().is_none(),
+            "a trial refusal is not the end of a fit"
+        );
+
+        let ended = CustomFamilyError::fit_ended_without_certified_inner_mode(refusal);
+        assert!(
+            !ended.is_trial_point_infeasible(),
+            "no outer search remains once a fit has ended"
+        );
+        assert_eq!(
+            ended.terminal_inner_mode_evidence(),
+            Some(TerminalInnerModeEvidence {
+                carrying_block: Some("slope_surface"),
+                cycles: 8,
+                cycle_budget: Some(8),
+                kkt_residual: Some(1.081e3),
+                kkt_tol: Some(5.352e-2),
+                terminal_reason: Some("cycle_budget"),
+            })
+        );
+        let message = ended.to_string();
+        for words in [
+            "ended without a certified inner mode",
+            "8 of 8 cycle(s)",
+            "carrying block: slope_surface",
+        ] {
+            assert!(message.contains(words), "missing {words:?} in: {message}");
+        }
+        assert!(
+            !message.contains("step away"),
+            "a fit that has ended must not say the outer search may step away: {message}"
+        );
+
+        let other = CustomFamilyError::TrialPointRefused {
+            reason: "indefinite active face".to_string(),
+        };
+        let passed = CustomFamilyError::fit_ended_without_certified_inner_mode(other);
+        assert!(
+            matches!(passed, CustomFamilyError::TrialPointRefused { .. }),
+            "only an uncertified inner solve is marked as a fit ending"
+        );
+        assert!(passed.terminal_inner_mode_evidence().is_none());
+
+        let blockwise = InnerConvergenceTerminalState::Blockwise {
+            cycle: 3,
+            max_accepted_step: 1.0e-2,
+            max_proposed_step: 1.0e-2,
+            step_tol: 1.0e-8,
+            objective_change: 1.0e-3,
+            objective_tol: 1.0e-9,
+            joint_stationarity_ok: false,
+        };
+        assert_eq!(blockwise.reason_label(), "blockwise_not_converged");
+    }
+
     #[test]
     fn regrading_a_trial_point_refusal_does_not_prefix_it_twice_2667() {
         let inner = CustomFamilyError::trial_point(
@@ -880,6 +1077,8 @@ mod tests {
             theta_dim: 3,
             rho_dim: 3,
             psi_dim: 0,
+            cycle_budget: None,
+            carrying_block: None,
         };
         let msg = absent.to_string();
         assert!(
@@ -900,6 +1099,8 @@ mod tests {
             theta_dim: 3,
             rho_dim: 3,
             psi_dim: 0,
+            cycle_budget: None,
+            carrying_block: None,
         };
         let msg = measured.to_string();
         assert!(
@@ -917,6 +1118,8 @@ mod tests {
             theta_dim: 1,
             rho_dim: 1,
             psi_dim: 0,
+            cycle_budget: None,
+            carrying_block: None,
         };
         let msg = half.to_string();
         assert!(
@@ -1171,6 +1374,8 @@ mod tests {
             theta_dim: 5,
             rho_dim: 5,
             psi_dim: 0,
+            cycle_budget: None,
+            carrying_block: None,
         };
         let msg = refused.to_string();
         assert!(
@@ -1276,6 +1481,8 @@ mod tests {
             theta_dim: 3,
             rho_dim: 3,
             psi_dim: 0,
+            cycle_budget: None,
+            carrying_block: None,
         };
 
         let stalled = refusal(JointNewtonTerminalReason::StalledOnDescendingRay {
@@ -1334,6 +1541,8 @@ mod tests {
             theta_dim: 3,
             rho_dim: 3,
             psi_dim: 0,
+            cycle_budget: None,
+            carrying_block: None,
         };
         assert_eq!(blockwise.descending_ray_exit(), None);
         assert_eq!(
@@ -1378,7 +1587,10 @@ impl CustomFamilyError {
             | Self::MapUniquenessFailure { .. }
             // The whole search refused; its last refusal is carried for the
             // caller to read, not re-graded here.
-            | Self::OuterSmoothingFailed { .. } => false,
+            | Self::OuterSmoothingFailed { .. }
+            // Minted only where a fit ends, so no outer search remains that
+            // could step away (gam#2943).
+            | Self::FitEndedWithoutCertifiedInnerMode { .. } => false,
         }
     }
 
@@ -1392,6 +1604,8 @@ impl CustomFamilyError {
             // inner optimizer of a context ended without its certificate.
             Self::Optimization { .. }
             | Self::InnerSolveNotConverged { .. }
+            // The fit ended holding an uncertified inner solve (gam#2943).
+            | Self::FitEndedWithoutCertifiedInnerMode { .. }
             // Reaching the boundary, a trial-point refusal means the search
             // never found a point it could evaluate.
             | Self::TrialPointRefused { .. } => FailureCategory::Convergence,
@@ -1428,6 +1642,61 @@ impl CustomFamilyError {
             Self::MapUniquenessFailure { .. } => "CustomFamilyError::MapUniquenessFailure",
             Self::TrialPointRefused { .. } => "CustomFamilyError::TrialPointRefused",
             Self::OuterSmoothingFailed { outer_error, .. } => outer_error.variant_name(),
+            Self::FitEndedWithoutCertifiedInnerMode { .. } => {
+                "CustomFamilyError::FitEndedWithoutCertifiedInnerMode"
+            }
         }
+    }
+
+    /// Mark the terminal refusal of a fit that ended without a certified inner
+    /// mode.
+    ///
+    /// This is the only constructor of
+    /// [`Self::FitEndedWithoutCertifiedInnerMode`]. It wraps an
+    /// [`Self::InnerSolveNotConverged`] whole and returns any other refusal
+    /// unchanged, so the wrapped refusal always carries the cycles, budget,
+    /// carrying block and verdict. Call it only where a fit is handed to its
+    /// caller: inside a trial the same refusal must stay
+    /// `InnerSolveNotConverged`, which the outer search steps away from
+    /// (gam#2943).
+    #[must_use]
+    pub fn fit_ended_without_certified_inner_mode(refusal: CustomFamilyError) -> CustomFamilyError {
+        match refusal {
+            refusal @ Self::InnerSolveNotConverged { .. } => Self::FitEndedWithoutCertifiedInnerMode {
+                refusal: Box::new(refusal),
+            },
+            other => other,
+        }
+    }
+
+    /// The typed facts of a fit that ended without a certified inner mode, read
+    /// from its terminal refusal, or `None` for every other error.
+    #[must_use]
+    pub fn terminal_inner_mode_evidence(&self) -> Option<TerminalInnerModeEvidence<'_>> {
+        let Self::FitEndedWithoutCertifiedInnerMode { refusal } = self else {
+            return None;
+        };
+        let Self::InnerSolveNotConverged {
+            cycles,
+            terminal,
+            kkt_residual,
+            kkt_tol,
+            cycle_budget,
+            carrying_block,
+            ..
+        } = refusal.as_ref()
+        else {
+            return None;
+        };
+        Some(TerminalInnerModeEvidence {
+            carrying_block: carrying_block.as_deref(),
+            cycles: *cycles,
+            cycle_budget: *cycle_budget,
+            kkt_residual: *kkt_residual,
+            kkt_tol: *kkt_tol,
+            terminal_reason: terminal
+                .as_ref()
+                .map(InnerConvergenceTerminalState::reason_label),
+        })
     }
 }

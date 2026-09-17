@@ -7096,6 +7096,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             block_logdet_s,
             s_lambdas,
             joint_workspace: cached_joint_workspace.clone(),
+            terminal_carrying_block: None,
             kkt_residual: Some(kkt_residual),
             active_constraints,
             objective_state,
@@ -7218,9 +7219,9 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 // non-certifying, but neighbouring rho values are perfectly
                 // fit-able, so aborting the whole fit prevents the optimizer
                 // from ever leaving the valley.
-                let block_diag = if let Some(report) = last_kkt_refusal_report.as_ref() {
-                    report.format_bubbled_error()
-                } else {
+                // The report is kept, not only rendered: the refusal that leaves
+                // this solve names its carrying block from it (gam#2943).
+                if last_kkt_refusal_report.is_none() {
                     let block_constraints =
                         collect_block_linear_constraints(family, &states, specs)?;
                     let report = compute_kkt_refusal_report(
@@ -7244,8 +7245,12 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         exit_unprojected_kkt_inf,
                         last_joint_math.as_ref(),
                     );
-                    report.format_bubbled_error()
-                };
+                    last_kkt_refusal_report = Some(report);
+                }
+                let block_diag = last_kkt_refusal_report
+                    .as_ref()
+                    .map(KktRefusalReport::format_bubbled_error)
+                    .unwrap_or_default();
                 log::log!(
                     exhaustion_level,
                     "coupled exact-joint inner solve exhausted the joint Newton budget without KKT convergence after {cycles_done} cycle(s) — {block_diag}; returning a non-converged inner mode for outer-rho rejection"
@@ -7322,6 +7327,13 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             block_logdet_s,
             s_lambdas,
             joint_workspace: cached_joint_workspace.clone(),
+            terminal_carrying_block: if converged {
+                None
+            } else {
+                last_kkt_refusal_report
+                    .as_ref()
+                    .and_then(KktRefusalReport::carrying_block_name)
+            },
             kkt_residual: None,
             active_constraints,
             objective_state,
@@ -7402,6 +7414,9 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             block_logdet_s: None,
             s_lambdas,
             joint_workspace: cached_joint_workspace.clone(),
+            terminal_carrying_block: last_kkt_refusal_report
+                .as_ref()
+                .and_then(KktRefusalReport::carrying_block_name),
             kkt_residual: None,
             active_constraints,
             objective_state,

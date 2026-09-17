@@ -21,6 +21,16 @@
   formerly `InvalidInput`); both keep their previous text.
   `SurvivalMarginalSlopeError::RootSolveFailed` replaces `IntegrationFailed` for
   the per-row intercept solve.
+- **A fit that ends without a certified inner mode raises `InnerModeConvergenceError`**
+  (#2943), a `FitConvergenceError` subclass. Its `fields` dict and plain
+  attributes carry the terminal inner solve's evidence: `carrying_block`,
+  `cycles`, `cycle_budget`, `kkt_residual`, `kkt_tol` and `terminal_reason`.
+- Rust: `CustomFamilyError::InnerSolveNotConverged` gains `cycle_budget` and
+  `carrying_block`, recorded where the refusal is built.
+  `CustomFamilyError::FitEndedWithoutCertifiedInnerMode` wraps the refusal a fit
+  ended with, and `fit_ended_without_certified_inner_mode` is its only
+  constructor; inside a trial the refusal stays `InnerSolveNotConverged`, which
+  the outer search steps away from.
 
 ## gamfit 0.1.268 (2026-09-11)
 

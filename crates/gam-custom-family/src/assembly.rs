@@ -2503,6 +2503,13 @@ pub struct BlockwiseInnerResult {
     /// below, this is populated whether or not the solve converged — it is the
     /// diagnostic a non-convergence refusal needs, and it is NEVER an IFT input.
     pub terminal_convergence_state: Option<gam_problem::InnerConvergenceTerminalState>,
+    /// Spec name of the block carrying the largest unresolved KKT residual when
+    /// the exact joint Newton route stopped without certifying, from its KKT
+    /// refusal report; `None` for a certified mode and for routes that build no
+    /// such report. The terminal `kkt_residual` is `None` off a converged
+    /// iterate by design, so this is the only record of which block held the
+    /// refusal (gam#2943).
+    pub terminal_carrying_block: Option<String>,
     /// Laplace Hessian log-determinant, defined only at a certified inner mode.
     pub block_logdet_h: Option<f64>,
     /// Penalty pseudo-logdeterminant, defined only at a certified inner mode.

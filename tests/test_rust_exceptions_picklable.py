@@ -30,6 +30,7 @@ def _rust_exception_instance(name):
         "IntegrationError",
         "FitError",
         "FitConvergenceError",
+        "InnerModeConvergenceError",
         "FitSeedError",
         "FitInvariantError",
         "FitInputError",
