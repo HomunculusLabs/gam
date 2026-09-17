@@ -7,6 +7,10 @@
 //! support-sparse fit reaches. Declared as a sibling `#[cfg(test)] mod` in
 //! `mod.rs` so it can read the lib-test binary's allocation ledger, which lives
 //! in `tests_row_jet_and_outer_objective_780`.
+//!
+//! That "declared as a `#[cfg(test)] mod`" claim is restated below as an inner
+//! attribute, so the compiler and the root ban scanner's test mask both see it.
+#![cfg(test)]
 
 use super::tests_row_jet_and_outer_objective_780::{
     begin_row_jet_allocation_measurement, end_row_jet_allocation_measurement,
@@ -69,7 +73,10 @@ fn native_support_code_report_allocates_linearly_at_32768_atoms_2933_f43() {
     begin_row_jet_allocation_measurement();
     let report = manifold_fit_description_length(&codes, &atom_code_spectra, 0.3, 0.9, &dictionary);
     let (allocation_calls, allocated_bytes) = end_row_jet_allocation_measurement();
-    let report = report.unwrap();
+    let report = report.expect(
+        "48 rows, a finite unit spectrum per atom, finite budget and EV, and a declared \
+         zero-parameter dictionary pass every input check of the report",
+    );
 
     // Every array the report keeps is indexed by an atom, a row, an active
     // entry or a co-firing pair, and together, Vec growth included, they hold
