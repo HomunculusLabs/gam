@@ -7,6 +7,9 @@ synthetic Rust-FFI payloads. The dispatcher's contract is:
   ``(return_type, id_column, interval)`` via :func:`wants_table` — no
   sniffing of payload columns (issue #342 collapsed an earlier
   ``with_uncertainty`` flag into ``interval``);
+* the per-class shaper is chosen by the ``point_shape`` and ``point_column``
+  the Rust ``PredictModelClass`` publishes on the wire, never by the
+  ``model_class`` / ``family`` labels (#2899);
 * Bernoulli marginal-slope, transformation-normal, and standard GAMs all
   default to a 1-D ``ndarray`` of point predictions when no tabular knob
   was set, and to a column payload otherwise.
@@ -65,13 +68,25 @@ def _dispatch(
 def _payload(
     model_class: str,
     family: str,
+    point_shape: str,
+    point_column: str,
     columns: dict[str, list[float]],
     *,
     covariance_source: str | None = None,
 ) -> str:
+    """A point payload carrying the fields the FFI ``PredictionPayload`` serializes.
+
+    ``point_shape`` / ``point_column`` are what ``PredictModelClass::point_shape``
+    and ``point_column`` publish: ``estimand_explicit`` / ``posterior_mean`` for
+    the standard and location-scale classes, ``marginal_slope_probability`` /
+    ``mean`` for Bernoulli marginal-slope, ``transformation_normal_mean`` /
+    ``mean`` for transformation-normal.
+    """
     payload: dict[str, Any] = {
         "model_class": model_class,
         "family": family,
+        "point_shape": point_shape,
+        "point_column": point_column,
         "columns": columns,
     }
     if covariance_source is not None:
@@ -83,6 +98,8 @@ def test_interval_dict_exposes_exact_covariance_provenance(monkeypatch: Any) -> 
     raw = _payload(
         "standard",
         "identity",
+        "estimand_explicit",
+        "posterior_mean",
         {
             "linear_predictor_plugin": [1.0, 2.0],
             "posterior_mean": [1.0, 2.0],
@@ -106,6 +123,8 @@ def test_bernoulli_marginal_slope_saved_kind_returns_1d_probabilities(
     raw = _payload(
         "marginal-slope",
         "bernoulli-marginal-slope",
+        "marginal_slope_probability",
+        "mean",
         {
             "linear_predictor": [-1.0, 0.0, 1.0],
             "mean": [0.2, 0.5, 0.8],
@@ -131,6 +150,8 @@ def test_transformation_normal_predict_shapes_response_mean_not_latent_score(
     raw = _payload(
         "transformation-normal",
         "transformation-normal",
+        "transformation_normal_mean",
+        "mean",
         {
             "linear_predictor": [-3.0, 4.0],
             "mean": [12.5, 18.25],
@@ -166,6 +187,8 @@ def test_bernoulli_marginal_slope_interval_carries_clipped_bounds(
     raw = _payload(
         "marginal-slope",
         "bernoulli-marginal-slope",
+        "marginal_slope_probability",
+        "mean",
         {
             "linear_predictor": [-1.0, 0.0, 1.0],
             # `mean` and the bounds are response-scale (probability) values; the
@@ -222,6 +245,8 @@ def test_bernoulli_marginal_slope_no_interval_stays_1d(monkeypatch: Any) -> None
     raw = _payload(
         "marginal-slope",
         "bernoulli-marginal-slope",
+        "marginal_slope_probability",
+        "mean",
         {
             "linear_predictor": [-1.0, 0.0, 1.0],
             "mean": [0.2, 0.5, 0.8],
@@ -247,6 +272,8 @@ def test_standard_gam_default_returns_1d_mean(monkeypatch: Any) -> None:
     raw = _payload(
         "standard",
         "gaussian",
+        "estimand_explicit",
+        "posterior_mean",
         {
             "linear_predictor_plugin": [-1.0, 0.0, 1.0],
             "posterior_mean": [0.2, 0.5, 0.8],
@@ -269,6 +296,8 @@ def test_standard_gam_with_return_type_returns_table(monkeypatch: Any) -> None:
     raw = _payload(
         "standard",
         "gaussian",
+        "estimand_explicit",
+        "posterior_mean",
         {
             "linear_predictor_plugin": [-1.0, 0.0, 1.0],
             "posterior_mean": [0.2, 0.5, 0.8],
@@ -293,6 +322,8 @@ def test_standard_gam_with_id_column_returns_table(monkeypatch: Any) -> None:
     raw = _payload(
         "standard",
         "gaussian",
+        "estimand_explicit",
+        "posterior_mean",
         {
             "linear_predictor_plugin": [-1.0, 0.0, 1.0],
             "posterior_mean": [0.2, 0.5, 0.8],
@@ -322,6 +353,8 @@ def test_standard_gam_with_interval_returns_table(monkeypatch: Any) -> None:
     raw = _payload(
         "standard",
         "gaussian",
+        "estimand_explicit",
+        "posterior_mean",
         {
             "linear_predictor_plugin": [-1.0, 0.0, 1.0],
             "posterior_mean": [0.2, 0.5, 0.8],
@@ -352,14 +385,20 @@ def test_standard_gam_with_interval_returns_table(monkeypatch: Any) -> None:
 def test_marginal_slope_non_bernoulli_falls_through_to_standard_shaper(
     monkeypatch: Any,
 ) -> None:
-    """A model with ``model_class='marginal-slope'`` that is *not*
-    Bernoulli (here: royston-parmar family) is not a known survival
-    class and is not a transformation-normal model, so it lands on the
-    standard shaper. Under the principled shape policy that means a 1-D
-    mean array by default — the same as any other plain GAM."""
+    """The shaper follows the Rust ``point_shape``, not the labels (#2899).
+
+    Here the labels read ``model_class='marginal-slope'`` with a
+    royston-parmar family, but the payload publishes the estimand-explicit
+    schema, so it lands on the standard shaper: a 1-D ``posterior_mean`` array
+    by default, the same as any other plain GAM, and the full estimand-explicit
+    payload as its table. Both shapers read the point from the published
+    ``point_column``, so the point alone cannot tell them apart; the table
+    can, because the marginal-slope shaper keeps only its probability column."""
     raw = _payload(
         "marginal-slope",
         "royston-parmar",
+        "estimand_explicit",
+        "posterior_mean",
         {
             "linear_predictor_plugin": [-1.0, 0.0, 1.0],
             "posterior_mean": [0.2, 0.5, 0.8],
@@ -371,6 +410,9 @@ def test_marginal_slope_non_bernoulli_falls_through_to_standard_shaper(
     arr = np.asarray(out, dtype=float)
     assert arr.shape == (3,)
     np.testing.assert_allclose(arr, [0.2, 0.5, 0.8])
+
+    table = _dispatch(monkeypatch, raw, return_type="dict")
+    assert list(table) == ["linear_predictor_plugin", "posterior_mean"]
 
 
 def test_wants_table_predicate_is_purely_caller_driven() -> None:
