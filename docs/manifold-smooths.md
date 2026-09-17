@@ -13,7 +13,7 @@ The image below is the output of
 For each shape, noisy 3-D points `(x, y, z)` are sampled along the
 manifold and one geometric smooth is fit per output coordinate:
 
-```python
+```text
 gamfit.fit(df, "x ~ <geometric-smooth>(latent_params)")
 gamfit.fit(df, "y ~ <geometric-smooth>(latent_params)")
 gamfit.fit(df, "z ~ <geometric-smooth>(latent_params)")
@@ -103,7 +103,7 @@ The Torch class is a frozen tensor adapter for the converged object returned by
 smoothing selection, and out-of-sample latent inference remain in the native
 fit.
 
-```python
+```python no-exec
 import torch
 import gamfit
 from gamfit.torch import ManifoldSAE

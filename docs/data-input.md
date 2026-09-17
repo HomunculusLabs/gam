@@ -107,16 +107,20 @@ a 1-D `numpy.ndarray` of shape `(n_samples,)` by default. Passing
 `id_column=` or `return_type=` switches them to tabular output.
 
 ```python
-# 1-D numpy by default
-z = model.predict(test_df)                       # shape (n,)
+model = gamfit.fit(train_df, "y ~ s(x)", transformation_normal=True)
+
+# 1-D numpy by default: the response-scale conditional mean E[Y|x]
+mean = model.predict(test_df)                    # shape (n,)
 
 # Two-column table when id_column is set
 df = model.predict(test_df, id_column="patient", return_type="pandas")
-z = df["z"].to_numpy()                           # transformation-normal
+mean = df["mean"].to_numpy()
 ```
 
-The value column is named `z` for transformation-normal output and
-`mean` for Bernoulli marginal-slope output. Passing `return_type=`
+The value column is named `mean` for both classes: the response-scale
+conditional mean for transformation-normal output and the probability for
+Bernoulli marginal-slope output. The latent score of labelled data comes
+from `Model.transformation_score`. Passing `return_type=`
 without `id_column=` produces a one-column table; including
 `id_column=` adds the id column. Extract the value column explicitly
 when a 1-D array is wanted.

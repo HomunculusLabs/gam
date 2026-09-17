@@ -123,6 +123,7 @@ For a fitted `--transformation-normal` model, evaluate the latent score
 `h(y|x)` at observed responses (rather than predicting `y` itself):
 
 ```bash
+gam fit train.csv 'y ~ s(x)' --transformation-normal --out model.gam
 gam transformation-score model.gam labelled.csv --out scores.csv
 ```
 

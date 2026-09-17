@@ -22,7 +22,10 @@ Manifold-SAE fits own the policy per fit, including every nested arrow-Schur
 solve and evidence evaluation:
 
 ```python
-gamfit.sae_manifold_fit(X, K=8, gpu="off")
+rng = np.random.default_rng(0)
+angle = rng.uniform(0.0, 2.0 * np.pi, 200)
+X = np.column_stack([np.cos(angle), np.sin(angle)]) + 0.05 * rng.standard_normal((200, 2))
+gamfit.sae_manifold_fit(X, K=2, d_atom=1, gpu="off")
 ```
 
 `gpu="off"` takes the exact CPU route before any CUDA runtime probe. This is

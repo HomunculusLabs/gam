@@ -72,6 +72,21 @@ def synthetic_data() -> pd.DataFrame:
         "sand": sand, "silt": silt, "clay": 1.0 - sand - silt,
         "nx": direction[:, 0], "ny": direction[:, 1], "nz": direction[:, 2],
     })
+    # Drawn after every column above, so adding a name never moves an existing column's values.
+    exposure = rng.uniform(0.5, 2.0, n)
+    nb_mean = np.exp(1.0 + 0.3 * np.cos(x))
+    frame["patient"] = [f"P{row:03d}" for row in range(n)]
+    frame["death"] = (rng.uniform(size=n) < 0.2 + 0.4 * (1.0 - risk)).astype(float)
+    frame["cause"] = np.where(frame["event"] > 0, np.where(rng.uniform(size=n) < risk, 1.0, 2.0), 0.0)
+    frame["log_exposure"] = np.log(exposure)
+    frame["count"] = rng.poisson(exposure * np.exp(0.5 + 0.4 * np.sin(x))).astype(float)
+    frame["freq"] = rng.integers(1, 4, n).astype(float)
+    frame["rate"] = rng.negative_binomial(5, 5.0 / (5.0 + nb_mean)).astype(float)
+    frame["claim"] = np.where(rng.uniform(size=n) < 0.3, 0.0, rng.gamma(2.0, np.exp(0.2 * x) / 2.0))
+    frame["year"] = 2000.0 + np.arange(n) % 12
+    frame["rare_event"] = (rng.uniform(size=n) < 0.2 * risk).astype(float)
+    frame["left"] = frame["exit"] * rng.uniform(0.3, 0.9, n)
+    frame["right"] = frame["exit"]
     return frame
 
 
@@ -81,7 +96,9 @@ def python_context():
 
     df = synthetic_data()
     train = df.copy()
-    test = df.head(4).drop(columns=["y", "outcome", "case", "disease", "event"])
+    test = df.head(4).drop(columns=[
+        "y", "outcome", "case", "disease", "event", "death", "cause", "count", "rate", "claim", "rare_event",
+    ])
     model = gamfit.fit(train, "y ~ x")
     posterior = model.sample(train, samples=20, seed=42)
     x_matrix = train[["x", "x2"]]
@@ -126,7 +143,7 @@ def cli_examples():
 @pytest.mark.parametrize("path,line,code", list(cli_examples()))
 def test_cli_documentation_example(path, line, code, tmp_path, python_context):
     frame = python_context["train"]
-    for name in ("train.csv", "data.csv", "new.csv", "new_data.csv", "labelled.csv"):
+    for name in ("train.csv", "data.csv", "new.csv", "new_data.csv", "labelled.csv", "held_out.csv"):
         frame.to_csv(tmp_path / name, index=False)
     for name in ("model.gam", "model.json"):
         python_context["model"].save(tmp_path / name)

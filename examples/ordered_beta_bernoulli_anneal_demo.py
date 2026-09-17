@@ -25,7 +25,7 @@ def main() -> None:
     )
     fit = gamfit.sae_manifold_fit(
         y,
-        K=4,
+        K=3,
         d_atom=1,
         atom_topology="euclidean",
         assignment="ordered_beta_bernoulli",

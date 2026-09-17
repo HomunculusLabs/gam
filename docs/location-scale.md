@@ -104,6 +104,12 @@ For survival location-scale, predictions return a
 surface and linear predictor:
 
 ```python
+model = gamfit.fit(
+    train_df,
+    "Surv(entry, exit, event) ~ s(age) + bmi",
+    survival_likelihood="location-scale",
+    noise_formula="s(age)",
+)
 pred = model.predict(test_df, interval=0.95)
 S    = pred.survival_at([1, 5, 10])
 se_S = pred.survival_se_at([1, 5, 10])

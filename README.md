@@ -220,6 +220,7 @@ marginal-slope, and latent-Gaussian frailty (`latent`,
 with on-demand `S(t)`, `h(t)`, `H(t)` on any time grid:
 
 ```python
+model = gamfit.fit(train_df, "Surv(entry, exit, event) ~ s(age) + bmi")
 pred = model.predict(test_df)
 S = pred.survival_at([1, 5, 10, 20])
 H = pred.cumulative_hazard_at([10])

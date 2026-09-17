@@ -1,7 +1,10 @@
 """Compare SCAD and MCP non-convex gate sparsity in manifold SAE fitting.
 
-The synthetic data contain three local mechanisms but the model is given five
-candidate atoms. ``coord_sparsity="scad"`` and ``"mcp"`` route the SAE row-block
+The synthetic data contain three local mechanisms in six ambient channels, and the
+model is given five candidate atoms. A penalty-gated assignment takes the dense
+certification lane, which admits at most as many atoms as ambient channels (K <= P),
+so the redundancy is in candidates beyond the mechanisms, not beyond the channels.
+``coord_sparsity="scad"`` and ``"mcp"`` route the SAE row-block
 ScadMcp penalty through ``sae_manifold_fit`` and should concentrate assignment
 mass on the useful atoms while leaving redundant atoms mostly inactive.
 """
@@ -25,9 +28,9 @@ def main() -> None:
     gates = np.c_[t < -0.25, (t >= -0.25) & (t <= 0.35), t > 0.35].astype(float)
     atoms = np.stack(
         [
-            np.c_[np.sin(2.0 * np.pi * t), np.zeros(n), 0.25 * t, np.zeros(n)],
-            np.c_[np.zeros(n), t**2, np.cos(np.pi * t), np.zeros(n)],
-            np.c_[0.25 * t, np.zeros(n), np.zeros(n), np.sin(3.0 * np.pi * t)],
+            np.c_[np.sin(2.0 * np.pi * t), np.zeros(n), 0.25 * t, np.zeros(n), 0.3 * np.cos(2.0 * np.pi * t), np.zeros(n)],
+            np.c_[np.zeros(n), t**2, np.cos(np.pi * t), np.zeros(n), np.zeros(n), 0.3 * t],
+            np.c_[0.25 * t, np.zeros(n), np.zeros(n), np.sin(3.0 * np.pi * t), np.zeros(n), 0.3 * np.cos(3.0 * np.pi * t)],
         ],
         axis=1,
     )

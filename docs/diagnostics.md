@@ -70,12 +70,12 @@ covariates**.
 That is what `basis_check` measures, and what every fit now measures for itself:
 
 ```python
-model = gamfit.fit(data, "y ~ dosage + duchon(pc1, ..., pc16, centers=24)",
+model = gamfit.fit(data, "case ~ dose + duchon(pc1, pc2, pc3, pc4, centers=24)",
                    family="binomial")
-# 1. the fit already told you, as a GamInferenceWarning:
-#    "basis adequacy: smooth 'duchon(...)' has 24 coefficient columns
-#     (17 unpenalized), and the fit's residuals still carry structure in its
-#     covariates that this basis cannot represent (lack-of-fit p = 9.0e-16 ...)"
+# 1. when the basis is too small, the fit already told you, as a GamInferenceWarning:
+#    "basis adequacy: smooth 'duchon(...)' has <k> coefficient columns
+#     (<m> unpenalized), and the fit's residuals still carry structure in its
+#     covariates that this basis cannot represent (lack-of-fit p = <p> ...)"
 
 model.summary().basis_checks     # the same evidence, no data, no refit
 model.basis_check(data)          # recomputed from the training rows

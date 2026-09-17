@@ -93,6 +93,7 @@ draws replicate class-label vectors (`Categorical(softmax(X·beta_hat))`) you ca
 feed into your own posterior-predictive check:
 
 ```python
+model = gamfit.fit(train_df, "site ~ s(x)", family="multinomial")
 reps = model.posterior_predict(train_df, n_draws=200, seed=42)
 # shape: (200, n_rows); object array of class labels
 ```
@@ -251,7 +252,7 @@ The response-scale inverse link supports `identity`, `logit`, `probit`,
 ### Trace plots
 
 ```python
-fig = posterior.plot_trace(coefficients=["beta_0", "beta_2"], max_panels=4)
+fig = posterior.plot_trace(coefficients=["beta_0", "beta_1"], max_panels=4)
 ```
 
 Each row has two panels: the trace (draws vs iteration index) on the

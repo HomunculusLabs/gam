@@ -30,7 +30,10 @@ Interval-censored responses use a distinct spelling:
 
 ```python
 gamfit.fit(df, "SurvInterval(left, right, event) ~ s(age)",
-           survival_likelihood="latent")
+           survival_likelihood="latent",
+           baseline_target="weibull",
+           frailty_kind="hazard-multiplier",
+           hazard_loading="full")
 ```
 
 `SurvInterval(L, R, event)` observes a bracket `T in (L, R]`.
@@ -60,7 +63,7 @@ is rejected for every other survival mode.
 
 ```python
 gamfit.fit(df,
-    "Surv(t0, t1, event) ~ s(age) + bmi",
+    "Surv(entry, exit, event) ~ s(age) + bmi",
     survival_likelihood="transformation",
 )
 ```
@@ -81,7 +84,7 @@ For modes that support a scalar parametric baseline (`"transformation"`,
 ```python
 gamfit.fit(df,
     "Surv(entry, exit, event) ~ s(bmi)",
-    survival_likelihood="latent",
+    survival_likelihood="transformation",
     baseline_target="gompertz",
     baseline_rate=0.08,
 )
@@ -189,6 +192,7 @@ For one-cause survival fits, `Model.predict(...)` returns a
 the survival surface on a user-supplied time grid:
 
 ```python
+model = gamfit.fit(train_df, "Surv(entry, exit, event) ~ s(age) + bmi")
 pred = model.predict(test_df)
 
 S = pred.survival_at([1, 5, 10, 20])
@@ -207,6 +211,7 @@ For dense surfaces on large cohorts use the chunked iterators or stream
 to CSV:
 
 ```python
+pred = gamfit.fit(train_df, "Surv(entry, exit, event) ~ s(age) + bmi").predict(test_df)
 for row_slice, time_slice, block in pred.survival_at_chunks([1, 5, 10, 20]):
     process(block)
 
@@ -217,6 +222,9 @@ For separate cause-specific fits, predict each endpoint and assemble CIFs
 on the same grid:
 
 ```python
+disease_pred = gamfit.fit(train_df, "Surv(entry, exit, disease) ~ s(age)").predict(test_df)
+death_pred = gamfit.fit(train_df, "Surv(entry, exit, death) ~ s(age)").predict(test_df)
+
 cif = gamfit.competing_risks_cif(
     {"disease": disease_pred, "death": death_pred},
     times=[1, 5, 10, 20],
@@ -238,6 +246,12 @@ For location-scale survival, passing any `interval=...` produces
 delta-method standard errors:
 
 ```python
+model = gamfit.fit(
+    train_df,
+    "Surv(entry, exit, event) ~ s(age) + bmi",
+    survival_likelihood="location-scale",
+    noise_formula="s(age)",
+)
 pred = model.predict(test_df, interval=0.95)
 
 S = pred.survival_at([1, 5, 10])
@@ -252,6 +266,8 @@ hazard, survival, cumulative-hazard, and CIF surface, plus overall survival
 and each cause's linear predictor:
 
 ```python
+# event codes 1..K in the event column select the joint competing-risks fit
+model = gamfit.fit(train_df, "Surv(entry, exit, cause) ~ s(age)")
 pred = model.predict(
     test_df,
     interval=0.95,

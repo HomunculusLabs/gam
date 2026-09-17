@@ -19,7 +19,6 @@ def main() -> None:
         x,
         K=4,
         d_atom=2,
-        atom_topology="circle",
         assignment="topk",
         top_k=2,
         n_iter=8,

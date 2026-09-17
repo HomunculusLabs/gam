@@ -213,6 +213,7 @@ F = 1.0 - pred.survival_at([10])          # (n_rows, 1)
 ## Stream survival predictions to CSV
 
 ```python
+pred = gamfit.fit(df, "Surv(entry, exit, event) ~ s(age) + bmi").predict(test_df)
 pred.write_survival_at_csv(
     "surv.csv",
     times=[1, 5, 10, 20, 50, 100],

@@ -166,8 +166,9 @@ For models fitted via `gamfit.fit_array(...)` (positional columns
 `x0, x1, ..., x{p-1}`), predict directly from a numeric feature matrix:
 
 ```python
-y = model.predict_array(X)                       # 1-D ndarray of point predictions
-table = model.predict_array(X, interval=0.95)    # adds posterior-mean uncertainty columns
+model = gamfit.fit_array(X_train, y, "y ~ s(x0) + s(x1)")
+y_hat = model.predict_array(X_test)                    # 1-D ndarray of point predictions
+table = model.predict_array(X_test, interval=0.95)     # adds posterior-mean uncertainty columns
 ```
 
 `predict_array` accepts `interval`, `covariance_mode`, and
@@ -204,6 +205,7 @@ core on a default time grid (derived from the entry/exit columns in
 interpolate that surface at arbitrary user times.
 
 ```python
+model = gamfit.fit(train_df, "Surv(entry, exit, event) ~ s(age) + bmi")
 pred = model.predict(test_df)
 
 S = pred.survival_at([1, 5, 10, 20])        # (n_rows, 4) survival probabilities
@@ -227,7 +229,7 @@ H = pred.cumulative_hazard_at([10, 20])     # cumulative hazard
 
 ### Methods
 
-```python
+```text
 pred.hazard_at(times)              # (n_rows, len(times))
 pred.survival_at(times)            # (n_rows, len(times))
 pred.cumulative_hazard_at(times)   # (n_rows, len(times))
@@ -244,6 +246,7 @@ helpers chunk internally before assembling the result. To stream
 without materializing the full matrix, iterate the chunk generators:
 
 ```python
+pred = gamfit.fit(train_df, "Surv(entry, exit, event) ~ s(age) + bmi").predict(test_df)
 for row_slice, time_slice, block in pred.survival_at_chunks(
     times=[1, 5, 10, 20, 50, 100],
     people_chunk=50_000,
@@ -258,6 +261,7 @@ generators for the matching surfaces.
 ### Stream to CSV
 
 ```python
+pred = gamfit.fit(train_df, "Surv(entry, exit, event) ~ s(age) + bmi").predict(test_df)
 pred.write_survival_at_csv("surv.csv", times=[1, 5, 10, 20])
 ```
 
@@ -272,6 +276,12 @@ For the location-scale survival likelihood, passing any `interval=...`
 populates delta-method standard errors:
 
 ```python
+model = gamfit.fit(
+    train_df,
+    "Surv(entry, exit, event) ~ s(age) + bmi",
+    survival_likelihood="location-scale",
+    noise_formula="s(age)",
+)
 pred = model.predict(test_df, interval=0.95)
 S = pred.survival_at([1, 5, 10])
 se = pred.survival_se_at([1, 5, 10])
@@ -285,6 +295,8 @@ joint coefficient covariance through every cause-specific surface and the
 Aalen-Johansen CIF recurrence:
 
 ```python
+# event codes 1..K in the event column select the joint competing-risks fit
+model = gamfit.fit(train_df, "Surv(entry, exit, cause) ~ s(age)")
 pred = model.predict(
     test_df,
     interval=0.95,
@@ -309,6 +321,9 @@ Fit one cause-specific survival endpoint per event type, then assemble
 Aalen-Johansen cumulative incidence functions on a shared grid:
 
 ```python
+disease_pred = gamfit.fit(train_df, "Surv(entry, exit, disease) ~ s(age)").predict(test_df)
+death_pred = gamfit.fit(train_df, "Surv(entry, exit, death) ~ s(age)").predict(test_df)
+
 cif = gamfit.competing_risks_cif(
     {"disease": disease_pred, "death": death_pred},
     times=[1, 5, 10, 20],
@@ -360,6 +375,7 @@ variance can therefore be computed without constructing the full row-by-row
 covariance — always through `eta_gradient`, never through `matrix`:
 
 ```python
+affine = model.design_matrix(test_df)
 covariance = affine.covariance_smoothing_corrected
 if covariance is None:
     raise RuntimeError("this fit has no smoothing-corrected covariance")
