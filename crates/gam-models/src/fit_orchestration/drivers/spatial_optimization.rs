@@ -4269,15 +4269,15 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                         dropped_penalties,
                         linear_constraints_local: linear_constraints_local.as_ref(),
                         joint_null_rotation: joint_null_rotation.as_ref(),
+                        duchon_operator_penalties: self
+                            .spec
+                            .smooth_terms
+                            .get(term_idx)
+                            .and_then(gam_terms::smooth::duchon_operator_penalty_request),
                         termname: &name,
                     },
                 )
-                .map_err(|e| {
-                    EstimationError::InvalidInput(format!(
-                        "term '{name}' could not be returned to its collection's identifiability \
-                         gauge after an incremental rebuild: {e}"
-                    ))
-                })?;
+                .map_err(|e| collection_gauge_placement_error(&name, trial_report, e))?;
                 (
                     placed.design,
                     placed.metadata,

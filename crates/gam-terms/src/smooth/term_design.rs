@@ -1155,6 +1155,9 @@ pub struct LocalTermRealization<'a> {
     /// The rotation the local build applied to `design` and reported
     /// separately. It is folded into the returned metadata.
     pub joint_null_rotation: Option<&'a crate::basis::JointNullRotation>,
+    /// A Duchon term's operator-penalty request, which its penalty set is
+    /// re-derived from in the collection chart; `None` for every other kind.
+    pub duchon_operator_penalties: Option<&'a crate::basis::DuchonOperatorPenaltySpec>,
     pub termname: &'a str,
 }
 
@@ -1198,6 +1201,7 @@ pub fn place_term_in_collection_gauge(
         dropped_penalties,
         linear_constraints_local,
         joint_null_rotation,
+        duchon_operator_penalties,
         termname,
     } = local;
     let realized = realize_smooth_collection_gauge(design, gauge, termname)?;
@@ -1215,6 +1219,7 @@ pub fn place_term_in_collection_gauge(
         dropped_penalties,
         Some(&coefficient_gauge),
         &metadata,
+        duchon_operator_penalties,
         termname,
     )?;
     let linear_constraints_local = linear_constraints_local.map(|lin| {
@@ -1238,6 +1243,17 @@ pub fn place_term_in_collection_gauge(
     })
 }
 
+/// The operator-penalty request of a Duchon term's spec, which
+/// [`penalties_in_collection_chart`] re-derives its penalty set from.
+pub fn duchon_operator_penalty_request(
+    termspec: &SmoothTermSpec,
+) -> Option<&crate::basis::DuchonOperatorPenaltySpec> {
+    match &termspec.basis {
+        SmoothBasisSpec::Duchon { spec, .. } => Some(&spec.operator_penalties),
+        _ => None,
+    }
+}
+
 /// A smooth term's penalty set in its collection's coefficient chart: the active
 /// blocks, and the dropped ones following `local_dropped`.
 ///
@@ -1251,11 +1267,21 @@ pub fn place_term_in_collection_gauge(
 /// The triplet applies the chart to the collocation operators before forming
 /// each Gram, and it is the builder the n-free κ re-key and the ψ-derivative
 /// already read, so the criterion and its gradient see the same blocks.
+///
+/// A non-periodic, non-spectral Duchon term's penalty set is re-derived the same
+/// way, through the builder the n-free re-key reads, with `duchon_operator_penalties`
+/// saying which operator orders its build requested. Congruencing its local
+/// blocks left the primary penalty's structural null space carrying 4.2e-10
+/// beside a top eigenvalue of 0.86 on gam#2959's single-block cache fixture,
+/// where the same block built in the composed chart has exact nulls (6e-19); the
+/// re-derived set agrees with that build to 4.2e-16 in every block (lane probe
+/// jobs 1245315, 1250166).
 fn penalties_in_collection_chart(
     active_penalties: &[ActivePenalty],
     local_dropped: Vec<DroppedPenaltyInfo>,
     coefficient_gauge: Option<&gam_problem::Gauge>,
     placed_metadata: &BasisMetadata,
+    duchon_operator_penalties: Option<&crate::basis::DuchonOperatorPenaltySpec>,
     term_name: &str,
 ) -> Result<(Vec<ActivePenalty>, Vec<DroppedPenaltyInfo>), BasisError> {
     if coefficient_gauge.is_some() && matches!(placed_metadata, BasisMetadata::Matern { .. }) {
@@ -1263,6 +1289,42 @@ fn penalties_in_collection_chart(
         // (the Matérn override in the basis dispatch), so the local dropped
         // blocks are the triplet's own and are not counted twice.
         let filtered = matern_operator_penalty_triplet_from_metadata(placed_metadata)?;
+        return Ok((filtered.active, filtered.dropped));
+    }
+    if coefficient_gauge.is_some()
+        && let (
+            BasisMetadata::Duchon {
+                centers,
+                length_scale,
+                periodic: None,
+                power,
+                nullspace_order,
+                identifiability_transform,
+                input_scale,
+                aniso_log_scales,
+                operator_collocation_points,
+                radial_reparam,
+                spectral_basis: None,
+            },
+            Some(operator_penalties),
+        ) = (placed_metadata, duchon_operator_penalties)
+    {
+        // The local build filtered this same candidate set, so its dropped
+        // blocks are the set's own and are not counted twice.
+        let filtered = crate::basis::duchon_penalty_set_at_length_scale(
+            centers.view(),
+            identifiability_transform.as_ref(),
+            operator_collocation_points.as_ref().map(|points| points.view()),
+            operator_penalties,
+            *power,
+            *nullspace_order,
+            aniso_log_scales.as_deref(),
+            radial_reparam.as_ref(),
+            length_scale
+                .clone()
+                .map(|length| input_scale.to_standardized_units(length).standardized_value()),
+            &mut crate::basis::BasisWorkspace::default(),
+        )?;
         return Ok((filtered.active, filtered.dropped));
     }
     let candidates =
@@ -1293,12 +1355,11 @@ fn assert_orthogonal_to_constraint_block(
 ) -> Result<(), BasisError> {
     let rel = orthogonality_relative_residual_for_design(design, constraint)?;
     if rel > ORTHOGONALITY_REL_RESIDUAL_TOL {
-        gam_problem::bail_invalid_basis!(
-            "smooth orthogonality residual too large for term '{}': {:.3e} > {:.1e}",
-            termname,
-            rel,
-            ORTHOGONALITY_REL_RESIDUAL_TOL
-        );
+        return Err(BasisError::CollectionGaugeNotOrthogonal {
+            term: termname.to_string(),
+            residual: rel,
+            tolerance: ORTHOGONALITY_REL_RESIDUAL_TOL,
+        });
     }
     Ok(())
 }
@@ -1848,6 +1909,7 @@ fn apply_global_smooth_identifiability(
             term.dropped_penalties.clone(),
             coefficient_gauge.as_ref(),
             &placed_metadata,
+            duchon_operator_penalty_request(termspec),
             &term.name,
         )?;
         let linear_constraints_constrained =

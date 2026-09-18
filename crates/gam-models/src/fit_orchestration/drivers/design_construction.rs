@@ -3553,6 +3553,36 @@ fn evaluate_joint_reml_outer_eval_at_theta(
     )
 }
 
+/// The error an incremental κ rebuild reports when the realizer cannot put a
+/// term back into its collection's identifiability gauge (#2747).
+///
+/// A trial ψ at which the term's block lies numerically inside the constraint
+/// span cannot be placed, so the model does not exist at that trial: the search
+/// retreats, as for a penalty that is not PSD there, instead of aborting the fit
+/// (gam#2959). Any other placement failure is a defect and stays fatal.
+fn collection_gauge_placement_error(
+    name: &str,
+    trial_report: &str,
+    error: gam_terms::basis::BasisError,
+) -> EstimationError {
+    if matches!(
+        error,
+        gam_terms::basis::BasisError::CollectionGaugeNotOrthogonal { .. }
+    ) {
+        EstimationError::TrialPointRefused {
+            reason: format!(
+                "term '{name}' cannot be placed in its collection's identifiability gauge at \
+                 this psi ({trial_report}): {error}"
+            ),
+        }
+    } else {
+        EstimationError::InvalidInput(format!(
+            "term '{name}' could not be returned to its collection's identifiability gauge \
+             after an incremental rebuild: {error}"
+        ))
+    }
+}
+
 fn evaluate_joint_reml_efs_at_theta(
     evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>,
     design: &TermCollectionDesign,

@@ -4147,6 +4147,86 @@ fn spatial_kappa_result_surfaces_optimizer_failure() {
     assert!(msg.contains("boom"), "unexpected error: {msg}");
 }
 
+/// A trial length scale at which a gauged Duchon term's block lies numerically inside
+/// the collection's constraint span refuses the trial, so the κ search retreats,
+/// instead of failing the fit (gam#2959). The κ search of this fixture proposed
+/// ψ = −18.269, where the realized block's orthogonality residual against the
+/// collection's constraint block is 9.919e-1, and the untyped error ended the fit
+/// (lane probe job 1255824). The seed itself still places.
+#[test]
+fn a_trial_the_collection_gauge_cannot_place_refuses_instead_of_failing_2959() {
+    let data = array![
+        [0.0, 0.1, 0.2],
+        [0.2, 0.0, 0.4],
+        [0.4, 0.3, 0.1],
+        [0.6, 0.5, 0.7],
+        [0.8, 0.7, 0.3],
+        [1.0, 0.9, 0.8],
+    ];
+    let spec = TermCollectionSpec {
+        linear_terms: vec![],
+        random_effect_terms: vec![],
+        smooth_terms: vec![SmoothTermSpec {
+            frozen_parametric_residualization: None,
+            name: "duchon".to_string(),
+            basis: SmoothBasisSpec::Duchon {
+                feature_cols: vec![0, 1],
+                spec: DuchonBasisSpec {
+                    radial_reparam: None,
+                    periodic: None,
+                    center_strategy: CenterStrategy::FarthestPoint { num_centers: 4 },
+                    length_scale: Some(0.9),
+                    power: 1.0,
+                    nullspace_order: DuchonNullspaceOrder::Linear,
+                    identifiability: SpatialIdentifiability::default(),
+                    aniso_log_scales: None,
+                    operator_penalties: DuchonOperatorPenaltySpec::default(),
+                    boundary: OneDimensionalBoundary::Open,
+                },
+                input_scale: None,
+            },
+            shape: ShapeConstraint::None,
+            joint_null_rotation: None,
+        }],
+    };
+    let design = build_term_collection_design(data.view(), &spec)
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "design", e));
+    let frozen = freeze_term_collection_from_design(&spec, &design)
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "freeze", e));
+    let spatial_terms = spatial_length_scale_term_indices(&frozen);
+    let rho_dim = design.penalties.len();
+    assert!(
+        design.smooth.terms[spatial_terms[0]].collection_gauge.is_some(),
+        "the fixture's Duchon term is gauged, so its trials go through the placement"
+    );
+    let mut theta = Array1::<f64>::zeros(rho_dim + 1);
+    theta[rho_dim] = -get_spatial_length_scale(&frozen, spatial_terms[0])
+        .unwrap_or_else(|| panic!("{} failed", "length scale"))
+        .ln();
+    let cache_at = |theta: &Array1<f64>| {
+        let mut cache = SingleBlockExactJointDesignCache::new(
+            data.view(),
+            frozen.clone(),
+            design.clone(),
+            spatial_terms.clone(),
+            rho_dim,
+            vec![1],
+        )
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "single-block cache", e));
+        cache.ensure_theta(theta).map(|()| cache.design().design.ncols())
+    };
+    assert!(cache_at(&theta).is_ok(), "the seed ψ places in the gauge");
+    let mut beyond = theta.clone();
+    beyond[rho_dim] = -18.26917481547663;
+    match cache_at(&beyond) {
+        Err(EstimationError::TrialPointRefused { reason }) => assert!(
+            reason.contains("smooth orthogonality residual too large"),
+            "the refusal names the placement it could not make: {reason}"
+        ),
+        other => panic!("a trial the gauge cannot place must refuse the trial, got {other:?}"),
+    }
+}
+
 #[test]
 fn duchon_terms_participate_in_kappa_optimization() {
     let data = array![
@@ -4190,7 +4270,14 @@ fn duchon_terms_participate_in_kappa_optimization() {
         max_iter: 40,
         ..FitOptions::default()
     };
-    let y = Array1::linspace(0.0, 1.0, data.nrows());
+    // A response the Duchon term's linear null space cannot interpolate. The six
+    // rows' first coordinate is exactly linear in the row index, so a linspace
+    // response lay inside that null space, a zero-residual fit. Its certified κ
+    // optimum rested on the primary penalty's leaked null-space mass (8.4e-11
+    // beside 1, gam#2959 lane probe job 1261298): with exact nulls and nothing
+    // else changed, the search railed a smoothing parameter at e^18 and declined
+    // to certify.
+    let y = data.column(0).mapv(|x: f64| (3.0 * x).sin()) + &data.column(1).mapv(|x: f64| 0.25 * x);
     let weights = Array1::ones(data.nrows());
     let offset = Array1::zeros(data.nrows());
 
