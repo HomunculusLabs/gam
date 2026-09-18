@@ -7167,7 +7167,7 @@ impl SaeSupportSparseTerm {
 
     /// Alternate exact decoder blocks and direct active-row coordinate Newton
     /// steps until the raw KKT residual AND a full-cycle recurrence agree. A
-    /// budget-exhausted iterate is an error; only converged fits are returned.
+    /// state no cycle can move measurably is refused; only converged fits are returned.
     /// One JOINT Gauss-Newton step over `(T, B)`, Schur-eliminating the per-row
     /// coordinate blocks -- the cure for the alternating map's linear rate
     /// (#2575), safeguarded on the same penalized objective the certificate
@@ -7414,7 +7414,6 @@ impl SaeSupportSparseTerm {
         target: ArrayView2<'_, f64>,
         lambda_smooth: &[f64],
         ard_precisions: &[Vec<f64>],
-        operator_directions_already_budgeted: usize,
     ) -> Result<Option<SupportNegativeCurvatureMode>, String> {
         let (beta_offsets, beta_dim) = self.beta_layout()?;
         let coordinate_dim = self.coordinate_state_len();
@@ -7426,17 +7425,24 @@ impl SaeSupportSparseTerm {
             .saturating_mul(std::mem::size_of::<f64>() as u128)
             .saturating_mul(6);
         let in_core_budget = crate::manifold::sae_host_in_core_budget_bytes().0 as u128;
-        // A terminal second-order audit may not silently turn a matrix-free
-        // fit into more operator work than its complete inner solve.  When the
-        // analytic pencil has at most the number of directions already bought
-        // by that solve and its eigensystem fits the cgroup ledger, dense is the
-        // exact and cheaper certificate.  Larger lanes retain their matrix-free
-        // outer-adjoint refusal rather than materialising an unbounded matrix.
-        if full_dim == 0
-            || full_dim > operator_directions_already_budgeted
-            || dense_workspace > in_core_budget
-        {
+        // #2576: a certified fixed point is stationary AND curvature-audited, so the audit
+        // is never skipped for the work a solve has or has not done; admitting it by a
+        // cycle count let a solve that certified in fewer cycles than the pencil's dimension
+        // certify a saddle. Its one admission is the resource it needs: the dense pencil
+        // runs wherever its workspace fits the cgroup-aware in-core ledger. Where it does
+        // not fit, this lane has no matrix-free curvature certificate, so the stationary
+        // state is refused as unaudited instead of certified.
+        if full_dim == 0 {
             return Ok(None);
+        }
+        if dense_workspace > in_core_budget {
+            return Err(format!(
+                "SaeSupportSparseTerm::solve_fixed_point: curvature not audited: the exact \
+                 stationarity pencil of dimension {full_dim} needs a dense workspace of \
+                 {dense_workspace} bytes against an in-core budget of {in_core_budget} bytes, \
+                 and this lane has no matrix-free curvature certificate, so the stationary \
+                 state is refused instead of certified"
+            ));
         }
         let system = self.assemble_arrow_schur(target, lambda_smooth, ard_precisions)?;
         let rows = self.support_outer_differential_rows(target, ard_precisions, &beta_offsets)?;
@@ -7856,7 +7862,6 @@ impl SaeSupportSparseTerm {
         target: ArrayView2<'_, f64>,
         lambda_smooth: &[f64],
         ard_precisions: &[Vec<f64>],
-        max_iter: usize,
         tolerance: f64,
         trust_radius: f64,
     ) -> Result<SaeSupportFixedPointReport, String> {
@@ -7868,8 +7873,8 @@ impl SaeSupportSparseTerm {
                 self.output_dim
             ));
         }
-        if max_iter == 0 || !(tolerance.is_finite() && tolerance > 0.0) {
-            return Err("SaeSupportSparseTerm::solve_fixed_point requires positive max_iter and finite positive tolerance".into());
+        if !(tolerance.is_finite() && tolerance > 0.0) {
+            return Err("SaeSupportSparseTerm::solve_fixed_point requires a finite positive tolerance".into());
         }
         let mut previous_candidate = false;
         let mut last_max_change = f64::NAN;
@@ -7927,42 +7932,32 @@ impl SaeSupportSparseTerm {
         let mut joint_scaled_step = Vec::with_capacity(self.coordinate_state_len());
         let mut joint_previous_step: Option<SupportJointStepMemory> = None;
         let mut joint_skip_remaining = 0usize;
-        // PHASE. The caller's budget buys the ALTERNATION, and nothing about
-        // that phase changes: no joint system is assembled, no coupled step is
-        // proposed, and a fit that certifies inside `max_iter` takes exactly the
-        // trajectory it has always taken. Only a fit that would otherwise return
-        // the non-recurrence refusal enters phase two, where the coupled step is
-        // armed and the same budget is spent again.
+        // PHASE (#2576). No cycle count phases or stops this loop. The alternation runs
+        // while its cycles measurably move the fit, by the rule a row step is accepted on
+        // (#2469): the objective falls by more than its rounding band, or it ties inside
+        // that band while the raw KKT norm falls by more than both states' gradient
+        // rounding bands. A cycle that does neither, and that the first-order screen does
+        // not pass, is the measurement that the alternation cannot bring this state to its
+        // certificate, and it arms the coupled step. No joint system is assembled before
+        // that, so a fit whose alternation certifies takes exactly the trajectory it always
+        // took.
         //
-        // That ordering is the whole safety argument. A coupled step is a strict
-        // descent on the same objective, but it is still a DIFFERENT trajectory,
-        // and a different trajectory can arrive at a different (better) optimum
-        // that the caller's budget is no longer enough to certify at. Charging
-        // that risk only to fits that were about to fail costs nothing they had,
-        // and refusing is the outcome SPEC's "a fit object must only ever come
-        // from a converged optimization" makes most expensive.
+        // Inside the coupled phase such a cycle forces the coupled step, whatever its skip
+        // schedule says. If that step is refused too, the state is a proven stall: neither
+        // block sweep nor the coupled step moves it measurably, so the next cycle would
+        // start from the same state and take the same decisions. The solve refuses there
+        // instead of spending cycles on it.
         let mut joint_armed = false;
         let mut joint_skip_width = 1usize;
         let mut joint_accepted = 0usize;
-        let total_cycles = max_iter.saturating_mul(2);
-        for iteration in 1..=total_cycles {
-            if iteration > max_iter && !joint_armed {
-                // Phase boundary. The alternation has spent the caller's budget
-                // without certifying, so its rate has already answered the only
-                // question the pace test asks. Arm the coupled step and start
-                // the two-cycle recurrence over: the certificate must be earned
-                // on the new trajectory, never inherited across the boundary.
-                joint_armed = true;
-                accelerator.reset();
-                taken_step.clear();
-                taken_step.resize(self.coordinate_state_len(), 0.0);
-                last_objective = None;
-                previous_candidate = false;
-                log::info!(
-                    "support fixed point: alternation did not recur in {max_iter} cycles; \
-                     arming the coupled (Schur-eliminated joint Newton) phase"
-                );
-            }
+        // What the progress rule knows about the state the last cycle ended in: its raw
+        // KKT norm, and its gradient rounding band where that cycle priced one. Both are
+        // `None` where something moved the state after they were read.
+        let mut last_kkt_norm: Option<f64> = None;
+        let mut last_gradient_band: Option<f64> = None;
+        let mut iteration = 0usize;
+        loop {
+            iteration += 1;
             self.snapshot_coordinates(&mut cycle_start);
             if cycle_start_decoders.len() != self.k_atoms()
                 || cycle_start_decoders
@@ -8017,10 +8012,10 @@ impl SaeSupportSparseTerm {
             // Both sweeps minimise their own block exactly, so a cycle is exact
             // block Gauss-Seidel and the iterate's error contracts by a fixed
             // factor — the cross-block coupling (see `joint_newton_step`). Phase
-            // one having spent the caller's whole budget without certifying IS
-            // the measurement that this factor is too close to one for the
-            // budget, so inside phase two there is nothing left to test: the
-            // coupled step fires every cycle.
+            // one ending on a cycle without measured progress IS the measurement
+            // that this factor is too close to one for the alternation to reach
+            // its certificate, so inside phase two there is nothing left to test:
+            // the coupled step fires every cycle.
             //
             // (An earlier revision re-tested the alternation's pace per cycle
             // and skipped the coupled step while it looked on track. Measured on
@@ -8049,7 +8044,52 @@ impl SaeSupportSparseTerm {
                 parameter_scale,
                 tolerance,
             ) && pre_joint_change <= tolerance * parameter_scale;
-            if joint_armed && joint_skip_remaining > 0 {
+            // #2576: whether this cycle's sweeps measurably moved the fit (see PHASE),
+            // against the state the last cycle ended in. The gradient rounding band is
+            // priced only where the objective ties, the one case that reads it.
+            let kkt_norm = stationarity.decoder_l2.hypot(stationarity.coordinate_l2);
+            let mut gradient_band = None;
+            let swept_progress = match previous_objective {
+                Some(previous) => {
+                    let resolution = self.objective_descent_resolution(previous);
+                    let change = objective - previous;
+                    if change < -resolution {
+                        Some(true)
+                    } else if change.abs() <= resolution {
+                        let band =
+                            self.gradient_rounding_band(target, lambda_smooth, ard_precisions)?;
+                        gradient_band = Some(band);
+                        match (last_kkt_norm, last_gradient_band) {
+                            (Some(previous_norm), Some(previous_band)) => {
+                                Some(kkt_norm < previous_norm - (previous_band + band))
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            };
+            let stalled = swept_progress == Some(false) && !screened;
+            if stalled && !joint_armed {
+                // Phase boundary: the certificate must be earned on the coupled
+                // trajectory, never inherited across it.
+                joint_armed = true;
+                accelerator.reset();
+                taken_step.clear();
+                taken_step.resize(self.coordinate_state_len(), 0.0);
+                last_objective = None;
+                previous_candidate = false;
+                log::info!(
+                    "support fixed point: cycle {iteration} made no measured progress (objective \
+                     {objective:.9e}, raw KKT norm {kkt_norm:.3e}); arming the coupled \
+                     (Schur-eliminated joint Newton) phase"
+                );
+            }
+            // Whether this cycle ends in the state `kkt_norm` and `gradient_band` describe.
+            let mut end_state_held = true;
+            if joint_armed && joint_skip_remaining > 0 && !stalled {
                 joint_skip_remaining -= 1;
             } else if joint_armed && !screened {
                 match self.joint_newton_step(
@@ -8066,6 +8106,7 @@ impl SaeSupportSparseTerm {
                     Some(_accepted_objective) => {
                         joint_accepted += 1;
                         joint_skip_width = 1;
+                        end_state_held = false;
                         // The coupled step can move along a periodic phase
                         // orbit after the cycle's first canonicalization. Put
                         // it back in the unique ARD-selected phase chart before
@@ -8096,6 +8137,40 @@ impl SaeSupportSparseTerm {
                         parameter_scale = self
                             .parameter_iterate_scale()
                             .map_err(SaeSupportStationarityError::ParameterScale)?;
+                    }
+                    None if stalled => {
+                        // A proven stall (see PHASE): refuse at the state reached.
+                        let last_newton =
+                            last_newton_displacement.as_ref().map(|(value, _)| *value);
+                        return Err(format!(
+                            "SaeSupportSparseTerm::solve_fixed_point stalled at cycle {iteration}: \
+                             neither the block sweeps nor the coupled step moved the state \
+                             measurably (objective {objective:.9e} tied within its rounding band \
+                             {:.3e}; raw KKT norm {kkt_norm:.6e} against {:?} at the last cycle, \
+                             gradient rounding bands {:?} and {gradient_band:?}; raw KKT \
+                             max={:.6e}, relative to objective {:.6e}; per block: decoder \
+                             max={:.6e} l2={:.6e}, coordinate max={:.6e} l2={:.6e}; \
+                             diagonal-scaled residual max={:.6e}, scale={parameter_scale:.6e}, \
+                             relative={:.6e} vs tolerance {tolerance:.6e} (decoder {:.6e}, \
+                             coordinate {:.6e}); that screen schedules the exact Newton \
+                             displacement certificate, last priced at {last_newton:?}; last \
+                             parameter max_change={last_max_change:.6e}, joint Newton steps \
+                             accepted={joint_accepted}, parameter change this \
+                             cycle={pre_joint_change:.6e})",
+                            self.objective_descent_resolution(objective),
+                            last_kkt_norm,
+                            last_gradient_band,
+                            stationarity.max_abs(),
+                            stationarity.max_abs() / kkt_scale,
+                            stationarity.decoder_max_abs,
+                            stationarity.decoder_l2,
+                            stationarity.coordinate_max_abs,
+                            stationarity.coordinate_l2,
+                            stationarity.scaled_max_abs(),
+                            stationarity.scaled_max_abs() / parameter_scale,
+                            stationarity.decoder_scaled_max_abs,
+                            stationarity.coordinate_scaled_max_abs,
+                        ));
                     }
                     None => {
                         joint_skip_remaining = joint_skip_width;
@@ -8302,7 +8377,6 @@ impl SaeSupportSparseTerm {
                     target,
                     lambda_smooth,
                     ard_precisions,
-                    total_cycles,
                 )? {
                     match self.escape_support_negative_curvature(
                         target,
@@ -8570,6 +8644,7 @@ impl SaeSupportSparseTerm {
                     )?;
                     if objective - extrapolated > self.objective_descent_resolution(objective) {
                         accepted_extrapolations += 1;
+                        end_state_held = false;
                         taken_step.extend_from_slice(&proposal);
                         std::mem::swap(&mut fitted_state, &mut trial_fitted);
                     } else {
@@ -8580,6 +8655,14 @@ impl SaeSupportSparseTerm {
                         taken_step.extend_from_slice(&cycle_residual);
                     }
                 }
+            }
+            // The state the next cycle's progress rule compares against (see PHASE).
+            if end_state_held {
+                last_kkt_norm = Some(stationarity.decoder_l2.hypot(stationarity.coordinate_l2));
+                last_gradient_band = gradient_band;
+            } else {
+                last_kkt_norm = None;
+                last_gradient_band = None;
             }
             log::info!(
                 "support fixed-point cycle {iteration}: raw KKT max={:.3e} rel={:.3e} \
@@ -8611,47 +8694,6 @@ impl SaeSupportSparseTerm {
                 }
             }
         }
-        let stationarity = self.raw_stationarity(target, lambda_smooth, ard_precisions)?;
-        let objective = self.penalized_objective(target, lambda_smooth, ard_precisions)?;
-        let parameter_scale = self
-            .parameter_iterate_scale()
-            .map_err(SaeSupportStationarityError::ParameterScale)?;
-        // #2517 — report the certificate PER BLOCK, not as one scalar. The two
-        // blocks are different quantities reached by different sweeps: the
-        // decoder block is the exact-PSD-solve's own residual, the coordinate
-        // block is the damped coordinate sweep's. A single `max` over both
-        // cannot say which sweep failed to reach its own stationarity, so every
-        // reader of this refusal has had to guess. Measured across eight shapes
-        // (n 120..480, P 4..8, K 9..24, top_k 1..3, residual 1e-4 and 1e-2)
-        // this refusal fires in EVERY arm at relative KKT 1.5e-3..9.7e-3 while
-        // `max_change` is already ~1e-3, i.e. the iterate has stopped moving
-        // and the certificate has not been reached — the split is what
-        // distinguishes "a sweep is not solving its block" from "the blocks
-        // disagree at the joint point".
-        let last_newton = last_newton_displacement.as_ref().map(|(value, _)| *value);
-        Err(format!(
-            "SaeSupportSparseTerm::solve_fixed_point did not recur within {max_iter} \
-             alternating cycles nor in the {max_iter} coupled cycles that follow \
-             (raw KKT max={:.6e}, relative to objective {:.6e}: {:.6e}; \
-             per block: decoder max={:.6e} l2={:.6e}, coordinate max={:.6e} l2={:.6e}; \
-             diagonal-scaled residual max={:.6e}, scale={parameter_scale:.6e}, relative={:.6e} \
-             vs tolerance {tolerance:.6e} (decoder {:.6e}, coordinate {:.6e}); \
-             that screen schedules the exact Newton displacement certificate, last priced at \
-             {last_newton:?}; \
-             last parameter max_change={last_max_change:.6e}, \
-             joint Newton steps accepted={joint_accepted}, gauge-invariant limbs required)",
-            stationarity.max_abs(),
-            objective,
-            stationarity.max_abs() / objective.abs().max(1.0),
-            stationarity.decoder_max_abs,
-            stationarity.decoder_l2,
-            stationarity.coordinate_max_abs,
-            stationarity.coordinate_l2,
-            stationarity.scaled_max_abs(),
-            stationarity.scaled_max_abs() / parameter_scale,
-            stationarity.decoder_scaled_max_abs,
-            stationarity.coordinate_scaled_max_abs,
-        ))
     }
 }
 

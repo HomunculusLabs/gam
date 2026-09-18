@@ -723,7 +723,7 @@ fn exact_generalized_mode_escapes_a_periodic_saddle_2634() {
     assert!(escaped < before, "escape must strictly lower the objective");
 
     let report = term
-        .solve_fixed_point(target.view(), &lambda, &ard, 64, 1.0e-8, 1.0)
+        .solve_fixed_point(target.view(), &lambda, &ard, 1.0e-8, 1.0)
         .expect("escaped state converges to a minimum basin");
     assert!(report.recurred && report.objective < before);
 }
@@ -1084,7 +1084,7 @@ fn fixed_point_certifies_the_orbit_optimum_not_its_crawl_2933_f08() {
     let (mut term, target, lambda, ard, slope) = scale_orbit_fixture_2933(alpha, 1.05);
     let tolerance = term.fixed_point_tolerance();
     let report = term
-        .solve_fixed_point(target.view(), &lambda, &ard, 64, tolerance, 1.0)
+        .solve_fixed_point(target.view(), &lambda, &ard, tolerance, 1.0)
         .expect("the orbit optimum is certifiable");
     assert!(report.recurred);
     let parameter_scale = term.parameter_iterate_scale().expect("parameter scale");
@@ -1182,7 +1182,7 @@ fn fixed_point_certifies_a_state_converged_to_roundoff_2933_f08() {
         "the control must ask for less than the fixture resolves, or it never reaches round-off",
     );
     let report = term
-        .solve_fixed_point(target.view(), &lambda, &ard, 5000, tolerance, 1.0)
+        .solve_fixed_point(target.view(), &lambda, &ard, tolerance, 1.0)
         .expect("a support fit converged to round-off must certify");
     assert!(report.recurred);
     let parameter_scale = term.parameter_iterate_scale().expect("parameter scale");
@@ -1191,6 +1191,147 @@ fn fixed_point_certifies_a_state_converged_to_roundoff_2933_f08() {
         "returned displacement {:.3e} vs bound {:.3e}",
         report.newton_displacement.max_abs(),
         tolerance * parameter_scale,
+    );
+}
+
+/// #2576 — no cycle count ends the support fixed point: a state no cycle can move is
+/// refused where it is reached. At the scale-orbit fixture's analytic optimum (`α = 1`),
+/// asked for a tolerance below anything f64 resolves, the sweeps change nothing the
+/// objective's rounding band or the gradients' rounding bands can see, the first-order
+/// screen cannot pass, and the coupled step finds no measured decrease. Cycle 1 has no
+/// previous state to compare with and cycle 2 no previous gradient band, so cycle 3 is
+/// the first the progress rule can judge, and the refusal must come there. Under the
+/// retired cycle budget the same state cycled to `2·max_iter` and refused as a
+/// non-recurrence.
+#[test]
+fn a_state_no_cycle_moves_refuses_as_a_proven_stall_2576() {
+    let (mut term, target, lambda, ard, _) = scale_orbit_fixture_2933(1.0, 1.0);
+    let error = term
+        .solve_fixed_point(target.view(), &lambda, &ard, f64::MIN_POSITIVE, 1.0)
+        .expect_err("a tolerance below the arithmetic's resolution cannot certify");
+    assert!(
+        error.contains("stalled at cycle 3:"),
+        "the refusal must be the proven stall at the first cycle the rule can judge; \
+         got: {error}"
+    );
+}
+
+/// #2576 — no cycle count phases or stops the support fixed point, so a solve that
+/// needs more cycles than any budget would have allowed still certifies on its own
+/// trajectory. The scale-orbit fixture (`α = 1`) starts at orbit scale 2: every row's
+/// coordinate sits at `|t| = 2` and the optimum is `|t| = 1`. A trust radius of `r`
+/// moves a row by at most `r` per cycle, so no alternating trajectory can certify in
+/// fewer than `1/r` cycles, and every cycle it takes lowers the objective measurably.
+/// A count that stops the alternation or hands it to the coupled step first cannot
+/// return this trajectory: with the retired 256-cycle budget the solve ended its
+/// alternation at cycle 256.
+#[test]
+fn fixed_point_certifies_a_crawl_past_any_cycle_budget_2576() {
+    let (mut term, target, lambda, ard, slope) = scale_orbit_fixture_2933(1.0, 2.0);
+    let trust_radius = 1.0e-3;
+    let tolerance = term.fixed_point_tolerance();
+    let report = term
+        .solve_fixed_point(target.view(), &lambda, &ard, tolerance, trust_radius)
+        .expect("a crawl that lowers the objective every cycle must run to its certificate");
+    assert!(report.recurred);
+    let minimum_cycles = ((2.0 - 1.0) / trust_radius) as usize;
+    assert!(
+        report.iterations >= minimum_cycles,
+        "a row moving at most {trust_radius:.1e} per cycle cannot travel from |t| = 2 to 1 \
+         in {} cycles",
+        report.iterations
+    );
+    let fitted_slope = term.atoms[0].decoder_coefficients()[[1, 0]];
+    assert!(
+        (fitted_slope - slope).abs() <= 1.0e-4 * slope,
+        "certified slope {fitted_slope:.9e} must be the orbit optimum {slope:.9e}",
+    );
+}
+
+/// #2576 — certification never skips the curvature audit. One degree-1 patch atom
+/// `f(t) = β₀ + β₁t` (penalty `S = I`, `λ = 1`, ARD precision `α = 1`) with a zero
+/// decoder sits at `t = 0` on each of `n = 512` rows, against the balanced target
+/// `y = ±1`. Every gradient is exactly zero: the residual is `y`, and `Σy = 0`, `t = 0`
+/// and `β₁ = 0` zero the decoder, coordinate and prior terms. Every block's own curvature
+/// is positive (`α` per coordinate, `n + λ` and `λ` on the decoder), so no sweep moves the
+/// state, and the first-order screen and the exact Newton displacement both certify it.
+/// Only the coupled curvature sees the saddle: the data term couples each coordinate to
+/// the slope by `−y`, so the slope's Schur complement is `λ − Σy²/α = 1 − n < 0`. The
+/// only other stationary points are the two minima `β₁ = ±√(√n − 1)`,
+/// `t = β₁y/(β₁² + α)`, `β₀ = 0`.
+///
+/// The pencil has `n + 2 = 514` directions, more than the `2·256 = 512` cycles the
+/// retired budget bought, so an audit admitted by that count was skipped and the saddle
+/// was certified. Admitted by the in-core ledger alone, the audit runs, the solve
+/// escapes, and the state it certifies is the analytic minimum. The planted state's own
+/// resolved negative mode is the control that the audit is what separates them.
+#[test]
+fn certification_audits_curvature_at_any_cycle_count_2576() {
+    let rows = 512usize;
+    let evaluator: Arc<dyn SaeBasisSecondJet> =
+        Arc::new(EuclideanPatchEvaluator::new(1, 1).expect("patch"));
+    let atoms = vec![atom(
+        "bilinear-saddle",
+        SaeAtomBasisKind::EuclideanPatch,
+        1,
+        evaluator,
+        &[0.0],
+        array![[0.0], [0.0]],
+    )];
+    let state = SaeAssignmentState::from_topk_support_heterogeneous(
+        rows,
+        1,
+        1,
+        vec![SaeAssignmentAtomSpec::euclidean(1)],
+        vec![vec![0]; rows],
+        vec![vec![1.0]; rows],
+        vec![vec![0.0]; rows],
+    )
+    .expect("state");
+    let mut term = SaeSupportSparseTerm::new(atoms, state).expect("term");
+    let target =
+        Array2::from_shape_fn((rows, 1), |(row, _)| if row % 2 == 0 { -1.0 } else { 1.0 });
+    let lambda = vec![1.0_f64];
+    let ard = vec![vec![1.0_f64]];
+    let (beta_offsets, beta_dim) = term.beta_layout().expect("beta layout");
+    // The retired budget bought `2 · SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER` = 512 directions.
+    assert!(term.coordinate_state_len() + beta_dim > 2 * 256);
+    let negative_mode = |term: &SaeSupportSparseTerm| {
+        let system = term
+            .assemble_arrow_schur(target.view(), &lambda, &ard)
+            .expect("arrow system");
+        let differential = term
+            .support_outer_differential_rows(target.view(), &ard, &beta_offsets)
+            .expect("exact differential rows");
+        term.support_outer_negative_curvature_mode(&system, &differential)
+            .expect("curvature classification")
+    };
+    let planted = negative_mode(&term).expect("the planted state carries a resolved negative mode");
+    assert!(
+        planted.curvature < -f64::EPSILON.sqrt(),
+        "planted generalized curvature must be resolved negative, got {}",
+        planted.curvature
+    );
+    let saddle_objective = term
+        .penalized_objective(target.view(), &lambda, &ard)
+        .expect("saddle objective");
+    let tolerance = term.fixed_point_tolerance();
+    let report = term
+        .solve_fixed_point(target.view(), &lambda, &ard, tolerance, 1.0)
+        .expect("the audited solve escapes the saddle and certifies a minimum");
+    assert!(report.recurred && report.objective < saddle_objective);
+    assert!(
+        negative_mode(&term).is_none(),
+        "the certified state must carry no resolved negative curvature"
+    );
+    let minimum_slope = ((rows as f64).sqrt() - 1.0).sqrt();
+    let decoder = term.atoms[0].decoder_coefficients();
+    assert!(
+        (decoder[[1, 0]].abs() - minimum_slope).abs() <= 1.0e-4 * minimum_slope
+            && decoder[[0, 0]].abs() <= 1.0e-4 * minimum_slope,
+        "certified decoder ({:.9e}, {:.9e}) must be a minimum (0, ±{minimum_slope:.9e})",
+        decoder[[0, 0]],
+        decoder[[1, 0]],
     );
 }
 

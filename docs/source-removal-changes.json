@@ -444,5 +444,14 @@
     "reason": "#2234 item 2: the dense exact-A criterion now integrates every closure-certified circle orbit alone in its connected block of A and Φ, not one, so the one-orbit pricer price_compact_orbit is replaced by price_compact_orbits, which prices each eliminated orbit off the same stiffened decomposition and forms the joint correction −log det N − 2·Σ log I_k + K·log 2π.",
     "evidence": "In direct lane dy5 run i2234-item2d (base 8473989829, exact tree 50344beb, patch md5 16372d8d) scripts/source_removal_guard.py counted exactly this one guarded removal and accepted this entry (RC_SOURCE_REMOVAL 0). git grep -n -w price_compact_orbit at bf762c2a1e finds the pub(crate) declaration (construction_orbit_elimination.rs:254) and its two callers only: the value site in construction_exact_hessian.rs (:4697) and compact_orbit_differential (construction_orbit_elimination.rs:572). This landing moves both to price_compact_orbits.",
     "base": "cd4e4d3662be44e5bfa4e8f3e0047b1941cf3aa8"
+  },
+  {
+    "base": "96ba4ea80dfcc2510b04628d52803adf3953b6ce",
+    "items": [
+      "crates/gam-sae/src/manifold/support_outer.rs:const:SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER",
+      "crates/gam-sae/src/tiered/fit.rs:fn:insufficient_inner_budget_returns_error_instead_of_a_tiered_report_2023"
+    ],
+    "reason": "#2576 (SPEC: no iteration caps as stop rules): SaeSupportSparseTerm::solve_fixed_point stops on its certificate or on a proven stall, not on a cycle count, so the engine's inner cycle budget SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER and the max_inner_iter fields that carried it are deleted. insufficient_inner_budget_returns_error_instead_of_a_tiered_report_2023 pinned the refusal a one-cycle budget produced; with no budget that input does not exist, and the stall refusal is pinned by a_state_no_cycle_moves_refuses_as_a_proven_stall_2576.",
+    "evidence": "At the base, git grep -n finds SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER at its definition in crates/gam-sae/src/manifold/support_outer.rs and in crates/gam-sae/src/tiered/fit.rs, crates/gam-sae/src/tiered/code_space.rs, crates/gam-pyffi/src/manifold/support_sparse_sae_ffi.rs, crates/gam-sae/examples/issue_2572_repro.rs and crates/gam-sae/examples/tiered_k2000_measure.rs, and this commit removes every use. The deleted test fn is named only by its own definition. Guard job 1200615 (pool-gx3, acn12) at 645a27b743 reported 2 guarded removals and exited 0 with this entry, and pre-push job 1251163 (pool-gx2) did the same at 95e51dadb2 on this commit's exact tree (source_removal_guard RC 0, 363 -> 364 Rust items, 2 guarded removals)."
   }
 ]
