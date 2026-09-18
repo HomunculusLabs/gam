@@ -4305,5 +4305,15 @@
     "reason": "#2951 P5, cycle-break pure move (lead gam-dd): MlpParameter::{slot, from_slot, name}, ComponentMlp::program and ComponentMlp::mask_assignment move unchanged from rewrite.rs to the new downstream module parameter_decomposition/rewrite_program.rs, so rewrite.rs no longer imports program.rs.",
     "evidence": "public_api_census.py without this entry, on object-only probe commit 2496d95fcc (base 5f8f308055 + move patch md5 43544105) through the dx2 lane object store, refused exactly these five removals (all five reappear in rewrite_program.rs). git grep -l -w at cd4e4d3662be44e5bfa4e8f3e0047b1941cf3aa8 finds mask_assignment and from_slot only in rewrite.rs; ComponentMlp::program is declared at rewrite.rs:823 and called only from rewrite.rs's tests.",
     "base": "19143a151111c307d64fc49a3f99347306c416c3"
+  },
+  {
+    "base": "7c01c5dc958bc4220f601f96faf58e47c5c7c08f",
+    "removed": {
+      "crates/gam-models/src/fit_orchestration/drivers/spatial_optimization.rs::curvature_inference_forspec": 1,
+      "crates/gam-models/src/fit_orchestration/drivers/spatial_optimization.rs::spatial_dims_per_term": 1,
+      "crates/gam-models/src/fit_orchestration/drivers/spatial_optimization.rs::try_build_latent_coord_hyper_dirs": 1
+    },
+    "reason": "Pure move, no behaviour change: three contiguous regions of crates/gam-models/src/fit_orchestration/drivers/spatial_optimization.rs moved verbatim into the sibling files spatial_hyper_dirs.rs, spatial_single_block_caches.rs and spatial_curvature_inference.rs, each include!d at the exact position it was cut from. spatial_optimization.rs is itself include!d into drivers/mod.rs, so every item stays in the same module with the same privacy, and no call site or use line changes. The guard and the census key items by file path, so each moved item reads as a removal from spatial_optimization.rs and an addition in its new file. The move keeps the file under the 10,000-line limit (lead gam-dd, 09-18).",
+    "evidence": "Split gate 1266315 (pool/ad-spec/splitgate.1266315.log): expanding each include! line of the split file (dropping its one comment line) reproduces the parent blob byte for byte (cmp, md5 78ba8cc1b981a80809f7c60b5972487b). Workspace --all-targets check 0 and pyffi 0. The moved and neighbouring gam-models tests give identical per-test verdicts before and after the split (TESTS_IDENTICAL_PER_TEST differing=0). This acknowledgement lists exactly the identities the guard/census reported for that gate."
   }
 ]
