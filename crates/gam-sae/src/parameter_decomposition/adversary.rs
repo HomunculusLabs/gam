@@ -73,8 +73,32 @@
 //! support keeps every control, the region is the single point all-on; it is evaluated natively
 //! and reported exact over that one point. A point evaluation is a counterexample when it
 //! refutes epsilon, and otherwise exact over its one mask.
+//!
+//! # Covering
+//!
+//! [`certify_by_covering`] bounds `sup_{Z_S} F` over sub-boxes `K = prod_c [a_c, b_c]` of the
+//! declared box (#2951 comment 5717715578). With center `m0` and half-width generators
+//! `w_c = ((b_c - a_c) / 2) v_c`,
+//!
+//! ```text
+//! { q(m) - q(m0) : m in K } = { sum_c s_c w_c : s in [-1, 1]^C } = { q'(s') - q'(0) : s' in [-1, 1]^C }
+//! ```
+//!
+//! for the half-width system over the signed box `[-1, 1]^C`. So the cell's gap and radius are
+//! that system's Frank-Wolfe gap and radius at mask 0, and
+//! `sup_K F <= F(m0) + G_K + (L / 2) R_K^2`. The search is depth-first:
+//! * a cell is pruned when its bound is at most epsilon;
+//! * otherwise it splits on the control with the largest first-order decrease of that bound,
+//!   `h_c (|g . v_c| + L R_K |v_c|_2)`, since `dU/dh_c = |g . v_c| + L R_K |v_c|_2`;
+//! * a cell whose split midpoint rounds to an endpoint while its bound still exceeds epsilon is
+//!   unresolved.
+//!
+//! A certified counterexample at a center returns at once. Memory is one interval vector and the
+//! split stack, and the covering is finite through the resolution floor.
 
-use super::moments::{MaskDomain, MaskMomentSystem, MomentGeometryError, MomentVector, WitnessEndpoint};
+use super::moments::{
+    GeneratorPart, MaskDomain, MaskMomentSystem, MomentGeometryError, MomentVector, WitnessEndpoint,
+};
 use super::supports::{
     ComponentSet, EvidenceStatus, EvidenceStatusError, ExactBasis, Extremum, SeparationOracle,
 };
@@ -206,6 +230,8 @@ pub enum AdversaryError {
     Geometry(MomentGeometryError),
     /// The evidence status refused the query's numbers.
     Evidence(EvidenceStatusError),
+    /// A covering needs a stated smoothness constant to bound any cell.
+    MissingCertificate,
 }
 
 impl fmt::Display for AdversaryError {
@@ -239,6 +265,10 @@ impl fmt::Display for AdversaryError {
             ),
             Self::Geometry(error) => write!(f, "moment geometry refused: {error:?}"),
             Self::Evidence(error) => write!(f, "evidence status refused: {error}"),
+            Self::MissingCertificate => write!(
+                f,
+                "a covering needs a stated gradient Lipschitz constant; none is derived for this objective"
+            ),
         }
     }
 }
@@ -375,6 +405,7 @@ impl ControlScales {
             gap,
             gap_roundoff,
             radius,
+            pairing_magnitude,
         })
     }
 
@@ -403,6 +434,9 @@ struct IterateGeometry {
     gap_roundoff: f64,
     /// `R(m)`, rounded up.
     radius: f64,
+    /// `sum_j |g_j| sum_{c free} max(|1 - lower_c|, |1 - upper_c|) |v_cj|`, the magnitude the pairing
+    /// band is taken over.
+    pairing_magnitude: f64,
 }
 
 /// `F(q) + G(q) + (L / 2) R(m)^2`, rounded up, with the roundoff folded into it: the pad
@@ -847,10 +881,271 @@ impl<O: SeparationObjective + ?Sized> SeparationOracle for ZonotopeSeparationOra
     }
 }
 
+/// A Lipschitz covering of `Z_S` by sub-boxes of the declared domain.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CoveringReport {
+    /// The best certified cell center.
+    pub witness: LowerWitness,
+    /// Cells whose bound is at most epsilon.
+    pub pruned_cells: usize,
+    /// Cells at mask resolution whose bound exceeds epsilon.
+    pub unresolved_cells: usize,
+    /// Native evaluations, one per visited cell.
+    pub evaluations: usize,
+    /// UniformBound when every cell is pruned, Counterexample when a center exceeds epsilon,
+    /// otherwise Unresolved with the largest unresolved bound as its upper side.
+    pub status: SeparationStatus,
+}
+
+/// One pending split on the depth-first stack.
+struct SplitFrame {
+    control: usize,
+    parent: (f64, f64),
+    midpoint: f64,
+    right_visited: bool,
+}
+
+/// The half-width system of a cell over the signed unit box.
+fn half_width_system(
+    system: &MaskMomentSystem,
+    cell: &[(f64, f64)],
+) -> Result<(MaskMomentSystem, MaskDomain), AdversaryError> {
+    let generators: Vec<Vec<GeneratorPart>> = cell
+        .iter()
+        .enumerate()
+        .map(|(control, &(lower, upper))| {
+            let half_width = 0.5 * (upper - lower);
+            system
+                .generator(control)
+                .unwrap_or(&[])
+                .iter()
+                .map(|part| GeneratorPart {
+                    block: part.block,
+                    vector: &part.vector * half_width,
+                })
+                .collect()
+        })
+        .collect();
+    let scaled =
+        MaskMomentSystem::new(system.blocks().to_vec(), generators).map_err(AdversaryError::Geometry)?;
+    let signed =
+        MaskDomain::new(vec![(-1.0, 1.0); cell.len()]).map_err(AdversaryError::Geometry)?;
+    Ok((scaled, signed))
+}
+
+/// Bounds `sup_{Z_S} F` by a depth-first Lipschitz covering and classifies it against epsilon.
+///
+/// `kept[c]` pins control `c` at all-on. The objective must state a smoothness constant, since
+/// no cell has a bound without one.
+pub fn certify_by_covering<O>(
+    system: &MaskMomentSystem,
+    domain: &MaskDomain,
+    kept: &[bool],
+    epsilon: f64,
+    objective: &O,
+) -> Result<CoveringReport, AdversaryError>
+where
+    O: SeparationObjective + ?Sized,
+{
+    let controls = system.control_count();
+    for found in [domain.control_count(), kept.len()] {
+        if found != controls {
+            return Err(AdversaryError::Geometry(MomentGeometryError::ControlCount {
+                expected: controls,
+                found,
+            }));
+        }
+    }
+    if !epsilon.is_finite() {
+        return Err(AdversaryError::NonFiniteEpsilon(epsilon));
+    }
+    let stated = objective
+        .smoothness()
+        .ok_or(AdversaryError::MissingCertificate)?;
+    if !(stated.gradient_lipschitz.is_finite() && stated.gradient_lipschitz >= 0.0) {
+        return Err(AdversaryError::InvalidCertificate {
+            gradient_lipschitz: stated.gradient_lipschitz,
+        });
+    }
+    let root = ControlScales::new(system, domain, kept)?;
+    let mut cell: Vec<(f64, f64)> = root
+        .intervals
+        .iter()
+        .zip(kept)
+        .map(|(&interval, &is_kept)| if is_kept { (1.0, 1.0) } else { interval })
+        .collect();
+    let region = SeparationRegion {
+        domain: domain.clone(),
+        kept: kept.to_vec(),
+    };
+    let cell_center = |intervals: &[(f64, f64)]| -> Vec<f64> {
+        intervals
+            .iter()
+            .map(|&(lower, upper)| (lower + 0.5 * (upper - lower)).clamp(lower, upper))
+            .collect()
+    };
+    let mut evaluations = 0;
+    // The root cell is evaluated before the loop, so the best witness always holds a native
+    // evaluation.
+    let root_center = cell_center(&cell);
+    let root_jet = evaluate_checked(objective, &root_center, &mut evaluations)?;
+    let mut best = LowerWitness {
+        mask: root_center.clone(),
+        value: root_jet.value,
+        value_roundoff: root_jet.value_roundoff,
+    };
+    let mut pending = Some((root_center, root_jet));
+    let mut stack: Vec<SplitFrame> = Vec::new();
+    let mut pruned_cells = 0;
+    let mut unresolved_cells = 0;
+    let mut pruned_upper = f64::NEG_INFINITY;
+    let mut pruned_error = 0.0_f64;
+    let mut unresolved_upper = f64::NEG_INFINITY;
+    loop {
+        let (center, jet) = match pending.take() {
+            Some(first) => first,
+            None => {
+                let center = cell_center(&cell);
+                let jet = evaluate_checked(objective, &center, &mut evaluations)?;
+                (center, jet)
+            }
+        };
+        let witness_lower = certified_lower(jet.value, jet.value_roundoff);
+        if witness_lower > certified_lower(best.value, best.value_roundoff) {
+            best = LowerWitness {
+                mask: center.clone(),
+                value: jet.value,
+                value_roundoff: jet.value_roundoff,
+            };
+        }
+        if witness_lower > epsilon {
+            let status = SeparationStatus::counterexample(
+                jet.value,
+                jet.value_roundoff,
+                epsilon,
+                center.clone(),
+            )
+            .map_err(AdversaryError::Evidence)?;
+            return Ok(CoveringReport {
+                witness: LowerWitness {
+                    mask: center,
+                    value: jet.value,
+                    value_roundoff: jet.value_roundoff,
+                },
+                pruned_cells,
+                unresolved_cells,
+                evaluations,
+                status,
+            });
+        }
+        let (scaled, signed) = half_width_system(system, &cell)?;
+        let scales = ControlScales::new(&scaled, &signed, kept)?;
+        let origin = vec![0.0; controls];
+        let mut geometry = scales.geometry(&scaled, &signed, kept, &origin, &jet)?;
+        // The support band covers the stored half-width generators. Forming w_c rounds b - a once
+        // and the product once (the halving is exact), |fl(w) - w| <= gamma_2 |w| per entry, so the
+        // exact cell gap can differ by gamma_2 sum_j |g_j| sum_c |w_cj|: half the pairing magnitude,
+        // which was taken at reach 2. The radius takes the same growth.
+        geometry.gap_roundoff += accumulation_band(2, 0.5 * geometry.pairing_magnitude);
+        geometry.radius *= 1.0 + accumulation_growth(2);
+        let (bound, numerical_error) =
+            smoothness_upper_bound(&jet, &geometry, stated.gradient_lipschitz);
+        if witness_lower > bound {
+            return Err(AdversaryError::CertificateRefuted {
+                witness_lower,
+                bound,
+            });
+        }
+        if bound <= epsilon {
+            pruned_cells += 1;
+            pruned_upper = pruned_upper.max(bound);
+            pruned_error = pruned_error.max(numerical_error);
+        } else {
+            let split = (0..controls)
+                .filter(|&control| !kept[control])
+                .map(|control| {
+                    let (lower, upper) = cell[control];
+                    let half_width = 0.5 * (upper - lower);
+                    let projection: f64 = system
+                        .generator(control)
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|part| part.vector.dot(&jet.moment_gradient.blocks[part.block]))
+                        .sum();
+                    let decrease = half_width
+                        * (projection.abs()
+                            + stated.gradient_lipschitz * geometry.radius * root.generator_norm[control]);
+                    (control, decrease)
+                })
+                .filter(|&(control, decrease)| {
+                    let (lower, upper) = cell[control];
+                    let midpoint = lower + 0.5 * (upper - lower);
+                    decrease > 0.0 && lower < midpoint && midpoint < upper
+                })
+                .max_by(|left, right| left.1.total_cmp(&right.1))
+                .map(|pair| pair.0);
+            match split {
+                Some(control) => {
+                    let (lower, upper) = cell[control];
+                    let midpoint = lower + 0.5 * (upper - lower);
+                    stack.push(SplitFrame {
+                        control,
+                        parent: (lower, upper),
+                        midpoint,
+                        right_visited: false,
+                    });
+                    cell[control] = (lower, midpoint);
+                    continue;
+                }
+                None => {
+                    unresolved_cells += 1;
+                    unresolved_upper = unresolved_upper.max(bound);
+                }
+            }
+        }
+        // Backtrack to the next unvisited right child.
+        loop {
+            match stack.last_mut() {
+                None => break,
+                Some(frame) if !frame.right_visited => {
+                    frame.right_visited = true;
+                    cell[frame.control] = (frame.midpoint, frame.parent.1);
+                    break;
+                }
+                Some(frame) => {
+                    cell[frame.control] = frame.parent;
+                    stack.pop();
+                }
+            }
+        }
+        if stack.is_empty() {
+            break;
+        }
+    }
+    let status = if unresolved_cells == 0 {
+        SeparationStatus::uniform_bound(pruned_upper, pruned_error, region)
+    } else {
+        SeparationStatus::unresolved(
+            certified_lower(best.value, best.value_roundoff),
+            unresolved_upper,
+            Extremum::Supremum,
+            Some(best.mask.clone()),
+            region,
+        )
+    };
+    Ok(CoveringReport {
+        witness: best,
+        pruned_cells,
+        unresolved_cells,
+        evaluations,
+        status: status.map_err(AdversaryError::Evidence)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parameter_decomposition::moments::{GeneratorPart, MomentBlock};
+    use crate::parameter_decomposition::moments::MomentBlock;
     use crate::parameter_decomposition::supports::{
         CardinalityCode, FailureHypergraph, minimum_code_support,
     };
@@ -1327,5 +1622,77 @@ mod tests {
             separate(&fixture.system, &fixture.domain, &[true; 5], epsilon, &[1.0; 5], &fixture)
                 .expect("all kept");
         assert!(!ascent.status.certifies_at_most(epsilon));
+    }
+
+    /// `F(q) = (27/4) q (1 - q)^2` on one control, `q = 1 - m`, with its derived smoothness constant:
+    /// `F''(q) = (27/4)(6 q - 4)`, so `|F''| <= 27` on `[0, 1]`, attained at `q = 0`.
+    struct CertifiedPeak;
+
+    impl SeparationObjective for CertifiedPeak {
+        fn evaluate(&self, mask: &[f64]) -> Result<ObjectiveJet, String> {
+            let deletion = 1.0 - mask[0];
+            // The same expanded-term bounds as InteriorPeak.
+            Ok(ObjectiveJet {
+                value: InteriorPeak::value(deletion),
+                value_roundoff: accumulation_band(
+                    8,
+                    6.75 * deletion * (1.0 + deletion) * (1.0 + deletion),
+                ),
+                moment_gradient: MomentVector {
+                    blocks: vec![array![6.75 * (1.0 - deletion) * (1.0 - 3.0 * deletion)]],
+                },
+                gradient_roundoff: accumulation_band(
+                    8,
+                    6.75 * (1.0 + deletion) * (1.0 + 3.0 * deletion),
+                ),
+            })
+        }
+
+        fn smoothness(&self) -> Option<SmoothnessCertificate> {
+            Some(SmoothnessCertificate {
+                gradient_lipschitz: 27.0,
+                derivation: "|F''(q)| = (27/4)|6q - 4| <= 27 on [0, 1]".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn covering_certifies_just_above_the_interior_supremum_2951() {
+        let system = system_from_rows(&array![[1.0]]);
+        let domain = unit_domain(1);
+        let report =
+            certify_by_covering(&system, &domain, &[false], 1.02, &CertifiedPeak).expect("covering");
+        assert!(matches!(report.status, EvidenceStatus::UniformBound { .. }));
+        assert_eq!(report.unresolved_cells, 0);
+        let upper = report.status.upper_bound().expect("a uniform bound");
+        // The exact supremum is 1: a valid bound covers it, and the certificate sits at or below
+        // epsilon.
+        assert!(upper >= 1.0 && upper <= 1.02, "bound {upper}");
+        assert!(report.pruned_cells >= 2);
+    }
+
+    #[test]
+    fn covering_refutes_just_below_the_interior_supremum_and_never_certifies_it_2951() {
+        let system = system_from_rows(&array![[1.0]]);
+        let domain = unit_domain(1);
+        let report =
+            certify_by_covering(&system, &domain, &[false], 0.98, &CertifiedPeak).expect("covering");
+        assert!(report.status.refutes_at_most(0.98));
+        assert!(!report.status.certifies_at_most(0.98));
+        let live = report.witness.mask[0];
+        assert!(live > 0.0 && live < 1.0, "interior refuting center, got {live}");
+    }
+
+    #[test]
+    fn covering_refuses_an_objective_without_a_stated_constant_2951() {
+        let system = system_from_rows(&Array2::<f64>::eye(3));
+        let domain = unit_domain(3);
+        assert_eq!(
+            certify_by_covering(&system, &domain, &[false; 3], 1.02, &InteriorPeak),
+            Err(AdversaryError::MissingCertificate)
+        );
+        // Positive control: the certified one-control peak is accepted.
+        let single = system_from_rows(&array![[1.0]]);
+        assert!(certify_by_covering(&single, &unit_domain(1), &[false], 1.02, &CertifiedPeak).is_ok());
     }
 }
