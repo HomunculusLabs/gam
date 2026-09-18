@@ -545,7 +545,12 @@ impl CompressedLaw {
         let mut audited: Vec<(DesignPoint, f64, CompressionCertificate)> =
             sample.iter().map(|&i| certificates[i]).collect();
         if slopes.0.is_finite() {
-            let tail = [slopes.0, slopes.1]
+            // A time-constant slope makes both ends one slope: audit it once.
+            let mut tail_slopes = vec![slopes.0];
+            if slopes.1 != slopes.0 {
+                tail_slopes.push(slopes.1);
+            }
+            let tail = tail_slopes
                 .into_iter()
                 .flat_map(|slope| AUDIT_TAIL_Q.iter().map(move |&q| DesignPoint { q, slope }))
                 .collect::<Vec<_>>()
