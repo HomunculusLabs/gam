@@ -1062,5 +1062,13 @@
     "reason": "Stale payload-version pin, fixed at its root: EXPECTED_MODEL_PAYLOAD_VERSION = 16 was a hand copy of MODEL_PAYLOAD_VERSION that stayed at 16 through the bumps to 17, 18, 19 and 20. The saved-model schema assert now reads MODEL_PAYLOAD_VERSION (u64::from), so no bump can leave it stale, and the literal is deleted. Its only use was that assert.",
     "evidence": "git grep -n -w EXPECTED_MODEL_PAYLOAD_VERSION at ac69e5831b4db7771badfa9e5a6c3f318d8e93b7 finds only tests/pyffi/misc/stateful_saved_model_sync.rs:24 (the declaration) and :73 (the one use), a test_scoped const with production_occurrences 0 per the guard in gate dy5 i2955-pin-a. sw4r job 1281277: at main 1aac5b051f two stateful_saved_model_sync tests fail at :66 (left 99, right 96); with this file all five pass. Gate dy5 i2955-pin-a at ac69e5831b: workspace --all-targets check RC 0, gam-pyffi check RC 0.",
     "base": "ac69e5831b4db7771badfa9e5a6c3f318d8e93b7"
+  },
+  {
+    "base": "1a7f4ea91087f2d1fabc987b240d44a909175a4a",
+    "items": [
+      "crates/gam-models/src/survival/construction.rs:fn:gompertz_components"
+    ],
+    "reason": "#2469: the function-local gompertz_components inside the latent survival baseline-offset builder restated the module's gompertz_hazard_components line for line, including its |shape| < 1e-10 series pivot, so the two could only drift apart. gompertz_hazard_components now evaluates H_G = rate·t·expm1(x)/x with no series at all (that quotient does not cancel for any x ≠ 0), and the builder's two calls use it directly.",
+    "evidence": "At base 5890931cf86ea4de6f978659c6bf2e29328a4187, git grep -n -w gompertz_components finds its declaration at crates/gam-models/src/survival/construction.rs:4347, its only two calls at :4409 and :4410 inside the same builder, and one comment at :2545. This commit rewrites both calls to gompertz_hazard_components(entry|exit, rate, shape) and rewrites the comment."
   }
 ]

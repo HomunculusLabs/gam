@@ -2499,10 +2499,10 @@ pub fn center_survival_time_designs_at_anchor(
 /// The `eta`-channel derivatives are closed-form for every branch.  The
 /// `o_D`-channel derivatives use the log-derivative identity
 /// `∂o_D/∂θ = o_D · ∂log(o_D)/∂θ` which is more numerically stable near
-/// the small-shape limit (shape·t → 0).  Near shape = 0 we fall back to
-/// a third-order Taylor expansion with the same 1e-10 pivot that
-/// `evaluate_survival_baseline` uses, keeping the value/derivative pair
-/// continuous and agreement with the linear-hazard limit exact at shape=0.
+/// the small-shape limit (shape·t → 0).  Near `shape·t = 0` the shape channel
+/// falls back to a Taylor expansion, switched on `shape·t` where its error
+/// crosses the closed form's (`gompertz_offset_shape_series_switch`), keeping
+/// agreement with the linear-hazard limit exact at shape = 0.
 pub fn baseline_offset_theta_partials(
     age: f64,
     cfg: &SurvivalBaselineConfig,
@@ -2540,9 +2540,9 @@ pub fn baseline_offset_theta_partials(
             //     ∂eta/∂shape   = −1/shape + t·E/(E−1)
             //     ∂log(o_D)/∂shape = 1/shape − t/(E−1)
             //     ∂o_D/∂shape  = o_D · ∂log(o_D)/∂shape
-            //   Near shape=0 both numerators are 1/shape cancellations. Use
-            //   Taylor expansions with the same 1e-10 pivot that
-            //   gompertz_components uses in evaluate_survival_baseline.
+            //   Near shape·t = 0 both numerators are 1/shape cancellations, so
+            //   `gompertz_shape_derivatives` switches to their Taylor expansions
+            //   at the derived crossing of the two routes' errors.
             let (d_eta_d_shape, d_od_d_shape) = gompertz_shape_derivatives(age, shape);
             Ok(Some(vec![(1.0, 0.0), (d_eta_d_shape, d_od_d_shape)]))
         }
@@ -2818,25 +2818,63 @@ pub fn marginal_slope_baseline_chain_rule_gradient(
     )
 }
 
-/// Shared Gompertz hazard components `(H_G(t), h_G(t))`.
-/// Mirrors the private helper in `evaluate_survival_baseline` with the
-/// same 1e-10 small-shape pivot.
+/// Shared Gompertz hazard components `(H_G(t), h_G(t))`, with
+/// `H_G = (rate/shape)·(e^{shape·t} − 1)` and `h_G = rate·e^{shape·t}`.
+///
+/// `H_G` is evaluated as `rate·t·expm1(x)/x` with `x = shape·t`: a quotient of two
+/// values each correct to rounding, so it carries no cancellation at any `x ≠ 0`
+/// and needs no small-shape series. Its removable singularity at `x = 0` takes the
+/// limit `rate·t`.
 #[inline]
 fn gompertz_hazard_components(age: f64, rate: f64, shape: f64) -> (f64, f64) {
-    if shape.abs() < 1e-10 {
-        // Taylor at shape=0: H_G(t) = rate·t·(1 + shape·t/2 + (shape·t)²/6),
-        // h_G(t) = rate·(1 + shape·t + (shape·t)²/2).
-        let x = shape * age;
-        (
-            rate * age * (1.0 + 0.5 * x + x * x / 6.0),
-            rate * (1.0 + x + 0.5 * x * x),
-        )
-    } else {
-        let shape_age = shape * age;
-        let cumulative_hazard = (rate / shape) * shape_age.exp_m1();
-        let instant_hazard = rate * shape_age.exp();
-        (cumulative_hazard, instant_hazard)
-    }
+    let x = shape * age;
+    let expm1_ratio = if x == 0.0 { 1.0 } else { x.exp_m1() / x };
+    (rate * age * expm1_ratio, rate * x.exp())
+}
+
+/// `|x|` below which the three-term series of `(x·eˣ − expm1(x))/x²` is the more
+/// accurate route to `∂H_G/∂shape = rate·t²·(x·eˣ − expm1(x))/x²`.
+///
+/// The closed form `age·eˣ·shape − expm1(x)` subtracts two terms of size `|x|` from
+/// a result `≈ x²/2`. They carry five roundings of `u` between them: `exp`, the two
+/// products, `expm1`, and the rounding of `x = shape·age`, which `expm1` sees but the
+/// unrounded product `age·shape` does not. That is a relative error of
+/// `10u/|x| = 5ε/|x|`. The series `1/2 + x/3 + x²/8` drops `x³/30` of `1/2`, a
+/// relative `x³/15`. The two cross at `x⁴ = 75ε`, about `3.6e-4`, where both err by
+/// about `3e-12`.
+fn gompertz_first_shape_series_switch() -> f64 {
+    // Derived (#2469): the error crossing `(75ε)^{1/4}` stated above.
+    (75.0 * f64::EPSILON).sqrt().sqrt()
+}
+
+/// `|x|` below which the series of `gompertz_shape_derivatives` is the more
+/// accurate route.
+///
+/// Its worst output is `∂η/∂shape = −1/shape + t·eˣ/expm1(x) = t·(1/2 + x/12 −
+/// x³/720 + …)`. The closed form subtracts two terms of size `t/|x|` from a result
+/// `≈ t/2`. They carry six roundings of `u` between them: `1/shape`, `exp`, `expm1`,
+/// the product and the quotient, and the rounding of `x`, which the second term sees
+/// through `1/x` and the first does not. That is a relative error of
+/// `12u/|x| = 6ε/|x|`. The series `1/2 + x/12` drops `x³/720` of `1/2`, a relative
+/// `x³/360`. The two cross at `x⁴ = 2160ε`, about `8.3e-4`, where both err by about
+/// `1.6e-12`. There the other outputs err by no more. `∂log(o_D)/∂shape` carries four
+/// roundings, `4ε/|x|` against the same `x³/360`, and `o_D` carries no cancellation.
+fn gompertz_offset_shape_series_switch() -> f64 {
+    // Derived (#2469): the error crossing `(2160ε)^{1/4}` stated above.
+    (2160.0 * f64::EPSILON).sqrt().sqrt()
+}
+
+/// `|x|` below which the three-term series of `∂²H_G/∂shape² = rate·t³·φ(x)`,
+/// `φ(x) = 1/3 + x/4 + x²/10 + x³/36 + …`, is the more accurate route.
+///
+/// The closed form `t²·eˣ/shape − 2·(x·eˣ − expm1(x))/shape³` subtracts two terms of
+/// size `t³/|x|`. The second carries the first derivative's numerator, whose rounding
+/// of about `3u·|x|` is divided by `x³`, so the difference `≈ t³/3` errs by a relative
+/// `18u/x² = 9ε/x²`. The series drops `x³/36` of `1/3`, a relative `x³/12`. The two
+/// cross at `x⁵ = 108ε`, about `1.9e-3`, where both err by about `6e-10`.
+fn gompertz_second_shape_series_switch() -> f64 {
+    // Derived (#2469): the error crossing `(108ε)^{1/5}` stated above.
+    (108.0 * f64::EPSILON).powf(0.2)
 }
 
 /// Partials of `(H_G(t), h_G(t))` with respect to the shape parameter.
@@ -2863,10 +2901,9 @@ fn gompertz_cumulative_shape_derivative(age: f64, rate: f64, shape: f64) -> (f64
     // governed by the dimensionless product x = shape·age, NOT by `shape`
     // alone. Pivoting on `shape < 1e-10` ignored `age`: for large ages a small
     // shape still yields a small x where the catastrophic cancellation has
-    // already corrupted the difference. Pivot on x instead; the 3-term Taylor
-    // (through O(x²)) is accurate to <1e-9 for |x| < 1e-4, and the exact branch
-    // is clean above it.
-    let dhg_dshape = if x.abs() < 1e-4 {
+    // already corrupted the difference. Pivot on x instead, at the crossing of the
+    // two routes' errors (`gompertz_first_shape_series_switch`).
+    let dhg_dshape = if x.abs() < gompertz_first_shape_series_switch() {
         let t = age;
         // Truncated to O(x³): t²/2 + x·t²/3 + x²·t²/8
         rate * t * t * (0.5 + x / 3.0 + x * x / 8.0)
@@ -2886,7 +2923,9 @@ fn gompertz_cumulative_shape_derivative(age: f64, rate: f64, shape: f64) -> (f64
 /// helper only covers the shape channel.
 #[inline]
 fn gompertz_shape_derivatives(age: f64, shape: f64) -> (f64, f64) {
-    if shape.abs() < 1e-10 {
+    // The closed forms below cancel in `x = shape·t`, not in `shape` alone, so the
+    // pivot is on `x`, at the crossing of the two routes' errors.
+    if (shape * age).abs() < gompertz_offset_shape_series_switch() {
         // Closed-form limits from the series t·E/(E−1) = 1/x + 1/2 + x/12 + ...
         // with E = e^x, x = shape·t:
         //   ∂eta/∂shape  = −1/shape + t·E/(E−1)
@@ -3197,11 +3236,10 @@ pub fn evaluate_survival_baseline(
         ValidatedBaselineTarget::Gompertz { rate, shape } => {
             let (h, inst) = gompertz_hazard_components(age, rate, shape);
             if h <= 0.0 || !h.is_finite() {
-                return Err(if shape.abs() < 1e-10 {
-                    "invalid gompertz baseline at near-zero shape".to_string()
-                } else {
-                    "gompertz baseline produced non-positive cumulative hazard".to_string()
-                });
+                return Err(format!(
+                    "gompertz baseline produced a non-positive or non-finite cumulative hazard \
+                     {h:e} at age {age:e} (rate {rate:e}, shape {shape:e})"
+                ));
             }
             let derivative = inst / h;
             Ok((h.ln(), derivative))
@@ -3436,24 +3474,20 @@ fn gompertz_cumulative_shape_second_derivative(age: f64, rate: f64, shape: f64) 
     // x=1e-9 gives a ~98% relative error; x=1e-10 a ~9700% error). The old
     // `shape < 1e-10` pivot ignored `age` and so routed those small-x cases
     // through the cancelling exact form, corrupting the marginal-slope baseline
-    // Hessian near small shape. Pivot on x with a wider threshold than the
-    // first derivative: the 3-term Taylor (through O(x²)) holds to <1e-8 for
-    // |x| < 1e-3, and the exact branch is clean above it.
-    if x.abs() < 1e-3 {
+    // Hessian near small shape. Pivot on x, at the crossing of the two routes'
+    // errors (`gompertz_second_shape_series_switch`). `∂²h_G/∂shape² = rate·t²·eˣ`
+    // carries no cancellation, so it takes the closed form on both sides.
+    let e = x.exp();
+    let d2_instant = rate * age * age * e;
+    let d2_cumulative = if x.abs() < gompertz_second_shape_series_switch() {
         let t = age;
-        (
-            rate * t * t * t * (1.0 / 3.0 + x / 4.0 + x * x / 10.0),
-            rate * t * t * (1.0 + x + 0.5 * x * x),
-        )
+        rate * t * t * t * (1.0 / 3.0 + x / 4.0 + x * x / 10.0)
     } else {
-        let e = x.exp();
         let em1 = x.exp_m1();
         let n = shape * age * e - em1;
-        (
-            rate * (age * age * e / shape - 2.0 * n / (shape * shape * shape)),
-            rate * age * age * e,
-        )
-    }
+        rate * (age * age * e / shape - 2.0 * n / (shape * shape * shape))
+    };
+    (d2_cumulative, d2_instant)
 }
 
 // ---------------------------------------------------------------------------
@@ -4344,26 +4378,6 @@ pub(crate) fn build_latent_survival_baseline_offsets(
         );
     }
 
-    fn gompertz_components(age: f64, rate: f64, shape: f64) -> (f64, f64) {
-        if shape.abs() < 1e-10 {
-            // Taylor at shape=0 matching `gompertz_hazard_components`:
-            //   H_G(t) = rate·t·(1 + (shape·t)/2 + (shape·t)²/6)
-            //   h_G(t) = rate·(1 + shape·t + (shape·t)²/2)
-            // Dropping the higher-order `shape*t` corrections silently
-            // diverges this helper from its sibling for non-zero shape near
-            // the cutoff and gives inconsistent loaded-vs-unloaded offsets.
-            let x = shape * age;
-            return (
-                rate * age * (1.0 + 0.5 * x + x * x / 6.0),
-                rate * (1.0 + x + 0.5 * x * x),
-            );
-        }
-        let shape_age = shape * age;
-        let cumulative_hazard = (rate / shape) * shape_age.exp_m1();
-        let instant_hazard = rate * shape_age.exp();
-        (cumulative_hazard, instant_hazard)
-    }
-
     let n = age_entry.len();
 
     // Per-row 6-tuple is independent. Evaluate in parallel into a Vec and then
@@ -4406,8 +4420,8 @@ pub(crate) fn build_latent_survival_baseline_offsets(
                     let makeham = cfg.makeham.ok_or_else(|| {
                         "gompertz-makeham latent survival is missing baseline makeham".to_string()
                     })?;
-                    let (loaded_entry, _) = gompertz_components(entry, rate, shape);
-                    let (loaded_exit, loaded_hazard) = gompertz_components(exit, rate, shape);
+                    let (loaded_entry, _) = gompertz_hazard_components(entry, rate, shape);
+                    let (loaded_exit, loaded_hazard) = gompertz_hazard_components(exit, rate, shape);
                     if !(loaded_entry.is_finite()
                         && loaded_entry > 0.0
                         && loaded_exit.is_finite()
@@ -5073,7 +5087,7 @@ mod tests {
         SurvivalLikelihoodMode::LatentBinary,
     ];
 
-    use super::{SURVIVAL_TIME_FLOOR,SurvivalBaselineConfig, SurvivalBaselineTarget, SurvivalLikelihoodMode, SurvivalMarginalSlopeFrozenOffsetChart, SurvivalTimeBasisConfig, baseline_chain_rule_gradient, baseline_offset_theta_partials, build_survival_marginal_slope_baseline_geometry, build_survival_marginal_slope_baseline_offsets, build_survival_time_basis, build_survival_timewiggle_from_baseline, evaluate_survival_baseline, evaluate_survival_marginal_slope_baseline, fitted_weibull_baseline_from_linear_time_beta, gompertz_cumulative_shape_derivative, gompertz_cumulative_shape_second_derivative, gompertz_hazard_components, marginal_slope_baseline_chain_rule_gradient, marginal_slope_baseline_offset_theta_partials, resolve_survival_time_anchor_for_mode, survival_baseline_config_from_theta, survival_baseline_theta_from_config, survival_data_is_left_truncated, survival_earliest_entry_time_anchor, survival_robust_interior_time_anchor, validate_survival_time_anchor_override};
+    use super::{SURVIVAL_TIME_FLOOR,SurvivalBaselineConfig, SurvivalBaselineTarget, SurvivalLikelihoodMode, SurvivalMarginalSlopeFrozenOffsetChart, SurvivalTimeBasisConfig, baseline_chain_rule_gradient, baseline_offset_theta_partials, build_survival_marginal_slope_baseline_geometry, build_survival_marginal_slope_baseline_offsets, build_survival_time_basis, build_survival_timewiggle_from_baseline, evaluate_survival_baseline, evaluate_survival_marginal_slope_baseline, fitted_weibull_baseline_from_linear_time_beta, gompertz_cumulative_shape_derivative, gompertz_cumulative_shape_second_derivative, gompertz_first_shape_series_switch, gompertz_offset_shape_series_switch, gompertz_second_shape_series_switch, gompertz_shape_derivatives, gompertz_hazard_components, marginal_slope_baseline_chain_rule_gradient, marginal_slope_baseline_offset_theta_partials, resolve_survival_time_anchor_for_mode, survival_baseline_config_from_theta, survival_baseline_theta_from_config, survival_data_is_left_truncated, survival_earliest_entry_time_anchor, survival_robust_interior_time_anchor, validate_survival_time_anchor_override};
     use super::optimize_survival_baseline_config_with_gradient_only;
     use super::{
         center_survival_time_designs_at_anchor, evaluate_survival_time_basis_row,
@@ -6591,7 +6605,7 @@ mod tests {
     ///
     /// `steps` is per-θ-component: the caller picks the step size appropriate
     /// for each channel. Gompertz / Gompertz–Makeham need a tiny step on the
-    /// shape channel near the Taylor pivot |shape| < 1e-10 (so θ±h stays on
+    /// shape channel near the Taylor pivot on `shape·t` (so θ±h stays on
     /// the same branch), but a normal-scale step on log_rate / log_makeham;
     /// using the tiny shape-step on every channel corrupts the log_rate
     /// channel with `eps/(2h)` cancellation noise and has nothing to do with
@@ -6645,8 +6659,8 @@ mod tests {
     #[test]
     fn gompertz_offset_partials_match_central_diff() {
         // Several (rate, shape, age) combinations spanning the small-shape
-        // Taylor branch (|shape| < 1e-10) and the normal branch
-        // (shape >> 1e-10), plus sign-reversed shape.
+        // Taylor branch (`shape·t` below its switch) and the closed-form branch,
+        // plus sign-reversed shape.
         let cases = [
             (0.5_f64, 0.01_f64, 30.0_f64),
             (0.2, 0.05, 60.0),
@@ -6726,40 +6740,94 @@ mod tests {
 
     #[test]
     fn gompertz_offset_partials_small_shape_taylor_agrees_with_direct_branch() {
-        // Both branches of gompertz_shape_derivatives should agree to high
-        // precision at shape = 1e-10 + epsilon on the direct side vs
-        // shape = 1e-10 - epsilon on the Taylor side. Here we spot-check
-        // the continuity at the branch cutoff: shape slightly above and
-        // slightly below 1e-10 must give values within O(shape²·t²)
-        // (the Taylor truncation error).
+        // `gompertz_shape_derivatives` switches from its Taylor series to the closed
+        // form at `|shape·t| = gompertz_offset_shape_series_switch()`, where the two
+        // routes' error bounds cross at `6ε/|x|`, about `1.6e-12`. Straddle the switch
+        // on both signs and hold both sides to that bound against the series carried
+        // two orders further, whose own truncation at these `x` is below `1e-20`.
         let age = 25.0;
-        let rate = 0.4;
-        let cfg_taylor = SurvivalBaselineConfig {
+        let t = age;
+        let switch = gompertz_offset_shape_series_switch();
+        let bound = 6.0 * f64::EPSILON / switch + 32.0 * f64::EPSILON;
+        for factor in [0.5, 0.9, 1.1, 2.0, -0.9, -1.1] {
+            let x = factor * switch;
+            let (d_eta, d_od) = gompertz_shape_derivatives(age, x / age);
+            let d_eta_ref = t * (0.5 + x / 12.0 - x.powi(3) / 720.0 + x.powi(5) / 30240.0);
+            let dlog_ref = t * (0.5 - x / 12.0 + x.powi(3) / 720.0 - x.powi(5) / 30240.0);
+            let od_ref =
+                (1.0 + x / 2.0 + x * x / 12.0 - x.powi(4) / 720.0 + x.powi(6) / 30240.0) / t;
+            let d_od_ref = od_ref * dlog_ref;
+            let eta_error = ((d_eta - d_eta_ref) / d_eta_ref).abs();
+            let od_error = ((d_od - d_od_ref) / d_od_ref).abs();
+            assert!(
+                eta_error <= bound,
+                "x = {x:e}: ∂η/∂shape relative error {eta_error:e} > {bound:e}"
+            );
+            assert!(
+                od_error <= bound,
+                "x = {x:e}: ∂o_D/∂shape relative error {od_error:e} > {bound:e}"
+            );
+        }
+        // The public entry reaches the same helper.
+        let cfg = SurvivalBaselineConfig {
             target: SurvivalBaselineTarget::Gompertz,
             scale: None,
-            shape: Some(0.5e-10),
-            rate: Some(rate),
+            shape: Some(0.9 * switch / age),
+            rate: Some(0.4),
             makeham: None,
         };
-        let cfg_direct = SurvivalBaselineConfig {
-            target: SurvivalBaselineTarget::Gompertz,
-            scale: None,
-            shape: Some(2.0e-10),
-            rate: Some(rate),
-            makeham: None,
+        let partials = baseline_offset_theta_partials(age, &cfg).expect("ok").expect("nl");
+        assert_eq!(partials[1], gompertz_shape_derivatives(age, 0.9 * switch / age));
+    }
+
+    #[test]
+    fn gompertz_hazard_shape_series_switches_hold_their_derived_errors() {
+        // `∂H_G/∂shape = rate·t²·φ₁(x)` and `∂²H_G/∂shape² = rate·t³·φ₂(x)` switch to
+        // their three-term series below the crossings of the two routes' error
+        // bounds: `5ε/|x|` against `x³/15` at `(75ε)^{1/4}`, and `9ε/x²` against
+        // `x³/12` at `(108ε)^{1/5}`. Straddle each switch on both signs and hold both
+        // sides to the bound there, against each series carried eight more orders.
+        let (age, rate) = (30.0_f64, 0.7_f64);
+        let t = age;
+        let phi_1 = |x: f64| {
+            (0..11).fold(0.0, |sum, k| sum + (k + 1) as f64 * x.powi(k) / factorial(k + 2))
         };
-        let p_t = baseline_offset_theta_partials(age, &cfg_taylor)
-            .expect("ok")
-            .expect("nl");
-        let p_d = baseline_offset_theta_partials(age, &cfg_direct)
-            .expect("ok")
-            .expect("nl");
-        // ∂eta/∂shape at shape≈0 should be t/2 = 12.5 on both sides.
-        assert_close(p_t[1].0, 12.5, 1e-8, "taylor ∂eta/∂shape near 0");
-        assert_close(p_d[1].0, 12.5, 1e-8, "direct ∂eta/∂shape near 0");
-        // ∂o_D/∂shape at shape≈0 should be 1/2.
-        assert_close(p_t[1].1, 0.5, 1e-8, "taylor ∂o_D/∂shape near 0");
-        assert_close(p_d[1].1, 0.5, 1e-8, "direct ∂o_D/∂shape near 0");
+        let phi_2 = |x: f64| {
+            (0..11).fold(0.0, |sum, j| {
+                sum + ((j + 2) * (j + 1)) as f64 * x.powi(j) / factorial(j + 3)
+            })
+        };
+        let first = gompertz_first_shape_series_switch();
+        let first_bound = 5.0 * f64::EPSILON / first + 32.0 * f64::EPSILON;
+        let second = gompertz_second_shape_series_switch();
+        let second_bound = 9.0 * f64::EPSILON / (second * second) + 32.0 * f64::EPSILON;
+        for factor in [0.5, 0.9, 1.1, 2.0, -0.9, -1.1] {
+            let x = factor * first;
+            let (d_cum, _) = gompertz_cumulative_shape_derivative(age, rate, x / age);
+            let reference = rate * t * t * phi_1(x);
+            let error = ((d_cum - reference) / reference).abs();
+            assert!(
+                error <= first_bound,
+                "x = {x:e}: ∂H_G/∂shape relative error {error:e} > {first_bound:e}"
+            );
+
+            let x = factor * second;
+            let (d2_cum, d2_inst) =
+                gompertz_cumulative_shape_second_derivative(age, rate, x / age);
+            let reference = rate * t * t * t * phi_2(x);
+            let error = ((d2_cum - reference) / reference).abs();
+            assert!(
+                error <= second_bound,
+                "x = {x:e}: ∂²H_G/∂shape² relative error {error:e} > {second_bound:e}"
+            );
+            // `rate·t²·eˣ` carries no cancellation on either side of the switch.
+            let instant = rate * t * t * x.exp();
+            assert!(((d2_inst - instant) / instant).abs() <= 8.0 * f64::EPSILON);
+        }
+    }
+
+    fn factorial(n: i32) -> f64 {
+        (1..=n).fold(1.0, |product, k| product * k as f64)
     }
 
     // ----------------------------------------------------------------------
