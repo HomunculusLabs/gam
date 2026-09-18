@@ -25,6 +25,9 @@ const EXPECTED_SAVED_MODEL_ROOT_FIELD_COUNT: usize = 2;
 // Any payload-field or skip-rule change requires a fresh enumeration and a
 // stateful-sync audit before the key-count pin below changes: the count is
 // what detects a payload field the stateful sync has not been audited for.
+// Keep it a literal. A count derived from the struct would pass whenever a field
+// is added, and this failure is what forces the audit, so the literal is the
+// control.
 //
 // The schema version is not pinned. The assert reads `MODEL_PAYLOAD_VERSION`,
 // so a saved model must record the version this binary writes. A literal copy

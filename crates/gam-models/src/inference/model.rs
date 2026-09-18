@@ -98,12 +98,22 @@ const EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION: u32 = 19;
 /// is the inference block's redundant covariance copies (#2955).
 const COVARIANCE_COPIES_PAYLOAD_VERSION: u32 = 18;
 
+/// Every payload version this binary reads: its own, and each older schema
+/// whose only differences it reads through. A payload written at any other
+/// version is refused by name (`payload_version_mismatch`). Callers that need a
+/// refused or an accepted version read it from here rather than offsetting
+/// [`MODEL_PAYLOAD_VERSION`], because a bump that keeps its predecessor
+/// readable changes which offsets are refused.
+pub const READABLE_PAYLOAD_VERSIONS: [u32; 4] = [
+    MODEL_PAYLOAD_VERSION,
+    RHO_CERTIFICATE_TOKENS_PAYLOAD_VERSION,
+    EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION,
+    COVARIANCE_COPIES_PAYLOAD_VERSION,
+];
+
 /// Whether this binary reads a payload written at `version`.
 fn payload_version_is_readable(version: u32) -> bool {
-    version == MODEL_PAYLOAD_VERSION
-        || version == RHO_CERTIFICATE_TOKENS_PAYLOAD_VERSION
-        || version == EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION
-        || version == COVARIANCE_COPIES_PAYLOAD_VERSION
+    READABLE_PAYLOAD_VERSIONS.contains(&version)
 }
 
 /// Coefficient parameterization of a saved transformation-normal (CTN) fit.
@@ -7303,7 +7313,12 @@ mod tests {
                 lambdas: Array1::zeros(0),
             },
         ]);
-        let payload = marginal_slope_payload(COVARIANCE_COPIES_PAYLOAD_VERSION - 1, fit);
+        let oldest_readable = READABLE_PAYLOAD_VERSIONS
+            .iter()
+            .copied()
+            .min()
+            .expect("this binary reads at least its own payload version");
+        let payload = marginal_slope_payload(oldest_readable - 1, fit);
 
         let err = FittedModel::from_payload(payload)
             .saved_prediction_runtime()
