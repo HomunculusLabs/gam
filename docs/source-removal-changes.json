@@ -189,5 +189,20 @@
     ],
     "reason": "#2946 (fr-kernel): one owner for the bounded left-tail Mills ratios and for the rounding of phi. The ratios move to gam_math::probability::normal_left_tail_ratios. Its bounds are derived without libm: at or below -4 from the Laplace continued fraction with the consecutive-convergent bracket, and on (-4, 0] from positive series in running-error double-double (gam_math::double_double), instead of resting on erfc's measured ulp. density_rounding becomes gam_math::probability::normal_pdf_rounding, which cites libm 0.2.16's exp error analysis and pins the version. UNIT_ROUNDOFF is read from gam_math::roundoff.",
     "evidence": "FILL AT GATE: source_removal_guard.py identities at the base, gate job ids, test counts. The base field is a placeholder: .git/sw/ledger-append.py overwrites every entry's base with the attempt's parent (no 'keep' argument)."
+  },
+  {
+    "base": "c098f269f3abb5a23dd92b00f47196f42e3fd3f8",
+    "items": [
+      "crates/gam-pyffi/src/manifold/geometry_ffi.rs:fn:identifiable_factor_log_evidence",
+      "crates/gam-sae/src/identifiability.rs:fn:identifiable_factor_evidence_rejects_unbounded_zero_residual",
+      "crates/gam-sae/src/identifiability.rs:fn:identifiable_factor_evidence_scores_one_converged_fit",
+      "crates/gam-sae/src/identifiability.rs:fn:identifiable_factor_log_evidence",
+      "crates/gam-solve/src/inference/residual_factor.rs:fn:log_evidence",
+      "crates/gam-solve/src/inference/residual_factor.rs:fn:naive_penalized_log_evidence",
+      "crates/gam-solve/src/inference/residual_factor.rs:fn:penalized_log_evidence",
+      "crates/gam-solve/src/inference/residual_factor.rs:fn:penalized_log_evidence_with_band"
+    ],
+    "reason": "#2946 T5 (Stage A census): three heuristic scores that were named as evidence are renamed to what they are, with no value change. StructuredResidualModel::log_evidence and its helpers compute the Gaussian log-likelihood minus the Schwarz penalty (-BIC/2) and become bic_penalized_log_likelihood / gaussian_bic_log_likelihood[_with_band]. identifiable_factor_log_evidence computes -1/2 n log(RSS/n) - 1/2 penalty, a penalized profile likelihood with no log-determinant or Occam term, and becomes identifiable_factor_profile_log_likelihood, with its two tests renamed to match.",
+    "evidence": "At origin/main ff77e70e78, git grep on lane sw2c finds StructuredResidualModel::log_evidence called only in residual_factor.rs (the rank ladder, is_finite and its tests) and crates/gam-sae/src/manifold/fit_entry.rs:1782. penalized_log_evidence, penalized_log_evidence_with_band and naive_penalized_log_evidence occur only in residual_factor.rs. identifiable_factor_log_evidence occurs only in identifiability.rs (the definition and two tests), crates/gam-pyffi/src/manifold/geometry_ffi.rs (the binding and its registration) and gamfit/identifiability.py:723. Every caller is renamed in this commit, and the gated old-name grep over crates, gamfit and tests went from 32 hits to 0 (gx jobs 1180109 and 1185023)."
   }
 ]

@@ -5248,7 +5248,10 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(rank_charge_dof, module)?)?;
     module.add_class::<SparseDictStream>()?;
     module.add_class::<BlockSparseDictStream>()?;
-    module.add_function(wrap_pyfunction!(identifiable_factor_log_evidence, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        identifiable_factor_profile_log_likelihood,
+        module
+    )?)?;
     module.add_class::<IsometryPenalty>()?;
     module.add_class::<SparsityPenalty>()?;
     module.add_class::<PyTopKActivationPenalty>()?;
@@ -5487,23 +5490,25 @@ fn diagnostics_concat_decoder_blocks<'py>(
     Ok(out.into_pyarray(py).unbind())
 }
 
-/// Score one converged identifiable-factor fit at fixed hyperparameters.
+/// Penalized profile log-likelihood of one converged identifiable-factor fit at
+/// fixed hyperparameters (not a marginal likelihood; see
+/// `gam_sae::identifiability::identifiable_factor_profile_log_likelihood`).
 ///
 /// This is deliberately scalar. A sampled RSS/penalty table cannot supply the
-/// analytic hyperparameter derivatives needed for continuous evidence
+/// analytic hyperparameter derivatives needed for continuous hyperparameter
 /// optimization and is therefore not accepted at the FFI boundary.
 #[pyfunction]
-fn identifiable_factor_log_evidence(
+fn identifiable_factor_profile_log_likelihood(
     residual_sum_squares: f64,
     penalty: f64,
     n_obs: i64,
 ) -> PyResult<f64> {
     if n_obs <= 0 {
         return Err(py_value_error(format!(
-            "identifiable_factor_log_evidence: n_obs must be > 0, got {n_obs}"
+            "identifiable_factor_profile_log_likelihood: n_obs must be > 0, got {n_obs}"
         )));
     }
-    gam::terms::sae::identifiability::identifiable_factor_log_evidence(
+    gam::terms::sae::identifiability::identifiable_factor_profile_log_likelihood(
         residual_sum_squares,
         penalty,
         n_obs as usize,

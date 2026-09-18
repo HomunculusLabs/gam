@@ -4204,5 +4204,14 @@
     },
     "reason": "#784: rho_posterior's crate-private standard_normal_gh_rule moves into gam_math::quadrature as standard_normal_gauss_hermite_rule, with the same arithmetic in the same operation order, so the representable-order ceiling and gam-solve's block_quadrature_units_784 probe read one rule builder; every caller now calls gam-math.",
     "evidence": "The removed map is the census's own output: scripts/public_api_census.py in direct lane dy3 run q784ceil-g2 (base fca653ffde, exact tree 813288c2, patch md5 d3171157) refused exactly this item. At the base, git grep -w standard_normal_gh_rule finds the definition and its callers only in rho_posterior.rs and hmc_io.rs, both edited here."
+  },
+  {
+    "base": "c098f269f3abb5a23dd92b00f47196f42e3fd3f8",
+    "removed": {
+      "crates/gam-sae/src/identifiability.rs::identifiable_factor_log_evidence": 1,
+      "crates/gam-solve/src/inference/residual_factor.rs::log_evidence": 1
+    },
+    "reason": "#2946 T5 (Stage A census): renames with no value change. StructuredResidualModel::log_evidence returns the Gaussian log-likelihood minus the Schwarz penalty (-BIC/2) and becomes bic_penalized_log_likelihood. identifiable_factor_log_evidence returns a penalized profile likelihood with no log-determinant or Occam term and becomes identifiable_factor_profile_log_likelihood.",
+    "evidence": "At origin/main ff77e70e78, git grep on lane sw2c finds StructuredResidualModel::log_evidence called only in residual_factor.rs and crates/gam-sae/src/manifold/fit_entry.rs:1782. identifiable_factor_log_evidence occurs only in identifiability.rs, crates/gam-pyffi/src/manifold/geometry_ffi.rs and gamfit/identifiability.py:723. Every caller is renamed in this commit."
   }
 ]

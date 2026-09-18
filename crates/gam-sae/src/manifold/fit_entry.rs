@@ -101,7 +101,10 @@ pub struct StructuredResidualPassDiagnostic {
     pub pass: usize,
     pub gamma: f64,
     pub factor_rank: usize,
-    pub log_evidence: f64,
+    /// The structured residual model's rank-ladder score, `−BIC/2`
+    /// (`StructuredResidualModel::bic_penalized_log_likelihood`). Not a marginal
+    /// likelihood.
+    pub bic_penalized_log_likelihood: f64,
     pub factor_energy: f64,
     pub diagonal_mean: f64,
     pub dispersion_before: f64,
@@ -177,8 +180,8 @@ fn sae_structured_residual_model(
     // the fit tail's own assignment read).
     let assignments = term.assignment.assignments();
     let activity: ndarray::Array1<f64> = (0..n).map(|r| assignments.row(r).sum()).collect();
-    // Let the evidence ladder pick the rank up to p-1 (`fit` re-caps to p-1 and
-    // scores r = 0..=cap, keeping the penalized-evidence maximizer).
+    // Let the BIC ladder pick the rank up to p-1 (`fit` re-caps to p-1 and
+    // scores r = 0..=cap, keeping the −BIC/2 maximizer).
     let max_factor_rank = p.saturating_sub(1);
     match StructuredResidualModel::fit(ResidualFactorInput {
         residuals: residuals.view(),
@@ -1793,7 +1796,7 @@ fn run_sae_manifold_fit_on_target(request: SaeFitRequest) -> Result<SaeFitOutcom
                 pass: pass + 1,
                 gamma,
                 factor_rank: model.factor_rank(),
-                log_evidence: model.log_evidence(),
+                bic_penalized_log_likelihood: model.bic_penalized_log_likelihood(),
                 factor_energy,
                 diagonal_mean,
                 dispersion_before,

@@ -115,7 +115,7 @@ fn absorption_audit_dict<'py>(
         pair.set_item("lift", entry.lift)?;
         pair.set_item("weight_correlation", entry.weight_correlation)?;
         pair.set_item("dependence", entry.dependence)?;
-        pair.set_item("fusion_evidence", entry.fusion_evidence)?;
+        pair.set_item("fusion_score", entry.fusion_score)?;
         pair.set_item("absorption_asymmetry", entry.absorption_asymmetry)?;
         pair_list.append(pair)?;
     }
