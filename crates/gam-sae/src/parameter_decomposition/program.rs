@@ -42,6 +42,19 @@
 use gam_math::gaussian_activation::{
     GaussianActivation, GaussianActivationError, gaussian_smoothing_derivatives,
 };
+use gam_math::gaussian_gated::silu_derivatives;
+use super::codec::{
+    BitReader, BitString, CodecError, DagNode, decode_fixed_index, decode_ordered_dag,
+    decode_prefix_integer, encode_fixed_index, encode_ordered_dag, encode_prefix_integer,
+};
+use super::gated_rewrite::{GatedRewriteError, MaskedNorm, swiglu_hidden};
+use super::attention::{
+    AttentionGeometry, AttentionProgramError, ProjectedRows, RotaryCausalAttention, RotaryEmbedding,
+    RotaryPairing,
+};
+use super::precision::{DecodableArtifact, DeclaredPrecision, LatticeCode};
+use super::supports::{EvidenceStatus, EvidenceStatusError, ExactBasis};
+use gam_linalg::roundoff::accumulation_growth;
 use ndarray::{Array1, Array2, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -127,13 +140,48 @@ pub enum NativeActivation {
     Relu,
     /// The exact GELU `t Phi(t)`.
     ExactGelu,
+    /// SiLU (swish) `t sigma(t)`, the gate of a SwiGLU block.
+    Silu,
 }
 
 impl NativeActivation {
-    fn owner(self) -> GaussianActivation {
+    /// The gam-math owner's activation. This match and the one in
+    /// [`Self::from_owner`] are exhaustive both ways, so an activation the owner adds
+    /// fails to compile until it has a node.
+    pub fn to_owner(self) -> GaussianActivation {
         match self {
             Self::Relu => GaussianActivation::Relu,
             Self::ExactGelu => GaussianActivation::ExactGelu,
+            Self::Silu => GaussianActivation::Silu,
+        }
+    }
+
+    /// The node for an owner activation, e.g. one named by
+    /// `GaussianActivation::from_hidden_act`.
+    pub fn from_owner(owner: GaussianActivation) -> Self {
+        match owner {
+            GaussianActivation::Relu => Self::Relu,
+            GaussianActivation::ExactGelu => Self::ExactGelu,
+            GaussianActivation::Silu => Self::Silu,
+        }
+    }
+
+    /// The activation's value at `t`, from its gam-math owner: the zero-variance
+    /// Gaussian smoothing for ReLU and GELU, and the SiLU jet for SiLU, whose
+    /// closed-form smoothing entries refuse it. A non-finite `t` is refused.
+    fn forward(self, t: f64) -> Result<f64, GaussianActivationError> {
+        match self.to_owner() {
+            GaussianActivation::Silu => {
+                if !t.is_finite() {
+                    return Err(GaussianActivationError::NonFiniteArgument { value: t });
+                }
+                Ok(silu_derivatives(t)[0])
+            }
+            owner @ (GaussianActivation::Relu | GaussianActivation::ExactGelu) => {
+                let mut value = [0.0];
+                gaussian_smoothing_derivatives(owner, t, 0.0, &mut value)?;
+                Ok(value[0])
+            }
         }
     }
 }
@@ -154,16 +202,57 @@ pub enum NativePrimitive {
     /// declared group, not independent diagonal entries in an arbitrary basis, is
     /// an intrinsic intervention; tie the coordinates with a [`MaskGroup`].
     CoordinateMask { controls: Vec<ControlId> },
+    /// `Qwen3RMSNorm`, `gain ⊙ (h (mean(h^2) + epsilon)^(-1/2))` per row, evaluated by
+    /// `gated_rewrite::MaskedNorm`. `epsilon` is the source configuration's value.
+    RmsNorm { epsilon: f64, gain: ParameterSlot },
+    /// `torch.nn.LayerNorm` over the population variance, with gain and bias,
+    /// evaluated by `gated_rewrite::MaskedNorm`.
+    LayerNorm {
+        epsilon: f64,
+        gain: ParameterSlot,
+        bias: ParameterSlot,
+    },
+    /// The source's causal rotary self-attention on already-projected rows
+    /// `(queries, keys, values)`, evaluated by `attention::RotaryCausalAttention` at
+    /// the execution's absolute positions: rotate, score, mask causally, softmax
+    /// jointly, read the values. The output is the head-mixed rows before the
+    /// output projection, which is a separate Linear node.
+    CausalSelfAttention {
+        geometry: AttentionGeometry,
+        rotary: RotaryEmbedding,
+        score_scale: f64,
+    },
+    /// A SwiGLU gate `s(gate) ⊙ up`, with `s` the SiLU, evaluated by
+    /// `gated_rewrite::swiglu_hidden` on the rows `(gate, up)`.
+    SwiGlu,
 }
 
 impl NativePrimitive {
     fn arity(&self) -> usize {
         match self {
-            Self::Hadamard => 2,
+            Self::CausalSelfAttention { .. } => 3,
+            Self::Hadamard | Self::SwiGlu => 2,
             Self::Linear { .. }
             | Self::AddBias { .. }
             | Self::Activation { .. }
-            | Self::CoordinateMask { .. } => 1,
+            | Self::CoordinateMask { .. }
+            | Self::RmsNorm { .. }
+            | Self::LayerNorm { .. } => 1,
+        }
+    }
+
+    /// The formal parameters this primitive reads.
+    pub fn parameters(&self) -> Vec<ParameterSlot> {
+        match self {
+            Self::Linear { weight: parameter }
+            | Self::AddBias { bias: parameter }
+            | Self::RmsNorm { gain: parameter, .. } => vec![*parameter],
+            Self::LayerNorm { gain, bias, .. } => vec![*gain, *bias],
+            Self::Activation { .. }
+            | Self::Hadamard
+            | Self::CoordinateMask { .. }
+            | Self::CausalSelfAttention { .. }
+            | Self::SwiGlu => Vec::new(),
         }
     }
 }
@@ -303,6 +392,10 @@ pub enum ProgramError {
     EmptyCompose { body: BodyId, node: NodeId },
     /// The call graph has a cycle through `body`.
     RecursiveCall { body: BodyId },
+    /// A declared parameter no Linear or AddBias node reads.
+    ParameterUnused { parameter: ParameterSlot },
+    /// A declared slot no Read or Write node names.
+    SlotUnused { slot: SlotId },
     ControlUnused { control: ControlId },
     ControlUsedTwice { control: ControlId },
     ControlUngrouped { control: ControlId },
@@ -320,12 +413,22 @@ pub enum ProgramError {
     WidthMismatch { body: BodyId, node: NodeId, expected: usize, found: usize },
     RowCountChanged { body: BodyId, node: NodeId, expected: usize, found: usize },
     Activation { body: BodyId, node: NodeId, error: GaussianActivationError },
+    /// A normalization or SwiGLU node refused by its owner in `gated_rewrite`.
+    GatedRewrite { body: BodyId, node: NodeId, error: GatedRewriteError },
+    /// An attention node refused by its owner, `attention::RotaryCausalAttention`.
+    Attention { body: BodyId, node: NodeId, error: AttentionProgramError },
+    /// A refinement residual has no evidence status, e.g. a non-finite output entry.
+    Evidence { body: BodyId, node: NodeId, error: EvidenceStatusError },
+    /// The real constants have no code at the declared precision (`precision.rs`).
+    Precision { message: String },
     NonFiniteMask { group: MaskGroupId, value: f64 },
     DuplicateMaskScope { group: MaskGroupId },
     /// An executor invariant: a value was released before its last use.
     ValueReleased { body: BodyId, node: NodeId },
     SchemaMismatch { found: String },
     Json { message: String },
+    /// A program codeword could not be written or read.
+    Codec { error: CodecError },
 }
 
 impl fmt::Display for ProgramError {
@@ -429,6 +532,22 @@ impl fmt::Display for ProgramError {
                 "activation node {} of body {}: {error}",
                 node.0, body.0
             ),
+            Self::GatedRewrite { body, node, error } => write!(
+                formatter,
+                "normalization or SwiGLU node {} of body {}: {error}",
+                node.0, body.0
+            ),
+            Self::Attention { body, node, error } => write!(
+                formatter,
+                "attention node {} of body {}: {error}",
+                node.0, body.0
+            ),
+            Self::Evidence { body, node, error } => write!(
+                formatter,
+                "refinement node {} of body {} has no residual status: {error:?}",
+                node.0, body.0
+            ),
+            Self::Precision { message } => write!(formatter, "program real constants: {message}"),
             Self::NonFiniteMask { group, value } => {
                 write!(formatter, "mask group {} was assigned non-finite {value}", group.0)
             }
@@ -447,11 +566,24 @@ impl fmt::Display for ProgramError {
                 "expected schema {MECHANISM_PROGRAM_SCHEMA}, found {found}"
             ),
             Self::Json { message } => write!(formatter, "program document: {message}"),
+            Self::Codec { error } => write!(formatter, "program codeword: {error}"),
+            Self::ParameterUnused { parameter } => {
+                write!(formatter, "formal parameter {} is read by no node", parameter.0)
+            }
+            Self::SlotUnused { slot } => {
+                write!(formatter, "state slot {} is named by no read or write", slot.0)
+            }
         }
     }
 }
 
 impl std::error::Error for ProgramError {}
+
+impl From<CodecError> for ProgramError {
+    fn from(error: CodecError) -> Self {
+        Self::Codec { error }
+    }
+}
 
 /// A validated program.
 #[derive(Clone, Debug, PartialEq)]
@@ -470,6 +602,8 @@ impl Program {
     pub fn new(parts: ProgramParts) -> Result<Self, ProgramError> {
         let body_count = parts.bodies.len();
         callee_body(&parts, parts.entry)?;
+        let mut parameter_used = vec![false; parts.parameters.len()];
+        let mut slot_used = vec![false; parts.slots.len()];
         let mut control_sites = vec![0u32; parts.controls.len()];
         for decl in &parts.parameters {
             for &control in &decl.controls {
@@ -510,9 +644,13 @@ impl Program {
                             });
                         }
                     }
-                    Node::Read { slot } => check_slot(&parts, *slot)?,
+                    Node::Read { slot } => {
+                        check_slot(&parts, *slot)?;
+                        slot_used[slot.index()] = true;
+                    }
                     Node::Write { slot, .. } => {
                         check_slot(&parts, *slot)?;
+                        slot_used[slot.index()] = true;
                         writes = true;
                     }
                     Node::Native { primitive, arguments } => {
@@ -524,21 +662,26 @@ impl Program {
                                 found: arguments.len(),
                             });
                         }
-                        match primitive {
-                            NativePrimitive::Linear { weight: parameter }
-                            | NativePrimitive::AddBias { bias: parameter } => {
-                                let decl = parts.parameters.get(parameter.index()).ok_or(
-                                    ProgramError::UnknownParameter { parameter: *parameter },
-                                )?;
-                                controls.extend(decl.controls.iter().copied());
+                        for parameter in primitive.parameters() {
+                            let decl = parts
+                                .parameters
+                                .get(parameter.index())
+                                .ok_or(ProgramError::UnknownParameter { parameter })?;
+                            controls.extend(decl.controls.iter().copied());
+                            parameter_used[parameter.index()] = true;
+                        }
+                        if let NativePrimitive::CoordinateMask { controls: mask } = primitive {
+                            for &control in mask {
+                                record_control_site(&mut control_sites, control)?;
+                                controls.push(control);
                             }
-                            NativePrimitive::CoordinateMask { controls: mask } => {
-                                for &control in mask {
-                                    record_control_site(&mut control_sites, control)?;
-                                    controls.push(control);
-                                }
-                            }
-                            NativePrimitive::Activation { .. } | NativePrimitive::Hadamard => {}
+                        }
+                        if let NativePrimitive::CausalSelfAttention { geometry, rotary, score_scale } =
+                            primitive
+                        {
+                            RotaryCausalAttention::new(*geometry, rotary.clone(), *score_scale).map_err(
+                                |error| ProgramError::Attention { body: body_id, node: node_id, error },
+                            )?;
                         }
                     }
                     Node::Sum { terms } => {
@@ -615,6 +758,12 @@ impl Program {
             controls_below.push(controls);
             writes_below.push(writes);
             refines_below.push(refines);
+        }
+        if let Some(unused) = parameter_used.iter().position(|&used| !used) {
+            return Err(ProgramError::ParameterUnused { parameter: ParameterSlot(unused as u32) });
+        }
+        if let Some(unused) = slot_used.iter().position(|&used| !used) {
+            return Err(ProgramError::SlotUnused { slot: SlotId(unused as u32) });
         }
         if let Some(unused) = control_sites.iter().position(|&sites| sites == 0) {
             return Err(ProgramError::ControlUnused { control: ControlId(unused as u32) });
@@ -883,18 +1032,27 @@ pub struct Execution {
     pub slots: Vec<Option<Array2<f64>>>,
 }
 
+/// The status of a residual figure at one evaluated invocation: the witness is the
+/// `(row, column)` of the extremal entry and the domain is the invocation path.
+pub type ResidualStatus = EvidenceStatus<(usize, usize), Vec<CallSite>>;
+
 /// At one refinement invocation, the mechanism body against the native body on
-/// the same arguments. These are measured numbers, not a bound.
+/// the same arguments.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RefinementResidual {
     pub invocation: Vec<CallSite>,
     /// Every control the mechanism reaches resolved to `1`, so the native output
     /// was carried downstream.
     pub all_on: bool,
-    /// `max |mechanism - native|` over every entry (NaN if either output has one).
-    pub max_abs_difference: f64,
-    /// `max |native|` over every entry, the scale of the difference.
-    pub native_max_abs: f64,
+    /// `max |mechanism - native|` over every entry of the two computed outputs at
+    /// this invocation: Exact over the one-member family, witnessed by its entry. Its
+    /// numerical error is `gamma_1 * value`, the rounding of the one subtraction that
+    /// forms each entry, since `abs` and `max` are exact. It says nothing about how
+    /// far either computed output is from its real function.
+    pub difference: ResidualStatus,
+    /// `max |native|` over every entry, the scale of the difference: Exact, with no
+    /// rounding.
+    pub native_scale: ResidualStatus,
 }
 
 impl Program {
@@ -905,8 +1063,9 @@ impl Program {
         masks: &MaskAssignment,
         inputs: Vec<Array2<f64>>,
         slots: Vec<Option<Array2<f64>>>,
+        positions: &[i64],
     ) -> Result<Execution, ExecutionError<S::Error>> {
-        let mut executor = Executor::new(self, source, masks, slots, false)?;
+        let mut executor = Executor::new(self, source, masks, slots, positions, false)?;
         let output = executor.run(inputs)?;
         Ok(Execution { output, slots: executor.slots })
     }
@@ -920,8 +1079,9 @@ impl Program {
         masks: &MaskAssignment,
         inputs: Vec<Array2<f64>>,
         slots: Vec<Option<Array2<f64>>>,
+        positions: &[i64],
     ) -> Result<(Execution, Vec<RefinementResidual>), ExecutionError<S::Error>> {
-        let mut executor = Executor::new(self, source, masks, slots, true)?;
+        let mut executor = Executor::new(self, source, masks, slots, positions, true)?;
         let output = executor.run(inputs)?;
         let residuals = executor.residuals.take().unwrap_or_default();
         Ok((Execution { output, slots: executor.slots }, residuals))
@@ -933,6 +1093,7 @@ struct Executor<'a, S> {
     source: &'a S,
     masks: BTreeMap<MaskGroupId, Vec<(&'a [CallSite], f64)>>,
     slots: Vec<Option<Array2<f64>>>,
+    positions: &'a [i64],
     residuals: Option<Vec<RefinementResidual>>,
 }
 
@@ -942,6 +1103,7 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
         source: &'a S,
         masks: &'a MaskAssignment,
         slots: Vec<Option<Array2<f64>>>,
+        positions: &'a [i64],
         record_residuals: bool,
     ) -> Result<Self, ProgramError> {
         if slots.len() != program.parts.slots.len() {
@@ -969,6 +1131,7 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
             source,
             masks: index,
             slots,
+            positions,
             residuals: record_residuals.then(Vec::new),
         })
     }
@@ -1001,6 +1164,28 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
             .iter()
             .map(|&control| self.resolve(control, path))
             .collect()
+    }
+
+    fn parameter_vector(
+        &self,
+        parameter: ParameterSlot,
+        site: CallSite,
+        path: &[CallSite],
+    ) -> Result<Array1<f64>, ExecutionError<S::Error>> {
+        let controls = self.parameter_controls(parameter, path);
+        let parameter_use = ParameterUse {
+            parameter,
+            body: site.body,
+            node: site.node,
+            invocation: path,
+            controls: &controls,
+        };
+        self.source.vector(parameter_use).map_err(|error| ExecutionError::Source {
+            body: site.body,
+            node: site.node,
+            parameter,
+            error,
+        })
     }
 
     fn body(
@@ -1139,18 +1324,7 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
                 Ok(rows)
             }
             NativePrimitive::AddBias { bias } => {
-                let controls = self.parameter_controls(*bias, path);
-                let parameter_use = ParameterUse {
-                    parameter: *bias,
-                    body,
-                    node,
-                    invocation: path,
-                    controls: &controls,
-                };
-                let vector = self
-                    .source
-                    .vector(parameter_use)
-                    .map_err(|error| ExecutionError::Source { body, node, parameter: *bias, error })?;
+                let vector = self.parameter_vector(*bias, site, path)?;
                 if vector.len() != x.ncols() {
                     return Err(ProgramError::WidthMismatch {
                         body,
@@ -1164,13 +1338,52 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
                 rows += &vector;
                 Ok(rows)
             }
+            NativePrimitive::SwiGlu => {
+                let up = argument(values, body, arguments[1])?;
+                swiglu_hidden(x.view(), up.view()).map_err(|error| {
+                    ExecutionError::Program(ProgramError::GatedRewrite { body, node, error })
+                })
+            }
+            NativePrimitive::CausalSelfAttention { geometry, rotary, score_scale } => {
+                let attention_error =
+                    |error| ExecutionError::Program(ProgramError::Attention { body, node, error });
+                let keys = argument(values, body, arguments[1])?;
+                let value_rows = argument(values, body, arguments[2])?;
+                let attention = RotaryCausalAttention::new(*geometry, rotary.clone(), *score_scale)
+                    .map_err(attention_error)?;
+                let attended = attention
+                    .attend_projected(
+                        ProjectedRows::exact(x.view()),
+                        ProjectedRows::exact(keys.view()),
+                        ProjectedRows::exact(value_rows.view()),
+                        self.positions,
+                    )
+                    .map_err(attention_error)?;
+                Ok(attended.mixed)
+            }
+            NativePrimitive::RmsNorm { epsilon, gain } => {
+                let gain_vector = self.parameter_vector(*gain, site, path)?;
+                MaskedNorm::Rms { epsilon: *epsilon, gain: gain_vector.view() }
+                    .apply(x.view())
+                    .map_err(|error| ExecutionError::Program(ProgramError::GatedRewrite { body, node, error }))
+            }
+            NativePrimitive::LayerNorm { epsilon, gain, bias } => {
+                let gain_vector = self.parameter_vector(*gain, site, path)?;
+                let bias_vector = self.parameter_vector(*bias, site, path)?;
+                MaskedNorm::Layer {
+                    epsilon: *epsilon,
+                    gain: gain_vector.view(),
+                    bias: bias_vector.view(),
+                }
+                .apply(x.view())
+                .map_err(|error| ExecutionError::Program(ProgramError::GatedRewrite { body, node, error }))
+            }
             NativePrimitive::Activation { activation } => {
                 let mut rows = x.clone();
-                let mut value = [0.0];
                 for entry in rows.iter_mut() {
-                    gaussian_smoothing_derivatives(activation.owner(), *entry, 0.0, &mut value)
+                    *entry = activation
+                        .forward(*entry)
                         .map_err(|error| ProgramError::Activation { body, node, error })?;
-                    *entry = value[0];
                 }
                 Ok(rows)
             }
@@ -1277,19 +1490,37 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
             }
             .into());
         }
-        let max_abs_difference = nan_propagating_max(
-            native_output
-                .iter()
-                .zip(mechanism_output.iter())
-                .map(|(native_entry, mechanism_entry)| (mechanism_entry - native_entry).abs()),
-        );
-        let native_max_abs = nan_propagating_max(native_output.iter().map(|entry| entry.abs()));
+        let columns = native_output.ncols().max(1);
+        let witness = |flat: usize| (flat / columns, flat % columns);
+        let evidence_error =
+            |error| ExecutionError::Program(ProgramError::Evidence { body: site.body, node: site.node, error });
+        let (difference_value, difference_at) =
+            extremal_entry((&mechanism_output - &native_output).iter().map(|entry| entry.abs()));
+        let (scale_value, scale_at) = extremal_entry(native_output.iter().map(|entry| entry.abs()));
+        // The bound is rounded up, so the computed error band is never below the real
+        // `gamma_1 * value`.
+        let difference = ResidualStatus::exact(
+            difference_value,
+            (accumulation_growth(1) * difference_value).next_up(),
+            ExactBasis::Exhaustive { cardinality: 1 },
+            difference_at.map(witness),
+            path.clone(),
+        )
+        .map_err(evidence_error)?;
+        let native_scale = ResidualStatus::exact(
+            scale_value,
+            0.0,
+            ExactBasis::Exhaustive { cardinality: 1 },
+            scale_at.map(witness),
+            path.clone(),
+        )
+        .map_err(evidence_error)?;
         if let Some(residuals) = self.residuals.as_mut() {
             residuals.push(RefinementResidual {
                 invocation: path.clone(),
                 all_on,
-                max_abs_difference,
-                native_max_abs,
+                difference,
+                native_scale,
             });
         }
         Ok(if all_on { native_output } else { mechanism_output })
@@ -1317,54 +1548,109 @@ fn collect_arguments<E>(
         .collect()
 }
 
-/// The largest value, or NaN once any value is NaN; `0` for no values.
-fn nan_propagating_max(values: impl Iterator<Item = f64>) -> f64 {
-    values.fold(0.0, |largest, value| {
-        if value.is_nan() || value > largest { value } else { largest }
-    })
+/// The largest value and its flat position. The first NaN is returned with its
+/// position, so the status constructor refuses it instead of hiding it; `(0, None)`
+/// for no values.
+fn extremal_entry(values: impl Iterator<Item = f64>) -> (f64, Option<usize>) {
+    let mut largest = (0.0, None);
+    for (position, value) in values.enumerate() {
+        if value.is_nan() {
+            return (value, Some(position));
+        }
+        if largest.1.is_none() || value > largest.0 {
+            largest = (value, Some(position));
+        }
+    }
+    largest
 }
 
-/// How a value depends on the mask values: a polynomial through linear
-/// operations, or through a nonlinearity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// How a value depends on the mask values: a polynomial through linear operations,
+/// or through a nonlinearity. Both degrees are upper bounds.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MaskDependence {
-    /// A polynomial of this total degree in the controls; `0` is mask-free.
-    Polynomial { degree: u32 },
+    /// A polynomial of total degree at most `degree` in the mask values, and of
+    /// degree at most `group_degrees[g]` in the value of mask group `g`. A group ties
+    /// its controls into one variable; an absent group has degree zero.
+    Polynomial {
+        degree: u32,
+        group_degrees: BTreeMap<MaskGroupId, u32>,
+    },
     /// A mask-dependent value reaches a nonlinearity.
     Nonlinear,
 }
 
 impl MaskDependence {
-    const FREE: Self = Self::Polynomial { degree: 0 };
+    const FREE: Self = Self::Polynomial { degree: 0, group_degrees: BTreeMap::new() };
 
-    /// Affine in the controls (degree at most one). The exact affine-logit vertex
-    /// adversary (P9) needs this over the whole zonotope. Masks that enter two
-    /// multiplied layers, including the induced cross term of a composition, give
-    /// degree two.
-    pub fn is_affine(self) -> bool {
-        matches!(self, Self::Polynomial { degree } if degree <= 1)
+    /// One mask group's value, to the first power.
+    fn group(group: MaskGroupId) -> Self {
+        Self::Polynomial { degree: 1, group_degrees: BTreeMap::from([(group, 1)]) }
     }
 
-    fn product(self, other: Self) -> Self {
+    /// The total degree bound, or `None` through a nonlinearity.
+    pub fn degree(&self) -> Option<u32> {
+        match self {
+            Self::Polynomial { degree, .. } => Some(*degree),
+            Self::Nonlinear => None,
+        }
+    }
+
+    /// The degree bound in one group's value, or `None` through a nonlinearity.
+    pub fn group_degree(&self, group: MaskGroupId) -> Option<u32> {
+        match self {
+            Self::Polynomial { group_degrees, .. } => Some(group_degrees.get(&group).copied().unwrap_or(0)),
+            Self::Nonlinear => None,
+        }
+    }
+
+    /// Affine in the mask values: total degree at most one.
+    pub fn is_affine(&self) -> bool {
+        matches!(self, Self::Polynomial { degree, .. } if *degree <= 1)
+    }
+
+    /// Multilinear in the mask groups: degree at most one in each group's value, with
+    /// no nonlinear path. This is where the logit vertex adversary (P9, `moments.rs`)
+    /// runs rather than refuses: a product of distinct groups, such as two masked
+    /// layers or a composition's induced cross term, is inside, and a group read by
+    /// two multiplied factors is outside. Inside, P9 is Exact only when every control
+    /// moves at most one declared factor; a control moving two factors couples their
+    /// zonotopes and P9 returns a UniformBound. Multilinear does not mean exact.
+    pub fn is_multilinear(&self) -> bool {
+        matches!(self, Self::Polynomial { group_degrees, .. } if group_degrees.values().all(|&degree| degree <= 1))
+    }
+
+    fn product(&self, other: &Self) -> Self {
         match (self, other) {
-            (Self::Polynomial { degree: left }, Self::Polynomial { degree: right }) => {
-                Self::Polynomial { degree: left.saturating_add(right) }
+            (
+                Self::Polynomial { degree: left, group_degrees: left_groups },
+                Self::Polynomial { degree: right, group_degrees: right_groups },
+            ) => {
+                let mut group_degrees = left_groups.clone();
+                for (&group, &degree) in right_groups {
+                    let entry = group_degrees.entry(group).or_insert(0);
+                    *entry = entry.saturating_add(degree);
+                }
+                Self::Polynomial { degree: left.saturating_add(*right), group_degrees }
             }
             (Self::Nonlinear, _) | (_, Self::Nonlinear) => Self::Nonlinear,
         }
     }
 
-    fn join(self, other: Self) -> Self {
+    fn join(&self, other: &Self) -> Self {
         match (self, other) {
-            (Self::Polynomial { degree: left }, Self::Polynomial { degree: right }) => {
-                Self::Polynomial { degree: left.max(right) }
+            (
+                Self::Polynomial { degree: left, group_degrees: left_groups },
+                Self::Polynomial { degree: right, group_degrees: right_groups },
+            ) => {
+                let mut group_degrees = left_groups.clone();
+                for (&group, &degree) in right_groups {
+                    let entry = group_degrees.entry(group).or_insert(0);
+                    *entry = (*entry).max(degree);
+                }
+                Self::Polynomial { degree: (*left).max(*right), group_degrees }
             }
             (Self::Nonlinear, _) | (_, Self::Nonlinear) => Self::Nonlinear,
         }
-    }
-
-    fn scaled(self, controlled: bool) -> Self {
-        if controlled { self.product(Self::Polynomial { degree: 1 }) } else { self }
     }
 }
 
@@ -1389,41 +1675,81 @@ impl Program {
         let mut values: Vec<MaskDependence> = Vec::with_capacity(body.nodes.len());
         for node in &body.nodes {
             let value = match node {
-                Node::Input { port } => inputs[*port as usize],
-                Node::Read { slot } => slots[slot.index()],
+                Node::Input { port } => inputs[*port as usize].clone(),
+                Node::Read { slot } => slots[slot.index()].clone(),
                 Node::Write { slot, value } => {
-                    slots[slot.index()] = values[value.index()];
-                    values[value.index()]
+                    slots[slot.index()] = values[value.index()].clone();
+                    values[value.index()].clone()
                 }
                 Node::Native { primitive, arguments } => {
-                    let x = values[arguments[0].index()];
+                    let x = values[arguments[0].index()].clone();
                     match primitive {
                         NativePrimitive::Linear { weight } => {
-                            x.product(self.parameter_mask_dependence(*weight))
+                            x.product(&self.parameter_mask_dependence(*weight))
                         }
                         NativePrimitive::AddBias { bias } => {
-                            x.join(self.parameter_mask_dependence(*bias))
+                            x.join(&self.parameter_mask_dependence(*bias))
                         }
                         NativePrimitive::Activation { .. } => {
                             if x == MaskDependence::FREE { x } else { MaskDependence::Nonlinear }
                         }
-                        NativePrimitive::Hadamard => x.product(values[arguments[1].index()]),
+                        NativePrimitive::Hadamard => x.product(&values[arguments[1].index()]),
                         NativePrimitive::CoordinateMask { controls } => {
-                            x.scaled(!controls.is_empty())
+                            if controls.is_empty() {
+                                x
+                            } else {
+                                controls.iter().fold(MaskDependence::FREE, |total, control| {
+                                    total.join(&self.controlled(&x, Some(*control)))
+                                })
+                            }
+                        }
+                        NativePrimitive::RmsNorm { gain, .. } => {
+                            if x == MaskDependence::FREE {
+                                self.parameter_mask_dependence(*gain)
+                            } else {
+                                MaskDependence::Nonlinear
+                            }
+                        }
+                        NativePrimitive::LayerNorm { gain, bias, .. } => {
+                            if x == MaskDependence::FREE {
+                                self.parameter_mask_dependence(*gain)
+                                    .join(&self.parameter_mask_dependence(*bias))
+                            } else {
+                                MaskDependence::Nonlinear
+                            }
+                        }
+                        NativePrimitive::CausalSelfAttention { .. } => {
+                            // The weights are a softmax of the query-key scores; the
+                            // values enter linearly under mask-free weights.
+                            let keys = &values[arguments[1].index()];
+                            if x == MaskDependence::FREE && *keys == MaskDependence::FREE {
+                                values[arguments[2].index()].clone()
+                            } else {
+                                MaskDependence::Nonlinear
+                            }
+                        }
+                        NativePrimitive::SwiGlu => {
+                            // SiLU(gate) multiplies `up` elementwise: linear in `up`
+                            // under a mask-free gate.
+                            if x == MaskDependence::FREE {
+                                values[arguments[1].index()].clone()
+                            } else {
+                                MaskDependence::Nonlinear
+                            }
                         }
                     }
                 }
                 Node::Sum { terms } => terms.iter().fold(MaskDependence::FREE, |total, term| {
-                    total.join(values[term.value.index()].scaled(term.control.is_some()))
+                    total.join(&self.controlled(&values[term.value.index()], term.control))
                 }),
                 Node::Compose { value, stages } => {
-                    let mut current = values[value.index()];
+                    let mut current = values[value.index()].clone();
                     for stage in stages {
-                        let staged = self.body_mask_dependence(stage.body, &[current], slots);
-                        current = if stage.control.is_some() {
-                            current.join(staged).scaled(true)
-                        } else {
-                            staged
+                        let staged =
+                            self.body_mask_dependence(stage.body, std::slice::from_ref(&current), slots);
+                        current = match stage.control {
+                            Some(control) => self.controlled(&current.join(&staged), Some(control)),
+                            None => staged,
                         };
                     }
                     current
@@ -1431,18 +1757,32 @@ impl Program {
                 Node::Call { body: callee, arguments }
                 | Node::Refine { mechanism: callee, arguments, .. } => {
                     let passed: Vec<MaskDependence> =
-                        arguments.iter().map(|argument| values[argument.index()]).collect();
+                        arguments.iter().map(|argument| values[argument.index()].clone()).collect();
                     self.body_mask_dependence(*callee, &passed, slots)
                 }
             };
             values.push(value);
         }
-        values[body.output.index()]
+        values[body.output.index()].clone()
     }
 
+    /// A parameter's anchor is affine in its controls jointly: every monomial has
+    /// degree one, in one group's value.
     fn parameter_mask_dependence(&self, parameter: ParameterSlot) -> MaskDependence {
-        let controlled = !self.parts.parameters[parameter.index()].controls.is_empty();
-        MaskDependence::Polynomial { degree: u32::from(controlled) }
+        self.parts.parameters[parameter.index()]
+            .controls
+            .iter()
+            .fold(MaskDependence::FREE, |total, control| {
+                total.join(&MaskDependence::group(self.control_group[control.index()]))
+            })
+    }
+
+    /// A value multiplied by one control's group value, or unchanged.
+    fn controlled(&self, value: &MaskDependence, control: Option<ControlId>) -> MaskDependence {
+        match control {
+            Some(control) => value.product(&MaskDependence::group(self.control_group[control.index()])),
+            None => value.clone(),
+        }
     }
 }
 
@@ -1587,6 +1927,447 @@ impl ParameterSource for DenseParameters {
     }
 }
 
+/// The node-label alphabet of a program codeword: Input, Read, Write, Linear,
+/// AddBias, Relu, ExactGelu, Silu, Hadamard, CoordinateMask, Sum, Compose, Call,
+/// Refine, RmsNorm, LayerNorm, CausalSelfAttention and SwiGlu.
+pub const PROGRAM_LABEL_ALPHABET: usize = 18;
+
+fn node_label(node: &Node) -> usize {
+    match node {
+        Node::Input { .. } => 0,
+        Node::Read { .. } => 1,
+        Node::Write { .. } => 2,
+        Node::Native { primitive, .. } => match primitive {
+            NativePrimitive::Linear { .. } => 3,
+            NativePrimitive::AddBias { .. } => 4,
+            NativePrimitive::Activation { activation } => match activation {
+                NativeActivation::Relu => 5,
+                NativeActivation::ExactGelu => 6,
+                NativeActivation::Silu => 7,
+            },
+            NativePrimitive::Hadamard => 8,
+            NativePrimitive::CoordinateMask { .. } => 9,
+            NativePrimitive::RmsNorm { .. } => 14,
+            NativePrimitive::LayerNorm { .. } => 15,
+            NativePrimitive::CausalSelfAttention { .. } => 16,
+            NativePrimitive::SwiGlu => 17,
+        },
+        Node::Sum { .. } => 10,
+        Node::Compose { .. } => 11,
+        Node::Call { .. } => 12,
+        Node::Refine { .. } => 13,
+    }
+}
+
+/// A primitive's real constants, in the order the program codeword carries them.
+fn real_constants(primitive: &NativePrimitive) -> Vec<f64> {
+    match primitive {
+        NativePrimitive::RmsNorm { epsilon, .. } | NativePrimitive::LayerNorm { epsilon, .. } => {
+            vec![*epsilon]
+        }
+        NativePrimitive::CausalSelfAttention { rotary, score_scale, .. } => {
+            let mut reals = rotary.inverse_frequencies.clone();
+            reals.extend([rotary.attention_scaling, *score_scale]);
+            reals
+        }
+        NativePrimitive::Linear { .. }
+        | NativePrimitive::AddBias { .. }
+        | NativePrimitive::Activation { .. }
+        | NativePrimitive::Hadamard
+        | NativePrimitive::CoordinateMask { .. }
+        | NativePrimitive::SwiGlu => Vec::new(),
+    }
+}
+
+fn precision_error(message: String) -> ProgramError {
+    ProgramError::Precision { message }
+}
+
+/// The next real constant of the lattice code.
+fn next_real(reals: &mut std::vec::IntoIter<f64>) -> Result<f64, CodecError> {
+    reals.next().ok_or(CodecError::InvalidCodeword(
+        "a node reads a real constant the lattice code does not carry".to_string(),
+    ))
+}
+
+fn encode_optional_control(
+    out: &mut BitString,
+    control: Option<ControlId>,
+    controls: usize,
+) -> Result<(), CodecError> {
+    out.push_bit(control.is_some());
+    match control {
+        Some(control) => encode_fixed_index(out, control.index(), controls),
+        None => Ok(()),
+    }
+}
+
+fn decode_optional_control(
+    reader: &mut BitReader<'_>,
+    controls: usize,
+) -> Result<Option<ControlId>, CodecError> {
+    if reader.read_bit()? {
+        Ok(Some(ControlId(decode_fixed_index(reader, controls)? as u32)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn encode_control_list(
+    out: &mut BitString,
+    list: &[ControlId],
+    controls: usize,
+) -> Result<(), CodecError> {
+    encode_prefix_integer(out, list.len() as u64 + 1)?;
+    for control in list {
+        encode_fixed_index(out, control.index(), controls)?;
+    }
+    Ok(())
+}
+
+/// A count of items that each spend at least one bit of the rest of the message
+/// ([`Program::encode`]). A larger count is not the codeword of a valid program and
+/// is refused before anything is allocated.
+fn decode_count(reader: &mut BitReader<'_>) -> Result<usize, CodecError> {
+    let count = decode_prefix_integer(reader)? - 1;
+    if count > reader.remaining_bits() {
+        return Err(CodecError::InvalidCodeword(format!(
+            "{count} items cannot fit in {} remaining bits",
+            reader.remaining_bits()
+        )));
+    }
+    usize::try_from(count)
+        .map_err(|error| CodecError::InvalidCodeword(format!("a count does not fit usize: {error}")))
+}
+
+/// An ordered control list. Every control sits at exactly one site, so no list is
+/// longer than the declared controls, even where an entry costs zero bits.
+fn decode_control_list(
+    reader: &mut BitReader<'_>,
+    controls: usize,
+) -> Result<Vec<ControlId>, CodecError> {
+    let length = decode_prefix_integer(reader)? - 1;
+    if length > controls as u64 {
+        return Err(CodecError::InvalidCodeword(format!(
+            "a list of {length} controls exceeds the {controls} declared"
+        )));
+    }
+    let mut list = Vec::with_capacity(length as usize);
+    for _ in 0..length {
+        list.push(ControlId(decode_fixed_index(reader, controls)? as u32));
+    }
+    Ok(list)
+}
+
+fn arity_refusal(label: usize, found: usize) -> CodecError {
+    CodecError::InvalidCodeword(format!("node label {label} cannot take {found} arguments"))
+}
+
+impl Program {
+    /// The program's codeword, through the mpd-codec encoders. It codes the
+    /// executable structure only: names are not coded, and a decoded program has
+    /// empty names.
+    ///
+    /// The header is the parameter, slot, control, group and body counts (each as
+    /// count + 1 in the prefix integer code), the entry as a fixed index, each
+    /// parameter's ordered anchor controls, and each control's group as a fixed
+    /// index (the groups partition the controls). Each body is its input count + 1,
+    /// its ordered DAG of node labels and arguments ([`encode_ordered_dag`]), its
+    /// output as a fixed index, then each node's payload in node order.
+    ///
+    /// Validation makes every declared parameter, slot, control, group and body
+    /// spend at least one bit, which bounds every count by the message length.
+    pub fn encode(&self, precision: DeclaredPrecision) -> Result<BitString, ProgramError> {
+        let parts = &self.parts;
+        let mut out = BitString::new();
+        let reals: Vec<f64> = parts
+            .bodies
+            .iter()
+            .flat_map(|body| body.nodes.iter())
+            .flat_map(|node| match node {
+                Node::Native { primitive, .. } => real_constants(primitive),
+                _ => Vec::new(),
+            })
+            .collect();
+        LatticeCode::encode(&reals, precision)
+            .map_err(precision_error)?
+            .write(&mut out)
+            .map_err(precision_error)?;
+        for count in [
+            parts.parameters.len(),
+            parts.slots.len(),
+            parts.controls.len(),
+            parts.mask_groups.len(),
+            parts.bodies.len(),
+        ] {
+            encode_prefix_integer(&mut out, count as u64 + 1)?;
+        }
+        encode_fixed_index(&mut out, parts.entry.index(), parts.bodies.len())?;
+        for decl in &parts.parameters {
+            encode_control_list(&mut out, &decl.controls, parts.controls.len())?;
+        }
+        for group in &self.control_group {
+            encode_fixed_index(&mut out, group.index(), parts.mask_groups.len())?;
+        }
+        for body in &parts.bodies {
+            encode_prefix_integer(&mut out, u64::from(body.inputs) + 1)?;
+            let dag: Vec<DagNode> = body
+                .nodes
+                .iter()
+                .map(|node| DagNode {
+                    label: node_label(node),
+                    arguments: node.arguments().iter().map(|argument| argument.index()).collect(),
+                })
+                .collect();
+            encode_ordered_dag(&mut out, PROGRAM_LABEL_ALPHABET, &dag)?;
+            encode_fixed_index(&mut out, body.output.index(), body.nodes.len())?;
+            for node in &body.nodes {
+                self.encode_payload(&mut out, body, node)?;
+            }
+        }
+        Ok(out)
+    }
+
+    fn encode_payload(&self, out: &mut BitString, body: &Body, node: &Node) -> Result<(), CodecError> {
+        let parts = &self.parts;
+        let (controls, bodies) = (parts.controls.len(), parts.bodies.len());
+        match node {
+            Node::Input { port } => encode_fixed_index(out, *port as usize, body.inputs as usize),
+            Node::Read { slot } | Node::Write { slot, .. } => {
+                encode_fixed_index(out, slot.index(), parts.slots.len())
+            }
+            Node::Native { primitive, .. } => match primitive {
+                NativePrimitive::Linear { weight: parameter }
+                | NativePrimitive::AddBias { bias: parameter } => {
+                    encode_fixed_index(out, parameter.index(), parts.parameters.len())
+                }
+                NativePrimitive::CoordinateMask { controls: mask } => {
+                    encode_control_list(out, mask, controls)
+                }
+                NativePrimitive::RmsNorm { gain, .. } => {
+                    encode_fixed_index(out, gain.index(), parts.parameters.len())
+                }
+                NativePrimitive::LayerNorm { gain, bias, .. } => {
+                    encode_fixed_index(out, gain.index(), parts.parameters.len())?;
+                    encode_fixed_index(out, bias.index(), parts.parameters.len())
+                }
+                NativePrimitive::CausalSelfAttention { geometry, rotary, .. } => {
+                    for dimension in
+                        [geometry.model_dim, geometry.n_heads, geometry.n_kv_heads, geometry.head_dim]
+                    {
+                        encode_prefix_integer(out, dimension as u64 + 1)?;
+                    }
+                    out.push_bit(rotary.pairing == RotaryPairing::Interleaved);
+                    encode_prefix_integer(out, rotary.inverse_frequencies.len() as u64 + 1)
+                }
+                NativePrimitive::Activation { .. } | NativePrimitive::Hadamard | NativePrimitive::SwiGlu => {
+                    Ok(())
+                }
+            },
+            Node::Sum { terms } => {
+                for term in terms {
+                    encode_optional_control(out, term.control, controls)?;
+                }
+                Ok(())
+            }
+            Node::Compose { stages, .. } => {
+                encode_prefix_integer(out, stages.len() as u64 + 1)?;
+                for stage in stages {
+                    encode_fixed_index(out, stage.body.index(), bodies)?;
+                    encode_optional_control(out, stage.control, controls)?;
+                }
+                Ok(())
+            }
+            Node::Call { body: callee, .. } => encode_fixed_index(out, callee.index(), bodies),
+            Node::Refine { native, mechanism, .. } => {
+                encode_fixed_index(out, native.index(), bodies)?;
+                encode_fixed_index(out, mechanism.index(), bodies)
+            }
+        }
+    }
+
+    /// Reads one codeword ([`Program::encode`]), refusing trailing bits, and
+    /// validates the decoded program through [`Program::new`].
+    pub fn decode(message: &BitString) -> Result<Self, ProgramError> {
+        let mut reader = message.reader();
+        let lattice = LatticeCode::read(&mut reader).map_err(precision_error)?;
+        let mut reals = lattice.decode().map_err(precision_error)?.into_iter();
+        let parameter_count = decode_count(&mut reader)?;
+        let slot_count = decode_count(&mut reader)?;
+        let control_count = decode_count(&mut reader)?;
+        let group_count = decode_count(&mut reader)?;
+        let body_count = decode_count(&mut reader)?;
+        let entry = BodyId(decode_fixed_index(&mut reader, body_count)? as u32);
+        let mut parameters = Vec::with_capacity(parameter_count);
+        for _ in 0..parameter_count {
+            let controls = decode_control_list(&mut reader, control_count)?;
+            parameters.push(ParameterDecl { name: String::new(), controls });
+        }
+        let mut mask_groups: Vec<MaskGroup> =
+            std::iter::repeat_with(|| MaskGroup { name: String::new(), controls: Vec::new() })
+                .take(group_count)
+                .collect();
+        for control in 0..control_count {
+            let group = decode_fixed_index(&mut reader, group_count)?;
+            mask_groups[group].controls.push(ControlId(control as u32));
+        }
+        let mut bodies = Vec::with_capacity(body_count);
+        for _ in 0..body_count {
+            let inputs = u32::try_from(decode_prefix_integer(&mut reader)? - 1).map_err(|error| {
+                CodecError::InvalidCodeword(format!("a body input count does not fit u32: {error}"))
+            })?;
+            let dag = decode_ordered_dag(&mut reader, PROGRAM_LABEL_ALPHABET)?;
+            let output = NodeId(decode_fixed_index(&mut reader, dag.len())? as u32);
+            let mut nodes = Vec::with_capacity(dag.len());
+            for dag_node in dag {
+                let arguments: Vec<NodeId> =
+                    dag_node.arguments.iter().map(|&argument| NodeId(argument as u32)).collect();
+                nodes.push(decode_node(
+                    &mut reader,
+                    &mut reals,
+                    dag_node.label,
+                    arguments,
+                    inputs as usize,
+                    [parameter_count, slot_count, control_count, body_count],
+                )?);
+            }
+            bodies.push(Body { name: String::new(), inputs, nodes, output });
+        }
+        if reals.next().is_some() {
+            return Err(ProgramError::Codec {
+                error: CodecError::InvalidCodeword(
+                    "the lattice code carries real constants no node reads".to_string(),
+                ),
+            });
+        }
+        reader.finish()?;
+        let slots = std::iter::repeat_with(|| SlotDecl { name: String::new() })
+            .take(slot_count)
+            .collect();
+        let controls = std::iter::repeat_with(|| ControlDecl { name: String::new() })
+            .take(control_count)
+            .collect();
+        Self::new(ProgramParts { parameters, slots, controls, mask_groups, bodies, entry })
+    }
+}
+
+fn decode_node(
+    reader: &mut BitReader<'_>,
+    reals: &mut std::vec::IntoIter<f64>,
+    label: usize,
+    arguments: Vec<NodeId>,
+    inputs: usize,
+    [parameters, slots, controls, bodies]: [usize; 4],
+) -> Result<Node, CodecError> {
+    let single = |arguments: &[NodeId]| match arguments {
+        [value] => Ok(*value),
+        other => Err(arity_refusal(label, other.len())),
+    };
+    let none = |arguments: &[NodeId]| {
+        if arguments.is_empty() { Ok(()) } else { Err(arity_refusal(label, arguments.len())) }
+    };
+    let native = |primitive: NativePrimitive, arguments: Vec<NodeId>| Node::Native { primitive, arguments };
+    Ok(match label {
+        0 => {
+            none(&arguments)?;
+            Node::Input { port: decode_fixed_index(reader, inputs)? as u32 }
+        }
+        1 => {
+            none(&arguments)?;
+            Node::Read { slot: SlotId(decode_fixed_index(reader, slots)? as u32) }
+        }
+        2 => {
+            let value = single(&arguments)?;
+            Node::Write { slot: SlotId(decode_fixed_index(reader, slots)? as u32), value }
+        }
+        3 => native(
+            NativePrimitive::Linear { weight: ParameterSlot(decode_fixed_index(reader, parameters)? as u32) },
+            arguments,
+        ),
+        4 => native(
+            NativePrimitive::AddBias { bias: ParameterSlot(decode_fixed_index(reader, parameters)? as u32) },
+            arguments,
+        ),
+        5 => native(NativePrimitive::Activation { activation: NativeActivation::Relu }, arguments),
+        6 => native(NativePrimitive::Activation { activation: NativeActivation::ExactGelu }, arguments),
+        7 => native(NativePrimitive::Activation { activation: NativeActivation::Silu }, arguments),
+        8 => native(NativePrimitive::Hadamard, arguments),
+        9 => native(
+            NativePrimitive::CoordinateMask { controls: decode_control_list(reader, controls)? },
+            arguments,
+        ),
+        10 => {
+            let mut terms = Vec::with_capacity(arguments.len());
+            for &value in &arguments {
+                terms.push(SumTerm { value, control: decode_optional_control(reader, controls)? });
+            }
+            Node::Sum { terms }
+        }
+        11 => {
+            let value = single(&arguments)?;
+            let stage_count = decode_count(reader)?;
+            let mut stages = Vec::with_capacity(stage_count);
+            for _ in 0..stage_count {
+                let body = BodyId(decode_fixed_index(reader, bodies)? as u32);
+                stages.push(ComposeStage { body, control: decode_optional_control(reader, controls)? });
+            }
+            Node::Compose { value, stages }
+        }
+        12 => Node::Call { body: BodyId(decode_fixed_index(reader, bodies)? as u32), arguments },
+        17 => native(NativePrimitive::SwiGlu, arguments),
+        16 => {
+            let mut dimensions = [0_usize; 4];
+            for dimension in &mut dimensions {
+                *dimension = usize::try_from(decode_prefix_integer(reader)? - 1).map_err(|error| {
+                    CodecError::InvalidCodeword(format!("an attention dimension does not fit usize: {error}"))
+                })?;
+            }
+            let [model_dim, n_heads, n_kv_heads, head_dim] = dimensions;
+            let pairing = if reader.read_bit()? { RotaryPairing::Interleaved } else { RotaryPairing::HalfSplit };
+            let frequency_count = decode_prefix_integer(reader)? - 1;
+            // Every frequency is a real of the lattice code, so no count above the
+            // reals that remain is a codeword.
+            if frequency_count > reals.len() as u64 {
+                return Err(CodecError::InvalidCodeword(format!(
+                    "{frequency_count} rotary frequencies exceed the {} real constants left",
+                    reals.len()
+                )));
+            }
+            let mut inverse_frequencies = Vec::with_capacity(frequency_count as usize);
+            for _ in 0..frequency_count {
+                inverse_frequencies.push(next_real(reals)?);
+            }
+            let attention_scaling = next_real(reals)?;
+            let score_scale = next_real(reals)?;
+            native(
+                NativePrimitive::CausalSelfAttention {
+                    geometry: AttentionGeometry { model_dim, n_heads, n_kv_heads, head_dim },
+                    rotary: RotaryEmbedding { pairing, inverse_frequencies, attention_scaling },
+                    score_scale,
+                },
+                arguments,
+            )
+        }
+        14 => {
+            let epsilon = next_real(reals)?;
+            let gain = ParameterSlot(decode_fixed_index(reader, parameters)? as u32);
+            native(NativePrimitive::RmsNorm { epsilon, gain }, arguments)
+        }
+        15 => {
+            let epsilon = next_real(reals)?;
+            let gain = ParameterSlot(decode_fixed_index(reader, parameters)? as u32);
+            let bias = ParameterSlot(decode_fixed_index(reader, parameters)? as u32);
+            native(NativePrimitive::LayerNorm { epsilon, gain, bias }, arguments)
+        }
+        13 => {
+            let native_body = BodyId(decode_fixed_index(reader, bodies)? as u32);
+            let mechanism = BodyId(decode_fixed_index(reader, bodies)? as u32);
+            Node::Refine { native: native_body, mechanism, arguments }
+        }
+        other => return Err(CodecError::InvalidCodeword(format!("no node label {other}"))),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     //! Fixtures whose entries and mask values are dyadic rationals with small
@@ -1649,9 +2430,13 @@ mod tests {
         masks
     }
 
+    fn row_positions(rows: &Array2<f64>) -> Vec<i64> {
+        (0..rows.nrows() as i64).collect()
+    }
+
     fn run(program: &Program, source: &DenseParameters, masks: &MaskAssignment, x: &Array2<f64>) -> Array2<f64> {
         program
-            .execute(source, masks, vec![x.clone()], Vec::new())
+            .execute(source, masks, vec![x.clone()], Vec::new(), &row_positions(x))
             .expect("execution of a valid program")
             .output
     }
@@ -1699,7 +2484,7 @@ mod tests {
         // coordinates (setting only the first gives a different output).
         assert_ne!(masked, all_on);
         assert_ne!(masked, expected([0.5, 1.0, -1.25], 0.75));
-        assert_eq!(program.output_mask_dependence(), MaskDependence::Polynomial { degree: 2 });
+        assert_eq!(program.output_mask_dependence().degree(), Some(2));
     }
 
     #[test]
@@ -1748,8 +2533,11 @@ mod tests {
         // Negative control: the cross term is nonzero, so a sum of the two
         // first-order mechanisms is refuted.
         assert_ne!(output, first_order);
-        assert_eq!(program.output_mask_dependence(), MaskDependence::Polynomial { degree: 2 });
+        assert_eq!(program.output_mask_dependence().degree(), Some(2));
         assert!(!program.output_mask_dependence().is_affine());
+        // The induced cross term multiplies two distinct groups, so P9 runs on it
+        // instead of refusing.
+        assert!(program.output_mask_dependence().is_multilinear());
         // A deleted stage is skipped exactly.
         let deleted = run(&program, &source, &global(&[(0, 0.0), (1, 1.0)]), &x);
         assert_eq!(deleted, row_map(&x, &(&identity + &delta_b)));
@@ -1776,7 +2564,7 @@ mod tests {
             Node::Sum { terms: vec![term(0, None), term(1, Some(0)), term(2, Some(1))] },
         ];
         let affine = two_control_program(affine_sum.clone());
-        assert_eq!(affine.output_mask_dependence(), MaskDependence::Polynomial { degree: 1 });
+        assert_eq!(affine.output_mask_dependence().degree(), Some(1));
         assert!(affine.output_mask_dependence().is_affine());
 
         let mut through_activation = affine_sum;
@@ -1790,7 +2578,35 @@ mod tests {
             linear(1, 2),
             Node::Sum { terms: vec![term(3, Some(1))] },
         ]);
-        assert_eq!(multiplied_layers.output_mask_dependence(), MaskDependence::Polynomial { degree: 2 });
+        assert_eq!(multiplied_layers.output_mask_dependence().degree(), Some(2));
+        assert!(!multiplied_layers.output_mask_dependence().is_affine());
+        assert!(multiplied_layers.output_mask_dependence().is_multilinear());
+
+        // Positive control: one group tying the controls of two multiplied layers has
+        // degree two in that group's value, so the value is not multilinear.
+        let tied_layers = Program::new(ProgramParts {
+            parameters: free_parameters(2),
+            slots: Vec::new(),
+            controls: named_controls(2),
+            mask_groups: vec![MaskGroup { name: "tied".to_string(), controls: controls(&[0, 1]) }],
+            bodies: vec![body(
+                "entry",
+                1,
+                vec![
+                    Node::Input { port: 0 },
+                    linear(0, 0),
+                    Node::Sum { terms: vec![term(1, Some(0))] },
+                    linear(1, 2),
+                    Node::Sum { terms: vec![term(3, Some(1))] },
+                ],
+            )],
+            entry: BodyId(0),
+        })
+        .expect("a valid program");
+        let tied_dependence = tied_layers.output_mask_dependence();
+        assert_eq!(tied_dependence.degree(), Some(2));
+        assert_eq!(tied_dependence.group_degree(MaskGroupId(0)), Some(2));
+        assert!(!tied_dependence.is_multilinear());
 
         let activation_before_masks = two_control_program(vec![
             Node::Input { port: 0 },
@@ -1799,7 +2615,7 @@ mod tests {
             linear(1, 2),
             Node::Sum { terms: vec![term(3, Some(0)), term(0, Some(1))] },
         ]);
-        assert_eq!(activation_before_masks.output_mask_dependence(), MaskDependence::Polynomial { degree: 1 });
+        assert_eq!(activation_before_masks.output_mask_dependence().degree(), Some(1));
     }
 
     #[test]
@@ -1846,20 +2662,31 @@ mod tests {
         assert_eq!(run(&program, &source, &half, &x), row_map(&row_map(&row_map(&x, &r), &diagonal), &u));
 
         let (execution, residuals) = program
-            .refinement_residuals(&source, &MaskAssignment::all_on(), vec![x.clone()], Vec::new())
+            .refinement_residuals(&source, &MaskAssignment::all_on(), vec![x.clone()], Vec::new(), &row_positions(&x))
             .expect("residual execution");
         assert_eq!(execution.output, native_output);
         assert_eq!(residuals.len(), 1);
         let residual = &residuals[0];
         assert!(residual.all_on);
         assert_eq!(residual.invocation, vec![CallSite { body: BodyId(0), node: NodeId(1), stage: 0 }]);
-        // U R - W = W, so the residual equals the native scale.
+        // U R - W = W, so the residual equals the native scale. The difference carries
+        // the rounding of its one subtraction; the scale is exact.
         let native_scale = native_output.iter().fold(0.0_f64, |largest, entry| largest.max(entry.abs()));
-        assert_eq!(residual.max_abs_difference, native_scale);
-        assert_eq!(residual.native_max_abs, native_scale);
+        assert!(matches!(
+            &residual.difference,
+            EvidenceStatus::Exact { value, numerical_error, witness: Some(..), .. }
+                if *value == native_scale
+                    && *numerical_error == (accumulation_growth(1) * native_scale).next_up()
+                    && *numerical_error > accumulation_growth(1) * native_scale
+        ));
+        assert!(matches!(
+            &residual.native_scale,
+            EvidenceStatus::Exact { value, numerical_error, .. }
+                if *value == native_scale && *numerical_error == 0.0
+        ));
 
         let (half_execution, half_residuals) = program
-            .refinement_residuals(&source, &half, vec![x.clone()], Vec::new())
+            .refinement_residuals(&source, &half, vec![x.clone()], Vec::new(), &row_positions(&x))
             .expect("residual execution");
         assert!(!half_residuals[0].all_on);
         assert_eq!(half_execution.output, run(&program, &source, &half, &x));
@@ -1915,47 +2742,79 @@ mod tests {
         assert_ne!(run(&separate, &source, &global(&[(0, 0.5)]), &x), array![[0.25]]);
     }
 
+    fn activation_program(activation: NativeActivation) -> Program {
+        Program::new(ProgramParts {
+            parameters: Vec::new(),
+            slots: Vec::new(),
+            controls: Vec::new(),
+            mask_groups: Vec::new(),
+            bodies: vec![body(
+                "entry",
+                1,
+                vec![Node::Input { port: 0 }, native(NativePrimitive::Activation { activation }, &[0])],
+            )],
+            entry: BodyId(0),
+        })
+        .expect("a valid program")
+    }
+
     #[test]
     fn activation_nodes_evaluate_the_gam_math_owner() {
         let x = array![[-1.5, 0.0, 2.25]];
+        let smoothed = |owner: GaussianActivation, t: f64| {
+            let mut value = [0.0];
+            gaussian_smoothing_derivatives(owner, t, 0.0, &mut value).expect("a finite point");
+            value[0]
+        };
+        let source = DenseParameters::new(Vec::new());
         let mut outputs = Vec::new();
-        for (activation, owner) in [
-            (NativeActivation::Relu, GaussianActivation::Relu),
-            (NativeActivation::ExactGelu, GaussianActivation::ExactGelu),
-        ] {
-            let program = Program::new(ProgramParts {
-                parameters: Vec::new(),
-                slots: Vec::new(),
-                controls: Vec::new(),
-                mask_groups: Vec::new(),
-                bodies: vec![body(
-                    "entry",
-                    1,
-                    vec![Node::Input { port: 0 }, native(NativePrimitive::Activation { activation }, &[0])],
-                )],
-                entry: BodyId(0),
-            })
-            .expect("a valid program");
-            let output = run(&program, &DenseParameters::new(Vec::new()), &MaskAssignment::all_on(), &x);
-            let expected = x.mapv(|t| {
-                let mut value = [0.0];
-                gaussian_smoothing_derivatives(owner, t, 0.0, &mut value).expect("a finite point");
-                value[0]
+        for activation in [NativeActivation::Relu, NativeActivation::ExactGelu, NativeActivation::Silu] {
+            let output = run(&activation_program(activation), &source, &MaskAssignment::all_on(), &x);
+            let expected = x.mapv(|t| match activation {
+                NativeActivation::Relu => smoothed(GaussianActivation::Relu, t),
+                NativeActivation::ExactGelu => smoothed(GaussianActivation::ExactGelu, t),
+                NativeActivation::Silu => silu_derivatives(t)[0],
             });
             assert_eq!(output, expected);
             outputs.push(output);
         }
         assert_eq!(outputs[0], array![[0.0, 0.0, 2.25]]);
         // The exact GELU is negative at -1.5 and strictly between 0 and t at 2.25,
-        // so the two kinds are not routed to one function.
+        // so the kinds are not routed to one function.
         assert!(outputs[1][[0, 0]] < 0.0);
         assert!(outputs[1][[0, 2]] > 0.0 && outputs[1][[0, 2]] < 2.25);
+        // SiLU is t sigma(t): exactly zero at 0, negative at -1.5, and not the GELU there.
+        assert_eq!(outputs[2][[0, 1]], 0.0);
+        assert!(outputs[2][[0, 0]] < 0.0);
+        assert_ne!(outputs[2][[0, 0]], outputs[1][[0, 0]]);
+        // The node and owner enumerations map onto each other exactly, both ways.
+        for activation in [NativeActivation::Relu, NativeActivation::ExactGelu, NativeActivation::Silu] {
+            assert_eq!(NativeActivation::from_owner(activation.to_owner()), activation);
+        }
+        for owner in [GaussianActivation::Relu, GaussianActivation::ExactGelu, GaussianActivation::Silu] {
+            assert_eq!(NativeActivation::from_owner(owner).to_owner(), owner);
+        }
+        // The SiLU jet returns NaN on a non-finite input; the node refuses it instead.
+        assert!(silu_derivatives(f64::NAN)[0].is_nan());
+        assert!(matches!(
+            activation_program(NativeActivation::Silu).execute(
+                &source,
+                &MaskAssignment::all_on(),
+                vec![array![[f64::NAN]]],
+                Vec::new(),
+                &[0],
+            ),
+            Err(ExecutionError::Program(ProgramError::Activation {
+                error: GaussianActivationError::NonFiniteArgument { .. },
+                ..
+            }))
+        ));
     }
 
     fn validation_base() -> ProgramParts {
         ProgramParts {
             parameters: free_parameters(1),
-            slots: vec![SlotDecl { name: "stream".to_string() }],
+            slots: Vec::new(),
             controls: named_controls(1),
             mask_groups: singleton_groups(1),
             bodies: vec![
@@ -2014,6 +2873,7 @@ mod tests {
         ));
 
         let mut impure = validation_base();
+        impure.slots.push(SlotDecl { name: "stream".to_string() });
         impure.bodies[1].nodes.push(Node::Write { slot: SlotId(0), value: NodeId(1) });
         assert!(matches!(
             Program::new(impure),
@@ -2100,17 +2960,17 @@ mod tests {
         .expect("a valid program");
         let source = DenseParameters::new(vec![DenseTensor::Matrix(w.clone())]);
         let execution = program
-            .execute(&source, &MaskAssignment::all_on(), Vec::new(), vec![Some(x.clone())])
+            .execute(&source, &MaskAssignment::all_on(), Vec::new(), vec![Some(x.clone())], &[0])
             .expect("a written slot");
         let updated = &x + &row_map(&x, &w);
         assert_eq!(execution.output, updated);
         assert_eq!(execution.slots, vec![Some(updated)]);
         assert!(matches!(
-            program.execute(&source, &MaskAssignment::all_on(), Vec::new(), vec![None]),
+            program.execute(&source, &MaskAssignment::all_on(), Vec::new(), vec![None], &[0]),
             Err(ExecutionError::Program(ProgramError::SlotUnwritten { .. }))
         ));
         assert!(matches!(
-            program.execute(&source, &MaskAssignment::all_on(), Vec::new(), Vec::new()),
+            program.execute(&source, &MaskAssignment::all_on(), Vec::new(), Vec::new(), &[0]),
             Err(ExecutionError::Program(ProgramError::SlotCount { expected: 1, found: 0 }))
         ));
 
@@ -2125,7 +2985,7 @@ mod tests {
             Err(ProgramError::DuplicateMaskScope { .. })
         ));
         assert!(matches!(
-            program.execute(&source, &masks, Vec::new(), vec![Some(x.clone())]),
+            program.execute(&source, &masks, Vec::new(), vec![Some(x.clone())], &[0]),
             Err(ExecutionError::Program(ProgramError::UnknownMaskGroup { .. }))
         ));
 
@@ -2138,10 +2998,362 @@ mod tests {
             entry: BodyId(0),
         })
         .expect("a valid program");
-        assert_eq!(anchored.output_mask_dependence(), MaskDependence::Polynomial { degree: 1 });
+        assert_eq!(anchored.output_mask_dependence().degree(), Some(1));
         assert!(matches!(
-            anchored.execute(&source, &MaskAssignment::all_on(), vec![x.clone()], Vec::new()),
+            anchored.execute(&source, &MaskAssignment::all_on(), vec![x.clone()], Vec::new(), &[0]),
             Err(ExecutionError::Source { error: DenseParameterError::Controlled { .. }, .. })
+        ));
+    }
+
+    #[test]
+    fn validation_refuses_declarations_no_node_uses() {
+        assert!(Program::new(validation_base()).is_ok());
+        let mut unused_slot = validation_base();
+        unused_slot.slots.push(SlotDecl { name: "idle".to_string() });
+        assert!(matches!(
+            Program::new(unused_slot),
+            Err(ProgramError::SlotUnused { slot: SlotId(0) })
+        ));
+        let mut unused_parameter = validation_base();
+        unused_parameter.parameters.push(ParameterDecl { name: "idle".to_string(), controls: Vec::new() });
+        assert!(matches!(
+            Program::new(unused_parameter),
+            Err(ProgramError::ParameterUnused { parameter: ParameterSlot(1) })
+        ));
+    }
+
+    #[test]
+    fn normalization_nodes_evaluate_the_gated_rewrite_owner() {
+        let x = array![[1.0, -2.0, 0.5], [3.0, 0.25, -1.0]];
+        let gain = array![0.5, 2.0, -1.0];
+        let bias = array![0.125, 0.0, -0.25];
+        // The source configuration's epsilon, e.g. Qwen3's rms_norm_eps.
+        let epsilon = 1e-6;
+        let build = |primitive: NativePrimitive, parameters: u32| {
+            Program::new(ProgramParts {
+                parameters: free_parameters(parameters),
+                slots: Vec::new(),
+                controls: Vec::new(),
+                mask_groups: Vec::new(),
+                bodies: vec![body("entry", 1, vec![Node::Input { port: 0 }, native(primitive, &[0])])],
+                entry: BodyId(0),
+            })
+            .expect("a valid program")
+        };
+        let source = DenseParameters::new(vec![DenseTensor::Vector(gain.clone()), DenseTensor::Vector(bias.clone())]);
+        let rms = run(
+            &build(NativePrimitive::RmsNorm { epsilon, gain: ParameterSlot(0) }, 1),
+            &source,
+            &MaskAssignment::all_on(),
+            &x,
+        );
+        let expected_rms = MaskedNorm::Rms { epsilon, gain: gain.view() }
+            .apply(x.view())
+            .expect("a finite normalization");
+        assert_eq!(rms, expected_rms);
+        let layer = run(
+            &build(NativePrimitive::LayerNorm { epsilon, gain: ParameterSlot(0), bias: ParameterSlot(1) }, 2),
+            &source,
+            &MaskAssignment::all_on(),
+            &x,
+        );
+        let expected_layer = MaskedNorm::Layer { epsilon, gain: gain.view(), bias: bias.view() }
+            .apply(x.view())
+            .expect("a finite normalization");
+        assert_eq!(layer, expected_layer);
+        // Positive control: the two kinds are different functions of the same rows.
+        assert_ne!(rms, layer);
+        // The owner's refusal of an invalid epsilon reaches the caller unchanged.
+        assert!(matches!(
+            build(NativePrimitive::RmsNorm { epsilon: -1.0, gain: ParameterSlot(0) }, 1).execute(
+                &source,
+                &MaskAssignment::all_on(),
+                vec![x.clone()],
+                Vec::new(),
+                &row_positions(&x),
+            ),
+            Err(ExecutionError::Program(ProgramError::GatedRewrite {
+                error: GatedRewriteError::InvalidEpsilon { .. },
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn swiglu_nodes_evaluate_the_gated_rewrite_owner() {
+        let gate = array![[1.0, -2.0], [0.5, 0.0]];
+        let up = array![[0.25, 3.0], [-1.0, 2.0]];
+        let program = Program::new(ProgramParts {
+            parameters: Vec::new(),
+            slots: Vec::new(),
+            controls: Vec::new(),
+            mask_groups: Vec::new(),
+            bodies: vec![body(
+                "entry",
+                2,
+                vec![Node::Input { port: 0 }, Node::Input { port: 1 }, native(NativePrimitive::SwiGlu, &[0, 1])],
+            )],
+            entry: BodyId(0),
+        })
+        .expect("a valid program");
+        let source = DenseParameters::new(Vec::new());
+        let output = program
+            .execute(&source, &MaskAssignment::all_on(), vec![gate.clone(), up.clone()], Vec::new(), &row_positions(&gate))
+            .expect("SwiGLU execution")
+            .output;
+        assert_eq!(output, swiglu_hidden(gate.view(), up.view()).expect("finite rows of one shape"));
+        // Positive control: the gate passes through SiLU, so the node is not the plain product.
+        assert_ne!(output, &gate * &up);
+        // The owner's shape refusal reaches the caller unchanged.
+        assert!(matches!(
+            program.execute(
+                &source,
+                &MaskAssignment::all_on(),
+                vec![gate.clone(), array![[0.0], [1.0]]],
+                Vec::new(),
+                &row_positions(&gate),
+            ),
+            Err(ExecutionError::Program(ProgramError::GatedRewrite { .. }))
+        ));
+    }
+
+    fn attention_rotary() -> RotaryEmbedding {
+        RotaryEmbedding { pairing: RotaryPairing::HalfSplit, inverse_frequencies: vec![1.0], attention_scaling: 1.0 }
+    }
+
+    fn attention_fixture(geometry: AttentionGeometry) -> ProgramParts {
+        ProgramParts {
+            parameters: free_parameters(3),
+            slots: Vec::new(),
+            controls: Vec::new(),
+            mask_groups: Vec::new(),
+            bodies: vec![body(
+                "entry",
+                1,
+                vec![
+                    Node::Input { port: 0 },
+                    linear(0, 0),
+                    linear(1, 0),
+                    linear(2, 0),
+                    native(
+                        NativePrimitive::CausalSelfAttention {
+                            geometry,
+                            rotary: attention_rotary(),
+                            score_scale: 0.75,
+                        },
+                        &[1, 2, 3],
+                    ),
+                ],
+            )],
+            entry: BodyId(0),
+        }
+    }
+
+    #[test]
+    fn causal_self_attention_nodes_evaluate_the_attention_owner() {
+        let geometry = AttentionGeometry { model_dim: 4, n_heads: 2, n_kv_heads: 1, head_dim: 2 };
+        let x = array![[1.0, -0.5, 0.25, 2.0], [0.5, 1.5, -1.0, 0.0], [-2.0, 0.75, 1.0, -0.25]];
+        let w_q = array![
+            [0.5, 0.0, 1.0, -0.5],
+            [0.25, 1.0, 0.0, 0.5],
+            [-1.0, 0.5, 0.25, 0.0],
+            [0.0, -0.25, 0.5, 1.0]
+        ];
+        let w_k = array![[1.0, 0.5, -0.5, 0.0], [0.0, 0.25, 1.0, -1.0]];
+        let w_v = array![[0.5, -1.0, 0.0, 0.25], [1.0, 0.0, 0.5, -0.5]];
+        let parts = attention_fixture(geometry);
+        let program = Program::new(parts.clone()).expect("a valid program");
+        let source = DenseParameters::new(vec![
+            DenseTensor::Matrix(w_q.clone()),
+            DenseTensor::Matrix(w_k.clone()),
+            DenseTensor::Matrix(w_v.clone()),
+        ]);
+        let positions = [0_i64, 1, 2];
+        let output = program
+            .execute(&source, &MaskAssignment::all_on(), vec![x.clone()], Vec::new(), &positions)
+            .expect("attention execution")
+            .output;
+        let owner = RotaryCausalAttention::new(geometry, attention_rotary(), 0.75)
+            .expect("a valid attention");
+        let (queries, keys, value_rows) = (row_map(&x, &w_q), row_map(&x, &w_k), row_map(&x, &w_v));
+        let expected = owner
+            .attend_projected(
+                ProjectedRows::exact(queries.view()),
+                ProjectedRows::exact(keys.view()),
+                ProjectedRows::exact(value_rows.view()),
+                &positions,
+            )
+            .expect("owner attention")
+            .mixed;
+        assert_eq!(output, expected);
+        // Positive control: moving one position changes the rotary scores, so the
+        // execution's positions reach the node.
+        let shifted = program
+            .execute(&source, &MaskAssignment::all_on(), vec![x.clone()], Vec::new(), &[0, 1, 5])
+            .expect("attention execution")
+            .output;
+        assert_ne!(shifted, output);
+        // Construction refuses key/value heads that do not divide the query heads.
+        assert!(matches!(
+            Program::new(attention_fixture(AttentionGeometry { model_dim: 4, n_heads: 3, n_kv_heads: 2, head_dim: 2 })),
+            Err(ProgramError::Attention { error: AttentionProgramError::KeyValueHeadsDoNotDivide { .. }, .. })
+        ));
+        // Positions that do not name every row are refused by the owner.
+        assert!(matches!(
+            program.execute(&source, &MaskAssignment::all_on(), vec![x.clone()], Vec::new(), &[0, 1]),
+            Err(ExecutionError::Program(ProgramError::Attention { .. }))
+        ));
+        assert_eq!(program.output_mask_dependence().degree(), Some(0));
+        let decoded = Program::decode(&program.encode(lattice()).expect("an encodable program"))
+            .expect("the codeword of a valid program");
+        assert_eq!(decoded.parts(), &unnamed(&parts));
+    }
+
+    fn unnamed(parts: &ProgramParts) -> ProgramParts {
+        let mut parts = parts.clone();
+        for decl in &mut parts.parameters {
+            decl.name.clear();
+        }
+        for decl in &mut parts.slots {
+            decl.name.clear();
+        }
+        for decl in &mut parts.controls {
+            decl.name.clear();
+        }
+        for group in &mut parts.mask_groups {
+            group.name.clear();
+        }
+        for body in &mut parts.bodies {
+            body.name.clear();
+        }
+        parts
+    }
+
+    fn copy_bits(message: &BitString, count: u64) -> BitString {
+        let mut reader = message.reader();
+        let mut copy = BitString::new();
+        for _ in 0..count {
+            copy.push_bit(reader.read_bit().expect("a bit of the message"));
+        }
+        copy
+    }
+
+    /// The declared precision of the codeword tests: the step `2^-24`, on which every
+    /// fixture constant lies.
+    fn lattice() -> DeclaredPrecision {
+        DeclaredPrecision::new(24).expect("a normal dyadic step")
+    }
+
+    fn codeword_fixture() -> ProgramParts {
+        ProgramParts {
+            parameters: vec![
+                ParameterDecl { name: "anchored".to_string(), controls: controls(&[1, 0]) },
+                ParameterDecl { name: "gain".to_string(), controls: Vec::new() },
+            ],
+            slots: vec![SlotDecl { name: "stream".to_string() }],
+            controls: named_controls(3),
+            mask_groups: vec![
+                MaskGroup { name: "tied".to_string(), controls: controls(&[0, 2]) },
+                MaskGroup { name: "anchor".to_string(), controls: controls(&[1]) },
+            ],
+            bodies: vec![
+                body(
+                    "entry",
+                    1,
+                    vec![
+                        Node::Input { port: 0 },
+                        Node::Refine { native: BodyId(1), mechanism: BodyId(2), arguments: vec![NodeId(0)] },
+                        Node::Sum { terms: vec![term(0, None), term(1, Some(2))] },
+                        Node::Write { slot: SlotId(0), value: NodeId(2) },
+                    ],
+                ),
+                body(
+                    "native",
+                    1,
+                    vec![
+                        Node::Input { port: 0 },
+                        // epsilon = 2^-20, a point of the codeword lattice.
+                        native(NativePrimitive::RmsNorm { epsilon: 9.5367431640625e-7, gain: ParameterSlot(1) }, &[0]),
+                        native(NativePrimitive::Activation { activation: NativeActivation::Silu }, &[1]),
+                    ],
+                ),
+                body(
+                    "mechanism",
+                    1,
+                    vec![Node::Input { port: 0 }, linear(0, 0), native(NativePrimitive::Hadamard, &[1, 1])],
+                ),
+            ],
+            entry: BodyId(0),
+        }
+    }
+
+    #[test]
+    fn a_program_codeword_decodes_to_the_same_executable_program() {
+        let mut lengths = Vec::new();
+        for parts in [validation_base(), codeword_fixture()] {
+            let program = Program::new(parts.clone()).expect("a valid program");
+            let message = program.encode(lattice()).expect("an encodable program");
+            let decoded = Program::decode(&message).expect("the codeword of a valid program");
+            assert_eq!(decoded.parts(), &unnamed(&parts));
+            lengths.push(message.len_bits());
+        }
+        // Positive control that the code carries structure: one more controlled term
+        // lengthens it.
+        let mut longer = codeword_fixture();
+        longer.controls.push(ControlDecl { name: "c3".to_string() });
+        longer.mask_groups.push(MaskGroup { name: "extra".to_string(), controls: controls(&[3]) });
+        longer.bodies[0].nodes[2] =
+            Node::Sum { terms: vec![term(0, None), term(1, Some(2)), term(1, Some(3))] };
+        let longer_bits = Program::new(longer)
+            .expect("a valid program")
+            .encode(lattice())
+            .expect("an encodable program")
+            .len_bits();
+        assert!(longer_bits > lengths[1]);
+
+        // Real constants go through the declared-precision lattice: an off-lattice
+        // epsilon decodes to its nearest lattice point, a different program, whose
+        // distortion is measured after decoding.
+        let mut off_lattice = codeword_fixture();
+        off_lattice.bodies[1].nodes[1] =
+            native(NativePrimitive::RmsNorm { epsilon: 1e-6, gain: ParameterSlot(1) }, &[0]);
+        let coarse = DeclaredPrecision::new(8).expect("a normal dyadic step");
+        let quantized = Program::decode(
+            &Program::new(off_lattice.clone())
+                .expect("a valid program")
+                .encode(coarse)
+                .expect("an encodable program"),
+        )
+        .expect("the codeword of a valid program");
+        assert_ne!(quantized.parts(), &unnamed(&off_lattice));
+
+        let message = Program::new(codeword_fixture())
+            .expect("a valid program")
+            .encode(lattice())
+            .expect("an encodable program");
+        // The decoder follows the encoder's path, so a message missing its last bit
+        // runs out exactly at the field that bit belongs to.
+        assert!(matches!(
+            Program::decode(&copy_bits(&message, message.len_bits() - 1)),
+            Err(ProgramError::Codec { error: CodecError::UnexpectedEnd { .. } })
+        ));
+        let mut trailing = copy_bits(&message, message.len_bits());
+        trailing.push_bit(false);
+        assert!(matches!(
+            Program::decode(&trailing),
+            Err(ProgramError::Codec { error: CodecError::TrailingBits { .. } })
+        ));
+        // A valid empty lattice message, then a hostile parameter count: the count is
+        // refused before anything is allocated.
+        let mut hostile = BitString::new();
+        LatticeCode::encode(&[], lattice())
+            .expect("an empty lattice code")
+            .write(&mut hostile)
+            .expect("a lattice message");
+        encode_prefix_integer(&mut hostile, 1_u64 << 40).expect("a prefix integer");
+        assert!(matches!(
+            Program::decode(&hostile),
+            Err(ProgramError::Codec { error: CodecError::InvalidCodeword(..) })
         ));
     }
 }

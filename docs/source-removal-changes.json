@@ -142,5 +142,15 @@
     ],
     "reason": "#784: the standard-normal Gauss-Hermite rule and its representable-order ceiling move into gam_math::quadrature (standard_normal_gauss_hermite_rule, max_representable_standard_normal_gauss_hermite_order), so gam-solve's block_quadrature_units_784 probe reads the production ceiling instead of a usize::MAX sentinel; gam-solve cannot depend on gam-inference. rho_posterior's crate-private standard_normal_gh_rule and hmc_io's private max_representable_gh_order are deleted with the same arithmetic, in the same operation order, and every caller (the corrector's ceiling, block_quadrature_marginal_correction's rules, rho_posterior_quadrature, and the hmc_io tests) now calls gam-math.",
     "evidence": "The item list is the refusal of scripts/source_removal_guard.py in direct lane dy3 run q784ceil-g2 (base fca653ffde, exact tree 813288c2, patch md5 d3171157): max_representable_gh_order and its MAX_REPRESENTABLE_ORDER static in hmc_io.rs, and standard_normal_gh_rule in rho_posterior.rs. At the base, git grep -w finds standard_normal_gh_rule and max_representable_gh_order only in rho_posterior.rs and hmc_io.rs, both edited here; gam-math's new MAX_REPRESENTABLE_ORDER static is a different item in quadrature.rs."
+  },
+  {
+    "base": "5ad74c1fa549c7a9933ca12af2dff985d3b6d913",
+    "items": [
+      "crates/gam-sae/src/parameter_decomposition/program.rs:fn:nan_propagating_max",
+      "crates/gam-sae/src/parameter_decomposition/program.rs:fn:owner",
+      "crates/gam-sae/src/parameter_decomposition/program.rs:fn:scaled"
+    ],
+    "reason": "#2951 program.rs follow-up (owner delegation per gam-67, mpd-spec NOTE 13, mpd-verify's NOTE on e4885ba66d): three private helpers are replaced by their successors. NativeActivation::owner becomes the pub, exhaustive NativeActivation::to_owner, with from_owner its inverse, so a gam-math activation with no node fails to compile. nan_propagating_max becomes extremal_entry, which also returns the extremal entry's position as the witness of the EvidenceStatus refinement residual. MaskDependence::scaled becomes Program::controlled, which multiplies by the control's mask-group variable so that per-group degrees are tracked.",
+    "evidence": "At the base all three are private items of crates/gam-sae/src/parameter_decomposition/program.rs: fn owner in impl NativeActivation, the free fn nan_propagating_max, and fn scaled in impl MaskDependence. Rust privacy confines every caller to that module, and this commit replaces each call site (NativeActivation::forward, Executor::refine, Program::body_mask_dependence). The guard's production count of 3 for nan_propagating_max is its definition and its two calls in refine; the counts for owner (359) and scaled (1876) are same-named identifiers elsewhere, which privacy keeps unrelated. The replacements are covered by activation_nodes_evaluate_the_gam_math_owner, a_refinement_runs_its_native_body_exactly_when_every_reached_control_is_one and mask_dependence_separates_affine_sums_from_products_and_nonlinearities in program.rs's test module."
   }
 ]
