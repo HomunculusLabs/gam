@@ -38,6 +38,18 @@ pub enum GeometryError {
         support_radius: f64,
         uniqueness_radius: f64,
     },
+    /// The weighted support of a Fréchet mean on a positively curved manifold
+    /// spreads from its seed, a positive-mass sample, by at least twice the
+    /// global-uniqueness radius. A mean certified by that radius would lie
+    /// within it of every positive-mass sample, the seed included, so by the
+    /// triangle inequality no stationary point can be certified and the Karcher
+    /// descent is not run. Callers must provide an explicit base point or
+    /// better-localized data.
+    FrechetMeanSupportNotLocalized {
+        context: &'static str,
+        seed_spread: f64,
+        uniqueness_radius: f64,
+    },
 }
 
 impl fmt::Display for GeometryError {
@@ -73,6 +85,16 @@ impl fmt::Display for GeometryError {
                  {tolerance:.6e}) but its weighted support radius \
                  {support_radius:.6e} is not below the global-uniqueness radius \
                  {uniqueness_radius:.6e}"
+            ),
+            Self::FrechetMeanSupportNotLocalized {
+                context,
+                seed_spread,
+                uniqueness_radius,
+            } => write!(
+                f,
+                "{context}: the weighted support spreads {seed_spread:.6e} from its seed, \
+                 at least twice the global-uniqueness radius {uniqueness_radius:.6e}, so no \
+                 stationary point can be certified as the unique global mean"
             ),
         }
     }
