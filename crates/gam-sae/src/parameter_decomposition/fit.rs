@@ -66,8 +66,10 @@
 //! loses when its code is longer.
 
 use std::fmt;
+use std::num::NonZeroU64;
 
-use super::codec::{DecodedArtifactScore, code_saving_at_declared_fidelity};
+use super::codec::code_saving_at_proven_fidelity;
+use super::precision::{DecodedFidelity, DeclaredPrecision};
 use super::supports::{EvidenceStatus, Extremum};
 use gam_linalg::matrix::dense_rowwise_kronecker;
 use gam_linalg::roundoff::accumulation_growth;
@@ -736,8 +738,8 @@ pub enum ProposalRejection<W, D> {
     /// and tolerance are then inconsistent, so the loop is refused, not only this
     /// proposal.
     ReferenceMissesTolerance(String),
-    /// The decoded candidate misses the declared tolerance over the declared input
-    /// family.
+    /// The decoded candidate does not prove it meets the reference's declared tolerance:
+    /// its verdict is not `Meets`, or its tolerance differs bitwise.
     CandidateMissesTolerance(String),
     /// The candidate's code is not strictly shorter.
     NoShorterCode { saving_bits: i128 },
@@ -787,25 +789,31 @@ impl<W: fmt::Debug, D: fmt::Debug> std::error::Error for ProposalRejection<W, D>
 
 /// Decides one structural proposal.
 ///
-/// `reference` and `candidate` score the decoded artifacts over the declared input
-/// family. `fidelity` is the separation oracle's status for `sup d` over the declared
-/// mask domain, on the decoded candidate. The rule reuses the owners' predicates
-/// (`code_saving_at_declared_fidelity`, `EvidenceStatus::refutes_at_most` and
-/// `certifies_at_most`) and writes no second comparison:
-/// 1. The decoded reference must meet `tolerance`; otherwise the loop is refused.
+/// `reference` and `candidate` pair each decoded artifact's exact code length in bits
+/// with its decoded distortion evidence under the declared tolerance, as the precision
+/// owner states it (`precision::decode_then_evaluate`). `fidelity` is the separation
+/// oracle's status for `sup d` over the declared mask domain, on the decoded candidate.
+/// It is a different quantity from the decoded distortion, read at the reference's
+/// declared tolerance.
+///
+/// The rule reuses the owners' predicates (`code_saving_at_proven_fidelity`,
+/// `EvidenceStatus::refutes_at_most` and `certifies_at_most`) and writes no second
+/// comparison:
+/// 1. The decoded reference must prove it meets its tolerance; otherwise the loop is
+///    refused.
 /// 2. An estimate or an infimum bracket is refused. A status that refutes
 ///    `sup d ≤ tolerance` rejects the candidate.
-/// 3. The decoded candidate must meet `tolerance`, and its code must be strictly
-///    shorter.
-pub fn decide_proposal<W, D>(
+/// 3. The decoded candidate must prove it meets the same tolerance, bitwise, and its
+///    code must be strictly shorter.
+pub fn decide_proposal<W, D, V, E>(
     kind: ProposalKind,
-    tolerance: f64,
-    reference: &DecodedArtifactScore,
-    candidate: &DecodedArtifactScore,
+    reference: (u64, &DecodedFidelity<V, E>),
+    candidate: (u64, &DecodedFidelity<V, E>),
     fidelity: EvidenceStatus<W, D>,
 ) -> Result<ProposalAcceptance<W, D>, ProposalRejection<W, D>> {
-    code_saving_at_declared_fidelity(tolerance, reference, reference)
+    code_saving_at_proven_fidelity(reference, reference)
         .map_err(ProposalRejection::ReferenceMissesTolerance)?;
+    let tolerance = reference.1.tolerance();
     match fidelity {
         EvidenceStatus::StatisticalEstimate { .. } => {
             return Err(ProposalRejection::EstimateIsNotAFidelityBound(fidelity));
@@ -822,7 +830,7 @@ pub fn decide_proposal<W, D>(
     if fidelity.refutes_at_most(tolerance) {
         return Err(ProposalRejection::FidelityRefuted(fidelity));
     }
-    let saving_bits = code_saving_at_declared_fidelity(tolerance, reference, candidate)
+    let saving_bits = code_saving_at_proven_fidelity(reference, candidate)
         .map_err(ProposalRejection::CandidateMissesTolerance)?;
     if saving_bits <= 0 {
         return Err(ProposalRejection::NoShorterCode { saving_bits });
@@ -833,6 +841,159 @@ pub fn decide_proposal<W, D>(
         fidelity_certified: fidelity.certifies_at_most(tolerance),
         fidelity,
     })
+}
+
+/// Whether rows execute the residual `Θ_* − Σ_c P_c`.
+///
+/// This is one declared value, shared by every row, by the mask generators and by
+/// the separation oracle, so all three read the same zonotope:
+/// * under `Kept`, `Θ(t) = Θ_* − B q`;
+/// * under `Removed`, `Θ(t) = B Σ_c v_c − B q`.
+///
+/// There is no default: the two are different experiments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResidualState {
+    /// Rows execute the residual: `m_Δ = 1`.
+    Kept,
+    /// Rows drop the residual: `m_Δ = 0`.
+    Removed,
+}
+
+impl ResidualState {
+    /// The residual mask `m_Δ` every row of the experiment declares.
+    pub fn residual_mask(self) -> f64 {
+        match self {
+            Self::Kept => 1.0,
+            Self::Removed => 0.0,
+        }
+    }
+}
+
+/// How a readout's distortion is measured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Divergence {
+    /// Squared error on a layer-local readout. Its coefficient block is conditionally
+    /// Gaussian and fitted exactly.
+    SquaredError,
+    /// `KL(p_native ‖ p_edited)` on a distribution readout.
+    ///
+    /// A deterministic teacher gives a soft-label row no dispersion, so each row stands
+    /// for a declared number of teacher draws. That count sets the likelihood's scale for
+    /// the Laplace evidence, which is an approximation and never exact.
+    Kl { samples: NonZeroU64 },
+}
+
+/// The declared inputs of a manifold parameter decomposition fit. Every field is
+/// required, and none has a default.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MpdExperiment {
+    residual_state: ResidualState,
+    tolerance: f64,
+    precision: DeclaredPrecision,
+    divergence: Divergence,
+}
+
+/// Why an experiment declaration was refused.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ExperimentError {
+    /// The fidelity tolerance must be finite and nonnegative.
+    Tolerance { value: f64 },
+}
+
+impl fmt::Display for ExperimentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tolerance { value } => write!(
+                f,
+                "experiment refused: the declared fidelity tolerance {value} must be finite and \
+                 nonnegative"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExperimentError {}
+
+impl MpdExperiment {
+    /// Declares an experiment.
+    ///
+    /// A tolerance is refused unless it is finite and nonnegative. That is the same
+    /// predicate `precision::decode_then_evaluate` and the codec's saving comparison
+    /// apply, so a declaration they would refuse never reaches them.
+    pub fn new(
+        residual_state: ResidualState,
+        tolerance: f64,
+        precision: DeclaredPrecision,
+        divergence: Divergence,
+    ) -> Result<Self, ExperimentError> {
+        if !(tolerance.is_finite() && tolerance >= 0.0) {
+            return Err(ExperimentError::Tolerance { value: tolerance });
+        }
+        Ok(Self {
+            residual_state,
+            tolerance,
+            precision,
+            divergence,
+        })
+    }
+
+    /// The declared residual state.
+    pub fn residual_state(&self) -> ResidualState {
+        self.residual_state
+    }
+
+    /// The declared fidelity tolerance.
+    pub fn tolerance(&self) -> f64 {
+        self.tolerance
+    }
+
+    /// The declared precision of real codes.
+    pub fn precision(&self) -> DeclaredPrecision {
+        self.precision
+    }
+
+    /// The declared divergence of the readout.
+    pub fn divergence(&self) -> Divergence {
+        self.divergence
+    }
+}
+
+#[cfg(test)]
+mod experiment_tests {
+    use super::*;
+
+    #[test]
+    fn an_experiment_declares_every_input_and_refuses_an_invalid_tolerance() {
+        let precision = DeclaredPrecision::new(12).expect("a normal dyadic step");
+        let samples = NonZeroU64::new(64).expect("a nonzero sample count");
+        for invalid in [f64::NAN, f64::INFINITY, -1e-300] {
+            let refused =
+                MpdExperiment::new(ResidualState::Kept, invalid, precision, Divergence::SquaredError);
+            assert!(
+                matches!(refused, Err(ExperimentError::Tolerance { .. })),
+                "tolerance {invalid} must be refused, got {refused:?}"
+            );
+        }
+        // Positive control: zero is a valid declared tolerance, the same edge the
+        // decode-then-evaluate owner admits.
+        let exact = MpdExperiment::new(ResidualState::Removed, 0.0, precision, Divergence::Kl { samples })
+            .expect("a zero tolerance is admitted");
+        assert_eq!(exact.tolerance(), 0.0, "the declared tolerance is kept");
+        assert_eq!(exact.residual_state(), ResidualState::Removed, "the declared residual state is kept");
+        assert_eq!(exact.divergence(), Divergence::Kl { samples }, "the declared divergence is kept");
+        assert_eq!(exact.precision(), precision, "the declared precision is kept");
+    }
+
+    #[test]
+    fn the_residual_state_fixes_one_residual_mask_for_every_row() {
+        assert_eq!(ResidualState::Kept.residual_mask(), 1.0, "Kept executes the residual");
+        assert_eq!(ResidualState::Removed.residual_mask(), 0.0, "Removed drops the residual");
+        assert_ne!(
+            ResidualState::Kept.residual_mask(),
+            ResidualState::Removed.residual_mask(),
+            "the two declared states are different experiments"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1511,6 +1672,7 @@ mod tests {
 #[cfg(test)]
 mod proposal_tests {
     use super::*;
+    use crate::parameter_decomposition::precision::{DecodableArtifact, decode_then_evaluate};
     use crate::parameter_decomposition::supports::ExactBasis;
 
     /// The declared fidelity tolerance of these fixtures.
@@ -1518,12 +1680,40 @@ mod proposal_tests {
 
     type Status = EvidenceStatus<Vec<f64>, &'static str>;
 
-    fn score(code_bits: u64, decoded_distortion: f64, distortion_roundoff: f64) -> DecodedArtifactScore {
-        DecodedArtifactScore {
-            code_bits,
-            decoded_distortion,
-            distortion_roundoff,
+    type Fidelity = DecodedFidelity<Vec<f64>, &'static str>;
+
+    /// A decoded figure whose artifact is its own output, so its evidence is exact.
+    struct Figure(f64);
+
+    impl DecodableArtifact for Figure {
+        type Decoded = f64;
+
+        fn decode(&self) -> Result<f64, String> {
+            Ok(self.0)
         }
+    }
+
+    /// Decoded distortion evidence under `tolerance`, built through the precision owner:
+    /// the output's exact distance from a native reference of zero, with a stated rounding
+    /// bound, over a one-member input family.
+    fn decoded(distortion: f64, numerical_error: f64, tolerance: f64) -> Fidelity {
+        decode_then_evaluate(
+            &Figure(distortion),
+            |value: &f64| Ok(*value),
+            &0.0,
+            |outputs: &f64, native: &f64| {
+                EvidenceStatus::exact(
+                    *outputs - *native,
+                    numerical_error,
+                    ExactBasis::Exhaustive { cardinality: 1 },
+                    None,
+                    "declared input family",
+                )
+                .map_err(|error| error.to_string())
+            },
+            tolerance,
+        )
+        .expect("a valid declared distortion")
     }
 
     fn certified() -> Status {
@@ -1532,14 +1722,10 @@ mod proposal_tests {
 
     #[test]
     fn a_shorter_certified_candidate_is_accepted_and_code_that_is_not_shorter_is_rejected() {
-        let reference = score(1000, 0.05, 0.001);
-        let accepted = decide_proposal(
-            ProposalKind::Split,
-            TOLERANCE,
-            &reference,
-            &score(900, 0.08, 0.001),
-            certified(),
-        );
+        let reference = decoded(0.05, 0.001, TOLERANCE);
+        let candidate = decoded(0.08, 0.001, TOLERANCE);
+        let accepted =
+            decide_proposal(ProposalKind::Split, (1000, &reference), (900, &candidate), certified());
         assert!(
             matches!(
                 &accepted,
@@ -1547,24 +1733,19 @@ mod proposal_tests {
             ),
             "a 100-bit shorter certified candidate must be accepted, got {accepted:?}"
         );
-        let equal = decide_proposal(
-            ProposalKind::Share,
-            TOLERANCE,
-            &reference,
-            &score(1000, 0.08, 0.001),
-            certified(),
-        );
+        let equal =
+            decide_proposal(ProposalKind::Share, (1000, &reference), (1000, &candidate), certified());
         assert!(
             matches!(equal, Err(ProposalRejection::NoShorterCode { saving_bits: 0 })),
             "equal code is not a strict decrease, got {equal:?}"
         );
         // An operator that interpolates the teacher at equal fidelity with a longer code
         // (mpd-modadd's rank caveat) loses on code alone.
+        let interpolating_fidelity = decoded(0.05, 0.001, TOLERANCE);
         let interpolating = decide_proposal(
             ProposalKind::Expose,
-            TOLERANCE,
-            &reference,
-            &score(1200, 0.05, 0.001),
+            (1000, &reference),
+            (1200, &interpolating_fidelity),
             certified(),
         );
         assert!(
@@ -1575,8 +1756,8 @@ mod proposal_tests {
 
     #[test]
     fn a_refuting_estimated_or_infimum_fidelity_status_rejects_even_a_shorter_candidate() {
-        let reference = score(1000, 0.05, 0.001);
-        let shorter = score(900, 0.08, 0.001);
+        let reference = decoded(0.05, 0.001, TOLERANCE);
+        let shorter = decoded(0.08, 0.001, TOLERANCE);
         let mask = vec![1.0, 0.0, 1.0];
         let refuting: [Status; 3] = [
             EvidenceStatus::counterexample(0.3, 0.001, TOLERANCE, mask.clone()).expect("a violation"),
@@ -1586,7 +1767,8 @@ mod proposal_tests {
                 .expect("a valid bracket"),
         ];
         for status in refuting {
-            let decision = decide_proposal(ProposalKind::Reduce, TOLERANCE, &reference, &shorter, status);
+            let decision =
+                decide_proposal(ProposalKind::Reduce, (1000, &reference), (900, &shorter), status);
             assert!(
                 matches!(decision, Err(ProposalRejection::FidelityRefuted(..))),
                 "a status whose lower bound exceeds the tolerance must reject, got {decision:?}"
@@ -1595,7 +1777,8 @@ mod proposal_tests {
 
         let estimate: Status =
             EvidenceStatus::statistical_estimate(0.02, 0.001, 64, "iid uniform masks").expect("a valid estimate");
-        let estimated = decide_proposal(ProposalKind::Refine, TOLERANCE, &reference, &shorter, estimate);
+        let estimated =
+            decide_proposal(ProposalKind::Refine, (1000, &reference), (900, &shorter), estimate);
         assert!(
             matches!(estimated, Err(ProposalRejection::EstimateIsNotAFidelityBound(..))),
             "a stochastic-mask mean must never stand in for the supremum, got {estimated:?}"
@@ -1603,12 +1786,13 @@ mod proposal_tests {
         // Positive control: the same figure as a uniform bound is accepted.
         let bound: Status =
             EvidenceStatus::uniform_bound(0.02, 0.001, "declared mask box").expect("a valid uniform bound");
-        let bounded = decide_proposal(ProposalKind::Refine, TOLERANCE, &reference, &shorter, bound);
+        let bounded = decide_proposal(ProposalKind::Refine, (1000, &reference), (900, &shorter), bound);
         assert!(bounded.is_ok(), "the same figure as a uniform bound must be accepted, got {bounded:?}");
 
         let infimum =
             EvidenceStatus::unresolved(0.04, 0.09, Extremum::Infimum, Some(mask.clone()), "mask box").expect("a valid bracket");
-        let infimum_decision = decide_proposal(ProposalKind::Expose, TOLERANCE, &reference, &shorter, infimum);
+        let infimum_decision =
+            decide_proposal(ProposalKind::Expose, (1000, &reference), (900, &shorter), infimum);
         assert!(
             matches!(infimum_decision, Err(ProposalRejection::NotASupremum(..))),
             "an infimum bracket certifies nothing about the supremum, got {infimum_decision:?}"
@@ -1616,9 +1800,8 @@ mod proposal_tests {
         // Positive control: the same bracket about the supremum certifies.
         let supremum = decide_proposal(
             ProposalKind::Expose,
-            TOLERANCE,
-            &reference,
-            &shorter,
+            (1000, &reference),
+            (900, &shorter),
             EvidenceStatus::unresolved(0.04, 0.09, Extremum::Supremum, Some(mask), "mask box").expect("a valid bracket"),
         );
         assert!(
@@ -1629,11 +1812,12 @@ mod proposal_tests {
 
     #[test]
     fn an_unrefuted_uncertified_fidelity_is_accepted_without_a_certificate() {
+        let reference = decoded(0.05, 0.001, TOLERANCE);
+        let candidate = decoded(0.08, 0.001, TOLERANCE);
         let decision = decide_proposal(
             ProposalKind::Split,
-            TOLERANCE,
-            &score(1000, 0.05, 0.001),
-            &score(900, 0.08, 0.001),
+            (1000, &reference),
+            (900, &candidate),
             EvidenceStatus::unresolved(0.04, f64::INFINITY, Extremum::Supremum, Some(vec![1.0, 1.0]), "mask box")
                 .expect("a valid bracket"),
         );
@@ -1650,40 +1834,46 @@ mod proposal_tests {
 
     #[test]
     fn the_decoded_reference_and_candidate_must_meet_the_tolerance() {
-        let shorter = score(900, 0.08, 0.001);
+        let shorter = decoded(0.08, 0.001, TOLERANCE);
+        let violating_reference = decoded(0.2, 0.001, TOLERANCE);
         let inconsistent = decide_proposal(
             ProposalKind::Split,
-            TOLERANCE,
-            &score(1000, 0.2, 0.001),
-            &shorter,
+            (1000, &violating_reference),
+            (900, &shorter),
             certified(),
         );
         assert!(
             matches!(inconsistent, Err(ProposalRejection::ReferenceMissesTolerance(..))),
             "a decoded reference that misses the tolerance must refuse the loop, got {inconsistent:?}"
         );
-        let reference = score(1000, 0.05, 0.001);
-        // Distortion plus roundoff is 0.101 > 0.1: the candidate misses.
-        let missing = decide_proposal(
-            ProposalKind::Split,
-            TOLERANCE,
-            &reference,
-            &score(900, 0.099, 0.002),
-            certified(),
-        );
+        let reference = decoded(0.05, 0.001, TOLERANCE);
+        // 0.099 ± 0.002 brackets the tolerance, so its verdict is Unresolved, never a pass.
+        let unresolved = decoded(0.099, 0.002, TOLERANCE);
+        let missing =
+            decide_proposal(ProposalKind::Split, (1000, &reference), (900, &unresolved), certified());
         assert!(
             matches!(missing, Err(ProposalRejection::CandidateMissesTolerance(..))),
-            "a decoded candidate that misses the tolerance must be rejected, got {missing:?}"
+            "a decoded candidate that does not prove it meets the tolerance must be rejected, got {missing:?}"
         );
-        // Positive control: 0.097 + 0.002 = 0.099 is within the tolerance by far more
-        // than one ulp, so the outcome does not rest on rounding.
-        let meeting = decide_proposal(
-            ProposalKind::Split,
-            TOLERANCE,
-            &reference,
-            &score(900, 0.097, 0.002),
-            certified(),
-        );
+        // Positive control: 0.097 + 0.002 = 0.099 is inside the tolerance by far more than one
+        // ulp, so the outcome does not rest on rounding.
+        let meeting_fidelity = decoded(0.097, 0.002, TOLERANCE);
+        let meeting =
+            decide_proposal(ProposalKind::Split, (1000, &reference), (900, &meeting_fidelity), certified());
         assert!(meeting.is_ok(), "a candidate at the tolerance must be accepted, got {meeting:?}");
+
+        // A candidate declared at a different tolerance is refused, even though it meets its own.
+        let other_tolerance = decoded(0.05, 0.001, 0.2);
+        let mismatched =
+            decide_proposal(ProposalKind::Split, (1000, &reference), (900, &other_tolerance), certified());
+        assert!(
+            matches!(mismatched, Err(ProposalRejection::CandidateMissesTolerance(..))),
+            "a candidate scored at another tolerance must be refused, got {mismatched:?}"
+        );
+        // Positive control: the same figure at the reference's tolerance is accepted.
+        let same_tolerance = decoded(0.05, 0.001, TOLERANCE);
+        let matched =
+            decide_proposal(ProposalKind::Split, (1000, &reference), (900, &same_tolerance), certified());
+        assert!(matched.is_ok(), "the same figure at the reference's tolerance must be accepted, got {matched:?}");
     }
 }
