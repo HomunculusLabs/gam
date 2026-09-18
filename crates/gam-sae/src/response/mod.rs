@@ -15,3 +15,4 @@ pub mod compose;
 pub mod compile;
 pub mod hermite;
 pub mod interaction;
+pub mod tiles;
