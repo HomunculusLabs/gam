@@ -25,11 +25,14 @@
 //! says the fitted coefficients are stationary under refinement; it says
 //! nothing about a different integral over a future window. So the window's
 //! mesh is refined until the time error of what it returns no longer
-//! dominates the other measured components of its error (under a latent
-//! state, the Gauss-Hermite quadrature against its next rung) or its
-//! roundoff, and that total error is returned with it. The horizons are
-//! output times, never mesh breakpoints, so requesting more of them cannot
-//! move a prediction (see `integrator`).
+//! dominates the other measured components of its error or its roundoff, and
+//! that total error is returned with it. Under a latent state the other
+//! component is the Gauss-Hermite quadrature: the same window on the next
+//! rung `2G − 1`, which filters the history and evolves its state under its
+//! own rule, so the gap between the two includes every error the state has
+//! accumulated, not only a cell's own. The horizons are output times, never
+//! mesh breakpoints, so requesting more of them cannot move a prediction (see
+//! `integrator`).
 //!
 //! The same window run from the stationary prior instead of a filtered
 //! state ([`population_forecast`]) gives the lower tiers of the information
@@ -90,14 +93,10 @@ use super::marginal::{
 };
 use gam_terms::smooth::build_term_collection_design;
 use ndarray::{Array2, ArrayView2};
-use std::sync::Arc;
 
 pub(crate) mod integrator;
 
-use integrator::{
-    CellIntegral, CellSums, KilledProcess, KilledRun, RunGaps, coupled, integral_gaps,
-    integrate_window,
-};
+use integrator::{CellSums, Companion, KilledProcess, KilledRun, integrate_window};
 
 /// One piece of a forecast window during which the covariates are
 /// constant: from `start` until the next segment's start (or the last
@@ -368,19 +367,30 @@ struct LatentState {
     time: f64,
 }
 
-/// The filtered latent state after a subject's observed history, whose
-/// covariate segments index `table`.
+/// The observed history a forecast window opens after: its covariate rows
+/// (which its segments index), the history, and the marks whose compensators
+/// it carries.
+struct Opening<'a> {
+    table: ArrayView2<'a, f64>,
+    history: SubjectHistory,
+    compensated: Vec<bool>,
+}
+
+/// The filtered latent state after an opening history, under Gauss-Hermite
+/// rule `gh`. Each rule a window integrates under filters the history anew,
+/// placing its own grids, so the state it continues from is its own.
 fn observed_state(
     fit: &EventHistoryFit,
     cohort: &EventHistoryCohort,
-    table: ArrayView2<'_, f64>,
-    history: &SubjectHistory,
+    opening: &Opening<'_>,
     stratum: usize,
     loadings: &[f64],
     rates: &[f64],
-    compensated: &[bool],
+    gh: &GaussHermite,
 ) -> Result<LatentState, EventHistoryError> {
-    let observed = single_subject_nodes(fit, cohort, table, history)?;
+    let history = &opening.history;
+    let observed = single_subject_nodes(fit, cohort, opening.table, history)?;
+    chain_fits(gh.order, fit.rank(), observed.subjects[0].len())?;
     let eta0 = node_eta0(fit, observed.node_data.view())?;
     let normaliser = forecast_normaliser(fit, stratum, &observed.subjects[0].times)?;
     let mut pass = forward_filter(
@@ -390,13 +400,13 @@ fn observed_state(
             loadings,
             rates,
             time_scale: fit.time_scale,
-            gh: fit.family.gauss_hermite(),
+            gh,
             continuation_gap: 0.0,
             designs: None,
             log_normaliser: normaliser.as_deref(),
         },
         None,
-        compensated,
+        &opening.compensated,
     )?;
     let last = observed.subjects[0].len() - 1;
     Ok(LatentState {
@@ -498,13 +508,13 @@ fn validate_future(
 }
 
 /// One forecast window: where it opens, the covariate path over it, the
-/// latent state it continues from (`None` for the stationary prior), and
-/// which marks the subject is still at risk for.
+/// history whose filtered state it continues from (`None` for the stationary
+/// prior), and which marks the subject is still at risk for.
 struct Window<'a> {
     fit: &'a EventHistoryFit,
     cohort: &'a EventHistoryCohort,
     stratum: usize,
-    initial: Option<&'a LatentState>,
+    opening: Option<Opening<'a>>,
     start: f64,
     horizons: &'a [f64],
     segments: Vec<CovariateSegment>,
@@ -514,55 +524,10 @@ struct Window<'a> {
     label: String,
 }
 
-/// A filtered latent state carried from rule `from` onto rule `to` at the
-/// same centres and scales. The state is the grid's Gaussian envelope times
-/// a polynomial of degree `G − 1` through its nodal values, so its value at
-/// a node `x'` of `to` is `Σ_i L_i(x') e^{x_i² − x'²} α_i` along each axis,
-/// and rule `to` integrates that polynomial against the envelope exactly:
-/// the mass is carried without loss.
-fn resample_state(state: &LatentState, from: &GaussHermite, to: &GaussHermite) -> LatentState {
-    let centres: Vec<f64> = state.grid.axes.iter().map(|axis| axis.mu).collect();
-    let scales: Vec<f64> = state.grid.axes.iter().map(|axis| axis.sigma).collect();
-    let grid = Grid::new(to, &centres, &scales, &0.0);
-    let (source, target) = (from.order, to.order);
-    let mut matrix = vec![0.0; target * source];
-    for (j, &x) in to.nodes.iter().enumerate() {
-        let basis = from.lagrange_basis(&x);
-        for (i, &node) in from.nodes.iter().enumerate() {
-            matrix[j * source + i] = basis[i] * (node * node - x * x).exp();
-        }
-    }
-    let atoms = grid.dimension();
-    let mut values = state.alpha.clone();
-    // Axis by axis: the axes below `axis` are already on `to`, the rest still
-    // on `from`, and axis 0 is the fastest.
-    for axis in 0..atoms {
-        let below = target.pow(axis as u32);
-        let above = source.pow((atoms - axis - 1) as u32);
-        let mut out = vec![0.0; below * target * above];
-        for upper in 0..above {
-            for j in 0..target {
-                for lower in 0..below {
-                    let mut acc = 0.0;
-                    for i in 0..source {
-                        acc += matrix[j * source + i] * values[lower + below * (i + source * upper)];
-                    }
-                    out[lower + below * (j + target * upper)] = acc;
-                }
-            }
-        }
-        values = out;
-    }
-    LatentState {
-        grid,
-        alpha: values,
-        time: state.time,
-    }
-}
-
-/// Refuse a Gauss-Hermite rung whose filter chain over one cell would not
-/// fit this machine's materialisation budget: every node of a chain keeps its
-/// grid weights and its predicted and filtered densities.
+/// Refuse a filter chain of `chain_nodes` nodes under Gauss-Hermite order
+/// `order` that would not fit this machine's materialisation budget: every
+/// node of a chain keeps its grid weights and its predicted and filtered
+/// densities.
 fn chain_fits(order: usize, atoms: usize, chain_nodes: usize) -> Result<(), EventHistoryError> {
     let points = product_grid_size(order, atoms)?;
     let bytes = 3.0 * chain_nodes as f64 * points as f64 * std::mem::size_of::<f64>() as f64;
@@ -571,7 +536,7 @@ fn chain_fits(order: usize, atoms: usize, chain_nodes: usize) -> Result<(), Even
     if bytes > budget {
         return Err(EventHistoryError::NumericalFailure {
             reason: format!(
-                "measuring a forecast's latent quadrature needs Gauss-Hermite order {order} over {atoms} atoms ({points} grid points), about {:.1} GiB per filter chain, above this machine's {:.1} GiB materialisation budget",
+                "a forecast's filter chain of {chain_nodes} nodes at Gauss-Hermite order {order} over {atoms} atoms ({points} grid points) needs about {:.1} GiB, above this machine's {:.1} GiB materialisation budget",
                 bytes / f64::from(1u32 << 30),
                 budget / f64::from(1u32 << 30)
             ),
@@ -580,23 +545,28 @@ fn chain_fits(order: usize, atoms: usize, chain_nodes: usize) -> Result<(), Even
     Ok(())
 }
 
-/// The grid-filter engine of a forecast window: the fit, the covariate path
-/// over the window, the latent parameters, the Gauss-Legendre rule per cell,
-/// the Gauss-Hermite rule and its next rung, and the window's killed runs.
+/// The grid-filter engine of a forecast window under one Gauss-Hermite rule:
+/// the fit, the covariate path over the window, the latent parameters, the
+/// Gauss-Legendre rule per cell, and the window's killed runs. A latent window
+/// runs two, on the fit's rule and on its next rung.
 struct WindowIntegrand<'a> {
     fit: &'a EventHistoryFit,
     stratum: usize,
-    pseudo: SubjectHistory,
-    table: Array2<f64>,
-    loadings: Vec<f64>,
-    rates: Vec<f64>,
-    gl_nodes: Vec<f64>,
-    gl_weights: Vec<f64>,
-    gh: Arc<GaussHermite>,
-    /// The certificate's next rung `2·order − 1`, against which a latent
-    /// forecast measures its quadrature error; `None` at rank zero.
-    rung: Option<GaussHermite>,
-    runs: Vec<KilledRun>,
+    pseudo: &'a SubjectHistory,
+    table: &'a Array2<f64>,
+    loadings: &'a [f64],
+    rates: &'a [f64],
+    gl_nodes: &'a [f64],
+    gl_weights: &'a [f64],
+    gh: &'a GaussHermite,
+    /// Whether the filter interpolates its density onto a new grid at every
+    /// node. A dynamic factor's does: `marginal::filter_step` carries the
+    /// density through `chain::forward_operators`, which evaluates the rule's
+    /// Lagrange basis at every target point (`gh.lagrange_basis(&raw)`). A
+    /// static factor's grid is conditioned in place (`static_state::filter`),
+    /// and a rank-zero window has no grid.
+    interpolates: bool,
+    runs: &'a [KilledRun],
 }
 
 impl WindowIntegrand<'_> {
@@ -615,10 +585,10 @@ impl WindowIntegrand<'_> {
         let marks = fit.marks();
         let atoms = fit.rank();
         let q = self.gl_nodes.len();
-        let outer: Vec<(f64, f64)> = cell_rule(left, right, &self.gl_nodes, &self.gl_weights).collect();
+        let outer: Vec<(f64, f64)> = cell_rule(left, right, self.gl_nodes, self.gl_weights).collect();
         let inner: Vec<Vec<(f64, f64)>> = outer
             .iter()
-            .map(|&(t, _)| cell_rule(left, t, &self.gl_nodes, &self.gl_weights).collect())
+            .map(|&(t, _)| cell_rule(left, t, self.gl_nodes, self.gl_weights).collect())
             .collect();
         // Evaluation points: the outer nodes, then every outer node's own
         // chronological rule from the cell's start.
@@ -645,8 +615,8 @@ impl WindowIntegrand<'_> {
                     &SubjectInputs {
                         nodes: &nodes,
                         eta0: eta,
-                        loadings: &self.loadings,
-                        rates: &self.rates,
+                        loadings: self.loadings,
+                        rates: self.rates,
                         time_scale: fit.time_scale,
                         gh,
                         continuation_gap: state.map_or(0.0, |s| times[0] - s.time),
@@ -673,7 +643,7 @@ impl WindowIntegrand<'_> {
                     &pass.grids[q],
                     &pass.predicted[q],
                     &eta0[j * marks..(j + 1) * marks],
-                    &self.loadings,
+                    self.loadings,
                     at_j.as_deref(),
                     marks,
                     atoms,
@@ -704,7 +674,7 @@ impl KilledProcess for WindowIntegrand<'_> {
     type State = Option<LatentState>;
 
     fn runs(&self) -> &[KilledRun] {
-        &self.runs
+        self.runs
     }
 
     fn cell(
@@ -713,58 +683,21 @@ impl KilledProcess for WindowIntegrand<'_> {
         right: f64,
         from: &[Option<LatentState>],
     ) -> Result<Vec<CellSums<Option<LatentState>>>, EventHistoryError> {
-        self.cell_under(&self.gh, left, right, from)
+        self.cell_under(self.gh, left, right, from)
     }
 
-    /// The cell under the next Gauss-Hermite rung, from the entering states
-    /// carried onto it: the forecast's latent quadrature error. A static
-    /// factor's continuation grid is measured the same way.
-    fn other_error(
-        &self,
-        left: f64,
-        right: f64,
-        from: &[Option<LatentState>],
-        coarse: &[CellIntegral<Option<LatentState>>],
-    ) -> Result<Option<Vec<RunGaps>>, EventHistoryError> {
-        let Some(rung) = self.rung.as_ref() else {
-            return Ok(None);
-        };
-        let resampled: Vec<Option<LatentState>> = from
-            .iter()
-            .map(|state| state.as_ref().map(|s| resample_state(s, &self.gh, rung)))
-            .collect();
-        // The carried interpolant can go negative beyond the old rule's hull.
-        // A cell under the rung that loses positivity is a failure of the
-        // check itself, which no finer time cell cures, so it is refused as
-        // such rather than read as a coarse cell.
-        let sums = match self.cell_under(rung, left, right, &resampled) {
-            Ok(sums) => sums,
-            Err(EventHistoryError::LostPositivity { reason }) => {
-                return Err(EventHistoryError::NumericalFailure {
-                    reason: format!(
-                        "the forecast's latent quadrature check at Gauss-Hermite order {} lost positivity carrying the state onto that rule: {reason}",
-                        rung.order
-                    ),
-                });
-            }
-            Err(error) => return Err(error),
-        };
-        let refined: Vec<CellIntegral<Option<LatentState>>> = self
-            .runs
-            .iter()
-            .zip(sums)
-            .map(|(run, sums)| coupled(run, sums))
-            .collect();
-        Ok(Some(integral_gaps(coarse, &refined, self.fit.marks())))
-    }
-
-    /// `ε · Λ_G · nodes`. The Gauss-Hermite interpolant amplifies nodal
-    /// roundoff by its Lebesgue constant (the bound the fit's certificate
-    /// reads, taken at the rung, the larger of the two rules compared), over the
-    /// nodes a halved cell's chronology filters. At rank zero nothing is
-    /// interpolated.
+    /// `ε · Λ · nodes`, over the nodes a halved cell's chronology filters. A
+    /// dynamic factor's filter carries its density onto a new grid at every
+    /// node through the rule's Lagrange interpolant, which amplifies nodal
+    /// roundoff by the rule's Lebesgue constant `Λ_G`: the charge the fit's own
+    /// certificate reads for the same route. It is this rule's constant, the
+    /// rule whose values the window returns. A companion's values enter only its
+    /// measured gap, so the next rung's constant, which grows exponentially with
+    /// the order, is never charged to them. A static factor's grid is
+    /// conditioned in place and a rank-zero window has no grid: nothing is
+    /// interpolated, and `Λ` is one.
     fn roundoff(&self) -> f64 {
-        let amplification = self.rung.as_ref().map_or(1.0, |rung| rung.lebesgue_constant);
+        let amplification = if self.interpolates { self.gh.lebesgue_constant } else { 1.0 };
         f64::EPSILON * amplification * (2 * self.gl_nodes.len() + 1) as f64
     }
 }
@@ -775,12 +708,25 @@ impl KilledProcess for WindowIntegrand<'_> {
 /// its acceptance and the horizons are `integrator::integrate_window`'s. The
 /// fit's quadrature order serves only as the rule per cell, and its mesh
 /// refinement not at all.
+///
+/// Under a latent state the window's companion is the same window on the
+/// next rung `2G − 1` of the fit's Gauss-Hermite rule: its opening state is
+/// the history filtered under that rung, which places its own grids, and it
+/// evolves under that rung over the same mesh. The window returns the fit's
+/// rule's values, whose latent error the gap to the companion measures on the
+/// premise that the next rung is the more accurate of the two.
+///
+/// The companion's filter chains are materialised like the window's own. A
+/// cell's chain, or the history the window opens after, that would not fit
+/// this machine's materialisation budget under the rung refuses the forecast
+/// (`chain_fits`): at rank two or more, a long history can be refused on the
+/// companion's budget alone.
 fn run_window(window: Window<'_>) -> Result<Forecast, EventHistoryError> {
     let Window {
         fit,
         cohort,
         stratum,
-        initial,
+        opening,
         start,
         horizons,
         segments,
@@ -807,7 +753,7 @@ fn run_window(window: Window<'_>) -> Result<Forecast, EventHistoryError> {
     }
     let (loadings, rates) = latent_parameters(fit);
     let (gl_nodes, gl_weights) = gam_math::special::gauss_legendre(fit.quadrature_order);
-    let gh = Arc::clone(fit.family.gauss_hermite());
+    let gh: &GaussHermite = fit.family.gauss_hermite();
     let rung = if fit.rank() > 0 {
         let order = 2 * gh.order - 1;
         chain_fits(order, fit.rank(), fit.quadrature_order + 1)?;
@@ -815,33 +761,50 @@ fn run_window(window: Window<'_>) -> Result<Forecast, EventHistoryError> {
     } else {
         None
     };
+    let pseudo = SubjectHistory {
+        id: label,
+        entry: start,
+        exit: horizons[horizons.len() - 1],
+        events: Vec::new(),
+        segments,
+    };
     let integrand = WindowIntegrand {
         fit,
         stratum,
-        pseudo: SubjectHistory {
-            id: label,
-            entry: start,
-            exit: horizons[horizons.len() - 1],
-            events: Vec::new(),
-            segments,
-        },
-        table,
-        loadings,
-        rates,
-        gl_nodes,
-        gl_weights,
+        pseudo: &pseudo,
+        table: &table,
+        loadings: &loadings,
+        rates: &rates,
+        gl_nodes: &gl_nodes,
+        gl_weights: &gl_weights,
         gh,
-        rung,
-        runs,
+        interpolates: fit.rank() > 0 && !crate::static_state::is_static(&rates),
+        runs: &runs,
+    };
+    // Each rule's opening state is the history filtered under that rule, or
+    // the stationary prior.
+    let opened = |rule: &GaussHermite| -> Result<Vec<Option<LatentState>>, EventHistoryError> {
+        let state = opening
+            .as_ref()
+            .map(|history| observed_state(fit, cohort, history, stratum, &loadings, &rates, rule))
+            .transpose()?;
+        Ok(vec![state; runs.len()])
+    };
+    let companion_integrand = rung.as_ref().map(|rule| WindowIntegrand { gh: rule, ..integrand });
+    let companion = match &companion_integrand {
+        Some(beside) => Some(Companion {
+            process: beside,
+            opening: opened(beside.gh)?,
+        }),
+        None => None,
     };
     let mut breakpoints = vec![start];
     breakpoints.extend(
-        mesh_cells(&integrand.pseudo, false, 0)
+        mesh_cells(&pseudo, false, 0)
             .iter()
             .map(|&(_, right)| right),
     );
-    let opening = vec![initial.cloned(); integrand.runs.len()];
-    let reached = integrate_window(&integrand, opening, &breakpoints, horizons)?;
+    let reached = integrate_window(&integrand, opened(gh)?, companion, &breakpoints, horizons)?;
     let n_h = horizons.len();
     let mut survival = vec![0.0; n_h];
     let mut survival_error = vec![0.0; n_h];
@@ -994,8 +957,11 @@ fn forecast_on_table(
             expected_count_errors: Array2::zeros((horizons.len(), marks)),
         });
     }
-    let (loadings, rates) = latent_parameters(fit);
-    let state = observed_state(fit, cohort, table, history, stratum, &loadings, &rates, &vec![true; marks])?;
+    let opening = Opening {
+        table,
+        history: history.clone(),
+        compensated: vec![true; marks],
+    };
     let (table, segments) = future_table(
         table,
         future,
@@ -1012,7 +978,7 @@ fn forecast_on_table(
         fit,
         cohort,
         stratum,
-        initial: Some(&state),
+        opening: Some(opening),
         start: history.exit,
         horizons,
         segments,
@@ -1055,7 +1021,7 @@ pub fn population_forecast(
     // diagnoses at start. Under reference centring they enter from that
     // selected reference law, not a fresh stationary draw at the late time.
     // Recurrent events are unobserved here and are integrated out.
-    let initial = if let Some(snapshot) = fit.centring.as_ref() {
+    let opening = if let Some(snapshot) = fit.centring.as_ref() {
         let origin = snapshot.grid.times[0];
         if request.start > origin {
             let history = SubjectHistory {
@@ -1063,17 +1029,15 @@ pub fn population_forecast(
                 events: Vec::new(),
                 segments: vec![CovariateSegment { start: origin, row: request.stratum }],
             };
-            let (loadings, rates) = latent_parameters(fit);
             let compensated: Vec<bool> = fit.mark_kinds.iter().map(|kind| *kind != MarkKind::Recurrent).collect();
-            Some(observed_state(fit, cohort, snapshot.profiles.view(), &history,
-                request.stratum, &loadings, &rates, &compensated)?)
+            Some(Opening { table: snapshot.profiles.view(), history, compensated })
         } else { None }
     } else { None };
     run_window(Window {
         fit,
         cohort,
         stratum: request.stratum,
-        initial: initial.as_ref(),
+        opening,
         start: request.start,
         horizons: request.horizons,
         segments,

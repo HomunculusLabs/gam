@@ -4830,3 +4830,478 @@ fn reference_midpoint_derivative_channels_converge_with_the_value_2627() {
         assert!(moves, "no log normaliser moves along the {name} by more than its bar, so the agreement is vacuous");
     }
 }
+
+/// One latent atom injected into a rank-zero fit: loadings `a_d` per mark and
+/// dimensionless rate `nu` (zero for a static factor). The rank is the number
+/// of rates, so the forecast runs the latent filter. Every parameter it reads
+/// is then known exactly, which is what lets an independent quadrature of the
+/// same model serve as its oracle.
+fn inject_one_atom(fit: &mut EventHistoryFit, loadings: [f64; 3], nu: f64) {
+    fit.loadings = Array2::from_shape_vec((3, 1), loadings.to_vec()).expect("one column of loadings");
+    fit.log_rates = vec![nu.ln()];
+    assert_eq!(fit.rank(), 1);
+}
+
+/// The constant-hazard fixture fitted under Gauss-Hermite order `order`. At
+/// rank zero the rule integrates nothing, so the fitted rates are the same at
+/// every order, and an atom injected afterwards is forecast under that rule.
+fn constant_hazard_fit_at(order: usize) -> (EventHistoryCohort, EventHistoryFit, Vec<f64>) {
+    let mut cohort = competing_risks_cohort(64);
+    let mut spec = EventHistorySpec::new(vec![intercept_only_spec()]);
+    spec.gauss_hermite_order = order;
+    let fit = fit_event_history(&mut cohort, &spec).expect("intercept-only fit");
+    assert_eq!(fit.rank(), 0, "the constant-hazard fixture must be rank zero: {:?}", fit.rank_path);
+    assert_eq!(fit.family.gauss_hermite_order(), order, "the fit left Gauss-Hermite order {order}");
+    let rates = (0..3).map(|d| fit.mark_coefficients(d)[0].exp()).collect();
+    (cohort, fit, rates)
+}
+
+/// `λ_d(z) = exp(η⁰_d − a_d²/2 + a_d z)`: the prior-centred intensity.
+fn one_atom_intensity(rates: &[f64], loadings: &[f64; 3], d: usize, z: f64) -> f64 {
+    rates[d] * (loadings[d] * z - 0.5 * loadings[d] * loadings[d]).exp()
+}
+
+/// The static one-atom model's survival, terminal incidences and recurrent
+/// count `h` after a history, by the trapezoid rule over the factor with
+/// spacing `step`. The history is `events` (the marks of its events) over a
+/// follow-up of `follow_up` with every mark at risk, as for a censored subject
+/// under constant hazards; no events and no follow-up is the stationary prior.
+/// It weighs the prior into the posterior
+/// `φ(z) Π_e λ_{m_e}(z) exp(−Σ_d λ_d(z) T)`, and the forecast integrands are
+/// averaged under that posterior.
+///
+/// Returns the values, their rounding and the mass the rule leaves outside
+/// its range. The rule's own error is MEASURED by the caller's step-halving
+/// gap: the trapezoid rule converges spectrally for an analytic integrand under
+/// a Gaussian.
+/// - Rounding: each value is a quotient of two serial sums. Its first-order
+///   running bound is `ε |v| (μ_N/|N| + μ_D/|D| + 1)`, with `μ` the magnitude of
+///   every partial sum (Higham, *Accuracy and Stability*, ch. 3) and one more
+///   rounding for the division. A term's own rounding is a few operations
+///   relative to itself, dominated by the partial sums' over thousands of
+///   terms.
+/// - Range: `ln` of the posterior weight is at most `−z²/2 + A z + C`, with
+///   `A = Σ_e a_{m_e}` and `C = Σ_e (ln r_{m_e} − a_{m_e}²/2)`, dropping the
+///   compensator. The survival and terminal integrands are at most one, and the
+///   recurrent one at most `λ_2 h`, so each is at most `B e^{b z}`. Beyond
+///   `|z| > R` the weighted integrand's mass is then at most
+///   `2 B e^{C − peak + s²/2 − (R − |s|)²/2} / (R − |s|)` with `s = A + b`
+///   (Mills' ratio), and the range is `R = 12 + |A| + |a_2|`.
+fn static_factor_oracle(
+    rates: &[f64],
+    loadings: &[f64; 3],
+    events: &[usize],
+    follow_up: f64,
+    h: f64,
+    step: f64,
+) -> ([f64; 4], [f64; 4], [f64; 4]) {
+    let tilt: f64 = events.iter().map(|&m| loadings[m]).sum();
+    let offset: f64 = events
+        .iter()
+        .map(|&m| rates[m].ln() - 0.5 * loadings[m] * loadings[m])
+        .sum();
+    let reach = 12.0 + tilt.abs() + loadings[2].abs();
+    let n = (2.0 * reach / step).round() as usize;
+    let log_weight = |z: f64| -> f64 {
+        let mut value = -0.5 * z * z;
+        for &m in events {
+            value += one_atom_intensity(rates, loadings, m, z).ln();
+        }
+        for d in 0..3 {
+            value -= one_atom_intensity(rates, loadings, d, z) * follow_up;
+        }
+        value
+    };
+    let peak = (0..=n)
+        .map(|j| log_weight(-reach + step * j as f64))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let (mut denominator, mut denominator_bound) = (0.0_f64, 0.0_f64);
+    let mut numerators = [0.0_f64; 4];
+    let mut numerator_bounds = [0.0_f64; 4];
+    for j in 0..=n {
+        let z = -reach + step * j as f64;
+        let ends = if j == 0 || j == n { 0.5 } else { 1.0 };
+        let weight = ends * step * (log_weight(z) - peak).exp();
+        let lambda: Vec<f64> = (0..3).map(|d| one_atom_intensity(rates, loadings, d, z)).collect();
+        let killing = lambda[0] + lambda[1];
+        let decrement = -(-killing * h).exp_m1();
+        let ratios = [
+            (-killing * h).exp(),
+            lambda[0] / killing * decrement,
+            lambda[1] / killing * decrement,
+            lambda[2] / killing * decrement,
+        ];
+        denominator += weight;
+        denominator_bound += denominator.abs();
+        for q in 0..4 {
+            numerators[q] += weight * ratios[q];
+            numerator_bounds[q] += numerators[q].abs();
+        }
+    }
+    let outside = |scale: f64, slope: f64| -> f64 {
+        let s = tilt + slope;
+        let margin = reach - s.abs();
+        2.0 * scale * (offset - peak + 0.5 * s * s - 0.5 * margin * margin).exp() / margin
+    };
+    let recurrent_scale = h * rates[2] * (-0.5 * loadings[2] * loadings[2]).exp();
+    let denominator_tail = outside(1.0, 0.0);
+    let mut values = [0.0; 4];
+    let mut rounding = [0.0; 4];
+    let mut tails = [0.0; 4];
+    for q in 0..4 {
+        values[q] = numerators[q] / denominator;
+        rounding[q] = f64::EPSILON
+            * values[q].abs()
+            * (numerator_bounds[q] / numerators[q].abs() + denominator_bound / denominator.abs() + 1.0);
+        let numerator_tail = if q == 3 { outside(recurrent_scale, loadings[2]) } else { outside(1.0, 0.0) };
+        tails[q] = numerator_tail / denominator + values[q].abs() * denominator_tail / denominator;
+    }
+    (values, rounding, tails)
+}
+
+/// The static one-atom oracle's value and error: its value at spacing `step`,
+/// with the step-halving gap from `2 · step` (MEASURED), both values' rounding
+/// and both ranges' outside mass.
+fn static_factor_reference(
+    rates: &[f64],
+    loadings: &[f64; 3],
+    events: &[usize],
+    follow_up: f64,
+    h: f64,
+    step: f64,
+) -> ([f64; 4], [f64; 4]) {
+    let (coarse, coarse_rounding, coarse_tail) = static_factor_oracle(rates, loadings, events, follow_up, h, 2.0 * step);
+    let (value, rounding, tail) = static_factor_oracle(rates, loadings, events, follow_up, h, step);
+    let mut error = [0.0; 4];
+    for q in 0..4 {
+        error[q] = (coarse[q] - value[q]).abs() + coarse_rounding[q] + rounding[q] + coarse_tail[q] + tail[q];
+    }
+    (value, error)
+}
+
+/// The dynamic one-atom model from its stationary prior over `[0, h]`, by a
+/// route independent of the filter. The density relative to the standard
+/// normal is represented on the orthonormal Hermite basis of degree below
+/// `order`, where the Ornstein–Uhlenbeck transition is exactly diagonal
+/// (`e^{−nκ}`). The killing acts at the Gauss–Hermite nodes by Strang
+/// splitting over equal steps, and the sub-densities are summed by the
+/// trapezoid rule on those steps. Both are second order, so one Richardson step
+/// between `steps` and `2·steps` leaves a fourth-order value.
+fn spectral_oracle(
+    rates: &[f64],
+    loadings: &[f64; 3],
+    kappa_per_time: f64,
+    h: f64,
+    order: usize,
+    steps: usize,
+) -> [f64; 4] {
+    let rule = gam_math::quadrature::gauss_hermite_rule(order).expect("Gauss-Hermite rule");
+    let z: Vec<f64> = rule.nodes.iter().map(|x| std::f64::consts::SQRT_2 * x).collect();
+    let v: Vec<f64> = rule.weights.iter().map(|w| w / std::f64::consts::PI.sqrt()).collect();
+    // basis[n][i] = ψ_n(z_i), with ψ_{n+1} = (z ψ_n − √n ψ_{n−1}) / √(n+1).
+    let mut basis = vec![vec![0.0; order]; order];
+    for i in 0..order {
+        basis[0][i] = 1.0;
+        basis[1][i] = z[i];
+        for n in 1..order - 1 {
+            basis[n + 1][i] = (z[i] * basis[n][i] - (n as f64).sqrt() * basis[n - 1][i]) / ((n + 1) as f64).sqrt();
+        }
+    }
+    let lambda: Vec<Vec<f64>> = (0..3)
+        .map(|d| z.iter().map(|&zi| one_atom_intensity(rates, loadings, d, zi)).collect())
+        .collect();
+    let densities = |p: &[f64]| -> [f64; 3] {
+        let mut m = [0.0; 3];
+        for d in 0..3 {
+            m[d] = (0..order).map(|i| v[i] * p[i] * lambda[d][i]).sum();
+        }
+        m
+    };
+    let run = |steps: usize| -> [f64; 4] {
+        let dt = h / steps as f64;
+        let half_kill: Vec<f64> = (0..order).map(|i| (-(lambda[0][i] + lambda[1][i]) * 0.5 * dt).exp()).collect();
+        let decay: Vec<f64> = (0..order).map(|n| (-(n as f64) * kappa_per_time * dt).exp()).collect();
+        let mut p = vec![1.0; order];
+        let mut counts = [0.0; 3];
+        let mut previous = densities(&p);
+        for _ in 0..steps {
+            for i in 0..order {
+                p[i] *= half_kill[i];
+            }
+            let coefficients: Vec<f64> = (0..order)
+                .map(|n| (0..order).map(|i| v[i] * p[i] * basis[n][i]).sum::<f64>() * decay[n])
+                .collect();
+            for i in 0..order {
+                p[i] = (0..order).map(|n| coefficients[n] * basis[n][i]).sum::<f64>() * half_kill[i];
+            }
+            let current = densities(&p);
+            for d in 0..3 {
+                counts[d] += 0.5 * dt * (previous[d] + current[d]);
+            }
+            previous = current;
+        }
+        [(0..order).map(|i| v[i] * p[i]).sum(), counts[0], counts[1], counts[2]]
+    };
+    let coarse = run(steps);
+    let fine = run(2 * steps);
+    let mut value = [0.0; 4];
+    for q in 0..4 {
+        value[q] = (4.0 * fine[q] - coarse[q]) / 3.0;
+    }
+    value
+}
+
+/// The dynamic one-atom oracle's value and error: its value at (56 basis
+/// functions, 800 steps), with the error MEASURED as its change across three
+/// resolutions, both consecutive changes summed. At these resolutions both sit
+/// at the oracle's rounding floor (probe 1230171: 3.8e-14, then 6.3e-14), so
+/// the finer one being the closer is not assumed.
+fn spectral_reference(rates: &[f64], loadings: &[f64; 3], kappa_per_time: f64, h: f64) -> ([f64; 4], [f64; 4]) {
+    let coarse = spectral_oracle(rates, loadings, kappa_per_time, h, 40, 400);
+    let value = spectral_oracle(rates, loadings, kappa_per_time, h, 56, 800);
+    let fine = spectral_oracle(rates, loadings, kappa_per_time, h, 72, 1600);
+    let mut error = [0.0; 4];
+    for q in 0..4 {
+        error[q] = (coarse[q] - value[q]).abs() + (value[q] - fine[q]).abs();
+    }
+    (value, error)
+}
+
+/// A forecast's survival and three expected counts at horizon `i`, and their
+/// checked errors.
+fn forecast_quantities(f: &super::forecast::Forecast, i: usize) -> ([f64; 4], [f64; 4]) {
+    (
+        [f.survival[i], f.expected_counts[[i, 0]], f.expected_counts[[i, 1]], f.expected_counts[[i, 2]]],
+        [
+            f.survival_error[i],
+            f.expected_count_errors[[i, 0]],
+            f.expected_count_errors[[i, 1]],
+            f.expected_count_errors[[i, 2]],
+        ],
+    )
+}
+
+/// The rank-zero model's survival and three expected counts `h` into a window
+/// at the fitted constant rates: `e^{−Λh}` and `(r_d/Λ)(1 − e^{−Λh})`, with `Λ`
+/// the terminal marks' total rate.
+fn rank_zero_quantities(rates: &[f64], h: f64) -> [f64; 4] {
+    let total = rates[0] + rates[1];
+    let decrement = -(-total * h).exp_m1();
+    [
+        (-total * h).exp(),
+        rates[0] / total * decrement,
+        rates[1] / total * decrement,
+        rates[2] / total * decrement,
+    ]
+}
+
+/// The magnitude floor of a one-atom agreement: for every quantity, the latent
+/// factor moves the oracle from the rank-zero model by more than the checked
+/// error and the oracle's error together. Agreement with the oracle within that
+/// error is then not agreement with the rank-zero model, and an error inflated
+/// past the factor's own effect fails here.
+fn assert_the_factor_is_resolved(label: &str, h: f64, rates: &[f64], errors: [f64; 4], oracle: [f64; 4], oracle_error: [f64; 4]) {
+    let rank_zero = rank_zero_quantities(rates, h);
+    emit(&format!("[2963 {label}] h {h:.4}: rank-zero model {rank_zero:?}"));
+    for q in 0..4 {
+        assert!(
+            (oracle[q] - rank_zero[q]).abs() > errors[q] + oracle_error[q],
+            "{label}: quantity {q} at h {h}: the factor moves it from {} to {} only, within the checked error {} + oracle error {}",
+            rank_zero[q],
+            oracle[q],
+            errors[q],
+            oracle_error[q]
+        );
+    }
+}
+
+/// Assert that a one-atom forecast is covered by its checked error against an
+/// oracle, above the magnitude floor of [`assert_the_factor_is_resolved`].
+fn assert_covered(label: &str, f: &super::forecast::Forecast, i: usize, h: f64, rates: &[f64], oracle: [f64; 4], oracle_error: [f64; 4]) {
+    let (forecast, errors) = forecast_quantities(f, i);
+    emit(&format!("[2963 {label}] h {h:.4}: forecast {forecast:?} errors {errors:?} oracle {oracle:?} oracle error {oracle_error:?}"));
+    assert_the_factor_is_resolved(label, h, rates, errors, oracle, oracle_error);
+    for q in 0..4 {
+        assert!(
+            (forecast[q] - oracle[q]).abs() <= errors[q] + oracle_error[q],
+            "{label}: quantity {q} at h {h}: forecast {} vs oracle {}, checked error {} + oracle error {}",
+            forecast[q],
+            oracle[q],
+            errors[q],
+            oracle_error[q]
+        );
+    }
+}
+
+#[test]
+fn a_static_factor_forecast_is_covered_by_its_reported_error() {
+    install_test_logger();
+    let loadings = [0.8, -0.5, 0.6];
+    let (cohort, mut fit, rates) = constant_hazard_fit();
+    inject_one_atom(&mut fit, loadings, 0.0);
+    let total = rates[0] + rates[1];
+    let horizons = [2.0 / total, 10.0 / total];
+    let f = constant_hazard_population(&fit, &cohort, &horizons);
+    for (i, &h) in horizons.iter().enumerate() {
+        let (oracle, oracle_error) = static_factor_reference(&rates, &loadings, &[], 0.0, h, 0.005);
+        assert_covered("static", &f, i, h, &rates, oracle, oracle_error);
+    }
+}
+
+#[test]
+fn a_dynamic_factor_forecast_is_covered_by_its_reported_error() {
+    install_test_logger();
+    let loadings = [0.8, -0.5, 0.6];
+    let (cohort, mut fit, rates) = constant_hazard_fit();
+    let total = rates[0] + rates[1];
+    let horizons = [2.0 / total, 10.0 / total];
+    // The factor decorrelates about three times over the window.
+    let kappa_per_time = 3.0 / horizons[1];
+    let nu = kappa_per_time * fit.time_scale;
+    inject_one_atom(&mut fit, loadings, nu);
+    let f = constant_hazard_population(&fit, &cohort, &horizons);
+    for (i, &h) in horizons.iter().enumerate() {
+        let (oracle, oracle_error) = spectral_reference(&rates, &loadings, kappa_per_time, h);
+        assert_covered("dynamic", &f, i, h, &rates, oracle, oracle_error);
+    }
+}
+
+/// The forecast opens at the state a history implies, not at the prior, so
+/// the error it reports must cover what filtering that history contributed.
+/// A censored subject with events, under a static factor: its posterior is
+/// the oracle's, and the window after its exit is covered as the prior's is.
+#[test]
+fn a_history_conditioned_static_factor_forecast_is_covered_by_its_reported_error() {
+    install_test_logger();
+    let loadings = [0.8, -0.5, 0.6];
+    let (cohort, mut fit, rates) = constant_hazard_fit();
+    inject_one_atom(&mut fit, loadings, 0.0);
+    let total = rates[0] + rates[1];
+    let subject = cohort
+        .subjects
+        .iter()
+        .find(|s| s.terminal_event(&cohort.mark_kinds).is_none() && !s.events.is_empty())
+        .expect("a censored subject with events");
+    let marks: Vec<usize> = subject.events.iter().map(|event| event.mark).collect();
+    let offsets = [2.0 / total, 10.0 / total];
+    let horizons: Vec<f64> = offsets.iter().map(|offset| subject.exit + offset).collect();
+    let f = forecast(
+        &fit,
+        &cohort,
+        &ForecastRequest {
+            history: subject,
+            horizons: &horizons,
+            future: &[],
+            stratum: 0,
+        },
+    )
+    .expect("forecast from a history");
+    emit(&format!(
+        "[2963 history static] subject {} follow-up {} events {marks:?}",
+        subject.id,
+        subject.exit - subject.entry
+    ));
+    for (i, &offset) in offsets.iter().enumerate() {
+        let (oracle, oracle_error) =
+            static_factor_reference(&rates, &loadings, &marks, subject.exit - subject.entry, offset, 0.005);
+        assert_covered("history static", &f, i, offset, &rates, oracle, oracle_error);
+    }
+}
+
+/// A forecast's roundoff and latent error are its own rule's, so a finer
+/// Gauss-Hermite rule gives a forecast at least as good and says so. The same
+/// one-atom window under orders 9 and 17:
+/// - the order-17 forecast lies within the order-9 forecast's checked error
+///   of the oracle, as a forecast under the more accurate rule must (the
+///   premise the latent check rests on), above the order-9 forecast's
+///   magnitude floor; and
+/// - when `resolves`, the order-17 checked error resolves the change from
+///   order 9.
+///
+/// For a static factor the first arm is that premise as a measurement
+/// precondition: no defect-state control moves it, since the order-17 static
+/// forecast was 5.0e-10 from the oracle on the pre-fix code too (probe
+/// 1230171). It prints before it asserts. For a dynamic factor it is the arm
+/// the pre-fix code's stalled mesh fires.
+fn assert_the_finer_rule_is_within_the_coarser_ones_error(label: &str, dynamic: bool, resolves: bool) {
+    let loadings = [0.8, -0.5, 0.6];
+    let mut at_order = Vec::new();
+    for order in [9, 17] {
+        let (cohort, mut fit, rates) = constant_hazard_fit_at(order);
+        let total = rates[0] + rates[1];
+        let horizons = [2.0 / total, 10.0 / total];
+        let kappa_per_time = if dynamic { 3.0 / horizons[1] } else { 0.0 };
+        let nu = kappa_per_time * fit.time_scale;
+        inject_one_atom(&mut fit, loadings, nu);
+        let f = constant_hazard_population(&fit, &cohort, &horizons);
+        at_order.push((f, rates, horizons, kappa_per_time));
+    }
+    let (coarse, rates, horizons, kappa_per_time) = &at_order[0];
+    let fine = &at_order[1].0;
+    for (i, &h) in horizons.iter().enumerate() {
+        let (oracle, oracle_error) = if dynamic {
+            spectral_reference(rates, &loadings, *kappa_per_time, h)
+        } else {
+            static_factor_reference(rates, &loadings, &[], 0.0, h, 0.005)
+        };
+        let (v9, e9) = forecast_quantities(coarse, i);
+        let (v17, e17) = forecast_quantities(fine, i);
+        for q in 0..4 {
+            emit(&format!(
+                "[2963 orders {label}] h {h:.4} quantity {q}: G9 {:.15} checked {:.3e} |G9−oracle| {:.3e} | G17 {:.15} checked {:.3e} |G17−oracle| {:.3e} | |G9−G17| {:.3e} | oracle error {:.3e}",
+                v9[q],
+                e9[q],
+                (v9[q] - oracle[q]).abs(),
+                v17[q],
+                e17[q],
+                (v17[q] - oracle[q]).abs(),
+                (v9[q] - v17[q]).abs(),
+                oracle_error[q]
+            ));
+        }
+        assert_the_factor_is_resolved(&format!("orders {label}"), h, rates, e9, oracle, oracle_error);
+        for q in 0..4 {
+            assert!(
+                (v17[q] - oracle[q]).abs() <= e9[q] + oracle_error[q],
+                "{label}: quantity {q} at h {h}: the order-17 forecast {} is {} from the oracle {}, outside the order-9 checked error {} + oracle error {}",
+                v17[q],
+                (v17[q] - oracle[q]).abs(),
+                oracle[q],
+                e9[q],
+                oracle_error[q]
+            );
+            if resolves {
+                assert!(
+                    e17[q] < (v9[q] - v17[q]).abs(),
+                    "{label}: quantity {q} at h {h}: the order-17 checked error {} does not resolve the change {} from order 9",
+                    e17[q],
+                    (v9[q] - v17[q]).abs()
+                );
+            }
+        }
+    }
+}
+
+/// A static factor's filter interpolates nothing, so its checked error at
+/// order 17 is that rule's own and resolves the change from order 9. Probe
+/// 1230171 measured the defect this pins: the order-17 window charged every
+/// value the roundoff of order 33's interpolant, 4.1e-5 on a survival of 0.17,
+/// above the whole order-9 error (3.7e-6).
+#[test]
+fn a_finer_rule_resolves_a_static_factor_forecasts_change_from_the_coarser_one() {
+    install_test_logger();
+    assert_the_finer_rule_is_within_the_coarser_ones_error("static", false, true);
+}
+
+/// A dynamic factor's order-17 forecast stays within the order-9 checked
+/// error of the oracle. Probe 1230171 measured the defect this pins: charged
+/// order 33's roundoff floor, the order-17 window stopped refining its mesh
+/// while time dominated, 5.1e-6 from the oracle where order 9 was 4.4e-8. Its
+/// own checked error is not asserted to resolve the change: the dynamic
+/// filter's roundoff is charged at order 17's Lebesgue constant, as the fit's
+/// certificate charges it, and that model is the certificate's question.
+#[test]
+fn a_finer_rule_keeps_a_dynamic_factor_forecast_within_the_coarser_ones_error() {
+    install_test_logger();
+    assert_the_finer_rule_is_within_the_coarser_ones_error("dynamic", true, false);
+}

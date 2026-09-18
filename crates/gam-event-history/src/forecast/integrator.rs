@@ -4,9 +4,8 @@
 //! killed run it tracks the survival `S(t)` against the marks that kill the
 //! run, and the expected count of every mark the run reports:
 //! `∫ S(t) E[λ_d(t) | alive] dt`. An engine (the grid filter of the
-//! event-history model, a particle route of the joint model) supplies each
-//! run's integral over one cell. This module owns everything that makes the
-//! result a checked number.
+//! event-history model) supplies each run's integral over one cell. This
+//! module owns everything that makes the result a checked number.
 //!
 //! - The mesh. Level-0 cells run between the window's breakpoints: its start,
 //!   the covariate changes and the last horizon. Horizons are output times. A
@@ -15,17 +14,32 @@
 //! - Survival and incidence are one evolution (`coupled`). The survival plus
 //!   the killing marks' incidences equals the survival at the window's start,
 //!   to roundoff, at any resolution.
+//! - The engine's other axis. When a cell integral is also a quadrature on
+//!   another axis (a latent state's Gauss-Hermite rule), the engine supplies a
+//!   [`Companion`]: the same runs on the next rung of that axis, each evolved
+//!   from its own opening state over the same mesh. The gap between the two
+//!   engines' integrals of a cell, each from its own state, is the cell's error
+//!   on that axis, including the error the coarser rule has already carried into
+//!   the state it enters with. A companion started from the coarser engine's
+//!   state would measure only the cell's own quadrature of that state and
+//!   inherit everything the state already got wrong. The premise is that the
+//!   companion is the more accurate of the two, as the next rung of a convergent
+//!   rule is; its own error is not measured.
 //! - Acceptance. A cell's time error is the gap between the cell and its two
 //!   halves, for the survival and for every count. Halving continues while that
-//!   gap exceeds the larger of two bounds on the quantity's error: the other
-//!   error component the engine measured for it (its latent quadrature against
-//!   the next rung, a Monte Carlo spread) and its roundoff floor. No tolerance
-//!   is set: time is refined exactly until it no longer dominates the other
-//!   known error. The other components are measured and reported, never refined
-//!   here. Every accepted component, and the roundoff of every value produced,
-//!   accumulates into the error returned with each value.
-//! - Termination at derived limits only. A cell at the resolution of its
-//!   endpoints is refused, and so is a halving whose time gap did not contract.
+//!   gap exceeds what else is known to be wrong with the two estimates it
+//!   compares: each one's gap to the companion's integral over the same span,
+//!   which bound their difference by the triangle inequality, or, where larger,
+//!   the value's roundoff floor. No tolerance is set: time is refined exactly
+//!   until it no longer dominates the other known error. The other axis is
+//!   measured and reported, never refined here. Every accepted component, and
+//!   the roundoff of every value produced, accumulates into the error returned
+//!   with each value.
+//! - Termination at a derived limit only: a cell at the resolution of its
+//!   endpoints is refused. A gap that is only rounding sits under the roundoff
+//!   floor, which is charged per value and does not shrink with the cell, so it
+//!   stops halving. Halving is depth-first, so a cell that never resolves is
+//!   refused after as many halvings as its endpoints can represent.
 
 use crate::cohort::EventHistoryError;
 
@@ -78,8 +92,7 @@ pub(crate) struct RunPosition<S> {
 }
 
 /// What a forecast engine supplies: its killed runs, each run's integral over
-/// one cell, the other measured components of a cell's error, and the
-/// roundoff a cell integral carries.
+/// one cell, and the roundoff a cell integral carries.
 pub(crate) trait KilledProcess {
     /// Where the engine stands at a cell boundary.
     type State: Clone;
@@ -96,19 +109,16 @@ pub(crate) trait KilledProcess {
         from: &[Self::State],
     ) -> Result<Vec<CellSums<Self::State>>, EventHistoryError>;
 
-    /// Every run's gaps in `coarse`, the cell's integral, under the engine's
-    /// own refinement on axes other than time: a latent quadrature against its
-    /// next rung, or a Monte Carlo spread. `None` when time is the only axis.
-    fn other_error(
-        &self,
-        left: f64,
-        right: f64,
-        from: &[Self::State],
-        coarse: &[CellIntegral<Self::State>],
-    ) -> Result<Option<Vec<RunGaps>>, EventHistoryError>;
-
     /// The relative roundoff a cell integral carries.
     fn roundoff(&self) -> f64;
+}
+
+/// The same killed runs as the forecast's engine on the next rung of its
+/// other axis, and each run's state at the window's start under that rung
+/// (see the module doc). Only its gaps to the engine are read.
+pub(crate) struct Companion<'a, P: KilledProcess> {
+    pub process: &'a P,
+    pub opening: Vec<P::State>,
 }
 
 /// A run's cell sums as one evolution of survival and incidence.
@@ -238,14 +248,58 @@ impl<S: Clone> RunPosition<S> {
     }
 }
 
-/// A cell waiting to be integrated: its bounds, its integral when that was
-/// computed from the current position, and the largest absolute time gap of
-/// the cell it halves.
+/// A cell waiting to be integrated: its bounds, and the engine's and the
+/// companion's integrals of it when those were computed from the current
+/// states.
 struct Pending<S> {
     left: f64,
     right: f64,
     coarse: Option<Vec<CellIntegral<S>>>,
-    parent_time_gap: f64,
+    companion_coarse: Option<Vec<CellIntegral<S>>>,
+}
+
+/// Every run's gaps over two consecutive cells as one, relative to the
+/// survival at the first one's start. The second cell's gaps scale with the
+/// first cell's survival factor, and the first cell's survival gap scales the
+/// second cell's increments.
+fn chained<S>(
+    first: &[CellIntegral<S>],
+    second: &[CellIntegral<S>],
+    one: &[RunGaps],
+    two: &[RunGaps],
+) -> Vec<RunGaps> {
+    first
+        .iter()
+        .zip(second)
+        .zip(one.iter().zip(two))
+        .map(|((x, y), (p, q))| {
+            let factor = x.log_decrement.exp();
+            RunGaps {
+                survival: p.survival + factor * q.survival,
+                counts: p
+                    .counts
+                    .iter()
+                    .zip(&q.counts)
+                    .enumerate()
+                    .map(|(d, (gap_one, gap_two))| match &y.increments {
+                        Some(increments) => gap_one + factor * gap_two + increments[d].abs() * p.survival,
+                        None => f64::INFINITY,
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+/// Every run's gaps summed.
+fn summed(one: &[RunGaps], two: &[RunGaps]) -> Vec<RunGaps> {
+    one.iter()
+        .zip(two)
+        .map(|(p, q)| RunGaps {
+            survival: p.survival + q.survival,
+            counts: p.counts.iter().zip(&q.counts).map(|(x, y)| x + y).collect(),
+        })
+        .collect()
 }
 
 /// A cell an engine's representation could not hold has not been resolved.
@@ -258,33 +312,34 @@ fn resolved<T>(result: Result<T, EventHistoryError>) -> Result<Option<T>, EventH
     }
 }
 
+/// The states every run of `integrals` ends at.
+fn ends<S: Clone>(integrals: &[CellIntegral<S>]) -> Vec<S> {
+    integrals.iter().map(|integral| integral.state.clone()).collect()
+}
+
 /// The largest ratio, over every run's survival and counts, of the time gap
-/// (the cell against its halves) to what else bounds that quantity's error.
-/// That bound is the engine's other measured component or, where that is
-/// smaller, the value's roundoff floor `roundoff · (1 + |value|)`. Returns the
-/// ratio, the gaps an accepted cell adds to the error (relative to the survival
-/// at the cell's start), and the largest absolute time gap.
+/// (the cell against its halves) to what else bounds that gap. That bound is
+/// `bound`, the other axis's gap for the cell plus that for its halves, since
+/// the two estimates' own errors bound their difference; where larger, it is
+/// the value's roundoff floor `roundoff · (1 + |value|)`. Returns the ratio and
+/// the gaps an accepted cell adds to the error (relative to the survival at the
+/// cell's start): the time gap plus `reported`, the halves' other-axis gap.
 fn time_excess<S>(
     position: &[RunPosition<S>],
     coarse: &[CellIntegral<S>],
     fine: &[CellIntegral<S>],
-    other: Option<&[RunGaps]>,
+    bound: Option<&[RunGaps]>,
+    reported: Option<&[RunGaps]>,
     roundoff: f64,
     marks: usize,
-) -> Result<(f64, Vec<RunGaps>, f64), EventHistoryError> {
+) -> Result<(f64, Vec<RunGaps>), EventHistoryError> {
     let time = integral_gaps(coarse, fine, marks);
     let mut excess = 0.0_f64;
-    let mut largest = 0.0_f64;
     let mut totals = Vec::with_capacity(time.len());
     for (r, ((p, f), t)) in position.iter().zip(fine).zip(&time).enumerate() {
         let survival = p.log_survival.exp();
-        if survival > 0.0 {
-            largest = t
-                .counts
-                .iter()
-                .fold(largest.max(survival * t.survival), |acc, gap| acc.max(survival * gap));
-        }
-        let other_gaps = other.and_then(|gaps| gaps.get(r));
+        let other_gaps = bound.and_then(|gaps| gaps.get(r));
+        let reported_gaps = reported.and_then(|gaps| gaps.get(r));
         let units = |gap: f64, other_gap: f64, value: f64| -> Result<f64, EventHistoryError> {
             if survival == 0.0 {
                 return Ok(0.0);
@@ -309,31 +364,37 @@ fn time_excess<S>(
             let other_gap = other_gaps.map_or(0.0, |gaps| gaps.counts[d]);
             let increment = f.increments.as_ref().map_or(0.0, |increments| increments[d]);
             excess = excess.max(units(t.counts[d], other_gap, p.counts[d] + survival * increment)?);
-            counts.push(t.counts[d] + other_gap);
+            counts.push(t.counts[d] + reported_gaps.map_or(0.0, |gaps| gaps.counts[d]));
         }
         totals.push(RunGaps {
-            survival: t.survival + survival_other,
+            survival: t.survival + reported_gaps.map_or(0.0, |gaps| gaps.survival),
             counts,
         });
     }
-    Ok((excess, totals, largest))
+    Ok((excess, totals))
 }
 
 /// Integrate every run of `process` from `opening` over the window whose
 /// level-0 breakpoints are `breakpoints` (its start, covariate changes and last
-/// horizon). Returns every run's position at each of `horizons`, which must be
+/// horizon), with `companion` measuring the other axis when there is one.
+/// Returns every run's position at each of `horizons`, which must be
 /// increasing and within the window.
 pub(crate) fn integrate_window<P: KilledProcess>(
     process: &P,
     opening: Vec<P::State>,
+    companion: Option<Companion<'_, P>>,
     breakpoints: &[f64],
     horizons: &[f64],
 ) -> Result<Vec<Vec<RunPosition<P::State>>>, EventHistoryError> {
     let marks = process.runs().first().map_or(0, |run| run.reported.len());
-    let mut position: Vec<RunPosition<P::State>> = opening
-        .into_iter()
-        .map(|state| RunPosition::opening(state, marks))
-        .collect();
+    let beside = companion.as_ref().map(|c| c.process);
+    let mut stand = Stand {
+        position: opening
+            .into_iter()
+            .map(|state| RunPosition::opening(state, marks))
+            .collect(),
+        companion: companion.map(|c| c.opening),
+    };
     let mut reached = Vec::with_capacity(horizons.len());
     for pair in breakpoints.windows(2) {
         let inside: Vec<f64> = horizons
@@ -341,8 +402,8 @@ pub(crate) fn integrate_window<P: KilledProcess>(
             .copied()
             .filter(|&h| h > pair[0] && h <= pair[1])
             .collect();
-        let (end, at_horizons) = integrate_interval(process, position, pair[0], pair[1], &inside, marks)?;
-        position = end;
+        let (end, at_horizons) = integrate_interval(process, beside, stand, pair[0], pair[1], &inside, marks)?;
+        stand = end;
         reached.extend(at_horizons);
     }
     if reached.len() != horizons.len() {
@@ -357,29 +418,41 @@ pub(crate) fn integrate_window<P: KilledProcess>(
     Ok(reached)
 }
 
-/// Integrate every run over `[left, right]` from `from`. Returns the positions
-/// at `right` and at every horizon of `horizons` (increasing, in
-/// `(left, right]`).
+/// Where every run stands, and the companion's state for every run when there
+/// is a companion.
+#[derive(Clone)]
+struct Stand<S> {
+    position: Vec<RunPosition<S>>,
+    companion: Option<Vec<S>>,
+}
+
+/// Integrate every run over `[left, right]` from `from`, with `companion`'s
+/// runs beside them. Returns where they stand at `right`, and the positions at
+/// every horizon of `horizons` (increasing, in `(left, right]`).
 fn integrate_interval<P: KilledProcess>(
     process: &P,
-    from: Vec<RunPosition<P::State>>,
+    companion: Option<&P>,
+    from: Stand<P::State>,
     left: f64,
     right: f64,
     horizons: &[f64],
     marks: usize,
-) -> Result<(Vec<RunPosition<P::State>>, Vec<Vec<RunPosition<P::State>>>), EventHistoryError> {
+) -> Result<(Stand<P::State>, Vec<Vec<RunPosition<P::State>>>), EventHistoryError> {
     let runs = process.runs();
     let couple = |sums: Vec<CellSums<P::State>>| -> Vec<CellIntegral<P::State>> {
         runs.iter().zip(sums).map(|(run, s)| coupled(run, s)).collect()
     };
-    let mut position = from;
+    let Stand {
+        mut position,
+        companion: mut beside,
+    } = from;
     let mut reached = Vec::with_capacity(horizons.len());
     let mut next_horizon = 0usize;
     let mut pending = vec![Pending {
         left,
         right,
         coarse: None,
-        parent_time_gap: f64::INFINITY,
+        companion_coarse: None,
     }];
     while let Some(cell) = pending.pop() {
         let (a, b) = (cell.left, cell.right);
@@ -397,73 +470,110 @@ fn integrate_interval<P: KilledProcess>(
             None => resolved(process.cell(a, b, &at))?.map(&couple),
         };
         let first = resolved(process.cell(a, middle, &at))?.map(&couple);
-        let fine = match &first {
-            Some(halves) => {
-                let halfway: Vec<P::State> = halves.iter().map(|half| half.state.clone()).collect();
-                resolved(process.cell(middle, b, &halfway))?.map(|sums| {
-                    halves
-                        .iter()
-                        .zip(couple(sums))
-                        .map(|(half, second)| joined(half, second))
-                        .collect::<Vec<_>>()
-                })
-            }
-            None => None,
+        // The companion's integrals of the cell and of its first half, each
+        // from the companion's own state.
+        let (companion_coarse, companion_first) = match (companion, &beside) {
+            (Some(other), Some(states)) => (
+                match cell.companion_coarse {
+                    Some(integral) => Some(integral),
+                    None => resolved(other.cell(a, b, states))?.map(&couple),
+                },
+                resolved(other.cell(a, middle, states))?.map(&couple),
+            ),
+            _ => (None, None),
         };
-        let measured = match (&coarse, &fine) {
-            (Some(c), Some(f)) => {
-                let other = process.other_error(a, b, &at, c)?;
-                Some(time_excess(&position, c, f, other.as_deref(), process.roundoff(), marks)?)
+        let mut measured = None;
+        let mut fine = None;
+        let mut companion_fine = None;
+        if let (Some(c), Some(one)) = (&coarse, &first) {
+            if let Some(two) = resolved(process.cell(middle, b, &ends(one)))?.map(&couple) {
+                // `None` when the companion could not represent the cell or a
+                // half, which a finer cell resolves; `Some(None)` when there
+                // is no other axis to measure.
+                let other = match (companion, &companion_coarse, &companion_first) {
+                    (None, ..) => Some(None),
+                    (Some(beside_process), Some(whole), Some(half)) => {
+                        match resolved(beside_process.cell(middle, b, &ends(half)))?.map(&couple) {
+                            Some(second) => {
+                                let halves = chained(
+                                    one,
+                                    &two,
+                                    &integral_gaps(one, half, marks),
+                                    &integral_gaps(&two, &second, marks),
+                                );
+                                let bound = summed(&integral_gaps(c, whole, marks), &halves);
+                                companion_fine = Some(ends(&second));
+                                Some(Some((bound, halves)))
+                            }
+                            None => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(other) = other {
+                    let halves: Vec<CellIntegral<P::State>> =
+                        one.iter().zip(two).map(|(x, y)| joined(x, y)).collect();
+                    measured = Some(time_excess(
+                        &position,
+                        c,
+                        &halves,
+                        other.as_ref().map(|o| o.0.as_slice()),
+                        other.as_ref().map(|o| o.1.as_slice()),
+                        process.roundoff(),
+                        marks,
+                    )?);
+                    fine = Some(halves);
+                }
             }
-            _ => None,
-        };
+        }
         match (measured, fine) {
-            (Some((excess, gaps, _)), Some(fine)) if excess <= 1.0 => {
-                let entering = position;
+            (Some((excess, gaps)), Some(fine)) if excess <= 1.0 => {
+                let entering = Stand {
+                    position,
+                    companion: beside,
+                };
                 position = entering
+                    .position
                     .iter()
                     .zip(&fine)
                     .zip(&gaps)
                     .map(|((p, integral), g)| p.advanced(integral, g, process.roundoff()))
                     .collect();
+                beside = companion_fine;
                 while next_horizon < horizons.len() && horizons[next_horizon] <= b {
                     let h = horizons[next_horizon];
                     if h == b {
                         reached.push(position.clone());
                     } else {
-                        reached.push(integrate_interval(process, entering.clone(), a, h, &[], marks)?.0);
+                        let (at_h, _) = integrate_interval(process, companion, entering.clone(), a, h, &[], marks)?;
+                        reached.push(at_h.position);
                     }
                     next_horizon += 1;
                 }
             }
-            (measured, _) => {
-                // The absolute gap, not its ratio to a bound the engine
-                // re-measures on every cell and that shrinks with it.
-                let time_gap = measured.as_ref().map_or(f64::INFINITY, |m| m.2);
-                if cell.parent_time_gap.is_finite() && !(time_gap < cell.parent_time_gap) {
-                    return Err(EventHistoryError::NumericalFailure {
-                        reason: format!(
-                            "halving the forecast cell [{a}, {b}] did not contract its time error: gap {time_gap:.3e} after {:.3e}",
-                            cell.parent_time_gap
-                        ),
-                    });
-                }
+            _ => {
                 pending.push(Pending {
                     left: middle,
                     right: b,
                     coarse: None,
-                    parent_time_gap: time_gap,
+                    companion_coarse: None,
                 });
                 pending.push(Pending {
                     left: a,
                     right: middle,
                     coarse: first,
-                    parent_time_gap: time_gap,
+                    companion_coarse: companion_first,
                 });
             }
         }
     }
-    Ok((position, reached))
+    Ok((
+        Stand {
+            position,
+            companion: beside,
+        },
+        reached,
+    ))
 }
 
 #[cfg(test)]
@@ -523,9 +633,61 @@ mod tests {
             },
         );
         let increments = integral.increments.expect("representable");
+        // Each bar is ε times the running bound of both routes' operation
+        // chains: the magnitude of every computed result (Higham, *Accuracy and
+        // Stability*, ch. 3).
+        let decrement = -log_decrement.exp_m1();
+        let (zero_share, one_share) = (decrement * 0.61, decrement * 0.29);
+        let partial = log_decrement.exp() + increments[0];
+        let sum = partial + increments[1];
+        let identity_bar = running_bound(&[
+            log_decrement.exp(),
+            decrement,
+            0.61 + 0.29,
+            zero_share,
+            increments[0],
+            one_share,
+            increments[1],
+            partial,
+            sum,
+        ]);
         // The survival factor and the killing marks' incidences sum to one.
-        assert!((log_decrement.exp() + increments[0] + increments[1] - 1.0).abs() <= 4.0 * f64::EPSILON);
-        assert!((increments[0] / increments[1] - 0.61 / 0.29).abs() <= 64.0 * f64::EPSILON);
+        emit(&format!("[2963 coupled] sum {sum:e} identity bar {identity_bar:e}"));
+        assert!(identity_bar < 1.0, "the bar {identity_bar} resolves nothing");
+        assert!((sum - 1.0).abs() <= identity_bar, "{sum} is not one within {identity_bar}");
+        let ratio = increments[0] / increments[1];
+        let ratio_bar = running_bound(&[
+            0.61 + 0.29,
+            zero_share,
+            increments[0],
+            one_share,
+            increments[1],
+            ratio,
+            0.61 / 0.29,
+        ]);
+        emit(&format!("[2963 coupled] share ratio {ratio:e} ratio bar {ratio_bar:e}"));
+        assert!(ratio_bar < 0.61 / 0.29, "the bar {ratio_bar} resolves nothing");
+        assert!(
+            (ratio - 0.61 / 0.29).abs() <= ratio_bar,
+            "share ratio {ratio} vs {}, bar {ratio_bar}",
+            0.61 / 0.29
+        );
         assert_eq!(increments[2], 1.7);
+    }
+
+    /// `ε · μ`, with `μ` the running bound of an operation chain: the sum of
+    /// every computed result's magnitude.
+    fn running_bound(results: &[f64]) -> f64 {
+        f64::EPSILON * results.iter().map(|value| value.abs()).sum::<f64>()
+    }
+
+    /// One line on the test's standard output, printed whether or not the
+    /// test's assertions hold.
+    fn emit(line: &str) {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        if out.write_all(line.as_bytes()).is_ok() && out.write_all(b"\n").is_ok() {
+            return;
+        }
     }
 }
