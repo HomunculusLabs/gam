@@ -2870,21 +2870,7 @@ pub fn maybe_log_audit_drift(
         every_n_iters
     };
 
-    let beta_pilot_norm: f64 = beta_pilot.iter().map(|b| b * b).sum::<f64>().sqrt();
-    let beta_current_len = beta_current.len();
-    let beta_pilot_len = beta_pilot.len();
-    let diff_norm: f64 = if beta_current_len == beta_pilot_len {
-        beta_current
-            .iter()
-            .zip(beta_pilot.iter())
-            .map(|(a, b)| (a - b).powi(2))
-            .sum::<f64>()
-            .sqrt()
-    } else {
-        // Length mismatch — treat as maximum drift.
-        f64::INFINITY
-    };
-    let beta_relative_change = diff_norm / (beta_pilot_norm + f64::EPSILON);
+    let beta_relative_change = audit_beta_relative_change(beta_pilot, beta_current);
 
     let large_beta_movement = beta_relative_change > BETA_RELATIVE_THRESHOLD;
     let periodic_check = (outer_iter % period) == 0;
@@ -2928,7 +2914,59 @@ pub fn maybe_log_audit_drift(
 
     // Re-run the flat audit at beta_current.
     let current_audit = audit_identifiability_with_state(specs, &state)?;
+    Ok(Some(audit_verdict_drift(
+        pilot_audit,
+        &current_audit,
+        beta_relative_change,
+        outer_iter,
+    )))
+}
 
+/// `‖β_current − β_pilot‖₂ / (‖β_pilot‖₂ + ε)`, and infinity when the two vectors have
+/// different lengths (treated as maximum drift).
+pub fn audit_beta_relative_change(beta_pilot: &[f64], beta_current: &[f64]) -> f64 {
+    if beta_current.len() != beta_pilot.len() {
+        return f64::INFINITY;
+    }
+    let beta_pilot_norm: f64 = beta_pilot.iter().map(|b| b * b).sum::<f64>().sqrt();
+    let diff_norm: f64 = beta_current
+        .iter()
+        .zip(beta_pilot.iter())
+        .map(|(a, b)| (a - b).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    diff_norm / (beta_pilot_norm + f64::EPSILON)
+}
+
+impl AuditDriftSummary {
+    /// Whether the current verdict differs from the pilot's in any way that can
+    /// invalidate a fit: a different joint rank, a fatal flip, a newly dropped
+    /// column, or a pilot drop no longer dropped. A flat-routed converged-state
+    /// refusal reads this predicate. A channel-aware one reads
+    /// `ConvergedChannelAwareVerdict::refuses`, which judges drop labels through the
+    /// pilot's gauge.
+    pub fn verdict_changed(&self) -> bool {
+        self.pilot_rank != self.current_rank
+            || self.pilot_fatal != self.current_fatal
+            || !self.newly_dropped.is_empty()
+            || !self.recovered.is_empty()
+    }
+}
+
+/// Compare two identifiability audits of the same specs, and price the realized
+/// path against the pilot's rank certificate.
+///
+/// The two audits must come from the SAME audit function at two operating points:
+/// the flat audit for flat-routed families, and
+/// `channel_aware_audit_at_operating_scalars` for channel-aware ones. Compare a
+/// design-structural drop set with a penalty-augmented one and every penalty-covered
+/// design alias reads as recovered.
+pub fn audit_verdict_drift(
+    pilot_audit: &IdentifiabilityAudit,
+    current_audit: &IdentifiabilityAudit,
+    beta_relative_change: f64,
+    outer_iter: usize,
+) -> AuditDriftSummary {
     let pilot_rank: usize = pilot_audit.blocks.iter().map(|b| b.effective_dim).sum();
     let current_rank: usize = current_audit.blocks.iter().map(|b| b.effective_dim).sum();
 
@@ -3037,7 +3075,7 @@ pub fn maybe_log_audit_drift(
         _ => (None, None),
     };
 
-    Ok(Some(AuditDriftSummary {
+    AuditDriftSummary {
         pilot_rank,
         current_rank,
         pilot_fatal: pilot_audit.fatal,
@@ -3047,7 +3085,7 @@ pub fn maybe_log_audit_drift(
         recovered,
         pilot_certificate_transported,
         excursion_vs_radius,
-    }))
+    }
 }
 
 /// Run [`audit_identifiability`] with an explicit [`FamilyLinearizationState`]

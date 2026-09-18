@@ -176,11 +176,21 @@ pub(crate) fn drift_audit_beta_pair(
     (pilot, current)
 }
 
-/// Re-run the unified identifiability audit at the converged raw-coordinate
-/// state when a family exposes dynamic primary scalars. Any change from the
-/// pilot verdict invalidates the gauge used by the solve, so result assembly
-/// fails closed instead of publishing a locally unidentified or over-reduced
-/// fit.
+/// Re-run the identifiability audit at the converged raw-coordinate state when a
+/// family exposes dynamic primary scalars, and refuse on any verdict change.
+///
+/// The converged verdict is measured by the SAME audit function that produced the
+/// pilot verdict. For a channel-aware family that is
+/// `channel_aware_audit_at_operating_scalars`, re-run at the converged operating
+/// scalars over the raw specs and over the canonical reduced specs. Re-measuring with
+/// the penalty-augmented flat audit instead reported every penalty-covered design
+/// alias as recovered, so an unchanged model refused after convergence (#2627 finding
+/// 9). Flat-routed families keep the flat audit.
+///
+/// A channel-aware verdict refuses when a rank or fatality changes: the raw problem's,
+/// or that of the problem the fit ran through the pilot's gauge. A drop set that names
+/// other members of the same alias classes is a representative swap. It is logged, and
+/// it does not refuse. See `ConvergedChannelAwareVerdict::refuses`.
 fn audit_converged_identifiability<F: CustomFamily + ?Sized>(
     family: &F,
     raw_specs: &[ParameterBlockSpec],
@@ -199,39 +209,68 @@ fn audit_converged_identifiability<F: CustomFamily + ?Sized>(
         return Ok(());
     };
     let (beta_pilot, beta_current) = drift_audit_beta_pair(raw_specs, &raw_states);
-    let drift = gam_identifiability::audit::maybe_log_audit_drift(
-        raw_specs,
-        &canonical.audit,
-        &beta_pilot,
-        &beta_current,
-        Some(&family_scalars),
-        outer_iter,
-        1,
-        family.identifiability_probit_frailty_scale(),
-    )
-    .map_err(|error| CustomFamilyError::Optimization {
-        context: "converged identifiability audit",
-        reason: error.to_string(),
-    })?
-    .ok_or_else(|| CustomFamilyError::Optimization {
-        context: "converged identifiability audit",
-        reason: "period-one converged audit did not run".to_string(),
-    })?;
-    if drift.current_rank != drift.pilot_rank
-        || drift.current_fatal != drift.pilot_fatal
-        || !drift.newly_dropped.is_empty()
-        || !drift.recovered.is_empty()
-    {
+    let (drift, refuses, pilot_gauge_rank) = if canonical.used_channel_aware_audit {
+        let verdict = gam_identifiability::canonical::converged_channel_aware_verdict(
+            raw_specs,
+            canonical,
+            Arc::clone(&family_scalars),
+            gam_identifiability::audit::audit_beta_relative_change(&beta_pilot, &beta_current),
+            outer_iter,
+        )?;
+        let refuses = verdict.refuses();
+        let pilot_gauge_rank = verdict.pilot_gauge_rank();
+        if verdict.representative_swap() {
+            let newly_dropped: Vec<String> = verdict
+                .drift
+                .newly_dropped
+                .iter()
+                .map(|dropped| format!("{}[{}]", dropped.block, dropped.column))
+                .collect();
+            log::info!(
+                "[AUDIT-DRIFT] converged identifiability accepted a representative swap: the pivot \
+                 chose other members of the same alias classes (rank {}, pilot gauge rank {} at \
+                 convergence); newly_dropped=[{}] recovered=[{}]",
+                verdict.drift.current_rank,
+                pilot_gauge_rank,
+                newly_dropped.join(", "),
+                verdict.drift.recovered.join(", "),
+            );
+        }
+        (verdict.drift, refuses, Some(pilot_gauge_rank))
+    } else {
+        let drift = gam_identifiability::audit::maybe_log_audit_drift(
+            raw_specs,
+            &canonical.audit,
+            &beta_pilot,
+            &beta_current,
+            Some(&family_scalars),
+            outer_iter,
+            1,
+            family.identifiability_probit_frailty_scale(),
+        )
+        .map_err(|error| CustomFamilyError::Optimization {
+            context: "converged identifiability audit",
+            reason: error.to_string(),
+        })?
+        .ok_or_else(|| CustomFamilyError::Optimization {
+            context: "converged identifiability audit",
+            reason: "period-one converged audit did not run".to_string(),
+        })?;
+        let refuses = drift.verdict_changed();
+        (drift, refuses, None)
+    };
+    if refuses {
         return Err(CustomFamilyError::Optimization {
             context: "converged identifiability audit",
             reason: format!(
-                "identifiability verdict changed after convergence: pilot_rank={} current_rank={} pilot_fatal={} current_fatal={} newly_dropped={} recovered={}",
+                "identifiability verdict changed after convergence: pilot_rank={} current_rank={} pilot_fatal={} current_fatal={} newly_dropped={} recovered={} pilot_gauge_rank={}",
                 drift.pilot_rank,
                 drift.current_rank,
                 drift.pilot_fatal,
                 drift.current_fatal,
                 drift.newly_dropped.len(),
                 drift.recovered.len(),
+                pilot_gauge_rank.map_or_else(|| "n/a (flat audit)".to_string(), |rank| rank.to_string()),
             ),
         });
     }
