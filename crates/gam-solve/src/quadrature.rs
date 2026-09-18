@@ -4346,6 +4346,88 @@ where
     normal_expectation_nd_adaptive_result::<2, _, _, E>(ctx, mu, cov, 21, |x| f(x[0], x[1]))
 }
 
+/// Where a bivariate normal `N(mu, cov)` puts its mass when `cov` may be
+/// singular in floating point, as [`normal_expectation_2d_projected_result`]
+/// integrates it.
+///
+/// The 2-D rule runs exactly when its Cholesky factor exists without jitter:
+/// the pivots `a` and `b − (c/√a)²` of `cov = [[a, c], [c, b]]`, formed as
+/// `cholesky_static` forms them, are both positive. Any other `cov` is rank one
+/// in floating point or indefinite, and the nearest positive semidefinite
+/// covariance keeps only its major eigenpair: variance `m + r` with
+/// `m = (a + b)/2` and `r = hypot((a − b)/2, c)`, along the major eigenvector.
+/// A covariance with no positive eigenvalue is a point mass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BivariateNormalSupport {
+    /// Both Cholesky pivots are positive: the law spreads over the plane.
+    Plane,
+    /// Only the major eigenpair carries variance: `mu + t·axis` with
+    /// `t ~ N(0, variance)` and `axis` a unit vector.
+    Axis { axis: [f64; 2], variance: f64 },
+    /// No positive eigenvalue: all mass at `mu`.
+    Point,
+}
+
+impl BivariateNormalSupport {
+    /// The support of `N(·, cov)` for a finite symmetric `cov`.
+    pub fn of(cov: [[f64; 2]; 2]) -> Self {
+        let (a, b, c) = (cov[0][0], cov[1][1], cov[1][0]);
+        if a > 0.0 {
+            let below = c / a.sqrt();
+            if b - below * below > 0.0 {
+                return Self::Plane;
+            }
+        }
+        let half_difference = 0.5 * a - 0.5 * b;
+        let radius = half_difference.hypot(c);
+        let major = 0.5 * a + 0.5 * b + radius;
+        if major <= 0.0 {
+            return Self::Point;
+        }
+        // The major eigenvector is `(r + h, c)` or `(c, r − h)` with `h = (a − b)/2`;
+        // take whichever adds rather than cancels. It is nonzero here: `r + h = 0`
+        // with `h ≥ 0` forces `h = c = 0`, so `a = b = m > 0` and both pivots were
+        // positive.
+        let (u0, u1) = if half_difference >= 0.0 {
+            (radius + half_difference, c)
+        } else {
+            (c, radius - half_difference)
+        };
+        let length = u0.hypot(u1);
+        Self::Axis {
+            axis: [u0 / length, u1 / length],
+            variance: major,
+        }
+    }
+}
+
+/// `E[f(x₀, x₁)]` under `N(mu, cov)` for a finite symmetric `cov`, integrated
+/// over every direction in which `cov` carries variance: adaptive 2-D
+/// Gauss–Hermite on [`BivariateNormalSupport::Plane`], the 1-D rule along the
+/// major axis on [`BivariateNormalSupport::Axis`], and `f(mu)` on a point mass.
+pub fn normal_expectation_2d_projected_result<F, R, E>(
+    ctx: &QuadratureContext,
+    mu: [f64; 2],
+    cov: [[f64; 2]; 2],
+    f: F,
+) -> Result<R, E>
+where
+    F: Fn(f64, f64) -> Result<R, E>,
+    R: GhqValue,
+{
+    match BivariateNormalSupport::of(cov) {
+        BivariateNormalSupport::Plane => {
+            normal_expectation_nd_adaptive_result::<2, _, R, E>(ctx, mu, cov, 21, |x| f(x[0], x[1]))
+        }
+        BivariateNormalSupport::Axis { axis, variance } => {
+            normal_expectation_nd_adaptive_result::<1, _, R, E>(ctx, [0.0], [[variance]], 21, |t| {
+                f(mu[0] + axis[0] * t[0], mu[1] + axis[1] * t[0])
+            })
+        }
+        BivariateNormalSupport::Point => f(mu[0], mu[1]),
+    }
+}
+
 /// Closed-form posterior mean under probit link when eta is Gaussian:
 /// E[Phi(Z)] for Z ~ N(eta, se_eta^2) = Phi(eta / sqrt(1 + se_eta^2)).
 ///
@@ -6004,6 +6086,96 @@ mod tests {
         // [[0, 1], [1, 0]] has a zero pivot above a unit Schur entry, which no
         // positive semidefinite matrix has.
         assert!(cholesky_static::<2>(&[[0.0, 1.0], [1.0, 0.0]]).is_none());
+    }
+
+    /// `normal_expectation_2d_projected_result` reproduces the closed-form
+    /// Gaussian moments on every support it integrates over (gam#2931).
+    ///
+    /// Under the law the rule integrates, `E[1] = 1`, `E[xₖ] = μₖ` and
+    /// `E[xₖxₗ] = μₖμₗ + Σₖₗ`, where `Σ` is the covariance itself on the plane
+    /// and its major eigenpair `variance·axis·axisᵀ` on a rank-one or indefinite
+    /// covariance. An n-point Gauss–Hermite rule integrates every polynomial of
+    /// degree ≤ 2n − 1 exactly and the adaptive rule never takes fewer than 7
+    /// points, so what is left is the rounding of the rule's own weighted sum.
+    /// Each of its `nodes` terms is formed by at most `2·D` node and weight
+    /// products, `D·(D + 1)` Cholesky or axis products and sums, one monomial
+    /// product and the weight times the value; the terms are then summed, scaled
+    /// by the rule's normalisation and compared with a closed form of at most two
+    /// rounded operations. So the bar is
+    /// `accumulation_band(nodes·(2·D + D·(D + 1) + 2) + 3, Σ w·|f|)`, with the
+    /// node count taken from the uncapped schedule (never fewer nodes than the
+    /// rule ran) and `Σ w·|f|` read off the same rule. A point mass is `f(μ)` bit
+    /// for bit.
+    #[test]
+    fn projected_bivariate_expectation_reproduces_closed_form_moments_2931() {
+        type Moments = (f64, f64, f64, f64, f64, f64);
+        let ctx = QuadratureContext::new();
+        let mu = [0.3, -1.2];
+        let monomials =
+            |x0: f64, x1: f64| -> Result<Moments, String> { Ok((1.0, x0, x1, x0 * x0, x0 * x1, x1 * x1)) };
+        let magnitudes = |x0: f64, x1: f64| -> Result<Moments, String> {
+            Ok((1.0, x0.abs(), x1.abs(), x0 * x0, (x0 * x1).abs(), x1 * x1))
+        };
+        let entries = |m: Moments| [m.0, m.1, m.2, m.3, m.4, m.5];
+        let check = |label: &str, cov: [[f64; 2]; 2], law: [[f64; 2]; 2], dims: usize, max_sd: f64| {
+            let got = entries(
+                normal_expectation_2d_projected_result(&ctx, mu, cov, &monomials).expect("moments"),
+            );
+            let absolute = entries(
+                normal_expectation_2d_projected_result(&ctx, mu, cov, &magnitudes)
+                    .expect("magnitudes"),
+            );
+            let exact = [
+                1.0,
+                mu[0],
+                mu[1],
+                mu[0] * mu[0] + law[0][0],
+                mu[0] * mu[1] + law[0][1],
+                mu[1] * mu[1] + law[1][1],
+            ];
+            let nodes = adaptive_point_count_from_sd(max_sd).pow(dims as u32);
+            let terms = nodes * (2 * dims + dims * (dims + 1) + 2) + 3;
+            for k in 0..6 {
+                let gap = (got[k] - exact[k]).abs();
+                let bar = gam_linalg::roundoff::accumulation_band(terms, absolute[k]);
+                assert!(
+                    gap <= bar,
+                    "[{label}] moment {k}: rule {:.17e}, closed form {:.17e}, gap {gap:.3e} above \
+                     the rounding bar {bar:.3e}",
+                    got[k],
+                    exact[k]
+                );
+            }
+        };
+
+        let plane = [[0.04, 0.012], [0.012, 0.09]];
+        assert_eq!(BivariateNormalSupport::of(plane), BivariateNormalSupport::Plane);
+        check("plane", plane, plane, 2, plane[1][1].sqrt());
+
+        // Exactly rank one in floating point: the second pivot 1 − (0.5/0.5)² is 0.
+        let rank_one = [[0.25, 0.5], [0.5, 1.0]];
+        let BivariateNormalSupport::Axis { variance, .. } = BivariateNormalSupport::of(rank_one) else {
+            panic!("a rank-one covariance integrates along its major axis");
+        };
+        assert_eq!(variance, 1.25);
+        check("rank-one axis", rank_one, rank_one, 1, variance.sqrt());
+
+        // Indefinite: eigenvalues ±1. The rule integrates the nearest positive
+        // semidefinite covariance, the eigenpair 1 along (1, 1)/√2.
+        let indefinite = [[0.0, 1.0], [1.0, 0.0]];
+        let BivariateNormalSupport::Axis { variance, .. } = BivariateNormalSupport::of(indefinite) else {
+            panic!("an indefinite covariance integrates along its major axis");
+        };
+        assert_eq!(variance, 1.0);
+        check("indefinite axis", indefinite, [[0.5, 0.5], [0.5, 0.5]], 1, variance.sqrt());
+
+        let point = [[0.0, 0.0], [0.0, 0.0]];
+        assert_eq!(BivariateNormalSupport::of(point), BivariateNormalSupport::Point);
+        let at_point = entries(
+            normal_expectation_2d_projected_result(&ctx, mu, point, &monomials).expect("point mass"),
+        );
+        let at_mean = entries(monomials(mu[0], mu[1]).expect("monomials at the mean"));
+        assert_eq!(at_point.map(f64::to_bits), at_mean.map(f64::to_bits));
     }
 }
 

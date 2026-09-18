@@ -128,6 +128,80 @@ impl AnchoredRowKernel {
             }
         }
     }
+
+    /// [`Self::eta`] together with its partials `(η, ∂η/∂q, ∂η/∂b)` at the
+    /// same primaries, the anchor re-solved there: `∂η/∂q = c(b)` and
+    /// `∂η/∂b = s²·b·q/c(b) + s·z` under the standard-normal law, and the
+    /// implicit-function derivatives `a_q = μ′(q)/F_a`, `a_b = −F_b/F_a` of the
+    /// calibrated intercept (plus `s·z` on `b`) under an empirical law. These
+    /// are the partials [`BernoulliMarginalSlopePredictor::predict_eta_and_time_tangent`]
+    /// chains a time tangent through.
+    pub fn eta_and_partials(&self, q: f64, b: f64) -> Result<(f64, f64, f64), EstimationError> {
+        let scale = self.probit_scale;
+        let sb = scale * b;
+        match &self.grid {
+            None => {
+                let c = (1.0 + sb * sb).sqrt();
+                Ok((
+                    c * q + sb * self.z,
+                    c,
+                    scale * scale * b * q / c + scale * self.z,
+                ))
+            }
+            Some(grid) => {
+                let marginal = bernoulli_marginal_link_map(&self.base_link, q)
+                    .map_err(EstimationError::InvalidInput)?;
+                let intercept = empirical_intercept_from_marginal_within(
+                    marginal.mu,
+                    marginal.q,
+                    b,
+                    scale,
+                    &grid.nodes,
+                    &grid.weights,
+                    None,
+                    empirical_intercept_tail_tolerance(marginal.mu),
+                )
+                .map_err(EstimationError::InvalidInput)?;
+                let (a_q, a_b) = empirical_intercept_partials(
+                    intercept,
+                    marginal.mu1,
+                    b,
+                    scale,
+                    &grid.nodes,
+                    &grid.weights,
+                )?;
+                Ok((intercept + sb * self.z, a_q, a_b + scale * self.z))
+            }
+        }
+    }
+}
+
+/// The implicit-function partials `(∂a/∂q, ∂a/∂b) = (μ′(q)/F_a, −F_b/F_a)` of
+/// the empirical-law intercept `a`, the root of
+/// `F(a) = Σ wᵢ Φ(a + s·b·zᵢ) − μ(q)`, given that root and `μ′(q)`.
+fn empirical_intercept_partials(
+    intercept: f64,
+    marginal_mu1: f64,
+    slope: f64,
+    probit_scale: f64,
+    nodes: &[f64],
+    weights: &[f64],
+) -> Result<(f64, f64), EstimationError> {
+    let observed_slope = probit_scale * slope;
+    let mut f_a = 0.0;
+    let mut f_b = 0.0;
+    for (&node, &weight) in nodes.iter().zip(weights.iter()) {
+        let eta = intercept + observed_slope * node;
+        let pdf = normal_pdf(eta);
+        f_a += weight * pdf;
+        f_b += weight * pdf * probit_scale * node;
+    }
+    if !(f_a.is_finite() && f_a > 0.0 && f_b.is_finite()) {
+        return Err(EstimationError::InvalidInput(format!(
+            "empirical latent prediction calibration derivative is invalid: F_a={f_a}, F_b={f_b}"
+        )));
+    }
+    Ok((marginal_mu1 / f_a, -f_b / f_a))
 }
 
 pub struct BernoulliMarginalSlopePredictor {
@@ -686,22 +760,8 @@ impl BernoulliMarginalSlopePredictor {
             None,
         )
         .map_err(EstimationError::InvalidInput)?;
-        let observed_slope = scale * slope;
-        let mut f_a = 0.0;
-        let mut f_b = 0.0;
-        for (&node, &weight) in nodes.iter().zip(weights.iter()) {
-            let eta = intercept + observed_slope * node;
-            let pdf = normal_pdf(eta);
-            f_a += weight * pdf;
-            f_b += weight * pdf * scale * node;
-        }
-        if !(f_a.is_finite() && f_a > 0.0 && f_b.is_finite()) {
-            return Err(EstimationError::InvalidInput(format!(
-                "empirical latent prediction calibration derivative is invalid: F_a={f_a}, F_b={f_b}"
-            )));
-        }
-        let a_marginal_eta = marginal.mu1 / f_a;
-        let a_slope = -f_b / f_a;
+        let (a_marginal_eta, a_slope) =
+            empirical_intercept_partials(intercept, marginal.mu1, slope, scale, nodes, weights)?;
         Ok((intercept, a_marginal_eta, a_slope))
     }
 
