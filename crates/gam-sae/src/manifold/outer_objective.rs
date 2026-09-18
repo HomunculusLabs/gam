@@ -624,6 +624,14 @@ impl OuterProbeTelemetry {
 /// convergence loop still runs (its KKT gate passes immediately) and the single
 /// stationary factorization prices the same log|H|. Same converged optimum,
 /// fewer iterations to reach it.
+///
+/// #2267 — the warm start alone still left that factorization to be paid twice. On the
+/// dense route the probe's value was priced on an exact-`A` spectral block at the converged
+/// state, and the gradient lane re-converged the handed-off state and decomposed it again:
+/// job 1244553 (635-row example, K=8) re-priced `ρ₁` from its handoff to the same digits
+/// (`½log|A|=1.221477e4 ½log|Φ|=1.217244e4`), each pricing about 330 s there. The handoff
+/// therefore also carries the evaluation the probe priced, and the gradient and EFS lanes
+/// differentiate that evaluation of the state they install.
 struct ProbeConvergedHandoff {
     /// Flattened ρ of the probe, compared BITWISE (`f64::to_bits`) so only an
     /// exact re-evaluation of the same probed point consumes the state.
@@ -632,6 +640,21 @@ struct ProbeConvergedHandoff {
     /// evaluation still treats it as a warm start and independently checks the
     /// same KKT stationarity condition before pricing value or gradient.
     term: SaeManifoldTerm,
+    /// The dense evaluation the probe's value was priced on, at `term`'s state. `None` on
+    /// the streaming routes, whose value lane prices no dense block. A lane that installs
+    /// `term` and differentiates at `rho_flat` reads it instead of pricing `term` again.
+    priced: Option<OuterCriterionEvaluation>,
+}
+
+/// What `install_authoritative_envelope_basin` left installed at the requested ρ.
+enum InstalledEnvelopeBasin {
+    /// Every admissible basin has an undefined quasi-Laplace value at this ρ.
+    Infeasible,
+    /// The envelope argmin's converged state is installed. `priced` is the evaluation its
+    /// value was priced on at that state, when the value lane priced a dense block (#2267).
+    Installed {
+        priced: Option<OuterCriterionEvaluation>,
+    },
 }
 
 /// #2231 Inc-B (stage 1) — crosscoder block-relevance PRICING state.
@@ -1969,6 +1992,17 @@ impl SaeManifoldOuterObjective {
         &mut self,
         rho_flat: ArrayView1<'_, f64>,
     ) -> Option<SaeManifoldTerm> {
+        self.take_priced_probe_handoff(rho_flat)
+            .map(|(term, _priced)| term)
+    }
+
+    /// [`Self::take_probe_converged_handoff`] with the evaluation the probe priced at the
+    /// converged state (#2267), for a lane that installs the term and differentiates it at
+    /// the same ρ without re-pricing.
+    fn take_priced_probe_handoff(
+        &mut self,
+        rho_flat: ArrayView1<'_, f64>,
+    ) -> Option<(SaeManifoldTerm, Option<OuterCriterionEvaluation>)> {
         let handoff = self.probe_converged_handoff.take()?;
         let matches = handoff.rho_flat.len() == rho_flat.len()
             && handoff
@@ -1976,7 +2010,11 @@ impl SaeManifoldOuterObjective {
                 .iter()
                 .zip(rho_flat.iter())
                 .all(|(a, b)| a.to_bits() == b.to_bits());
-        if matches { Some(handoff.term) } else { None }
+        if matches {
+            Some((handoff.term, handoff.priced))
+        } else {
+            None
+        }
     }
 
     /// Evaluate the authoritative penalized quasi-Laplace criterion at
@@ -1990,16 +2028,21 @@ impl SaeManifoldOuterObjective {
         rho_flat: ArrayView1<'_, f64>,
     ) -> Result<(f64, Array1<f64>), String> {
         self.evaluate_authoritative_inner(rho_flat, false)
+            .map(|(cost, beta_hat, _priced)| (cost, beta_hat))
     }
 
     /// Shared authoritative inner drive. Everything around the full-refine
     /// criterion — probe handoff installation, seeded-β and amortized latent
     /// warm starts, and the collapse ledger — is shared across outer lanes.
+    ///
+    /// Returns `(cost, β̂, priced)`. `priced` is the dense evaluation a finite value was
+    /// priced on at the converged state `self.term` now holds (#2267), `None` on the
+    /// streaming routes and for every non-finite or refused value.
     fn evaluate_authoritative_inner(
         &mut self,
         rho_flat: ArrayView1<'_, f64>,
         basin_installed: bool,
-    ) -> Result<(f64, Array1<f64>), String> {
+    ) -> Result<(f64, Array1<f64>, Option<OuterCriterionEvaluation>), String> {
         // Any new criterion drive may change the installed inner state. A fit
         // certificate is single-use evidence for the exact state/rho pair that
         // produced it, never a sticky success flag.
@@ -2062,20 +2105,18 @@ impl SaeManifoldOuterObjective {
             self.record_warm_start(warm_start_outcome)?;
         }
         self.declare_collapse_prevention_gates_on_term();
-        let criterion = self
-            .term
-            .penalized_quasi_laplace_criterion_with_refine_policy_and_lane(
-                self.target.view(),
-                &rho,
-                self.registry.as_ref(),
-                self.inner_max_iter,
-                self.learning_rate,
-                self.ridge_ext_coord,
-                self.ridge_beta,
-                true,
-                self.surrogate_lane.as_mut(),
-            );
-        let (penalized_quasi_laplace_cost, loss) = match criterion {
+        let criterion = self.term.penalized_quasi_laplace_criterion_priced_with_lane(
+            self.target.view(),
+            &rho,
+            self.registry.as_ref(),
+            self.inner_max_iter,
+            self.learning_rate,
+            self.ridge_ext_coord,
+            self.ridge_beta,
+            true,
+            self.surrogate_lane.as_mut(),
+        );
+        let (penalized_quasi_laplace_cost, loss, priced) = match criterion {
             Ok(evaluated) => evaluated,
             Err(SaeCriterionError::VanishedAtoms(atoms)) => {
                 log::debug!(
@@ -2087,7 +2128,7 @@ impl SaeManifoldOuterObjective {
                 self.current_rho = rho;
                 self.last_loss = Some(loss);
                 self.probe_telemetry.infeasible_criterion_evals += 1;
-                return Ok((f64::INFINITY, beta_hat));
+                return Ok((f64::INFINITY, beta_hat, None));
             }
             // #2336 — an indefinite exact `A` leaves the Laplace normaliser
             // `½log|A|` UNDEFINED at this ρ, so this evaluation is INFEASIBLE, not
@@ -2110,7 +2151,7 @@ impl SaeManifoldOuterObjective {
                 self.current_rho = rho;
                 self.last_loss = Some(loss);
                 self.probe_telemetry.infeasible_criterion_evals += 1;
-                return Ok((f64::INFINITY, beta_hat));
+                return Ok((f64::INFINITY, beta_hat, None));
             }
             Err(SaeCriterionError::Numerical(message)) => return Err(message),
             // #2234 — the arrow route lacks the capability to price this state at ANY ρ, so the
@@ -2155,9 +2196,22 @@ impl SaeManifoldOuterObjective {
             self.probe_telemetry.infeasible_criterion_evals += 1;
             f64::INFINITY
         };
+        // #2267 — the same evaluation `evaluate_outer_criterion_route` builds from the same
+        // criterion call on its dense route, kept for a lane that differentiates this state.
+        let priced = match priced {
+            Some((cache, geometry)) if penalized_quasi_laplace_cost.is_finite() => {
+                Some(OuterCriterionEvaluation {
+                    cost: penalized_quasi_laplace_cost,
+                    loss: loss.clone(),
+                    cache,
+                    artifacts: OuterEvaluationArtifacts::Dense(geometry),
+                })
+            }
+            _ => None,
+        };
         self.current_rho = rho;
         self.last_loss = Some(loss);
-        Ok((cost, beta_hat))
+        Ok((cost, beta_hat, priced))
     }
 
     /// Fit the SAE inner problem once at a caller-selected rho, committing the
@@ -2207,19 +2261,23 @@ impl SaeManifoldOuterObjective {
         // accept pattern re-evaluates the accepted point at the ρ of its last
         // successful value probe. Only a genuinely converged finite value is
         // worth handing off; a refused or non-finite probe never defines usable
-        // penalized quasi-Laplace score.
-        match &result {
-            Ok((cost, _beta)) if !Self::probe_value_is_infeasible(*cost) => {
+        // penalized quasi-Laplace score. #2267 — the evaluation it was priced on
+        // travels with it.
+        let result = match result {
+            Ok((cost, beta_hat, priced)) if !Self::probe_value_is_infeasible(cost) => {
                 let converged = std::mem::replace(&mut self.term, saved_term);
                 self.probe_converged_handoff = Some(ProbeConvergedHandoff {
                     rho_flat: rho_flat.to_owned(),
                     term: converged,
+                    priced,
                 });
+                Ok((cost, beta_hat))
             }
-            _ => {
+            other => {
                 self.term = saved_term;
+                other.map(|(cost, beta_hat, _priced)| (cost, beta_hat))
             }
-        }
+        };
         self.current_rho = saved_rho;
         self.last_loss = saved_loss;
         self.seeded_beta = saved_seeded_beta;
@@ -2289,14 +2347,34 @@ impl SaeManifoldOuterObjective {
         // Reclaim the discovery basin's converged term from the handoff it just
         // parked (bitwise ρ match, so this retrieves exactly that term). The
         // envelope argmin's handoff is re-installed at the end.
-        let discovery_term = self.take_probe_converged_handoff(rho_flat);
+        let (discovery_term, discovery_priced) = match self.take_priced_probe_handoff(rho_flat) {
+            Some((term, priced)) => (Some(term), priced),
+            None => (None, None),
+        };
+        // #2267 — the one priced evaluation the envelope keeps for its argmin: that of the
+        // least value seen so far, the discovery's first. A member replaces it only when
+        // strictly lower, so at most one retained evaluation lives beside the next member's
+        // pricing. It is handed off below only while its state holds the argmin slot.
+        let mut kept: Option<(Option<usize>, f64, OuterCriterionEvaluation)> =
+            match (discovery_cost, discovery_priced) {
+                (Some(cost), Some(priced)) => Some((None, cost, priced)),
+                _ => None,
+            };
 
         // (4) Re-converge every saved member from its own state (cheap, pure). The
         // bundle is moved out of `self` so the closure can borrow `&mut self` for
         // the per-member inner drive; restored immediately after.
         let mut bundle = std::mem::replace(&mut self.basin_bundle, BasinBundle::new(0));
+        let mut member_index = 0usize;
         let member_eval = bundle.evaluate(|state: &SaeManifoldTerm| {
-            let (res, converged) = self.converge_member_criterion(rho_flat, state);
+            let index = member_index;
+            member_index += 1;
+            let (res, converged, priced) = self.converge_member_criterion(rho_flat, state);
+            if let (Ok(value), Some(priced)) = (&res, priced)
+                && kept.as_ref().is_none_or(|(_, least, _)| *value < *least)
+            {
+                kept = Some((Some(index), *value, priced));
+            }
             res.map(|value| (converged, value))
         });
 
@@ -2306,15 +2384,19 @@ impl SaeManifoldOuterObjective {
         let ss_tot =
             super::fit_drivers::TargetCenteredColStats::compute(self.target.view()).ss_tot();
         let len_before = bundle.len();
+        let mut discovery_slot = None;
         if let (Some(term), Some(cost)) = (discovery_term, discovery_cost) {
             let admission = bundle.admit(term, cost, |a, b| {
                 Self::same_basin_at_rho(a, b, &rho_state, ss_tot)
             });
-            if let Err(error) = admission {
-                self.basin_bundle = bundle;
-                return Err(format!(
-                    "SAE exact basin-envelope discovery admission refused: {error}"
-                ));
+            match admission {
+                Ok(slot) => discovery_slot = slot,
+                Err(error) => {
+                    self.basin_bundle = bundle;
+                    return Err(format!(
+                        "SAE exact basin-envelope discovery admission refused: {error}"
+                    ));
+                }
             }
         }
         let grew = bundle.len() > len_before;
@@ -2325,6 +2407,17 @@ impl SaeManifoldOuterObjective {
             .argmin()
             .filter(|m| m.last_value.is_finite())
             .map(|m| (m.last_value, m.state.flatten_beta(), m.state.clone()));
+        // The kept evaluation prices the argmin's state only if its basin still holds that
+        // slot: the discovery where it was admitted there, a member where the discovery did
+        // not replace it.
+        let argmin_slot = bundle.argmin_index();
+        let envelope_priced = kept.and_then(|(index, _, priced)| {
+            let prices_the_argmin = match index {
+                None => discovery_slot.is_some() && discovery_slot == argmin_slot,
+                Some(index) => argmin_slot == Some(index) && discovery_slot != Some(index),
+            };
+            prices_the_argmin.then_some(priced)
+        });
         self.basin_bundle = bundle;
 
         // Telemetry.
@@ -2354,6 +2447,7 @@ impl SaeManifoldOuterObjective {
                     self.probe_converged_handoff = Some(ProbeConvergedHandoff {
                         rho_flat: rho_flat.to_owned(),
                         term: env_term,
+                        priced: envelope_priced,
                     });
                 }
                 Ok((env_value, env_beta))
@@ -2373,33 +2467,33 @@ impl SaeManifoldOuterObjective {
     /// selected envelope argmin and is consumed directly; otherwise the shared
     /// envelope selector is run and its finite argmin handoff is required.
     ///
-    /// Returns `false` only when every admissible basin has an undefined
-    /// quasi-Laplace value at this rho. A finite selector result without its
+    /// Returns [`InstalledEnvelopeBasin::Infeasible`] only when every admissible basin has an
+    /// undefined quasi-Laplace value at this rho. A finite selector result without its
     /// exact-rho converged-state handoff is a protocol violation, never a reason
     /// to continue from a different warm-start trajectory.
     fn install_authoritative_envelope_basin(
         &mut self,
         rho_flat: ArrayView1<'_, f64>,
-    ) -> Result<bool, String> {
-        if let Some(converged) = self.take_probe_converged_handoff(rho_flat) {
+    ) -> Result<InstalledEnvelopeBasin, String> {
+        if let Some((converged, priced)) = self.take_priced_probe_handoff(rho_flat) {
             self.term = converged;
             self.seeded_beta = None;
-            return Ok(true);
+            return Ok(InstalledEnvelopeBasin::Installed { priced });
         }
 
         let (cost, _beta) = self.authoritative_envelope_value_probe(rho_flat)?;
         if Self::probe_value_is_infeasible(cost) {
-            return Ok(false);
+            return Ok(InstalledEnvelopeBasin::Infeasible);
         }
-        let converged = self
-            .take_probe_converged_handoff(rho_flat)
+        let (converged, priced) = self
+            .take_priced_probe_handoff(rho_flat)
             .ok_or_else(|| {
                 "SAE basin-envelope protocol violated: a finite probe at the requested rho did not install its exact-rho converged-state handoff"
                     .to_string()
             })?;
         self.term = converged;
         self.seeded_beta = None;
-        Ok(true)
+        Ok(InstalledEnvelopeBasin::Installed { priced })
     }
 
     /// Re-converge one saved basin `member` at `rho_flat` through the
@@ -2409,24 +2503,31 @@ impl SaeManifoldOuterObjective {
     /// `basin_installed = true` so the installed converged state is NOT
     /// re-warm-started (no amortized encoder entry heuristic) and does NOT
     /// consume the pending β seed (the seed belongs to the discovery trajectory).
+    /// The third element is the evaluation a finite value was priced on at the
+    /// returned state (#2267).
     fn converge_member_criterion(
         &mut self,
         rho_flat: ArrayView1<'_, f64>,
         member: &SaeManifoldTerm,
-    ) -> (Result<f64, String>, SaeManifoldTerm) {
+    ) -> (
+        Result<f64, String>,
+        SaeManifoldTerm,
+        Option<OuterCriterionEvaluation>,
+    ) {
         let saved_term = std::mem::replace(&mut self.term, member.clone());
         let saved_rho = self.current_rho.clone();
         let saved_loss = self.last_loss.clone();
         // Members must not touch the pending seed — take it out for the duration.
         let saved_seeded_beta = self.seeded_beta.take();
-        let res = self
-            .evaluate_authoritative_inner(rho_flat, true)
-            .map(|(cost, _beta)| cost);
+        let (res, priced) = match self.evaluate_authoritative_inner(rho_flat, true) {
+            Ok((cost, _beta, priced)) => (Ok(cost), priced),
+            Err(error) => (Err(error), None),
+        };
         let converged = std::mem::replace(&mut self.term, saved_term);
         self.current_rho = saved_rho;
         self.last_loss = saved_loss;
         self.seeded_beta = saved_seeded_beta;
-        (res, converged)
+        (res, converged, priced)
     }
 
     /// Basin-identity test for two converged SAE terms evaluated at the SAME ρ:
@@ -2551,10 +2652,11 @@ impl SaeManifoldOuterObjective {
         // historical single-pass paths: the envelope itself deliberately
         // bypasses multi-basin reconvergence in those regimes, and pre-running
         // it here would only duplicate the dominant evaluation.
+        let mut priced = None;
         if direct_logdet_admitted && self.inner_max_iter != 0 {
             match self.install_authoritative_envelope_basin(rho_flat) {
-                Ok(true) => {}
-                Ok(false) => {
+                Ok(InstalledEnvelopeBasin::Installed { priced: installed }) => priced = installed,
+                Ok(InstalledEnvelopeBasin::Infeasible) => {
                     self.probe_converged_handoff = None;
                     self.basin_bundle.clear();
                     self.current_rho = rho;
@@ -2585,6 +2687,8 @@ impl SaeManifoldOuterObjective {
         if let Some(beta) = self.seeded_beta.take()
             && beta.len() == self.term.beta_dim()
         {
+            // A seeded decoder moves the state, so no evaluation priced before it applies.
+            priced = None;
             self.term.set_flat_beta(beta.view())?;
         }
         // #1026 massive-K: in the streaming regime the dense evidence cache is
@@ -2600,7 +2704,12 @@ impl SaeManifoldOuterObjective {
         // `(probes, S^-1 probes)` bundle. Reassembling the operator after the
         // value would both duplicate the dominant pass and risk differentiating
         // a different functional.
-        let criterion = self.evaluate_outer_criterion_route(&rho, direct_logdet_admitted, true);
+        // #2267 — the installed argmin's value was priced on the dense route at this state;
+        // the step differentiates that evaluation instead of pricing the state again.
+        let criterion = match priced {
+            Some(evaluation) => Ok(evaluation),
+            None => self.evaluate_outer_criterion_route(&rho, direct_logdet_admitted, true),
+        };
         let evaluation = match criterion {
             Ok(evaluated) => evaluated,
             Err(SaeCriterionError::VanishedAtoms(atoms)) => {
@@ -3550,9 +3659,9 @@ impl OuterObjective for SaeManifoldOuterObjective {
         // installs a converged state and consumes the pending seeded-β hint.
         // The selector owns the amortized basin-entry warm start, so no second
         // warm-start drive is permitted after installation.
-        match self.install_authoritative_envelope_basin(rho.view()) {
-            Ok(true) => {}
-            Ok(false) => return Ok(OuterEval::infeasible(rho.len())),
+        let priced = match self.install_authoritative_envelope_basin(rho.view()) {
+            Ok(InstalledEnvelopeBasin::Installed { priced }) => priced,
+            Ok(InstalledEnvelopeBasin::Infeasible) => return Ok(OuterEval::infeasible(rho.len())),
             Err(err) if Self::is_recoverable_value_probe_refusal(&err) => {
                 self.probe_telemetry.record_refusal_kind(&err);
                 log::debug!("SAE criterion eval mapped refusal to +inf: {err}");
@@ -3560,7 +3669,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
                 return Ok(OuterEval::infeasible(rho.len()));
             }
             Err(err) => return Err(EstimationError::RemlOptimizationFailed(err)),
-        }
+        };
         // Dense and streaming analytic samples use one route-selected authority.
         // The streaming artifact retains the exact matrix-free system and frozen
         // inverse-probe bundle that produced its rational-logdet value; no dense
@@ -3583,8 +3692,14 @@ impl OuterObjective for SaeManifoldOuterObjective {
             .streaming_plan()
             .map_err(EstimationError::RemlOptimizationFailed)?
             .direct_logdet_admitted();
+        // #2267 — the installed argmin's value was priced on the dense route at this state, and
+        // the gradient differentiates that evaluation rather than pricing the state again.
+        let criterion = match priced {
+            Some(evaluation) => Ok(evaluation),
+            None => self.evaluate_outer_criterion_route(&rho_state, direct_logdet_admitted, false),
+        };
         let evaluation =
-            match self.evaluate_outer_criterion_route(&rho_state, direct_logdet_admitted, false) {
+            match criterion {
                 Ok(evaluated) => evaluated,
                 Err(SaeCriterionError::VanishedAtoms(atoms)) => {
                     log::debug!(

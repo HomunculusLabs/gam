@@ -241,6 +241,44 @@ impl SaeManifoldTerm {
         refine_progress_extension: bool,
         lane: Option<&mut SurrogateLaneState>,
     ) -> Result<(f64, SaeManifoldLoss), SaeCriterionError> {
+        self.penalized_quasi_laplace_criterion_priced_with_lane(
+            target,
+            rho,
+            registry,
+            inner_max_iter,
+            learning_rate,
+            ridge_ext_coord,
+            ridge_beta,
+            refine_progress_extension,
+            lane,
+        )
+        .map(|(value, loss, _priced)| (value, loss))
+    }
+
+    /// [`Self::penalized_quasi_laplace_criterion_with_refine_policy_and_lane`] with what the
+    /// dense branch priced its value on: the converged factor cache and the exact-`A` spectral
+    /// block (#2267). A value probe hands them to the gradient lane's evaluation at the same
+    /// ρ, which otherwise re-converges and decomposes again the state it was handed. `None`
+    /// on the streaming routes, which materialize no `A`.
+    pub(crate) fn penalized_quasi_laplace_criterion_priced_with_lane(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+        inner_max_iter: usize,
+        learning_rate: f64,
+        ridge_ext_coord: f64,
+        ridge_beta: f64,
+        refine_progress_extension: bool,
+        lane: Option<&mut SurrogateLaneState>,
+    ) -> Result<
+        (
+            f64,
+            SaeManifoldLoss,
+            Option<(ArrowFactorCache, DenseExactAGeometry)>,
+        ),
+        SaeCriterionError,
+    > {
         self.assignment.validate_rho_domain(rho)?;
         // #976 evidence-ledger scope: one criterion evaluation = one per-atom
         // reseed budget. The joint-fit driver no longer clears the ledger on
@@ -286,19 +324,19 @@ impl SaeManifoldTerm {
                 ridge_beta,
                 lane,
             )
+            .map(|(value, loss)| (value, loss, None))
         } else {
-            let (v, loss, _cache) = self
-                .penalized_quasi_laplace_criterion_with_cache_refine_policy(
-                    target,
-                    rho,
-                    registry,
-                    inner_max_iter,
-                    learning_rate,
-                    ridge_ext_coord,
-                    ridge_beta,
-                    refine_progress_extension,
-                )?;
-            Ok((v, loss))
+            let (v, loss, cache, geometry) = self.penalized_quasi_laplace_criterion_with_geometry(
+                target,
+                rho,
+                registry,
+                inner_max_iter,
+                learning_rate,
+                ridge_ext_coord,
+                ridge_beta,
+                refine_progress_extension,
+            )?;
+            Ok((v, loss, geometry.map(|geometry| (cache, geometry))))
         }
     }
 
