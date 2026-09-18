@@ -465,6 +465,90 @@ Two limits are worth stating plainly:
   learned frailty, per-score pre-transforms, uncertainty bands, the
   posterior-mean estimand, and leave-one-out replay.
 
+## Residual genetic repair: reading what the score discarded
+
+A polygenic score keeps **one** direction of the genome. A varying slope
+`b(a)` rescales that direction across covariate space; it cannot turn it
+into a different predictive direction, and no calibration of the same
+scalar — affine or not — recovers variation in `E[Y | genome, a]` that
+`(S, A)` does not determine. What can is a block of genetic features the
+score threw away, entered next to the score and shrunk like everything
+else:
+
+```text
+η_i = c(a_i)·q(a_i) + b(a_i)·z_i + βᵀ r_i ,        r_i = φ_i − E_ref[φ | S_i, A_i]
+```
+
+`r` is a block of `K` **conditionally centred** residual features — block
+partial scores, local-ancestry contrasts, selected dosages — and `β` is a
+constant coefficient block under one ridge penalty whose smoothing
+parameter is estimated by REML/LAML like every other penalty. Under
+`r ⟂ Y` the marginal likelihood drives that penalty up and `β → 0`,
+leaving the score-only fit unchanged. The population value a linear read
+of `r` removes from squared risk is exactly `c_rᵀ Σ_r⁺ c_r` with
+`c_r = E[rY]`, `Σ_r = E[rrᵀ]`, whatever the rank
+(`Descent.Portability.ResidualGeneticRepair.residual_repair_law`).
+
+```python
+model = gamfit.fit(
+    df,
+    "case ~ s(age) + matern(pc1, pc2, pc3)",
+    family="bernoulli-marginal-slope",
+    z_column="z",
+    slope_formula="matern(pc1, pc2, pc3)",
+    residual_columns=["chr6_partial", "chr11_partial", "afr_contrast"],
+)
+```
+
+CLI: repeat `--residual-column NAME` for every column. The prediction table
+must carry the same columns, centred on the same reference law.
+
+### The anchor moves with the block
+
+The marginal interpretation `E[p | a] = Φ(q(a))` is what keeps the
+baseline surface meaningful, and it needs the anchor to integrate the
+**whole** genetic drive. Under the conditionally Gaussian joint law of
+`(z, r)` that is
+
+```text
+c(a) = √(1 + b̃(a)ᵀ Σ(a) b̃(a)) ,      b̃(a) = (b(a), β) ,      Σ(a) = Var((z, r) | a) ,
+```
+
+the several-scores identity above with the residual block appended to the
+score vector. The score's coordinate keeps its declared unit variance, so
+at `β = 0` the anchor is exactly the score-only `√(1 + b²)`; its couplings
+to `r` and `Var(r)` are estimated. `Σ(a)` is the pooled joint covariance
+unless the pairwise Rao gate of the several-scores section escalates it to
+a conditional `Σ(a)`; either way it is persisted with the model and
+replayed at prediction, plug-in and posterior-mean alike. The posterior
+mean integrates the residual coefficients' uncertainty jointly with the
+surfaces to first order (the complete gradient of `η`, the anchor moved
+through `b̃ᵀΣb̃`): the anchor now reads the whole coefficient vector, not
+`(q, b)` alone, so the exact bivariate integration of the score-only model
+does not apply. Adding `βᵀr` without moving
+the anchor would leak `Var(βᵀr | a)` into the baseline — the unconditioned-
+score defect in another coat. With the anchor holding along every
+parameter path the baseline and predictor-shape directions are
+Fisher-orthogonal under the declared law
+(`Descent.Portability.MarginalAnchor.crossInformation_baseline_shape_zero`),
+which is what makes `β` estimable without corrupting `q`.
+
+### What the fit checks and refuses
+
+- Every residual column is tested for `E_w[r | marginal-index span] = 0`
+  with the same robust Rao score test the score's conditional gate uses, at
+  the same level, **including the level**. A column that fails is refused
+  with a typed reason; the fit never centres a feature for you, because a
+  level absorbed into the baseline is a different model.
+- The block is lowered through the rigid standard-normal row kernel with
+  the coefficients as row primaries, so it cannot be combined with
+  `linkwiggle(...)` score-warp / link-deviation blocks, a learned frailty
+  scale, an absorbed CTN influence block, or a score that fell back to the
+  empirical latent measure. Each of those is a typed refusal, not a silent
+  reinterpretation. Spatial length scales are held at their seeded values
+  in the presence of the block; pass `length_scale=` to choose them.
+- At most twelve residual columns.
+
 ## Fixed external baseline (slope-only fit)
 
 Both marginal-slope families route the two offset columns onto their two

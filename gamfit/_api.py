@@ -277,6 +277,7 @@ def _build_fit_payload(
     penalties: Sequence[Any] | None,
     smooths: Mapping[Any, Any] | None,
     config: dict[str, Any] | None,
+    residual_columns: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     normalized_latents = _normalize_latents(latents)
     payload: dict[str, Any] = {
@@ -302,6 +303,9 @@ def _build_fit_payload(
         "baseline_rate": baseline_rate,
         "baseline_makeham": baseline_makeham,
         "z_column": z_column,
+        "residual_columns": (
+            None if residual_columns is None else [str(name) for name in residual_columns]
+        ),
         "link": link,
         "slope_formula": slope_formula,
         "frailty_kind": frailty_kind,
@@ -582,6 +586,7 @@ def fit(
     baseline_rate: float | None = ...,
     baseline_makeham: float | None = ...,
     z_column: str | None = ...,
+    residual_columns: Sequence[str] | None = ...,
     link: str | None = ...,
     slope_formula: str | None = ...,
     frailty_kind: str | None = ...,
@@ -627,6 +632,7 @@ def fit(
     baseline_rate: float | None = ...,
     baseline_makeham: float | None = ...,
     z_column: str | None = ...,
+    residual_columns: Sequence[str] | None = ...,
     link: str | None = ...,
     slope_formula: str | None = ...,
     frailty_kind: str | None = ...,
@@ -671,6 +677,7 @@ def fit(
     baseline_rate: float | None = None,
     baseline_makeham: float | None = None,
     z_column: str | None = None,
+    residual_columns: Sequence[str] | None = None,
     link: str | None = None,
     slope_formula: str | None = None,
     frailty_kind: str | None = None,
@@ -788,6 +795,15 @@ def fit(
     z_column:
         Name of the latent/observed z-score column used by score-warp families
         and latent transformation models. Corresponds to ``--z-column``.
+    residual_columns:
+        Residual genetic repair block for ``family="bernoulli-marginal-slope"``:
+        names of conditionally centred genetic residual features
+        ``r = φ − E_ref[φ | S, A]`` (block partial scores, local-ancestry
+        contrasts, selected dosages) that enter the genetic drive beside the
+        score with one ridge-shrunk constant coefficient each. The marginal
+        anchor integrates the joint law of ``(z, r)``. The fit checks that
+        every column is centred on the marginal-index span and refuses one
+        that is not. Corresponds to repeated ``--residual-column``.
     link:
         Override the default link function. Corresponds to ``--link``.
     slope_formula:
@@ -978,6 +994,7 @@ def fit(
             ("baseline_rate", baseline_rate),
             ("baseline_makeham", baseline_makeham),
             ("z_column", z_column),
+            ("residual_columns", residual_columns),
             ("link", link),
             ("slope_formula", slope_formula),
             ("frailty_kind", frailty_kind),
@@ -1029,6 +1046,7 @@ def fit(
         baseline_rate=baseline_rate,
         baseline_makeham=baseline_makeham,
         z_column=z_column,
+        residual_columns=residual_columns,
         link=link,
         slope_formula=slope_formula,
         frailty_kind=frailty_kind,
@@ -1131,6 +1149,7 @@ def fit_array(
     baseline_rate: float | None = None,
     baseline_makeham: float | None = None,
     z_column: str | None = None,
+    residual_columns: Sequence[str] | None = None,
     link: str | None = None,
     slope_formula: str | None = None,
     frailty_kind: str | None = None,
@@ -1196,6 +1215,7 @@ def fit_array(
         baseline_rate=baseline_rate,
         baseline_makeham=baseline_makeham,
         z_column=z_column,
+        residual_columns=residual_columns,
         link=link,
         slope_formula=slope_formula,
         frailty_kind=frailty_kind,
@@ -1419,6 +1439,7 @@ def validate_formula(
     baseline_rate: float | None = None,
     baseline_makeham: float | None = None,
     z_column: str | None = None,
+    residual_columns: Sequence[str] | None = None,
     link: str | None = None,
     slope_formula: str | None = None,
     frailty_kind: str | None = None,
@@ -1462,6 +1483,7 @@ def validate_formula(
         baseline_rate=baseline_rate,
         baseline_makeham=baseline_makeham,
         z_column=z_column,
+        residual_columns=residual_columns,
         link=link,
         slope_formula=slope_formula,
         frailty_kind=frailty_kind,
