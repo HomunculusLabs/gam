@@ -4260,5 +4260,21 @@
     },
     "reason": "#2966 (gam-21 and lead ruling): the saved-model envelope functions move from gam-event-history's saved.rs to gam_model_api::saved_model (public there, with docs), so both event engines and gam-models share one owner. The kind becomes an owner-named &'static str, and write_saved_model's temporary name gains a per-call counter.",
     "evidence": "Guard-only job 1212841 (base 22f30c2e61, tree 208cc2b8 with the saved.rs deletion appended) reported exactly these 4 unacknowledged removals. The same four names are declared in crates/gam-model-api/src/saved_model.rs in the same commit, and joint/model.rs calls them there. At origin/main dca31ddc96, `git grep -w` over crates, src, tests, gamfit, examples, scripts and bench finds the gam-event-history versions called only from saved.rs itself and joint/model.rs (:13-14, :137-154)."
+  },
+  {
+    "base": "90a88caa111aeb60d43c2617afeb2457cb942af2",
+    "removed": {
+      "crates/gam-models/src/bms/cell_moment_assembly.rs::empirical_flex_row_fifth_axis_slabs": 1,
+      "crates/gam-models/src/bms/cell_moment_assembly.rs::flex_third_information_all_axes": 1,
+      "crates/gam-models/src/bms/cell_moment_assembly.rs::rigid_row_contracted_trace_hessian_coefficients": 1,
+      "crates/gam-models/src/bms/custom_family_impl.rs::rigid_row_third_information_contraction": 1,
+      "crates/gam-models/src/bms/custom_family_impl.rs::rigid_third_information_all_axes": 1,
+      "crates/gam-models/src/bms/flex_row_program.rs::evaluate_fifth": 1,
+      "crates/gam-models/src/bms/standard_normal_flex_fifth.rs::contraction": 1,
+      "crates/gam-models/src/bms/standard_normal_flex_fifth.rs::standard_normal_flex_row_fifth_axis_slabs": 1,
+      "crates/gam-models/src/bms/standard_normal_flex_fifth.rs::standard_normal_flex_row_totals": 1
+    },
+    "reason": "#2922: the Bernoulli marginal-slope Jeffreys information becomes the expected Fisher information (bms/expected_information.rs), whose derivatives need row derivatives of order at most four. The pub(super) observed third-information producers (flex_third_information_all_axes, rigid_row_contracted_trace_hessian_coefficients, rigid_row_third_information_contraction, rigid_third_information_all_axes) and the fifth-order channels only they consumed (empirical_flex_row_fifth_axis_slabs #2898, standard_normal_flex_row_fifth_axis_slabs with standard_normal_flex_row_totals and StandardNormalFlexRowTotals::contraction #2901, and the row program's evaluate_fifth) are deleted. The source-removal entry at this base records the same change with the private items.",
+    "evidence": "The removed map is scripts/public_api_census.py's own refusal in direct lane dy5 run i2922-ei-p1 (base d0b3432912, exact tree b13f2450, patch md5 3ea0a200): exactly these nine function identities."
   }
 ]

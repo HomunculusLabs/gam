@@ -305,7 +305,6 @@ pub(crate) struct BernoulliMarginalLinkMap {
     pub mu2: f64,
     pub mu3: f64,
     pub mu4: f64,
-    pub mu5: f64,
     pub q: f64,
     pub q1: f64,
     pub q2: f64,
@@ -350,7 +349,6 @@ pub(crate) fn bernoulli_marginal_link_map(
             mu2: 0.0,
             mu3: 0.0,
             mu4: 0.0,
-            mu5: 0.0,
             q,
             q1: 0.0,
             q2: 0.0,
@@ -363,7 +361,6 @@ pub(crate) fn bernoulli_marginal_link_map(
     let mu2 = -eta * phi_eta;
     let mu3 = (eta * eta - 1.0) * phi_eta;
     let mu4 = -(eta.powi(3) - 3.0 * eta) * phi_eta;
-    let mu5 = (eta.powi(4) - 6.0 * eta * eta + 3.0) * phi_eta;
     // In the unclamped region Φ⁻¹∘Φ is exactly the identity. Numerically
     // inverting a rounded probability and differentiating the inverse again
     // manufactured spurious high derivatives (especially in the tails).
@@ -375,7 +372,6 @@ pub(crate) fn bernoulli_marginal_link_map(
         mu2,
         mu3,
         mu4,
-        mu5,
         q: eta,
         q1: 1.0,
         q2: 0.0,

@@ -1,5 +1,27 @@
 ## Unreleased
 
+- **The Bernoulli marginal-slope Jeffreys prior uses the expected Fisher information** (#2922).
+  The binary marginal-slope family priced its Jeffreys/Firth term from the observed
+  joint Hessian. Away from the mode that matrix is indefinite (smallest eigenvalue down
+  to −4.5 on a 50-row flexible fit), and the term's value jumped between trust-region
+  trials whose likelihood barely moved. The term now uses the expected information
+  `Σ w·∇p∇pᵀ/(p(1 − p))`, the matrix the custom-family contract asks of a non-canonical
+  Bernoulli likelihood, for its value and every coefficient, design-hyperparameter and
+  learned frailty-scale derivative. Fits whose Jeffreys term is armed get different
+  coefficients and EDF. A flexible fit with a learned frailty scale and an armed Jeffreys
+  term refuses on the frailty-scale axis, as its observed frailty-scale derivatives
+  already did.
+- Rust: `CustomFamily` gains `joint_jeffreys_information_psi_derivative`,
+  `joint_jeffreys_information_psi_derivative_all_axes`,
+  `joint_jeffreys_information_psi_second_derivative`,
+  `joint_jeffreys_information_psi_second_derivative_all_axes` and
+  `joint_jeffreys_information_psi_directional_second_all_axes`: the design-hyperparameter
+  motion of a Jeffreys information that is not the observed joint Hessian. The explicit-ψ
+  Jeffreys terms used to substitute the observed Hessian's motion for such a family; a
+  family that supplies none of its own now gets a typed `UnsupportedConfiguration`
+  refusal. The binomial location-scale and location-scale-wiggle families declare the
+  expected information and supply none yet, so their armed fits with a design
+  hyperparameter refuse.
 - **A failed fit raises the class of what failed, not `IntegrationError`** (#2937).
   Every fit-solver failure used to reach Python as `IntegrationError`, so a
   refused start, a stalled outer search and a numerical refusal could not be

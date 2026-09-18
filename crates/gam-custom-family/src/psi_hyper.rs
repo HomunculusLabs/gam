@@ -18,6 +18,19 @@ pub struct ExplicitJeffreysCurvatureDrifts {
         Arc<dyn Fn(usize, &Array1<f64>) -> Result<Array2<f64>, CustomFamilyError> + Send + Sync>,
 }
 
+/// The typed refusal of an explicit-ψ Jeffreys term when the Jeffreys information is not the
+/// observed joint Hessian and the family publishes no motion of it (gam#2922), carrying the
+/// family's reason. The observed Hessian's motion would differentiate a different matrix than the
+/// value prices.
+fn unpublished_jeffreys_information_psi_motion(psi: usize, reason: &str) -> CustomFamilyError {
+    CustomFamilyError::UnsupportedConfiguration {
+        reason: format!(
+            "hyper axis {psi}: the Jeffreys information is not the observed joint Hessian and \
+             moves with this hyperparameter, but {reason}"
+        ),
+    }
+}
+
 fn prepare_explicit_jeffreys_curvature_drifts<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     states: &[ParameterBlockState],
@@ -41,9 +54,30 @@ fn prepare_explicit_jeffreys_curvature_drifts<F: CustomFamily + Clone + Send + S
         return Ok(None);
     };
     let total = h.nrows();
+    // gam#2922: `hessian_psi` and its drifts move the observed joint Hessian. Another
+    // information moves by the family's own derivatives, or the curvature refuses.
+    let information_is_observed = family.joint_jeffreys_information_matches_observed_hessian();
     let mut first = Vec::with_capacity(layout.len());
     let mut first_axes = Vec::with_capacity(layout.len());
     for psi in 0..layout.len() {
+        if !information_is_observed {
+            let information = family
+                .joint_jeffreys_information_psi_derivative(states, specs, &layout, psi)?
+                .published()
+                .map_err(|reason| unpublished_jeffreys_information_psi_motion(psi, &reason))?;
+            let axes = family
+                .joint_jeffreys_information_psi_derivative_all_axes(states, specs, &layout, psi)?
+                .published()
+                .map_err(|reason| unpublished_jeffreys_information_psi_motion(psi, &reason))?;
+            if information.dim() != (total, total) || axes.len() != total {
+                return Err(CustomFamilyError::trial_point(
+                    "explicit Jeffreys information psi motion has wrong dimension",
+                ));
+            }
+            first.push(information);
+            first_axes.push(axes);
+            continue;
+        }
         let terms = if let Some(ws) = workspace.as_ref() {
             ws.first_order_terms(psi)?
         } else {
@@ -105,11 +139,19 @@ fn prepare_explicit_jeffreys_curvature_drifts<F: CustomFamily + Clone + Send + S
                         continue;
                     }
                     h_alpha.scaled_add(weight, &first[j]);
-                    let third = if let Some(ws) = workspace.as_ref() {
-                    ws.second_order_hessian_directional_derivative_all_beta_axes(i,j)?
-                } else {
-                    family.exact_newton_joint_psisecond_order_hessian_directional_derivative_all_beta_axes(&states,&specs,&layout,i,j)?
-                }.ok_or_else(|| CustomFamilyError::trial_point(format!("active Jeffreys psi pair ({i},{j}) requires exact third information derivatives")))?;
+                    let third = if !information_is_observed {
+                        family
+                            .joint_jeffreys_information_psi_second_derivative_all_axes(&states, &specs, &layout, i, j)?
+                            .published()
+                            .map_err(|reason| unpublished_jeffreys_information_psi_motion(i, &reason))?
+                    } else {
+                        if let Some(ws) = workspace.as_ref() {
+                            ws.second_order_hessian_directional_derivative_all_beta_axes(i, j)?
+                        } else {
+                            family.exact_newton_joint_psisecond_order_hessian_directional_derivative_all_beta_axes(&states, &specs, &layout, i, j)?
+                        }
+                        .ok_or_else(|| CustomFamilyError::trial_point(format!("active Jeffreys psi pair ({i},{j}) requires exact third information derivatives")))?
+                    };
                     if third.len() != total || first_axes[j].len() != total {
                         return Err(CustomFamilyError::trial_point(
                             "explicit Jeffreys third information derivative axis count mismatch",
@@ -148,11 +190,19 @@ fn prepare_explicit_jeffreys_curvature_drifts<F: CustomFamily + Clone + Send + S
             let h = first.get(psi).ok_or_else(|| CustomFamilyError::trial_point("Jeffreys completion psi index out of range"))?;
             let axes = family.joint_jeffreys_information_second_directional_all_axes_with_specs(&states, &specs, v)?
                 .ok_or_else(|| CustomFamilyError::trial_point("Jeffreys completion requires second information derivatives"))?;
-            let moving = if let Some(ws) = &workspace {
-                ws.hessian_second_directional_derivative_all_beta_axes(psi, v)?
+            let moving = if !information_is_observed {
+                family
+                    .joint_jeffreys_information_psi_directional_second_all_axes(&states, &specs, &layout, psi, v)?
+                    .published()
+                    .map_err(|reason| unpublished_jeffreys_information_psi_motion(psi, &reason))?
             } else {
-                family.exact_newton_joint_psihessian_second_directional_derivative_all_beta_axes(&states, &specs, &layout, psi, v)?
-            }.ok_or_else(|| CustomFamilyError::trial_point("Jeffreys completion requires mixed third information derivatives"))?;
+                if let Some(ws) = &workspace {
+                    ws.hessian_second_directional_derivative_all_beta_axes(psi, v)?
+                } else {
+                    family.exact_newton_joint_psihessian_second_directional_derivative_all_beta_axes(&states, &specs, &layout, psi, v)?
+                }
+                .ok_or_else(|| CustomFamilyError::trial_point("Jeffreys completion requires mixed third information derivatives"))?
+            };
             // #1082: where the conditioning gate or the relative floor moves, the
             // completion carries their motion. Its psi-drift perturbs the coefficient-axis
             // information derivatives by `d_psi Hdot[e_a]`.
@@ -186,10 +236,12 @@ fn prepare_explicit_jeffreys_curvature_drifts<F: CustomFamily + Clone + Send + S
                 .get(psi)
                 .ok_or_else(|| CustomFamilyError::trial_point("Jeffreys completion psi index out of range"))?;
             let total = h.nrows();
-            let served = match workspace.as_ref() {
-                Some(ws) => ws.contracted_trace_hessian_psi_axes()?.contains(&psi),
-                None => false,
-            };
+            // gam#2922: the workspace contracts the observed Hessian's ψ motion.
+            let served = information_is_observed
+                && match workspace.as_ref() {
+                    Some(ws) => ws.contracted_trace_hessian_psi_axes()?.contains(&psi),
+                    None => false,
+                };
             match (served, workspace.as_ref()) {
                 (true, Some(ws)) => {
                     let second = if base.hessian_motion_active() {
@@ -233,13 +285,15 @@ fn prepare_explicit_jeffreys_curvature_drifts<F: CustomFamily + Clone + Send + S
     // `∂_ψ D_β C[v]`, from the completion's second-drift algebra with ψ directions in place of
     // coefficient directions. Served only where the workspace contracts every ψ-moved trace Hessian
     // in one pass; elsewhere a criterion that prices the completion declares no outer Hessian.
-    let every_axis_served = match workspace.as_ref() {
-        Some(ws) => {
-            let served = ws.contracted_trace_hessian_psi_axes()?;
-            (0..layout.len()).all(|psi| served.contains(&psi))
-        }
-        None => false,
-    };
+    // Those passes move the observed Hessian, so another information is never served (gam#2922).
+    let every_axis_served = information_is_observed
+        && match workspace.as_ref() {
+            Some(ws) => {
+                let served = ws.contracted_trace_hessian_psi_axes()?;
+                (0..layout.len()).all(|psi| served.contains(&psi))
+            }
+            None => false,
+        };
     let (completion_psi_pair, completion_beta_psi): (
         Option<CompletionPsiPair>,
         Option<CompletionBetaPsi>,
@@ -459,11 +513,19 @@ fn prepare_explicit_jeffreys_curvature_drifts<F: CustomFamily + Clone + Send + S
                         "active Jeffreys beta-psi drift requires second information derivatives",
                     )
                 })?;
-            let axes_mixed = if let Some(ws) = workspace.as_ref() {
-            ws.hessian_second_directional_derivative_all_beta_axes(psi,direction)?
-        } else {
-            family.exact_newton_joint_psihessian_second_directional_derivative_all_beta_axes(&states,&specs,&layout,psi,direction)?
-        }.ok_or_else(|| CustomFamilyError::trial_point(format!("active Jeffreys beta-psi axis {psi} requires exact third information derivatives")))?;
+            let axes_mixed = if !information_is_observed {
+                family
+                    .joint_jeffreys_information_psi_directional_second_all_axes(&states, &specs, &layout, psi, direction)?
+                    .published()
+                    .map_err(|reason| unpublished_jeffreys_information_psi_motion(psi, &reason))?
+            } else {
+                if let Some(ws) = workspace.as_ref() {
+                    ws.hessian_second_directional_derivative_all_beta_axes(psi, direction)?
+                } else {
+                    family.exact_newton_joint_psihessian_second_directional_derivative_all_beta_axes(&states, &specs, &layout, psi, direction)?
+                }
+                .ok_or_else(|| CustomFamilyError::trial_point(format!("active Jeffreys beta-psi axis {psi} requires exact third information derivatives")))?
+            };
             let mut mixed = Array2::zeros((total, total));
             for (a, &value) in direction.iter().enumerate() {
                 if value != 0.0 {
@@ -744,6 +806,13 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
     // β-mode-response of `Φ` (the operator `H_Φ` and its `D_β H_Φ[β̇]` drift)
     // is independent of this flag and stays folded.
     let jeffreys_info_depends_on_psi = family.joint_jeffreys_information_depends_on_psi();
+    // gam#2922: `hessian_psi` is the ψ-derivative of the OBSERVED joint Hessian, so it is the
+    // Jeffreys information's motion only for a family whose information is that Hessian. Any
+    // other information supplies its own motion through `joint_jeffreys_information_psi_derivative`
+    // and its companions, and the batched and contracted routes below, which read `hessian_psi`
+    // and the observed axis tensors, stay closed to it.
+    let jeffreys_information_is_observed =
+        family.joint_jeffreys_information_matches_observed_hessian();
 
     // The reduced Jeffreys spectrum — `Z_Jᵀ H_info Z_J`, its eigendecomposition,
     // the conditioning gate, the relative floor and the dominant/worst
@@ -810,7 +879,7 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
         jeffreys_plan.as_ref(),
         jeffreys_hphi_base.as_ref(),
     ) {
-        (Some(terms), Some(plan), Some(_)) => {
+        (Some(terms), Some(plan), Some(_)) if jeffreys_information_is_observed => {
             let infos: Vec<Array2<f64>> = terms
                 .iter()
                 .filter_map(|axis_terms| {
@@ -951,7 +1020,22 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
         // materialized once and reused for BOTH the VALUE gradient term `−∂_ψΦ`
         // (here) and the Hessian β-coupling term `−∂_β∂_ψΦ` (the score below).
         let firth_pert_info: Option<Array2<f64>> =
-            if let Some((infos, _)) = batched_explicit_jeffreys.as_ref() {
+            if jeffreys_hphi_ctx.is_some()
+                && jeffreys_info_depends_on_psi
+                && !jeffreys_information_is_observed
+            {
+                Some(
+                    family
+                        .joint_jeffreys_information_psi_derivative(
+                            synced_states,
+                            specs,
+                            hyper_layout,
+                            psi_global,
+                        )?
+                        .published()
+                        .map_err(|reason| unpublished_jeffreys_information_psi_motion(psi_global, &reason))?,
+                )
+            } else if let Some((infos, _)) = batched_explicit_jeffreys.as_ref() {
                 Some(infos[psi_global].clone())
             } else if jeffreys_hphi_ctx.is_some() && jeffreys_info_depends_on_psi {
                 if let Some(op) = psi_terms.hessian_psi_operator.as_ref() {
@@ -996,15 +1080,31 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                 && jeffreys_hphi_ctx.is_some()
                 && firth_pert_info.is_some()
             {
-                materialize_authoritative_psi_hessian_directional_derivatives_all_beta_axes(
-                    family,
-                    synced_states,
-                    specs,
-                    hyper_layout,
-                    psi_workspace.as_deref(),
-                    psi_global,
-                    total,
-                )?
+                if jeffreys_information_is_observed {
+                    materialize_authoritative_psi_hessian_directional_derivatives_all_beta_axes(
+                        family,
+                        synced_states,
+                        specs,
+                        hyper_layout,
+                        psi_workspace.as_deref(),
+                        psi_global,
+                        total,
+                    )?
+                } else {
+                    Some(
+                        family
+                            .joint_jeffreys_information_psi_derivative_all_axes(
+                                synced_states,
+                                specs,
+                                hyper_layout,
+                                psi_global,
+                            )?
+                            .published()
+                            .map_err(|reason| {
+                                unpublished_jeffreys_information_psi_motion(psi_global, &reason)
+                            })?,
+                    )
+                }
             } else {
                 None
             };
@@ -1175,6 +1275,18 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                             )
                         },
                         |dir: &Array1<f64>| {
+                            if !jeffreys_information_is_observed {
+                                // The family's own information motion, linear in the direction.
+                                return Ok(firth_pert_axis_derivatives.as_ref().map(|axes| {
+                                    axes.iter().zip(dir.iter()).fold(
+                                        Array2::<f64>::zeros((total, total)),
+                                        |mut sum, (axis_derivative, &component)| {
+                                            sum.scaled_add(component, axis_derivative);
+                                            sum
+                                        },
+                                    )
+                                }));
+                            }
                             // Display boundary (gam#2689): the gam-solve
                             // explicit-parameter-derivative entry point takes
                             // `String`-erroring probes.
@@ -1848,6 +1960,9 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
     // `build_psi_hyper_coords` use. `None` (no Jeffreys term, or a first-order axis
     // term that can't be materialized total×total — matching the gradient term's own
     // availability gate) leaves a clean / well-conditioned fit byte-unchanged.
+    // gam#2922: `hessian_psi` moves the observed joint Hessian; another information moves by
+    // the family's own derivatives.
+    let jeffreys_information_is_observed = family.joint_jeffreys_information_matches_observed_hessian();
     let firth_pair_ctx: Option<Arc<JeffreysPsiWeightCache>> =
         match jeffreys_ctx {
             Some((z_j, h_joint))
@@ -1856,8 +1971,8 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
                 let psi_dim = hyper_layout.len();
                 let batched_first: Option<Vec<ExactNewtonJointPsiTerms>> =
                     match psi_workspace.as_ref() {
-                        Some(ws) => ws.first_order_terms_all()?,
-                        None => None,
+                        Some(ws) if jeffreys_information_is_observed => ws.first_order_terms_all()?,
+                        _ => None,
                     };
                 if let Some(all) = batched_first.as_ref()
                     && all.len() != psi_dim
@@ -1870,6 +1985,20 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
                 let mut pert_first: Vec<Array2<f64>> = Vec::with_capacity(psi_dim);
                 let mut ok = true;
                 for axis in 0..psi_dim {
+                    if !jeffreys_information_is_observed {
+                        pert_first.push(
+                            family
+                                .joint_jeffreys_information_psi_derivative(
+                                    synced_states,
+                                    specs,
+                                    &hyper_layout,
+                                    axis,
+                                )?
+                                .published()
+                                .map_err(|reason| unpublished_jeffreys_information_psi_motion(axis, &reason))?,
+                        );
+                        continue;
+                    }
                     let terms = if let Some(all) = batched_first.as_ref() {
                         all[axis].clone()
                     } else if let Some(ws) = psi_workspace.as_ref() {
@@ -2104,7 +2233,22 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
                     && psi_j < jeffreys.axes()
                 {
                     let pert_ij_opt: Option<Array2<f64>> =
-                        if b_mat.nrows() == total && b_mat.ncols() == total {
+                        if !jeffreys_information_is_observed {
+                            Some(
+                                family_arc
+                                    .joint_jeffreys_information_psi_second_derivative(
+                                        &synced_arc,
+                                        &specs_arc,
+                                        &hyper_layout,
+                                        psi_i,
+                                        psi_j,
+                                    )?
+                                    .published()
+                                    .map_err(|reason| {
+                                        unpublished_jeffreys_information_psi_motion(psi_i, &reason)
+                                    })?,
+                            )
+                        } else if b_mat.nrows() == total && b_mat.ncols() == total {
                             Some(b_mat.clone())
                         } else {
                             b_operator
@@ -3009,6 +3153,13 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                     // matvec. `None` (no contracted family kernel) keeps the exact
                     // per-pair `ext_ext_fn` path. Built before the drift callback
                     // moves `psi_workspace`.
+                    // gam#2922: the contracted hook prices the Jeffreys ψψ value from the observed
+                    // `hessian_psi`, so another information keeps the exact per-pair path, which
+                    // reads the family's own information motion.
+                    let contracted_psi_workspace = psi_workspace.clone().filter(|_| {
+                        jeffreys_ctx.is_none()
+                            || family.joint_jeffreys_information_matches_observed_hessian()
+                    });
                     let contracted_psi_fn = build_contracted_psi_hook(
                         specs,
                         Arc::clone(&hyper_layout),
@@ -3016,7 +3167,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                         rho_slice,
                         penalty_counts,
                         s_logdet_blocks.as_deref(),
-                        psi_workspace.clone(),
+                        contracted_psi_workspace,
                         jeffreys_ctx,
                         explicit_curvature.clone(),
                     )?;

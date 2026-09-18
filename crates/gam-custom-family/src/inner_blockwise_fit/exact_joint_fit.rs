@@ -1595,15 +1595,19 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 // Jeffreys triple before reconstructing the same information
                 // matrix and all-axes derivatives through `family + states`.
                 // A workspace without the optional batched derivative retains
-                // the generic exact family assembly.
+                // the generic exact family assembly. The workspace holds the
+                // observed joint Hessian, which is the Jeffreys information only
+                // when the family says so (gam#2922).
                 let workspace_term = match hessian_workspace_for_cycle.as_ref() {
-                    Some(workspace) => custom_family_joint_jeffreys_term_from_workspace(
-                        workspace.as_ref(),
-                        total_p,
-                        z_joint,
-                        family.joint_jeffreys_term_strength(),
-                    )?,
-                    None => None,
+                    Some(workspace) if family.joint_jeffreys_information_matches_observed_hessian() => {
+                        custom_family_joint_jeffreys_term_from_workspace(
+                            workspace.as_ref(),
+                            total_p,
+                            z_joint,
+                            family.joint_jeffreys_term_strength(),
+                        )?
+                    }
+                    _ => None,
                 };
                 let exact_term = match workspace_term {
                     Some(term) => Some(term),
@@ -5179,14 +5183,18 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // which folded H_Φ=0/∇Φ=0 this cycle. Avoids the dense H/eigh.
             None
         } else if let Some(z_joint) = joint_jeffreys_subspace.as_ref() {
+            // The workspace holds the observed joint Hessian, the Jeffreys
+            // information only when the family says so (gam#2922).
             let workspace_term = match cached_joint_workspace.as_ref() {
-                Some(workspace) => custom_family_joint_jeffreys_term_from_workspace(
-                    workspace.as_ref(),
-                    total_p,
-                    z_joint,
-                    family.joint_jeffreys_term_strength(),
-                )?,
-                None => None,
+                Some(workspace) if family.joint_jeffreys_information_matches_observed_hessian() => {
+                    custom_family_joint_jeffreys_term_from_workspace(
+                        workspace.as_ref(),
+                        total_p,
+                        z_joint,
+                        family.joint_jeffreys_term_strength(),
+                    )?
+                }
+                _ => None,
             };
             // Workspace evidence is authoritative when available. Families
             // whose workspace does not expose a batched all-axes derivative

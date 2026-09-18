@@ -1993,9 +1993,8 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
 
     /// gam#979 Jeffreys wide-p contracted-trace-Hessian for the rigid survival
     /// marginal-slope kernel: `∇²_β tr(W · H(β))` for a caller-supplied
-    /// full-joint trace weight `W`. Binary twin of BMS's
-    /// `rigid_row_contracted_trace_hessian_coefficients` +
-    /// `joint_jeffreys_information_contracted_trace_hessian_with_specs`,
+    /// full-joint trace weight `W`. The observed-Hessian form BMS used before its
+    /// Jeffreys information became the expected information (gam#2922),
     /// generalized from BMS's 2 block-orthogonal primaries to survival's 4
     /// primaries `(q0, q1, qd1, g)`. Unlike BMS, the primaries are NOT
     /// block-diagonal in coefficient space: `q0, q1, qd1` all read the SAME
