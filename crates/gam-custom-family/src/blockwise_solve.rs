@@ -1965,10 +1965,19 @@ pub(crate) fn truncate_block_step_to_metric_radius(
     }
 }
 
+/// Fewest blocks for which [`total_quadratic_penalty`] maps the per-block penalties
+/// on rayon workers.
+///
+/// Work bound (#2469): result-invariant. Both sides evaluate every block with
+/// `block_quadratic_penalty` and sum the values in block order with the same
+/// `Iterator::sum`, so the total is bit-identical on either side.
 pub(crate) const TOTAL_QUADRATIC_PENALTY_PAR_MIN_BLOCKS: usize = 4;
 
-// Avoid Rayon overhead for a few tiny blocks; this approximates the dense
-// mat-vec work in βᵀSβ before splitting independent block penalties.
+/// Least dense mat-vec work in `βᵀSβ` for which [`total_quadratic_penalty`] maps the
+/// per-block penalties on rayon workers, so a few tiny blocks avoid the fork/join cost.
+///
+/// Work bound (#2469): result-invariant, for the reason at
+/// [`TOTAL_QUADRATIC_PENALTY_PAR_MIN_BLOCKS`].
 pub(crate) const TOTAL_QUADRATIC_PENALTY_PAR_MIN_DENSE_WORK: usize = 16_384;
 
 pub(crate) fn total_quadratic_penalty_parallel_worthwhile(
@@ -2009,7 +2018,11 @@ pub(crate) fn total_quadratic_penalty(
             .map(|(state, s_lambda)| {
                 block_quadratic_penalty(&state.beta, s_lambda)
             })
-            .reduce(|| 0.0, |left, right| left + right)
+            // Collect in block order and sum serially, the order the serial side sums
+            // in, so the parallel map changes the schedule and never the total.
+            .collect::<Vec<f64>>()
+            .into_iter()
+            .sum()
     } else {
         states
             .iter()
