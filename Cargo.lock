@@ -3584,6 +3584,7 @@ dependencies = [
  "csv",
  "gam",
  "gam-data",
+ "gam-math",
  "gam-predict",
  "gam-runtime",
  "gam-sae",
