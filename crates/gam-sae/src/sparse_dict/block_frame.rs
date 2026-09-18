@@ -228,7 +228,9 @@ fn write_unit_columns(columns: ArrayView2<'_, f64>, mut rows: ArrayViewMut2<'_, 
 /// `current` stores U transposed (`b×P`), `directions` stores the search rows
 /// `[R, P]` (`2b×P`) the previous step left, and `action` holds `H·[U, R, P]`
 /// (`P×3b`) from this pass. The top-`b` Ritz vectors on `span[U, R, P]`, rotated
-/// into the gauge closest to U, go to `proposal`. The next search rows go to
+/// into the gauge closest to U, go to `proposal`, unless their stored projector lies
+/// within [`STORED_FRAME_RESOLUTION`] of U's, when U's stored bits stay and the
+/// tangent gradient becomes the next search row. The next search rows go to
 /// `next_directions`: the Ritz residual `HU' − U'(U'ᵀHU')` and the part of U
 /// outside `span U'`, each scaled to unit length. This is block LOBPCG whose
 /// residual is one pass behind, because `H·R` exists only once a pass has
@@ -348,6 +350,17 @@ pub(super) fn ritz_tied_frame_step(
         for (entry, &value) in row.iter_mut().zip(column.iter()) {
             *entry = value as f32;
         }
+    }
+    // A proposal whose stored projector lies within the storage resolution of the
+    // stored frame is the same span rewritten at f32 rounding, not a step the stored
+    // rows resolve, and a paired trial would price only that rewrite. Keep the stored
+    // bits. On the Spark layer-18 fit the trials of epochs 2661-2672 rewrote 1013 to
+    // 1021 of the 1024 blocks (#2502, lane job 1196792); keeping the unresolved ones
+    // left 89 to 517 moved per trial (lane job 1229606).
+    if stored_projector_distance(current, proposal.view())? <= STORED_FRAME_RESOLUTION {
+        proposal.assign(&current);
+        write_unit_columns(tangent.view(), next_directions.slice_mut(s![..b, ..]));
+        return Ok(stationarity);
     }
     // The next search rows, read off this pass's H: the Ritz residual, and the
     // part of the stored frame outside the proposal's span.

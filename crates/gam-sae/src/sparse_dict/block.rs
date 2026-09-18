@@ -467,6 +467,133 @@ pub(super) fn gram_schmidt_rows(block: &mut Array2<f32>) {
     }
 }
 
+/// The inverse Gram `(UUᵀ)⁻¹` of one block's stored rows `U` (`b×P`), `b×b`
+/// row-major.
+///
+/// The rows are stored as `f32`, so they are orthonormal only to storage rounding
+/// and `UᵀU` is not a projector. A loss priced through `UᵀU` moves at first order
+/// whenever a frame is rewritten, because every rewrite changes the stored rows'
+/// norms and overlaps by an `f32` ulp even when the span they represent does not
+/// move, and the overlap of the blocks a row co-admits carries that change into its
+/// residual. On the 25,000-row Spark layer-18 fit, the losing one-block swaps of
+/// each of 49 paired frame trials priced that way summed to between 6.8e-6 and
+/// 5.0e-4, against a 2.46e-6 bar. Priced through each block's orthogonal projector
+/// they summed to at most 3.3e-12, and every trial's fixed-support decrease was
+/// positive (#2502, lane job 1229606). The block's tied projector is therefore the orthogonal
+/// projector of its stored span, `P = Uᵀ(UUᵀ)⁻¹U`, a function of the span alone, and a
+/// row's span coordinates `w = (UUᵀ)⁻¹Ux` are the coefficients of `Px` on the stored
+/// rows.
+///
+/// The Gram is accumulated in f64 from the stored bits in ascending column order and
+/// factored by Cholesky. A pivot at or below the bound the Rayleigh–Ritz step uses
+/// for a direction the stored rows cannot resolve, `u₃₂·√b·max_i G_ii`, means that
+/// row adds no direction the earlier rows do not already span: it takes no
+/// coordinate, and `P` projects onto the span of the others. A dead block whose
+/// frame is zero therefore has the zero projector. A non-finite Gram is refused by
+/// name.
+pub(super) fn stored_span_inverse_gram(frame: ArrayView2<'_, f32>) -> Result<Vec<f64>, String> {
+    let (b, p) = frame.dim();
+    let mut factor = vec![0.0f64; b * b];
+    let mut largest = 0.0f64;
+    for i in 0..b {
+        for j in 0..=i {
+            let mut dot = 0.0f64;
+            for c in 0..p {
+                dot += frame[[i, c]] as f64 * frame[[j, c]] as f64;
+            }
+            factor[i * b + j] = dot;
+        }
+        largest = largest.max(factor[i * b + i]);
+    }
+    let floor = super::block_frame::STORED_FRAME_RESOLUTION * (b as f64).sqrt() * largest;
+    let mut resolved = vec![false; b];
+    for j in 0..b {
+        let mut pivot = factor[j * b + j];
+        for m in 0..j {
+            pivot -= factor[j * b + m] * factor[j * b + m];
+        }
+        if !pivot.is_finite() {
+            return Err(format!("stored frame Gram pivot at row {j} is {pivot}"));
+        }
+        if pivot <= floor {
+            // Row j adds no resolved direction: its column of the factor is zero.
+            for i in j..b {
+                factor[i * b + j] = 0.0;
+            }
+            continue;
+        }
+        resolved[j] = true;
+        let root = pivot.sqrt();
+        factor[j * b + j] = root;
+        for i in j + 1..b {
+            let mut value = factor[i * b + j];
+            for m in 0..j {
+                value -= factor[i * b + m] * factor[j * b + m];
+            }
+            factor[i * b + j] = value / root;
+        }
+    }
+    // (UUᵀ)⁻¹ = L⁻ᵀL⁻¹ over the resolved rows, one column at a time: L y = e_column,
+    // then Lᵀ z = y. An unresolved row's entries stay zero.
+    let mut inverse = vec![0.0f64; b * b];
+    let mut forward = vec![0.0f64; b];
+    for column in 0..b {
+        for i in 0..b {
+            if !resolved[i] {
+                forward[i] = 0.0;
+                continue;
+            }
+            let mut value = if i == column { 1.0 } else { 0.0 };
+            for m in 0..i {
+                value -= factor[i * b + m] * forward[m];
+            }
+            forward[i] = value / factor[i * b + i];
+        }
+        for i in (0..b).rev() {
+            if !resolved[i] {
+                continue;
+            }
+            let mut value = forward[i];
+            for m in i + 1..b {
+                value -= factor[m * b + i] * inverse[m * b + column];
+            }
+            inverse[i * b + column] = value / factor[i * b + i];
+        }
+    }
+    Ok(inverse)
+}
+
+/// [`stored_span_inverse_gram`] for every block of `decoder`, concatenated, so block
+/// `g`'s inverse Gram is `[g·b², (g+1)·b²)`.
+pub(super) fn stored_span_inverse_grams(
+    decoder: ArrayView2<'_, f32>,
+    b: usize,
+) -> Result<Vec<f64>, String> {
+    let blocks = decoder.nrows() / b.max(1);
+    let per_block: Vec<Vec<f64>> = (0..blocks)
+        .into_par_iter()
+        .map(|block| {
+            stored_span_inverse_gram(decoder.slice(ndarray::s![block * b..(block + 1) * b, ..]))
+                .map_err(|error| format!("block {block}: {error}"))
+        })
+        .collect::<Result<_, String>>()?;
+    Ok(per_block.concat())
+}
+
+/// A row's span coordinates on one block, `w = (UUᵀ)⁻¹s` from its inner products
+/// `s = Ux` with the stored rows, each entry summed in ascending order. The device
+/// coder performs the same operations in the same order.
+pub(super) fn span_coordinates(inverse_gram: &[f64], inner: &[f64], coordinates: &mut [f64]) {
+    let b = inner.len();
+    for (axis, coordinate) in coordinates.iter_mut().enumerate() {
+        let mut value = 0.0f64;
+        for (&entry, &product) in inverse_gram[axis * b..(axis + 1) * b].iter().zip(inner) {
+            value += entry * product;
+        }
+        *coordinate = value;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Encoding / routing over a corpus (block-tiled, never N×K).
 // ---------------------------------------------------------------------------
@@ -483,8 +610,9 @@ pub(super) struct RowBlockCode {
     pub(super) gates: Vec<f32>,
     /// Signed within-block code `z_g = γ w_g`, `k×b` flattened row-major.
     pub(super) codes: Vec<f32>,
-    /// Gamma-free signed projections, accumulated in f64 from the stored inputs.
-    /// Streaming scalar and frame moments consume these same values.
+    /// Gamma-free span coordinates `w_g = (U_gU_gᵀ)⁻¹U_g x` of each selected block
+    /// ([`stored_span_inverse_gram`]), accumulated in f64 from the stored inputs, so
+    /// `U_gᵀw_g = P_g x`. Streaming scalar and frame moments consume these same values.
     pub(super) projections: Vec<f64>,
 }
 
@@ -571,12 +699,22 @@ pub(super) fn route_and_code_all(
 ) -> Result<Vec<RowBlockCode>, String> {
     let n = x.nrows();
     let batch = minibatch.max(1);
+    let inverse_grams = stored_span_inverse_grams(decoder, b)?;
     let mut out: Vec<RowBlockCode> = Vec::with_capacity(n);
     let mut start = 0usize;
     while start < n {
         let end = (start + batch).min(n);
         let mb = x.slice(ndarray::s![start..end, ..]);
-        let mut coded = route_and_code_minibatch(mb, decoder, gamma, n_blocks, b, k, block_tile)?;
+        let mut coded = route_and_code_minibatch(
+            mb,
+            decoder,
+            &inverse_grams,
+            gamma,
+            n_blocks,
+            b,
+            k,
+            block_tile,
+        )?;
         out.append(&mut coded);
         start = end;
     }
@@ -586,9 +724,11 @@ pub(super) fn route_and_code_all(
 /// Code one minibatch's routed shortlists on the host. Each row admits its
 /// support by descent in the tied loss (`code_row`); a row whose best gate falls
 /// below its projection roundoff (`orphan_gate_floor`) keeps no block.
+/// `inverse_grams` is [`stored_span_inverse_grams`] of `decoder`.
 pub(super) fn code_routed_rows(
     mb: ArrayView2<'_, f32>,
     decoder: ArrayView2<'_, f32>,
+    inverse_grams: &[f64],
     gamma: f32,
     b: usize,
     k: usize,
@@ -600,9 +740,9 @@ pub(super) fn code_routed_rows(
         .map(|(row, shortlist)| {
             let best_gate = shortlist.first().map(|entry| entry.1).unwrap_or(0.0);
             if best_gate < orphan_gate_floor(row, b) {
-                code_row(row, decoder, gamma, b, k, &[])
+                code_row(row, decoder, inverse_grams, gamma, b, k, &[])
             } else {
-                code_row(row, decoder, gamma, b, k, &shortlist)
+                code_row(row, decoder, inverse_grams, gamma, b, k, &shortlist)
             }
         })
         .collect()
@@ -626,6 +766,7 @@ pub(super) fn code_routed_rows(
 fn route_and_code_minibatch(
     mb: ArrayView2<'_, f32>,
     decoder: ArrayView2<'_, f32>,
+    inverse_grams: &[f64],
     gamma: f32,
     n_blocks: usize,
     b: usize,
@@ -636,9 +777,16 @@ fn route_and_code_minibatch(
     {
         let policy = gam_gpu::global_policy();
         if policy != gam_gpu::GpuPolicy::Off {
-            let (codes, _path) =
-                super::block_scoring_gpu::route_and_code_blocks(mb, decoder, gamma, b, k, policy)
-                    .map_err(|err| err.to_string())?;
+            let (codes, _path) = super::block_scoring_gpu::route_and_code_blocks(
+                mb,
+                decoder,
+                inverse_grams,
+                gamma,
+                b,
+                k,
+                policy,
+            )
+            .map_err(|err| err.to_string())?;
             return Ok(codes);
         }
     }
@@ -650,7 +798,7 @@ fn route_and_code_minibatch(
         );
     }
     let routed = route_block_minibatch(mb, decoder, n_blocks, b, k, block_tile);
-    Ok(code_routed_rows(mb, decoder, gamma, b, k, routed))
+    Ok(code_routed_rows(mb, decoder, inverse_grams, gamma, b, k, routed))
 }
 
 /// Fixed-width sparse code for one row from its `(block, gate)` shortlist: the
@@ -707,13 +855,18 @@ fn route_and_code_minibatch(
 /// visits — that first admission is the one `ΔL` would have chosen anyway, so
 /// the guard changes nothing there.
 ///
+/// `P_g` is the orthogonal projector of block `g`'s stored span
+/// ([`stored_span_inverse_gram`]): `y_g = U_gᵀw_g` for the span coordinates
+/// `w_g = (U_gU_gᵀ)⁻¹s_g` of the inner products `s_g = U_g x`, and `c_g = s_g·w_g`.
 /// Every quantity is a function of the projectors `P_g`, so the rule is
-/// invariant to an `O(b)` change of basis inside any block, and it is a pure
-/// function of `(x, decoder, γ)`, so [`block_sparse_dictionary_transform`]
-/// reproduces the training support exactly.
+/// invariant to any change of basis of a block's stored rows that keeps their
+/// span, and it is a pure function of `(x, decoder, γ)`, so
+/// [`block_sparse_dictionary_transform`] reproduces the training support exactly.
+/// `inverse_grams` is [`stored_span_inverse_grams`] of `decoder`.
 fn code_row(
     row: ArrayView1<'_, f32>,
     decoder: ArrayView2<'_, f32>,
+    inverse_grams: &[f64],
     gamma: f32,
     b: usize,
     k: usize,
@@ -723,25 +876,31 @@ fn code_row(
     let gamma64 = gamma as f64;
     let admission_scale = 2.0 * gamma64 - gamma64 * gamma64;
 
-    // Candidate coordinates `w_h = U_h x`, in the routed order. A zero-gate
-    // entry is an absent firing from the fixed-capacity selector, not a
-    // candidate.
-    let mut candidates: Vec<(u32, f32, Vec<f64>)> = Vec::with_capacity(shortlist.len());
+    // Candidate inner products `s_h = U_h x` and span coordinates
+    // `w_h = (U_hU_hᵀ)⁻¹s_h`, in the routed order. A zero-gate entry is an absent
+    // firing from the fixed-capacity selector, not a candidate.
+    let mut candidates: Vec<(u32, f32, Vec<f64>, Vec<f64>)> = Vec::with_capacity(shortlist.len());
     for &(g, gate) in shortlist.iter() {
         if gate == 0.0 {
             continue;
         }
         let base = g as usize * b;
-        let mut coordinates = Vec::with_capacity(b);
+        let mut inner = Vec::with_capacity(b);
         for r in 0..b {
             let atom = decoder.row(base + r);
             let mut projection = 0.0f64;
             for (value, direction) in row.iter().zip(atom.iter()) {
                 projection += *value as f64 * *direction as f64;
             }
-            coordinates.push(projection);
+            inner.push(projection);
         }
-        candidates.push((g, gate, coordinates));
+        let mut coordinates = vec![0.0f64; b];
+        span_coordinates(
+            &inverse_grams[g as usize * b * b..(g as usize + 1) * b * b],
+            &inner,
+            &mut coordinates,
+        );
+        candidates.push((g, gate, inner, coordinates));
     }
 
     let mut blocks = Vec::with_capacity(k);
@@ -757,7 +916,7 @@ fn code_row(
         // every later one must lower the loss.
         let unconditional = round == 0;
         let mut best: Option<(usize, f64)> = None;
-        for (index, (block, _, coordinates)) in candidates.iter().enumerate() {
+        for (index, (block, _, inner, coordinates)) in candidates.iter().enumerate() {
             if taken[index] {
                 continue;
             }
@@ -765,7 +924,7 @@ fn code_row(
             let mut own = 0.0f64;
             let mut overlap = 0.0f64;
             for (r, &coordinate) in coordinates.iter().enumerate() {
-                own += coordinate * coordinate;
+                own += inner[r] * coordinate;
                 let atom = decoder.row(base + r);
                 let mut projected = 0.0f64;
                 for (accumulated, direction) in reconstruction.iter().zip(atom.iter()) {
@@ -789,7 +948,7 @@ fn code_row(
             break; // no remaining candidate lowers this row's loss
         };
         taken[index] = true;
-        let (block, gate, coordinates) = &candidates[index];
+        let (block, gate, _, coordinates) = &candidates[index];
         blocks.push(*block);
         gates.push(*gate);
         let base = *block as usize * b;
@@ -825,36 +984,23 @@ fn code_row(
 // γ refresh, frame refresh, evidence-adjudicated births, EV.
 // ---------------------------------------------------------------------------
 
-/// Per-row un-scaled projection sum `p_i = Σ_{g∈S_i} x_i P_g` (the reconstruction
-/// with `γ = 1`), used both by the closed-form `γ` solve and residual/EV. Because
-/// `D_g` is orthonormal, `x_i P_g = (x_i D_gᵀ) D_g`, formed from the stored raw
-/// projection `z_{ig}/γ` — but we recompute directly from the frames to stay
-/// `γ`-independent.
-fn projection_sum_row(
-    row: ArrayView1<'_, f32>,
-    decoder: ArrayView2<'_, f32>,
-    blocks: &[u32],
-    gates: &[f32],
-    b: usize,
-) -> Array1<f32> {
-    let p = row.len();
-    let mut out = Array1::<f32>::zeros(p);
-    for (j, &g) in blocks.iter().enumerate() {
-        if gates[j] == 0.0 {
+/// Per-row un-scaled projection sum `p_i = Σ_{g∈S_i} P_g x_i` (the reconstruction
+/// with `γ = 1`) used by the closed-form `γ` solve, decoded from the row's γ-free
+/// span coordinates `U_gᵀw_g`, so the solve prices the projectors the codes decode.
+fn projection_sum_row(code: &RowBlockCode, decoder: ArrayView2<'_, f32>, b: usize) -> Vec<f64> {
+    let mut out = vec![0.0f64; decoder.ncols()];
+    for (slot, &block) in code.blocks.iter().enumerate() {
+        if code.gates[slot] == 0.0 {
             continue; // padded slot
         }
-        let gg = g as usize;
         for r in 0..b {
-            let atom = decoder.row(gg * b + r);
-            let mut wr = 0.0f32;
-            for (xr, ar) in row.iter().zip(atom.iter()) {
-                wr += *xr * *ar;
-            }
-            if wr == 0.0 {
+            let coordinate = code.projections[slot * b + r];
+            if coordinate == 0.0 {
                 continue;
             }
-            for c in 0..p {
-                out[c] += wr * atom[c];
+            let atom = decoder.row(block as usize * b + r);
+            for (value, &direction) in out.iter_mut().zip(atom.iter()) {
+                *value += coordinate * direction as f64;
             }
         }
     }
@@ -904,10 +1050,10 @@ fn refresh_gamma(
     let mut den = 0.0f64;
     for (i, code) in codes.iter().enumerate() {
         let xi = x.row(i);
-        let p_i = projection_sum_row(xi, decoder, &code.blocks, &code.gates, b);
+        let p_i = projection_sum_row(code, decoder, b);
         for c in 0..xi.len() {
-            num += xi[c] as f64 * p_i[c] as f64;
-            den += p_i[c] as f64 * p_i[c] as f64;
+            num += xi[c] as f64 * p_i[c];
+            den += p_i[c] * p_i[c];
         }
     }
     if den == 0.0 { 0.0 } else { (num / den) as f32 }
@@ -966,10 +1112,18 @@ fn refresh_frames(
         let mut energy = 0.0;
         let mut negative_bound = 0.0;
         let mut other_coordinates = vec![0.0; b];
+        let mut inner = vec![0.0; b];
         for &(row, slot) in &members[block] {
             // This block has not moved yet, so its original tied projections
             // remain valid even though earlier blocks changed projection_sum.
             let w = &codes[row].projections[slot * b..(slot + 1) * b];
+            // H acts on the stored rows through their inner products `s = Ux`;
+            // the span coordinates `w` only decode this block's projection.
+            for (axis, value) in inner.iter_mut().enumerate() {
+                *value = (0..p)
+                    .map(|c| x[[row, c]] as f64 * decoder[[block * b + axis, c]] as f64)
+                    .sum::<f64>();
+            }
             other_coordinates.fill(0.0);
             let mut x_norm_sq = 0.0;
             let mut q_norm_sq = 0.0;
@@ -984,7 +1138,7 @@ fn refresh_frames(
                 q_norm_sq += q * q;
                 x_dot_q += value * q;
                 for axis in 0..b {
-                    action[[c, axis]] += (data_scale * value - gamma_sq * q) * w[axis];
+                    action[[c, axis]] += (data_scale * value - gamma_sq * q) * inner[axis];
                     other_coordinates[axis] += decoder[[block * b + axis, c]] as f64 * q;
                 }
             }
@@ -1010,14 +1164,22 @@ fn refresh_frames(
         .map_err(|error| format!("tied frame refresh block {block}: {error}"))?;
         stationarity = stationarity.max(residual);
 
+        let proposal_inverse_gram = stored_span_inverse_gram(proposal.view())
+            .map_err(|error| format!("tied frame refresh block {block}: {error}"))?;
+        let mut proposed_inner = vec![0.0; b];
         let mut proposed_coordinates = vec![0.0; b];
         for &(row, slot) in &members[block] {
-            proposed_coordinates.fill(0.0);
+            proposed_inner.fill(0.0);
             for axis in 0..b {
                 for c in 0..p {
-                    proposed_coordinates[axis] += x[[row, c]] as f64 * proposal[[axis, c]] as f64;
+                    proposed_inner[axis] += x[[row, c]] as f64 * proposal[[axis, c]] as f64;
                 }
             }
+            span_coordinates(
+                &proposal_inverse_gram,
+                &proposed_inner,
+                &mut proposed_coordinates,
+            );
             let old_coordinates = &codes[row].projections[slot * b..(slot + 1) * b];
             for c in 0..p {
                 for axis in 0..b {
@@ -2479,10 +2641,11 @@ fn pack_block_codes(
 ///
 /// This is the Rust core of the block lane's `transform`: the same group-ℓ₂ gate
 /// (`‖z_g‖₂ = γ‖x D_gᵀ‖₂`), block-TopK selection, and tied signed within-block
-/// codes (`z_g = γ x D_gᵀ`, no ReLU) the trainer uses — so held-out encoding is
-/// bit-consistent with training, and the Python facade need not reimplement it in
-/// numpy. `gates` carry the FINAL-γ presence `γ·‖x D_gᵀ‖₂`; `codes` are the signed
-/// `z_g`.
+/// codes (`z_g = γ w_g`, the span coordinates `w_g = (D_gD_gᵀ)⁻¹D_g x`, which equal
+/// `x D_gᵀ` for exactly orthonormal rows; no ReLU) the trainer uses — so held-out
+/// encoding is bit-consistent with training, and the Python facade need not
+/// reimplement it in numpy. `gates` carry the FINAL-γ presence `γ·‖x D_gᵀ‖₂`; `codes`
+/// are the signed `z_g`.
 pub fn block_sparse_dictionary_transform(
     x: ArrayView2<'_, f32>,
     decoder: ArrayView2<'_, f32>,

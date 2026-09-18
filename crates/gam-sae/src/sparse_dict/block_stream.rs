@@ -60,7 +60,7 @@
 use super::BlockSparseConfig;
 use super::block::{
     RowBlockCode, block_birth_evidence_margin, gram_schmidt_rows, relative_scalar_change,
-    route_and_code_all, stable_rank_symmetric,
+    route_and_code_all, span_coordinates, stable_rank_symmetric, stored_span_inverse_grams,
 };
 use super::block_frame::{STORED_FRAME_RESOLUTION, ritz_tied_frame_step, stored_projector_distance};
 use super::residual_reservoir::{ResidualReservoir, residual_rounding_energy};
@@ -162,12 +162,14 @@ fn append_supports(supports: &mut Vec<u32>, codes: &[RowBlockCode], k: usize) {
 }
 
 /// The tied code of a row's retained support `prior` at `decoder` and `gamma`:
-/// each retained block's projections `w_g = U_g x`, in the retained slot order and
-/// padded to `k` slots. A retained block the row no longer projects onto takes a
-/// zero gate and is not admitted.
+/// each retained block's span coordinates `w_g = (U_gU_gᵀ)⁻¹U_g x`, in the retained
+/// slot order and padded to `k` slots, with gate `‖P_g x‖`. A retained block the row
+/// no longer projects onto takes a zero gate and is not admitted. `inverse_grams` is
+/// `stored_span_inverse_grams` of `decoder`.
 fn kept_block_code(
     row: ArrayView1<'_, f32>,
     decoder: ArrayView2<'_, f32>,
+    inverse_grams: &[f64],
     gamma: f32,
     b: usize,
     k: usize,
@@ -178,17 +180,27 @@ fn kept_block_code(
     let mut gates = Vec::with_capacity(k);
     let mut codes = Vec::with_capacity(k * b);
     let mut projections = Vec::with_capacity(k * b);
+    let mut inner = vec![0.0f64; b];
+    let mut coordinates = vec![0.0f64; b];
     for &block in prior.iter().take_while(|&&block| block != NO_BLOCK) {
         let base = block as usize * b;
-        let mut energy = 0.0f64;
-        for axis in 0..b {
+        for (axis, value) in inner.iter_mut().enumerate() {
             let mut projection = 0.0f64;
-            for (value, direction) in row.iter().zip(decoder.row(base + axis).iter()) {
-                projection += *value as f64 * *direction as f64;
+            for (x, direction) in row.iter().zip(decoder.row(base + axis).iter()) {
+                projection += *x as f64 * *direction as f64;
             }
-            energy += projection * projection;
-            projections.push(projection);
-            codes.push((gamma64 * projection) as f32);
+            *value = projection;
+        }
+        span_coordinates(
+            &inverse_grams[base * b..(base + b) * b],
+            &inner,
+            &mut coordinates,
+        );
+        let mut energy = 0.0f64;
+        for (&product, &coordinate) in inner.iter().zip(&coordinates) {
+            energy += product * coordinate;
+            projections.push(coordinate);
+            codes.push((gamma64 * coordinate) as f32);
         }
         blocks.push(block);
         gates.push(energy.sqrt() as f32);
@@ -224,10 +236,12 @@ fn kept_block_code(
 /// so a row changes support only finitely often: #2283's rule for the atom lane.
 ///
 /// The third value is the routed loss minus the retained loss when the routed support
-/// admits different blocks and is declined, and `None` otherwise.
+/// admits different blocks and is declined, and `None` otherwise. `inverse_grams` is
+/// `stored_span_inverse_grams` of `decoder`.
 fn descend_block_support(
     row: ArrayView1<'_, f32>,
     decoder: ArrayView2<'_, f32>,
+    inverse_grams: &[f64],
     gamma: f32,
     b: usize,
     k: usize,
@@ -238,7 +252,7 @@ fn descend_block_support(
     if prior.first().is_none_or(|&block| block == NO_BLOCK) {
         return (fresh, fresh_projection, None);
     }
-    let kept = kept_block_code(row, decoder, gamma, b, k, prior);
+    let kept = kept_block_code(row, decoder, inverse_grams, gamma, b, k, prior);
     let kept_projection = row_projection(row, decoder, &kept, b, gamma);
     if same_admitted_blocks(&fresh, &kept) {
         return (kept, kept_projection, None);
@@ -286,6 +300,7 @@ struct DeclinedRoutes {
 fn descend_supports(
     rows: ArrayView2<'_, f32>,
     decoder: ArrayView2<'_, f32>,
+    inverse_grams: &[f64],
     gamma: f32,
     b: usize,
     k: usize,
@@ -302,7 +317,16 @@ fn descend_supports(
             } else {
                 &retained[(offset + row) * k..(offset + row + 1) * k]
             };
-            descend_block_support(rows.row(row), decoder, gamma, b, k, fresh, prior)
+            descend_block_support(
+                rows.row(row),
+                decoder,
+                inverse_grams,
+                gamma,
+                b,
+                k,
+                fresh,
+                prior,
+            )
         })
         .collect();
     let mut codes = Vec::with_capacity(arbitrated.len());
@@ -352,17 +376,20 @@ fn same_admitted_blocks(left: &RowBlockCode, right: &RowBlockCode) -> bool {
 /// One selected row's contribution to its block's tied projector moments over
 /// `W = [U, D]`: `coupling += v (Wᵀx)ᵀ + x (Wᵀv)ᵀ − m x (Wᵀx)ᵀ` and
 /// `data_cross += x (Wᵀx)ᵀ`, where `v = m P_g x − Σ_h P_h x` is formed from the
-/// row's code `w = Uᵀx`, its gamma-free reconstruction `sum`, and `m`, the number
-/// of blocks the row admits this pass (see `end_epoch`).
+/// row's span coordinates `w` (`P_g x = Uᵀw`), its gamma-free reconstruction `sum`,
+/// and `m`, the number of blocks the row admits this pass (see `end_epoch`).
+///
+/// The moments are `H` applied to the stored rows, so they take the inner products
+/// `Wᵀx` with those rows, summed here. The span coordinates equal `Ux` only for exactly
+/// orthonormal rows, which `f32` storage never holds (see
+/// `super::block::stored_span_inverse_gram`).
 ///
 /// `frame` holds the block's `b` directions and `directions` its `d` search rows,
 /// both f64 and row-major (`frame[axis * p + c]`); `d` may be zero. `coupling` and
 /// `data_cross` are the block's `P×n` moments, row-major (`[c * n + column]`) with
 /// `n ≥ b + d`, and only their first `b + d` columns are written. `v` (length `P`)
-/// and `coordinates` (length `b + 2d`) are caller-owned scratch. The frame columns
-/// receive the same floating-point operations in the same order as the
-/// per-element `[[c, axis]]` loop, extended by the weighted data term, so they are
-/// bit-identical to that loop (#2826).
+/// and `coordinates` (length `2(b + d)`) are caller-owned scratch. Every column
+/// receives the same floating-point operations in the same order (#2826).
 fn accumulate_tied_row_moments(
     frame: &[f64],
     directions: &[f64],
@@ -380,31 +407,37 @@ fn accumulate_tied_row_moments(
     let searched = directions.len() / p;
     let columns = coupling.len() / p;
     coordinates.fill(0.0);
-    // `v_coordinates` holds Wᵀv over all `b + d` columns; `x_coordinates` holds Dᵀx.
+    // `v_coordinates` holds Wᵀv and `x_coordinates` holds Wᵀx, over all `b + d` columns.
     let (v_coordinates, x_coordinates) = coordinates.split_at_mut(b + searched);
-    // Pass 1: v, then U v and the search projections, each summed in `c` order.
-    for (c, ((value, &x), &total)) in v.iter_mut().zip(xi.iter()).zip(sum).enumerate() {
-        let mut own = 0.0;
-        for (axis, &weight) in w.iter().enumerate() {
-            own += weight * frame[axis * p + c];
-        }
-        *value = majorizer_weight * own - total;
-        for (axis, coordinate) in v_coordinates[..b].iter_mut().enumerate() {
-            *coordinate += frame[axis * p + c] * *value;
-        }
-        let x = x as f64;
-        for (row, (v_coordinate, x_coordinate)) in v_coordinates[b..]
-            .iter_mut()
-            .zip(x_coordinates.iter_mut())
-            .enumerate()
-        {
-            let direction = directions[row * p + c];
-            *v_coordinate += direction * *value;
-            *x_coordinate += direction * x;
+    // Pass 1: v, then W v and W x, each summed in `c` order.
+    {
+        let (frame_v, search_v) = v_coordinates.split_at_mut(b);
+        let (frame_x, search_x) = x_coordinates.split_at_mut(b);
+        for (c, ((value, &x), &total)) in v.iter_mut().zip(xi.iter()).zip(sum).enumerate() {
+            let mut own = 0.0;
+            for (axis, &weight) in w.iter().enumerate() {
+                own += weight * frame[axis * p + c];
+            }
+            *value = majorizer_weight * own - total;
+            let x = x as f64;
+            for (axis, (v_coordinate, x_coordinate)) in
+                frame_v.iter_mut().zip(frame_x.iter_mut()).enumerate()
+            {
+                let direction = frame[axis * p + c];
+                *v_coordinate += direction * *value;
+                *x_coordinate += direction * x;
+            }
+            for (row, (v_coordinate, x_coordinate)) in
+                search_v.iter_mut().zip(search_x.iter_mut()).enumerate()
+            {
+                let direction = directions[row * p + c];
+                *v_coordinate += direction * *value;
+                *x_coordinate += direction * x;
+            }
         }
     }
-    // Pass 2: each frame coupling entry takes `v w` and then `x (U v)` as two
-    // separate additions, exactly as the two loops it replaced did.
+    // Pass 2: each coupling entry takes `v (Wᵀx)`, then `x (Wᵀv)`, then `−m x (Wᵀx)`,
+    // as separate additions.
     for (((coupling_row, data_row), &value), &x) in coupling
         .chunks_exact_mut(columns)
         .zip(data_cross.chunks_exact_mut(columns))
@@ -412,14 +445,7 @@ fn accumulate_tied_row_moments(
         .zip(xi.iter())
     {
         let x = x as f64;
-        for (axis, &weight) in w.iter().enumerate() {
-            coupling_row[axis] += value * weight;
-            data_row[axis] += x * weight;
-            coupling_row[axis] += x * v_coordinates[axis];
-            coupling_row[axis] -= majorizer_weight * x * weight;
-        }
-        for (row, &projection) in x_coordinates.iter().enumerate() {
-            let column = b + row;
+        for (column, &projection) in x_coordinates.iter().enumerate() {
             coupling_row[column] += value * projection;
             data_row[column] += x * projection;
             coupling_row[column] += x * v_coordinates[column];
@@ -443,14 +469,41 @@ fn profiled_scalar(old_gamma: f32, rss: f64, numerator: f64, denominator: f64) -
 /// Grassmann retraction halfway between a rejected proposal and its baseline.
 /// Repeated rejection therefore backtracks on the same proposed direction;
 /// there is no user-selected damping constant or search box.
-fn bisect_frame_trial(baseline: &Array2<f32>, proposal: &Array2<f32>, b: usize) -> Array2<f32> {
-    let mut midpoint = (baseline + proposal) * 0.5;
-    for mut block in midpoint.axis_chunks_iter_mut(Axis(0), b) {
-        let mut owned = block.to_owned();
+///
+/// Only the blocks the proposal moved are bisected, and a block keeps the baseline's
+/// bits when its midpoint lies within the storage resolution of the baseline, or when
+/// storage rounds the midpoint back to the proposal's own bits, so the move cannot be
+/// halved in the type the frames are stored in. Re-orthonormalising an unmoved block,
+/// or a midpoint the stored rows cannot tell from the baseline, rewrites the same
+/// span at `f32` rounding: on the Spark layer-18 fit
+/// every one of the 274 frame trials from epoch 2727 to 3000 was a rewrite of all
+/// 1024 blocks at projector displacement 6.19e-8, so backtracking never returned to
+/// the baseline and every residual stayed infinite (#2502, run 1165180). Here
+/// backtracking ends at the baseline itself.
+fn bisect_frame_trial(
+    baseline: &Array2<f32>,
+    proposal: &Array2<f32>,
+    b: usize,
+) -> Result<Array2<f32>, String> {
+    let mut midpoint = baseline.clone();
+    for (index, ((mut block, stored), proposed)) in midpoint
+        .axis_chunks_iter_mut(Axis(0), b)
+        .zip(baseline.axis_chunks_iter(Axis(0), b))
+        .zip(proposal.axis_chunks_iter(Axis(0), b))
+        .enumerate()
+    {
+        if stored == proposed {
+            continue;
+        }
+        let mut owned = (&stored + &proposed) * 0.5;
         gram_schmidt_rows(&mut owned);
-        block.assign(&owned);
+        let distance = stored_projector_distance(stored, owned.view())
+            .map_err(|error| format!("frame trial bisection block {index}: {error}"))?;
+        if distance > STORED_FRAME_RESOLUTION && owned != proposed {
+            block.assign(&owned);
+        }
     }
-    midpoint
+    Ok(midpoint)
 }
 
 /// Per-shard summary returned by [`BlockSparseStreamState::partial_fit`].
@@ -954,27 +1007,30 @@ impl BlockSparseStreamState {
             // Route, then let each row keep its committed support unless the routed
             // one lowers its loss beyond rounding (`descend_block_support`).
             let route_descending = |decoder: ArrayView2<'_, f32>, scale: f32| {
-                route_and_code_all(
-                    rows,
-                    decoder,
-                    scale,
-                    self.g,
-                    b,
-                    k,
-                    self.config.minibatch,
-                    self.config.block_tile,
-                )
-                .map(|routed| {
-                    descend_supports(
+                stored_span_inverse_grams(decoder, b).and_then(|inverse_grams| {
+                    route_and_code_all(
                         rows,
                         decoder,
                         scale,
+                        self.g,
                         b,
                         k,
-                        routed,
-                        &self.retained_supports,
-                        offset,
+                        self.config.minibatch,
+                        self.config.block_tile,
                     )
+                    .map(|routed| {
+                        descend_supports(
+                            rows,
+                            decoder,
+                            &inverse_grams,
+                            scale,
+                            b,
+                            k,
+                            routed,
+                            &self.retained_supports,
+                            offset,
+                        )
+                    })
                 })
             };
             let (codes, projected, declined) = route_descending(self.decoder.view(), gamma)?;
@@ -1102,7 +1158,7 @@ impl BlockSparseStreamState {
                             .as_slice_mut()
                             .expect("block data moments are standard layout");
                         let mut v = vec![0.0; p];
-                        let mut coordinates = vec![0.0; b + 2 * (directions.len() / p)];
+                        let mut coordinates = vec![0.0; 2 * (b + directions.len() / p)];
                         for &(row, slot) in entries {
                             let w = &codes[row].projections[slot * b..(slot + 1) * b];
                             let majorizer_weight = admitted_counts[row] as f64;
@@ -1354,7 +1410,7 @@ impl BlockSparseStreamState {
             });
             if !(baseline_rss - candidate_rss > resolution) {
                 let midpoint =
-                    bisect_frame_trial(&trial.baseline_decoder, &trial.proposed_decoder, b);
+                    bisect_frame_trial(&trial.baseline_decoder, &trial.proposed_decoder, b)?;
                 self.decoder = trial.baseline_decoder.clone();
                 self.gamma = baseline_gamma;
                 self.rss = baseline_rss;
