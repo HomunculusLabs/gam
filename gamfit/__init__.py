@@ -159,6 +159,7 @@ from ._sae_spectral import (
     routability_floor,
     separation_limit,
     sparse_dict_dual_certificate,
+    whole_set_containment,
 )
 from ._penalties import (
     ARDPenalty,
