@@ -669,6 +669,21 @@ impl NativeAttention {
         &self.key
     }
 
+    /// The source's value projection.
+    pub fn value(&self) -> &AffineProjection {
+        &self.value
+    }
+
+    /// The source's output projection.
+    pub fn output(&self) -> &AffineProjection {
+        &self.output
+    }
+
+    /// The source's multiplier on each query-key inner product.
+    pub fn score_scale(&self) -> f64 {
+        self.attention.score_scale
+    }
+
     /// Whether the source normalizes each head's queries and keys before the rotary embedding
     /// ([`NativeAttention::with_query_key_norm`]). With a norm, a map that preserves every score
     /// must also commute with that norm, and a caller that projects rows itself would skip it.
@@ -1831,9 +1846,10 @@ mod tests {
         );
     }
 
-    /// The read accessors return the parts the block was built from, and `has_query_key_norm`
-    /// follows `with_query_key_norm`. Positive control: an edited query tensor compares unequal to
-    /// the accessor's.
+    /// The read accessors return the parts the block was built from (geometry, rotary embedding,
+    /// score scale and all four projections), and `has_query_key_norm` follows
+    /// `with_query_key_norm`. Positive control: an edited query tensor compares unequal to the
+    /// accessor's.
     #[test]
     fn accessors_return_the_source_parts() {
         let fixture = Fixture::new(RotaryPairing::HalfSplit).biased();
@@ -1844,6 +1860,13 @@ mod tests {
         assert_eq!(native.key().bias, fixture.key_bias, "key bias");
         let source_query = masked_product(&fixture.query_outputs, &all_on().query, &fixture.query_readins);
         assert_eq!(native.query().weight, source_query, "query weight");
+        let source_key = masked_product(&fixture.key_outputs, &all_on().key, &fixture.key_readins);
+        assert_eq!(native.key().weight, source_key, "key weight");
+        assert_eq!(native.value().weight, fixture.value, "value weight");
+        assert_eq!(native.value().bias, fixture.value_bias, "value bias");
+        assert_eq!(native.output().weight, fixture.output, "output weight");
+        assert_eq!(native.output().bias, fixture.output_bias, "output bias");
+        assert_eq!(native.score_scale(), fixture.score_scale, "score scale");
         assert!(
             !native.has_query_key_norm(),
             "a block built without q_norm/k_norm has no query/key norm"
