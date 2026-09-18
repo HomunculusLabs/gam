@@ -970,12 +970,7 @@ fn deterministic_gaussian_standard_fit(
         reparam_qs: None,
         // Exact fit ⇒ residual variance is exactly zero.
         dispersion: gam_solve::estimate::Dispersion::ZERO_ESTIMATE,
-        beta_covariance: Some(gam_problem::dispersion_cov::PhiScaledCovariance::wrap(
-            ndarray::Array2::<f64>::zeros((p, p)),
-        )),
-        beta_standard_errors: Some(Array1::<f64>::zeros(p)),
-        beta_covariance_corrected: None,
-        beta_standard_errors_corrected: None,
+        factorized_standard_errors: None,
         beta_covariance_frequentist: None,
         coefficient_influence,
         weighted_gram: Some(xtwx),

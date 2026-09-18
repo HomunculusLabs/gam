@@ -1394,32 +1394,17 @@ pub(crate) fn rescale_gaussian_location_scale_to_raw_with_units(
             rescale_precision_coordinates(&mut inference.penalized_hessian.0, &row_factors)?;
         }
 
-        // The inference block carries its own copies of every coefficient-frame
-        // covariance object, and `UnifiedFitResult::try_from_parts` re-runs on
-        // every saved-model load requiring the conditional/corrected copies to
-        // equal the top-level matrices exactly. Each copy must therefore ride
-        // the identical remap: a copy left in standardized units made every
-        // saved location-scale fit refuse to predict once the custom-family
-        // lane began publishing the corrected covariance (#2346).
-        if let Some(cov) = inference.beta_covariance.as_mut() {
-            rescale_covariance_coordinates(&mut cov.0, &row_factors);
-        }
-        if let Some(cov) = inference.beta_covariance_corrected.as_mut() {
-            rescale_covariance_coordinates(cov, &row_factors);
-        }
+        // The conditional and corrected covariances have one store each, the
+        // top-level matrices remapped above, and their standard errors derive
+        // from it (#2955). The inference block's other coefficient-frame
+        // covariance objects ride the same remap.
         if let Some(cov) = inference.beta_covariance_frequentist.as_mut() {
             rescale_covariance_coordinates(cov, &row_factors);
         }
         if let Some(correction) = inference.smoothing_correction.as_mut() {
             rescale_covariance_coordinates(correction, &row_factors);
         }
-        for se in [
-            inference.beta_standard_errors.as_mut(),
-            inference.beta_standard_errors_corrected.as_mut(),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        if let Some(se) = inference.factorized_standard_errors.as_mut() {
             for (value, &factor) in se.iter_mut().zip(row_factors.iter()) {
                 *value *= factor;
             }
@@ -2337,21 +2322,18 @@ fn survival_unified_fit_result(
     // a fabricated nearby matrix.
     let covariance_conditional =
         survival_conditional_covariance_from_penalized_hessian(&penalized_hessian);
-    // Standard errors come from the one gate that owns the negative-diagonal
-    // judgement (`gam_problem::se_from_covariance`), not a local `max(0, ·)`.
-    // A clamp reports a materially negative variance as `SE = 0` — an
-    // infinitely precise coefficient — where the shared gate refuses anything
-    // outside its dimension-scaled backward-error bound.
-    let beta_standard_errors = covariance_conditional
+    // Standard errors derive from this matrix (#2955) under the one gate that
+    // owns the negative-diagonal judgement (`gam_problem::se_from_covariance`),
+    // not a local `max(0, ·)`. A clamp reports a materially negative variance as
+    // `SE = 0` — an infinitely precise coefficient — where the shared gate
+    // refuses anything outside its dimension-scaled backward-error bound.
+    covariance_conditional
         .as_ref()
         .map(gam_problem::se_from_covariance)
         .transpose()
         .map_err(|reason| {
             format!("survival transformation conditional standard errors are invalid: {reason}")
         })?;
-    let beta_covariance = covariance_conditional
-        .clone()
-        .map(gam_problem::dispersion_cov::PhiScaledCovariance::wrap);
     let penalized_hessian = gam_problem::dispersion_cov::UnscaledPrecision::wrap(penalized_hessian);
 
     // #2627: on the FIXED-lambda survival path, lambda is a CONSTANT of the model
@@ -2458,7 +2440,7 @@ fn survival_unified_fit_result(
             .zip(covariance_conditional.as_ref())
             .map(|((correction, _), v_cond)| v_cond + correction)
     };
-    let beta_standard_errors_corrected = covariance_corrected
+    covariance_corrected
         .as_ref()
         .map(gam_problem::se_from_covariance)
         .transpose()
@@ -2486,10 +2468,7 @@ fn survival_unified_fit_result(
         penalized_hessian: penalized_hessian.clone(),
         reparam_qs: None,
         dispersion: gam_solve::estimate::Dispersion::UNIT,
-        beta_covariance,
-        beta_standard_errors,
-        beta_covariance_corrected: covariance_corrected.clone(),
-        beta_standard_errors_corrected,
+        factorized_standard_errors: None,
         beta_covariance_frequentist: None,
         coefficient_influence: None,
         weighted_gram: None,

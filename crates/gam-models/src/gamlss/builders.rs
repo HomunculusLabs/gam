@@ -1386,53 +1386,13 @@ fn finalize_binomial_mean_wiggle_saved_frame(
 
     let mut saved_inference = fit.inference.clone();
     if let Some(inference) = saved_inference.as_mut() {
-        if inference.beta_covariance.is_none() && inference.beta_standard_errors.is_some() {
+        // Standard errors published without their covariance have no saved-frame
+        // map: a diagonal does not survive the frame change.
+        if inference.factorized_standard_errors.is_some() {
             return Err(
-                "binomial mean-wiggle inference has conditional standard errors without their covariance"
+                "binomial mean-wiggle inference has standard errors without their covariance"
                     .to_string(),
             );
-        }
-        if inference.beta_covariance_corrected.is_none()
-            && inference.beta_standard_errors_corrected.is_some()
-        {
-            return Err(
-                "binomial mean-wiggle inference has corrected standard errors without their covariance"
-                    .to_string(),
-            );
-        }
-        if let Some(covariance) = inference.beta_covariance.take() {
-            let covariance = binomial_mean_wiggle_saved_covariance(
-                covariance.as_array(),
-                &saved_frame,
-                "inference conditional covariance",
-            )?;
-            if inference.beta_standard_errors.is_some() {
-                inference.beta_standard_errors = Some(
-                    gam_problem::se_from_covariance(&covariance).map_err(|reason| {
-                        format!(
-                            "binomial mean-wiggle saved conditional standard errors are invalid: {reason}"
-                        )
-                    })?,
-                );
-            }
-            inference.beta_covariance = Some(covariance.into());
-        }
-        if let Some(covariance) = inference.beta_covariance_corrected.take() {
-            let covariance = binomial_mean_wiggle_saved_covariance(
-                &covariance,
-                &saved_frame,
-                "inference corrected covariance",
-            )?;
-            if inference.beta_standard_errors_corrected.is_some() {
-                inference.beta_standard_errors_corrected = Some(
-                    gam_problem::se_from_covariance(&covariance).map_err(|reason| {
-                        format!(
-                            "binomial mean-wiggle saved corrected standard errors are invalid: {reason}"
-                        )
-                    })?,
-                );
-            }
-            inference.beta_covariance_corrected = Some(covariance);
         }
         if let Some(covariance) = inference.beta_covariance_frequentist.take() {
             inference.beta_covariance_frequentist = Some(binomial_mean_wiggle_saved_covariance(

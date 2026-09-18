@@ -492,19 +492,18 @@ fn require_converged_outer_for_assembly(outer_converged: bool) -> Result<(), Cus
     })
 }
 
-/// Assemble the first-order corrected covariance `V_c = V_cond + C` and the
-/// standard errors published beside it (#2346).
+/// Assemble the first-order corrected covariance `V_c = V_cond + C` (#2346).
 ///
-/// The standard errors go through `gam_problem::se_from_covariance` — the same
-/// gate the standard GAM lane, the GAMLSS builders and the penalty path already
-/// use — rather than a local `max(0, ·)` clamp. `V_c` is a *sum*, not a
-/// factorization, so a large negative correction on a weakly identified
-/// coefficient can drive a diagonal materially negative. A clamp publishes that
-/// coefficient with `SE = 0`, i.e. infinite precision and a Wald `p ≈ 0`;
-/// snapping a negative diagonal to zero is legitimate only inside the
-/// dimension-scaled backward-error bound, which is exactly the judgement
-/// `se_from_covariance` owns.
-fn corrected_covariance_and_standard_errors(
+/// Its diagonal goes through `gam_problem::se_from_covariance`, the gate the
+/// published standard errors are derived under (gam#2955), rather than a local
+/// `max(0, ·)` clamp. `V_c` is a *sum*, not a factorization, so a large negative
+/// correction on a weakly identified coefficient can drive a diagonal
+/// materially negative. A clamp publishes that coefficient with `SE = 0`, i.e.
+/// infinite precision and a Wald `p ≈ 0`; snapping a negative diagonal to zero
+/// is legitimate only inside the dimension-scaled backward-error bound, which is
+/// exactly the judgement `se_from_covariance` owns. Refusing here names the
+/// custom-family lane in the error, before the fit is minted.
+fn corrected_covariance(
     smoothing_corrected: Option<&(
         Array2<f64>,
         gam_solve::model_types::SmoothingCorrectionMethod,
@@ -515,31 +514,25 @@ fn corrected_covariance_and_standard_errors(
         Option<Array2<f64>>,
         Option<gam_solve::model_types::SmoothingCorrectionMethod>,
         Option<Array2<f64>>,
-        Option<Array1<f64>>,
     ),
     CustomFamilyError,
 > {
     let (Some((correction, method)), Some(v_cond)) = (smoothing_corrected, covariance_conditional)
     else {
-        return Ok((None, None, None, None));
+        return Ok((None, None, None));
     };
     if correction.dim() != v_cond.dim() {
-        return Ok((None, None, None, None));
+        return Ok((None, None, None));
     }
     let corrected = v_cond + correction;
-    let standard_errors = gam_problem::se_from_covariance(&corrected).map_err(|reason| {
+    gam_problem::se_from_covariance(&corrected).map_err(|reason| {
         CustomFamilyError::NumericalFailure {
             reason: format!(
                 "corrected covariance V_c = V_cond + C has an invalid diagonal: {reason}"
             ),
         }
     })?;
-    Ok((
-        Some(correction.clone()),
-        Some(*method),
-        Some(corrected),
-        Some(standard_errors),
-    ))
+    Ok((Some(correction.clone()), Some(*method), Some(corrected)))
 }
 
 #[cfg(test)]
@@ -558,7 +551,7 @@ mod corrected_covariance_tests {
     fn corrected_standard_errors_are_the_covariance_diagonal_roots() {
         let v_cond = Array2::from_diag(&Array1::from_vec(vec![4.0, 9.0]));
         let correction = Array2::from_diag(&Array1::from_vec(vec![5.0, 7.0]));
-        let (_, _, corrected, se) = corrected_covariance_and_standard_errors(
+        let (_, _, corrected) = corrected_covariance(
             Some(&(correction, first_order_method())),
             Some(&v_cond),
         )
@@ -566,7 +559,9 @@ mod corrected_covariance_tests {
         let corrected = corrected.expect("corrected covariance is published");
         assert_eq!(corrected[[0, 0]], 9.0);
         assert_eq!(corrected[[1, 1]], 16.0);
-        let se = se.expect("corrected standard errors are published");
+        // The published standard errors are derived from this one matrix (gam#2955).
+        let se = gam_problem::se_from_covariance(&corrected)
+            .expect("the corrected diagonal yields standard errors");
         assert_eq!(se[0], 3.0);
         assert_eq!(se[1], 4.0);
     }
@@ -579,7 +574,7 @@ mod corrected_covariance_tests {
         // is 0 — so the guard is that assembly now fails instead.
         let v_cond = Array2::from_diag(&Array1::from_vec(vec![4.0, 1.0]));
         let correction = Array2::from_diag(&Array1::from_vec(vec![0.0, -3.0]));
-        let error = corrected_covariance_and_standard_errors(
+        let error = corrected_covariance(
             Some(&(correction, first_order_method())),
             Some(&v_cond),
         )
@@ -595,7 +590,7 @@ mod corrected_covariance_tests {
     fn a_dimension_mismatched_correction_publishes_no_corrected_pair() {
         let v_cond = Array2::from_diag(&Array1::from_vec(vec![4.0, 9.0]));
         let correction = Array2::from_diag(&Array1::from_vec(vec![1.0]));
-        let (correction_out, method, corrected, se) = corrected_covariance_and_standard_errors(
+        let (correction_out, method, corrected) = corrected_covariance(
             Some(&(correction, first_order_method())),
             Some(&v_cond),
         )
@@ -603,7 +598,6 @@ mod corrected_covariance_tests {
         assert!(correction_out.is_none());
         assert!(method.is_none());
         assert!(corrected.is_none());
-        assert!(se.is_none());
     }
 }
 
@@ -966,29 +960,17 @@ pub fn blockwise_fit_from_parts(
     // #2346: publish the first-order corrected covariance when the outer ρ
     // curvature supplied one — `V_c = V_cond + C`, with the correction matrix
     // and its typed method provenance carried exactly like the standard lane.
-    let (smoothing_correction, smoothing_correction_method, corrected_cov, corrected_se) =
-        corrected_covariance_and_standard_errors(
+    let (smoothing_correction, smoothing_correction_method, corrected_cov) =
+        corrected_covariance(
             smoothing_corrected.as_ref(),
             covariance_conditional.as_ref(),
         )?;
-    // #2296 moved every display surface onto `display_coefficient_uncertainty()`
-    // (`gam-solve/src/model_types/result_types.rs:4281`), which selects on the
-    // inference block's STANDARD ERRORS and never on the covariance matrices —
-    // deliberately, so a presenter can never pair one definition's SEs with
-    // another definition's matrix. This lane published `covariance_conditional`
-    // to the top-level slot but left both inference-block conditional fields
-    // `None`, so the accessor saw no SEs under either definition, returned
-    // `None`, and `covariance_kind` / `covariance_n` / `covariance_flat` came
-    // back absent on every custom-family fit — a covariance that had been
-    // computed, validated (finite and `(p, p)`, above) and stored, then dropped
-    // at the read boundary. Publish the pair the accessor reads.
-    //
-    // `try_from_parts` requires `inference.beta_covariance` to equal the
-    // top-level `covariance_conditional` bitwise
-    // (`result_types.rs:3759-3769`), so this clones exactly that array and
-    // nothing else; `se_from_covariance` is the same diagonal gate the
-    // corrected pair goes through two lines above.
-    let conditional_se = covariance_conditional
+    // The published standard errors derive from the top-level covariance, the
+    // one store (gam#2955), so `display_coefficient_uncertainty()` (#2296) sees
+    // this lane's pairs whenever the matrices are published. The conditional
+    // diagonal goes through the same gate the corrected pair goes through above,
+    // so a refusal names this lane before the fit is minted (gam-2929).
+    covariance_conditional
         .as_ref()
         .map(gam_problem::se_from_covariance)
         .transpose()
@@ -1014,12 +996,7 @@ pub fn blockwise_fit_from_parts(
         penalized_hessian: geom.penalized_hessian.clone(),
         reparam_qs: None,
         dispersion: gam_solve::model_types::Dispersion::UNIT,
-        beta_covariance: covariance_conditional
-            .as_ref()
-            .map(|cov| gam_problem::PhiScaledCovariance::wrap(cov.clone())),
-        beta_standard_errors: conditional_se,
-        beta_covariance_corrected: corrected_cov.clone(),
-        beta_standard_errors_corrected: corrected_se,
+        factorized_standard_errors: None,
         beta_covariance_frequentist: None,
         coefficient_influence: None,
         weighted_gram: None,

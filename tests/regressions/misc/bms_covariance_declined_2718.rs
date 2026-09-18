@@ -435,16 +435,14 @@ fn bms_publishes_the_corrected_covariance_on_a_global_empirical_measure_2484() {
 
     // 4. And the derived surfaces are populated, not just the matrix. A
     //    consumer reads standard errors, not the covariance.
-    if let Some(inference) = out.fit.inference.as_ref() {
-        let ses = inference
-            .beta_standard_errors
-            .as_ref()
-            .expect("gam#2484: standard errors must be published alongside the covariance");
-        assert!(
-            ses.iter().all(|se| se.is_finite() && *se >= 0.0),
-            "gam#2484: published standard errors must be finite and non-negative, got {ses:?}"
-        );
-    }
+    let ses = out
+        .fit
+        .beta_standard_errors()
+        .expect("gam#2484: standard errors must be published alongside the covariance");
+    assert!(
+        ses.iter().all(|se| se.is_finite() && *se >= 0.0),
+        "gam#2484: published standard errors must be finite and non-negative, got {ses:?}"
+    );
 
     // 5. gam#2943: the published standard errors are the published covariance's,
     //    for both pairs. The correction used to reach only the top-level matrices,
@@ -470,25 +468,6 @@ fn bms_publishes_the_corrected_covariance_on_a_global_empirical_measure_2484() {
                     se * se
                 );
             }
-        }
-    }
-
-    // 6. gam#2943: each inference copy equals its top-level matrix bit for bit,
-    //    the condition `UnifiedFitResult::try_from_parts` enforces on every load.
-    if let Some(inference) = out.fit.inference.as_ref() {
-        if let Some(copy) = inference.beta_covariance.as_ref() {
-            assert_eq!(
-                Some(copy.as_array()),
-                out.fit.covariance_conditional.as_ref(),
-                "gam#2943: the inference conditional covariance must equal the top-level matrix"
-            );
-        }
-        if let Some(copy) = inference.beta_covariance_corrected.as_ref() {
-            assert_eq!(
-                Some(copy),
-                out.fit.covariance_corrected.as_ref(),
-                "gam#2943: the inference corrected covariance must equal the top-level matrix"
-            );
         }
     }
 }

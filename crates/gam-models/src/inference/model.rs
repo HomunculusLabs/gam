@@ -69,7 +69,21 @@ use std::path::Path;
 // v18 persists the Tier-0 rho-posterior seam's typed outcome (`FitArtifacts::rho_posterior`,
 // #2627), which v17 skipped at serialization and which carries no serde default, so a v17
 // payload is refused by name before the field is parsed.
-pub const MODEL_PAYLOAD_VERSION: u32 = 18;
+// v19 stores the coefficient covariance once (#2955): `FitInference` no longer
+// carries `beta_covariance`, `beta_standard_errors` or their corrected twins, and
+// the standard errors derive from `UnifiedFitResult::covariance_conditional` /
+// `covariance_corrected`. A v18 payload's copies were checked bit for bit against
+// those stores at save, so it still loads (`payload_version_is_readable`).
+pub const MODEL_PAYLOAD_VERSION: u32 = 19;
+
+/// The payload version this binary reads besides its own: the schema whose only
+/// difference is the inference block's redundant covariance copies (#2955).
+const COVARIANCE_COPIES_PAYLOAD_VERSION: u32 = 18;
+
+/// Whether this binary reads a payload written at `version`.
+fn payload_version_is_readable(version: u32) -> bool {
+    version == MODEL_PAYLOAD_VERSION || version == COVARIANCE_COPIES_PAYLOAD_VERSION
+}
 
 /// Coefficient parameterization of a saved transformation-normal (CTN) fit.
 ///
@@ -1046,7 +1060,7 @@ impl FittedModelPayload {
     }
 
     fn validate_payload_version(&self) -> Result<(), FittedModelError> {
-        if self.version != MODEL_PAYLOAD_VERSION {
+        if !payload_version_is_readable(self.version) {
             return Err(payload_version_mismatch(
                 self.version,
                 Some(&self.family_state.likelihood()),
@@ -4651,7 +4665,7 @@ impl FittedModel {
         // parse, so a schema whose other fields no longer parse still gets the typed
         // refusal instead of a parse error (#2902 row 34).
         if let Ok(probe) = serde_json::from_str::<PayloadVersionProbe>(&payload)
-            && probe.payload.version != MODEL_PAYLOAD_VERSION
+            && !payload_version_is_readable(probe.payload.version)
         {
             let likelihood = probe
                 .payload
@@ -7156,11 +7170,42 @@ mod tests {
                 lambdas: Array1::zeros(0),
             },
         ]);
-        let payload = marginal_slope_payload(MODEL_PAYLOAD_VERSION - 1, fit);
+        let payload = marginal_slope_payload(COVARIANCE_COPIES_PAYLOAD_VERSION - 1, fit);
 
         let err = FittedModel::from_payload(payload)
             .saved_prediction_runtime()
             .expect_err("stale payload version should fail before runtime assembly");
+        assert!(err.to_string().contains("payload schema mismatch"));
+    }
+
+    /// #2955: the schema one version before the one-store covariance is still
+    /// read, because its only difference is the inference block's covariance
+    /// copies, which were checked against the top-level stores at save and which
+    /// the reader drops. The version before that one is refused.
+    #[test]
+    fn the_covariance_copies_payload_version_is_readable_and_its_predecessor_is_not_2955() {
+        let blocks = || {
+            vec![FittedBlock {
+                beta: array![0.1],
+                role: BlockRole::Mean,
+                edf: 1.0,
+                lambdas: Array1::zeros(0),
+            }]
+        };
+        FittedModel::from_payload(marginal_slope_payload(
+            COVARIANCE_COPIES_PAYLOAD_VERSION,
+            saved_fit(blocks()),
+        ))
+        .payload()
+        .validate_payload_version()
+        .expect("a payload written with the covariance copies is readable");
+        let err = FittedModel::from_payload(marginal_slope_payload(
+            COVARIANCE_COPIES_PAYLOAD_VERSION - 1,
+            saved_fit(blocks()),
+        ))
+        .payload()
+        .validate_payload_version()
+        .expect_err("the version before the covariance-copies schema is refused");
         assert!(err.to_string().contains("payload schema mismatch"));
     }
 

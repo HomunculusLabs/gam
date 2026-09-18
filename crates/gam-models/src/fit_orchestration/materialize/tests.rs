@@ -2873,10 +2873,6 @@ fn gaussian_location_scale_raw_remap_keeps_inference_covariance_copies_bitwise_e
             .inference
             .as_mut()
             .expect("terms fit must carry an inference block");
-        inference.beta_covariance = Some(conditional.clone().into());
-        inference.beta_covariance_corrected = Some(corrected.clone());
-        inference.beta_standard_errors_corrected =
-            Some(corrected.diag().mapv(|v| v.max(0.0).sqrt()));
         inference.smoothing_correction = Some(&corrected - &conditional);
         inference.smoothing_correction_method = Some(
             gam_solve::model_types::SmoothingCorrectionMethod::FirstOrderIdentifiedSubspace {
@@ -2904,25 +2900,6 @@ fn gaussian_location_scale_raw_remap_keeps_inference_covariance_copies_bitwise_e
         (top_corrected[[0, 0]] - corrected[[0, 0]]).abs() > 1e-12,
         "remap with s={s} must rescale the corrected covariance"
     );
-    // ...and every inference copy must land bitwise on its top-level twin,
-    // which is exactly what the predict-time revalidation requires.
-    assert_eq!(
-        inference
-            .beta_covariance
-            .as_ref()
-            .expect("inference conditional copy survives")
-            .as_array(),
-        top_conditional,
-        "inference conditional covariance must ride the raw remap bitwise (#2386)"
-    );
-    assert_eq!(
-        inference
-            .beta_covariance_corrected
-            .as_ref()
-            .expect("inference corrected copy survives"),
-        top_corrected,
-        "inference corrected covariance must ride the raw remap bitwise (#2386)"
-    );
     // The corrected decomposition Vp = Vb + C must keep holding in raw units:
     // both sides ride the same congruence, so their difference is the remapped
     // correction matrix.
@@ -2941,12 +2918,11 @@ fn gaussian_location_scale_raw_remap_keeps_inference_covariance_copies_bitwise_e
             );
         }
     }
-    // Corrected SEs are the remapped per-coordinate scale of the corrected
-    // diagonal: se_raw_i = f_i * se_i with f_i > 0, so se_raw_i^2 must equal
-    // the corrected diagonal exactly up to float regrouping.
-    let se = inference
-        .beta_standard_errors_corrected
-        .as_ref()
+    // Corrected SEs are derived from the one remapped corrected covariance, so
+    // se_raw_i^2 must equal the corrected diagonal exactly up to float
+    // regrouping.
+    let se = fit
+        .beta_standard_errors_corrected()
         .expect("corrected SEs survive");
     assert_eq!(se.len(), p);
     for i in 0..p {
@@ -3057,16 +3033,14 @@ fn gaussian_location_scale_raw_remap_representations_agree_1561() {
         .expect("the terms fit publishes a conditional covariance");
     assert_eq!(Some(covariance_a), b.covariance_conditional.as_ref());
     assert_eq!(a.covariance_corrected, b.covariance_corrected);
-    let inf_a = a.inference.as_ref().expect("rescaled inference block");
-    let inf_b = b.inference.as_ref().expect("composed inference block");
     assert!(
-        inf_a.beta_standard_errors.is_some(),
+        a.beta_standard_errors().is_some(),
         "the terms fit publishes conditional standard errors"
     );
-    assert_eq!(inf_a.beta_standard_errors, inf_b.beta_standard_errors);
+    assert_eq!(a.beta_standard_errors(), b.beta_standard_errors());
     assert_eq!(
-        inf_a.beta_standard_errors_corrected,
-        inf_b.beta_standard_errors_corrected
+        a.beta_standard_errors_corrected(),
+        b.beta_standard_errors_corrected()
     );
 
     // Predictions on the fitted rows: each channel's linear predictor
@@ -3119,6 +3093,8 @@ fn gaussian_location_scale_raw_remap_representations_agree_1561() {
     // the as-solved precision on the composed section β_raw = D·β_internal + a.
     let geom_a = a.geometry.as_ref().expect("rescaled geometry");
     let geom_b = b.geometry.as_ref().expect("composed geometry");
+    let inf_a = a.inference.as_ref().expect("rescaled inference block");
+    let inf_b = b.inference.as_ref().expect("composed inference block");
     assert!(geom_a.coefficient_gauge.is_identity());
     assert!(!geom_b.coefficient_gauge.is_identity());
     assert!(

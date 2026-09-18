@@ -29,7 +29,7 @@ pub(crate) fn build_model_summary(
     let display_uncertainty = fit.display_coefficient_uncertainty();
     let se = display_uncertainty
         .as_ref()
-        .map(|view| view.standard_errors);
+        .map(|view| &view.standard_errors);
     // Wood (2013) design-whitening metric for the Wald smooth test (#2142):
     // the exact weighted Gram `X'WX` when the inference block is present, else
     // the unweighted `X'X` from the summary design (here the real training

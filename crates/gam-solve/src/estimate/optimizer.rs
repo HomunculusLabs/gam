@@ -2502,9 +2502,8 @@ where
     let mut rho_covariance = None;
     let mut penalized_hessian = Array2::<f64>::zeros((0, 0));
     let mut beta_covariance = None;
-    let mut beta_standard_errors = None;
+    let mut factorized_standard_errors = None;
     let mut beta_covariance_corrected = None;
-    let mut beta_standard_errors_corrected = None;
     // #2705 group A: carried from where the constrained-posterior correction is
     // APPLIED to where the corrected covariance is READ, so the refusal below
     // can say which producer's budget the negative diagonal is inside.
@@ -3138,7 +3137,6 @@ where
         penalized_hessian = map_hessian_to_original_basis(&pirls_res)?;
     }
     if opts.compute_inference {
-        let p_cov = penalized_hessian.nrows();
         let qs = &pirls_res.reparam_result.qs;
 
         // Auto-select covariance strategy from the runtime resource policy.
@@ -3621,16 +3619,11 @@ where
             se_chunk_target_bytes,
             qs.ncols().saturating_mul(2),
         );
-        beta_standard_errors = if beta_covariance_unscaled.is_some() {
+        if let Some(covariance) = beta_covariance.as_ref() {
             // The dense covariance already includes the inequality-truncation
-            // correction. Derive SEs from that same matrix so the dense and
-            // factorized representations cannot disagree.
-            let covariance = beta_covariance.as_ref().ok_or_else(|| {
-                EstimationError::RemlOptimizationFailed(
-                    "dense posterior covariance was not retained for standard errors".to_string(),
-                )
-            })?;
-            let mut raw_se = Array1::<f64>::zeros(p_cov);
+            // correction, and the published standard errors derive from it
+            // (#2955). Its diagonal is judged here, where the attribution is.
+            //
             // Why an inequality-truncated covariance may show an exactly-zero
             // diagonal, and why that is a measurement rather than a defect
             // (#2705 group A).
@@ -3669,71 +3662,12 @@ where
                          cubature_allowance={allowance} truncation_applied={truncation_applied}]"
                     )));
                 }
-                raw_se[index] = variance.sqrt();
             }
-            Some(raw_se)
         } else if let Some(ref factor_t) = edf_factor {
-            // Solve-on-demand: process columns of Qs^T in chunks.
-            // Qs is (p_cov × p_t) orthogonal. H_orig⁻¹ = Qs H_t⁻¹ Qs'.
-            // (H_orig⁻¹)_{ii} = Qs[i,:] · H_t⁻¹ · Qs[i,:]'
-            // Batch: column i of Qs^T is row i of Qs. Solve H_t Z = Qs^T[:,chunk]
-            // then dot each solution column back with the corresponding Qs row.
-            if se_chunk_cols == 0 {
-                return Err(EstimationError::RemlOptimizationFailed(
-                    "resource policy cannot admit even one exact factorized coefficient-SE column"
-                        .to_string(),
-                ));
-            }
-            let mut diag_inv = Array1::<f64>::zeros(p_cov);
-            let mut col_start = 0usize;
-            while col_start < p_cov {
-                let col_end = (col_start + se_chunk_cols).min(p_cov);
-                let chunk = col_end - col_start;
-                let chunk_reservation = governor
-                    .try_reserve_dense_f64_copies(
-                        qs.ncols(),
-                        chunk,
-                        2,
-                        "factorized coefficient-SE solve chunk",
-                    )
-                    // The typed refusal carries the budget, what was already
-                    // reserved, and the availability observation the budget was
-                    // derived from. Discarding it left two runs that refused for
-                    // different reasons indistinguishable in the log, which is
-                    // half of why #2702 took a filed issue to diagnose: state the
-                    // measured quantities, not just the verdict.
-                    .map_err(|refusal| {
-                        EstimationError::RemlOptimizationFailed(format!(
-                            "resource policy refused exact coefficient-SE columns \
-                             {col_start}..{col_end} ({chunk} of {p_cov} columns, \
-                             {p_t} transformed rows): {refusal}",
-                            p_t = qs.ncols(),
-                        ))
-                    })?;
-                // qs.t() has shape (p_t, p_cov); slice to (p_t, chunk). The
-                // reservation covers this buffer and its `solvemulti` output
-                // jointly, so it is bound to whichever one outlives the other
-                // (both are dropped together at the end of this iteration).
-                let rhs = chunk_reservation
-                    .bind(qs.t().slice(ndarray::s![.., col_start..col_end]).to_owned());
-                let z_chunk = factor_t.certified_solve(
-                    &pirls_res.stabilizedhessian_transformed,
-                    &rhs,
-                    &format!(
-                        "factorized coefficient standard errors at columns {col_start}..{col_end}"
-                    ),
-                )?;
-                // z_chunk is (p_t × chunk).
-                // (H_orig⁻¹)_{ii} = qs.row(i) · z_chunk.column(i - col_start)
-                for local_i in 0..chunk {
-                    let global_i = col_start + local_i;
-                    let qs_row = qs.row(global_i);
-                    let z_col = z_chunk.column(local_i);
-                    diag_inv[global_i] = qs_row.dot(&z_col);
-                }
-                col_start = col_end;
-            }
-            let removed_variance = constrained_posterior
+            // No dense `Σ`: solve the published coordinates' diagonal
+            // `diag(M·Σ·Mᵀ)` through the factor, one row of `M·Qs` per solve
+            // (#2960), and publish it as the fit's standard errors.
+            let correction = constrained_posterior
                 .as_ref()
                 .map(crate::constrained_posterior::ConstrainedPosteriorGeometry::correction)
                 .transpose()
@@ -3742,61 +3676,36 @@ where
                         "constrained posterior variance correction is unavailable: {reason}"
                     ))
                 })?
-                .flatten()
-                .map(|correction| correction.removed_variance_diagonal())
-                .unwrap_or_else(|| Array1::<f64>::zeros(p_cov));
-            let mut se = Array1::<f64>::zeros(p_cov);
-            for (index, &variance_unscaled) in diag_inv.iter().enumerate() {
-                if !(variance_unscaled.is_finite() && variance_unscaled > 0.0) {
-                    return Err(EstimationError::RemlOptimizationFailed(format!(
-                        "exact factorized SPD inverse has invalid diagonal {index}: {variance_unscaled:?}"
-                    )));
-                }
-                let base = cov_scale * variance_unscaled;
-                let removed = removed_variance[index];
-                let variance = base - removed;
-                // #2705 group A. The dense branch assembles this quantity as a
-                // sum of squares and cannot produce a negative variance; here
-                // there is no dense `Σ` to factor, so the subtraction stands —
-                // and on a coordinate the constraint pins, `removed` cancels
-                // `base` to the last digit and the residue carries a sign.
-                //
-                // The resolution of that residue is a MEASURED quantity, not a
-                // chosen one: `base` and `removed` are each accurate to a
-                // relative rounding error, so their difference is accurate to
-                // `~ε·max(base, removed)` in ABSOLUTE terms — which is the whole
-                // of the answer once the removal is complete. A residue inside
-                // that band is the zero it is approximating (the λ → ∞ limit of
-                // the truncation, the only value it can be). A residue outside
-                // it is a real negative variance and is refused, with the
-                // decomposition attached so the next reader does not have to
-                // re-derive which producer overran.
-                let subtraction_resolution =
-                    16.0 * f64::EPSILON * base.abs().max(removed.abs());
-                let variance = if variance < 0.0 && -variance <= subtraction_resolution {
-                    0.0
-                } else {
-                    variance
-                };
-                let valid = if zero_covariance_boundary {
-                    variance == 0.0
-                } else {
-                    variance.is_finite() && variance >= 0.0
-                };
-                if !valid {
-                    return Err(EstimationError::RemlOptimizationFailed(format!(
-                        "factorized posterior variance {index} is not positive and \
-                         representable: {variance:?} [#2705 attribution: base={base:.6e} \
-                         removed_variance_diag={removed:.6e} \
-                         subtraction_resolution={subtraction_resolution:.6e}]"
-                    )));
-                }
-                se[index] = variance.sqrt();
-            }
-            Some(se)
+                .flatten();
+            factorized_standard_errors = Some(crate::estimate::penalty::factorized_standard_errors(
+                &conditioning,
+                qs,
+                cov_scale,
+                correction,
+                zero_covariance_boundary,
+                se_chunk_cols,
+                |rhs, rows| {
+                    factor_t.certified_solve(
+                        &pirls_res.stabilizedhessian_transformed,
+                        rhs,
+                        &format!(
+                            "factorized coefficient standard errors at rows {}..{}",
+                            rows.start, rows.end
+                        ),
+                    )
+                },
+            )?);
         } else {
-            None
-        };
+            // `edf_factor` is set on every `compute_inference` fit, so one of
+            // the two branches above runs. Reaching here would publish an
+            // inference block with neither a covariance nor standard errors and
+            // no reason; say which invariant broke instead (gam-2929, gam#2955).
+            return Err(EstimationError::RemlOptimizationFailed(
+                "coefficient standard errors were requested with neither a dense posterior \
+                 covariance nor an inference factor to solve them from"
+                    .to_string(),
+            ));
+        }
 
         // Vp = Vb + J·V_ρ·Jᵀ, both terms on the SAME dispersion (variance) scale.
         //
@@ -3897,7 +3806,9 @@ where
             }
             _ => None,
         };
-        beta_standard_errors_corrected = beta_covariance_corrected
+        // The published corrected standard errors derive from this matrix
+        // (#2955); judge its diagonal here, where the attribution is.
+        beta_covariance_corrected
             .as_ref()
             .map(se_from_covariance)
             .transpose()
@@ -3957,10 +3868,7 @@ where
         penalized_hessian: penalized_hessian.clone().into(),
         reparam_qs: Some(pirls_res.reparam_result.qs.clone()),
         dispersion,
-        beta_covariance,
-        beta_standard_errors,
-        beta_covariance_corrected,
-        beta_standard_errors_corrected,
+        factorized_standard_errors,
         beta_covariance_frequentist,
         coefficient_influence,
         weighted_gram,
@@ -4138,6 +4046,8 @@ where
             ..Default::default()
         },
         inference,
+        covariance_conditional: beta_covariance.map(Array2::from),
+        covariance_corrected: beta_covariance_corrected,
         reml_score: (!zero_covariance_boundary).then_some(outer_result.final_value),
         outer_cost_evals: usize::try_from(
             // A panic elsewhere can poison this lock, but the count it guards is

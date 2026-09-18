@@ -618,7 +618,7 @@ pub fn saved_model_summary(model: &FittedModel) -> Result<SummaryPayload, String
     let display_uncertainty = fit.display_coefficient_uncertainty();
     let standard_errors = display_uncertainty
         .as_ref()
-        .map(|view| view.standard_errors);
+        .map(|view| &view.standard_errors);
     let covariance = display_uncertainty.as_ref().and_then(|view| {
         view.covariance
             .map(|cov| (view.definition.as_str().to_string(), cov))
@@ -971,9 +971,10 @@ pub fn saved_model_report_input(
         .unwrap_or_else(|| fit.edf_total().unwrap_or(0.0));
     // Definition-consistent SE column (#2296): corrected-preferred, but never
     // an unlabeled mix of covariance definitions.
-    let standard_errors = fit
-        .display_coefficient_uncertainty()
-        .map(|view| view.standard_errors);
+    let display_uncertainty = fit.display_coefficient_uncertainty();
+    let standard_errors = display_uncertainty
+        .as_ref()
+        .map(|view| &view.standard_errors);
     let coefficients = fit
         .beta
         .iter()

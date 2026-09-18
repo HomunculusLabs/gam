@@ -162,10 +162,7 @@ mod per_term_edf_tests {
                 reparam_qs: None,
                 dispersion: Dispersion::estimated(1.0)
                     .expect("1.0 is a valid estimated dispersion"),
-                beta_covariance: None,
-                beta_standard_errors: None,
-                beta_covariance_corrected: None,
-                beta_standard_errors_corrected: None,
+                factorized_standard_errors: None,
                 beta_covariance_frequentist: None,
                 coefficient_influence: None,
                 weighted_gram: None,
@@ -275,10 +272,7 @@ mod per_term_edf_tests {
                 reparam_qs: None,
                 dispersion: Dispersion::estimated(1.0)
                     .expect("1.0 is a valid estimated dispersion"),
-                beta_covariance: None,
-                beta_standard_errors: None,
-                beta_covariance_corrected: None,
-                beta_standard_errors_corrected: None,
+                factorized_standard_errors: None,
                 beta_covariance_frequentist: None,
                 coefficient_influence: Some(influence),
                 weighted_gram: None,
@@ -350,10 +344,7 @@ mod per_term_edf_tests {
                 reparam_qs: None,
                 dispersion: Dispersion::estimated(1.0)
                     .expect("1.0 is a valid estimated dispersion"),
-                beta_covariance: None,
-                beta_standard_errors: None,
-                beta_covariance_corrected: None,
-                beta_standard_errors_corrected: None,
+                factorized_standard_errors: None,
                 beta_covariance_frequentist: None,
                 // No influence matrix: forces the `|coeff_range| − Σ tr_kk`
                 // per-block-trace channel, where the `penalty_cursor` walk matters.
@@ -555,10 +546,7 @@ mod per_term_edf_tests {
                 reparam_qs: None,
                 dispersion: Dispersion::estimated(1.0)
                     .expect("1.0 is a valid estimated dispersion"),
-                beta_covariance: None,
-                beta_standard_errors: None,
-                beta_covariance_corrected: None,
-                beta_standard_errors_corrected: None,
+                factorized_standard_errors: None,
                 beta_covariance_frequentist: None,
                 // No influence matrix: forces the per-block-trace fallback where
                 // `penalty_cursor` keys into `penalty_block_trace`.
@@ -2194,7 +2182,7 @@ mod shipped_criterion_identity_tests {
 /// did not (gam#2718, gam#2484).
 ///
 /// A bare `None` on [`UnifiedFitResult::covariance_conditional`] or
-/// `FitInference::beta_covariance` is three states wearing one costume: *not
+/// [`UnifiedFitResult::covariance_corrected`] is three states wearing one costume: *not
 /// requested*, *not computed*, and *computed but not valid to publish*. A
 /// consumer cannot tell them apart, so an absence that was a considered refusal
 /// reads exactly like an absence nobody thought about. This enum is the third
@@ -2700,6 +2688,7 @@ impl std::fmt::Display for SmoothingCorrectionAbsence {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(from = "FitInferenceWire")]
 pub struct FitInference {
     pub edf_by_block: Vec<f64>,
     /// Raw per-penalty-block trace `tr_kk = λ_kk·tr(H⁻¹ S_kk)`, one entry per
@@ -2764,21 +2753,19 @@ pub struct FitInference {
     /// required on the wire — no `#[serde(default)]`, which would both demand a
     /// nonexistent `Default` impl and silently fabricate an unvalidated scale.
     pub dispersion: Dispersion,
-    /// Conditional Bayesian covariance under fixed smoothing parameters (mgcv
-    /// `Vb`). In an unreduced coefficient frame, `Vb = H^{-1} * phi`. With an
-    /// active geometry gauge `β = Tθ + a`, the saved/raw covariance is
-    /// `Vb = T H_θ^{-1} Tᵀ * phi`. Do not use an unscaled `H^{-1}` for
-    /// standard errors when scale is estimated.
-    pub beta_covariance: Option<gam_problem::dispersion_cov::PhiScaledCovariance>,
-    /// Marginal SEs from `beta_covariance`.
-    pub beta_standard_errors: Option<Array1<f64>>,
-    /// Optional smoothing-parameter-corrected Bayesian covariance (mgcv `Vp`):
-    /// `Vp = Vb + V_lambda`, on the same dispersion scale as `Vb`. Usually
-    /// this is first-order: `Var*(β) ≈ Var(β|λ) + J Var(ρ) J^T`; high-risk
-    /// regimes may use adaptive cubature for higher-order terms.
-    pub beta_covariance_corrected: Option<Array2<f64>>,
-    /// Marginal SEs from `beta_covariance_corrected` (`Vp`).
-    pub beta_standard_errors_corrected: Option<Array1<f64>>,
+    /// Marginal standard errors published WITHOUT a coefficient covariance.
+    ///
+    /// The standard optimizer's factorized branch solves `diag(M·Σ·Mᵀ)`
+    /// through the Hessian factor when the resource governor refuses the dense
+    /// bundle, and publishes only that diagonal (#2960). Every other fit
+    /// publishes its covariance in [`UnifiedFitResult::covariance_conditional`]
+    /// and [`UnifiedFitResult::covariance_corrected`], the only store of each,
+    /// and [`UnifiedFitResult::beta_standard_errors`] derives the standard
+    /// errors from it (#2955). [`UnifiedFitResult::try_from_parts`] refuses a
+    /// fit that carries both, so a published diagonal has no second copy to go
+    /// stale.
+    #[serde(default)]
+    pub factorized_standard_errors: Option<Array1<f64>>,
     /// Frequentist covariance Ve = H⁻¹ X'WX H⁻¹ * φ̂.
     #[serde(default)]
     pub beta_covariance_frequentist: Option<Array2<f64>>,
@@ -2802,6 +2789,77 @@ pub struct FitInference {
     /// does not form this Hessian.
     #[serde(default)]
     pub identified_subspace: Option<IdentifiedCoefficientSubspace>,
+}
+
+/// The wire form [`FitInference`] deserializes through.
+///
+/// A payload written before the one-store schema (#2955) also carries
+/// `beta_covariance`, `beta_standard_errors`, `beta_covariance_corrected` and
+/// `beta_standard_errors_corrected`. The covariance copies were checked bit for
+/// bit against the top-level stores when the model was saved, so they are
+/// dropped. The standard errors of a fit that published no covariance, the
+/// factorized branch's diagonal, lived only in `beta_standard_errors`, so they
+/// are carried into [`FitInference::factorized_standard_errors`].
+#[derive(Deserialize)]
+struct FitInferenceWire {
+    edf_by_block: Vec<f64>,
+    #[serde(default)]
+    penalty_block_trace: Vec<f64>,
+    edf_total: f64,
+    smoothing_correction: Option<Array2<f64>>,
+    smoothing_correction_method: Option<SmoothingCorrectionMethod>,
+    #[serde(default)]
+    smoothing_correction_first_order: Option<Array2<f64>>,
+    #[serde(default)]
+    smoothing_correction_method_first_order: Option<SmoothingCorrectionMethod>,
+    #[serde(default)]
+    smoothing_correction_absence: Option<SmoothingCorrectionAbsence>,
+    penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision,
+    reparam_qs: Option<Array2<f64>>,
+    dispersion: Dispersion,
+    #[serde(default)]
+    factorized_standard_errors: Option<Array1<f64>>,
+    #[serde(default)]
+    beta_covariance: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    beta_standard_errors: Option<Array1<f64>>,
+    #[serde(default)]
+    beta_covariance_frequentist: Option<Array2<f64>>,
+    #[serde(default)]
+    coefficient_influence: Option<Array2<f64>>,
+    #[serde(default)]
+    weighted_gram: Option<Array2<f64>>,
+    #[serde(default)]
+    identified_subspace: Option<IdentifiedCoefficientSubspace>,
+}
+
+impl From<FitInferenceWire> for FitInference {
+    fn from(wire: FitInferenceWire) -> Self {
+        let factorized_standard_errors = match (wire.factorized_standard_errors, wire.beta_covariance)
+        {
+            (Some(standard_errors), _) => Some(standard_errors),
+            (None, None) => wire.beta_standard_errors,
+            (None, Some(_)) => None,
+        };
+        Self {
+            edf_by_block: wire.edf_by_block,
+            penalty_block_trace: wire.penalty_block_trace,
+            edf_total: wire.edf_total,
+            smoothing_correction: wire.smoothing_correction,
+            smoothing_correction_method: wire.smoothing_correction_method,
+            smoothing_correction_first_order: wire.smoothing_correction_first_order,
+            smoothing_correction_method_first_order: wire.smoothing_correction_method_first_order,
+            smoothing_correction_absence: wire.smoothing_correction_absence,
+            penalized_hessian: wire.penalized_hessian,
+            reparam_qs: wire.reparam_qs,
+            dispersion: wire.dispersion,
+            factorized_standard_errors,
+            beta_covariance_frequentist: wire.beta_covariance_frequentist,
+            coefficient_influence: wire.coefficient_influence,
+            weighted_gram: wire.weighted_gram,
+            identified_subspace: wire.identified_subspace,
+        }
+    }
 }
 
 /// The coefficient directions the REML criterion scored `½log|H|₊` over at the
@@ -3338,10 +3396,7 @@ mod assembly_inner_status_gate_tests {
                 reparam_qs: None,
                 dispersion: Dispersion::estimated(1.0)
                     .expect("1.0 is a valid estimated dispersion"),
-                beta_covariance: None,
-                beta_standard_errors: None,
-                beta_covariance_corrected: None,
-                beta_standard_errors_corrected: None,
+                factorized_standard_errors: None,
                 beta_covariance_frequentist: None,
                 coefficient_influence: None,
                 weighted_gram: None,
@@ -3484,10 +3539,32 @@ mod assembly_inner_status_gate_tests {
         );
     }
 
-    /// gam#2943: a covariance correction reaches every published copy in one
-    /// step. The marginal-slope Murphy–Topel correction used to add to the
-    /// top-level matrices only, so the inference copies kept the uncorrected
-    /// matrix and every saved-model load refused the fit.
+    /// `beta_standard_errors()² == diag(beta_covariance())` for both published
+    /// pairs: the property one store gives by construction (#2955).
+    fn assert_standard_errors_are_the_published_diagonal(fit: &UnifiedFitResult) {
+        for (label, standard_errors, covariance) in [
+            ("conditional", fit.beta_standard_errors(), fit.beta_covariance()),
+            ("corrected", fit.beta_standard_errors_corrected(), fit.beta_covariance_corrected()),
+        ] {
+            let standard_errors =
+                standard_errors.unwrap_or_else(|| panic!("{label} standard errors are published"));
+            let covariance = covariance.unwrap_or_else(|| panic!("{label} covariance is published"));
+            assert_eq!(standard_errors.len(), covariance.nrows(), "{label} width");
+            for (i, (se, diagonal)) in standard_errors.iter().zip(covariance.diag().iter()).enumerate() {
+                assert!(
+                    (se * se - diagonal).abs() <= 4.0 * f64::EPSILON * diagonal.abs(),
+                    "{label} standard error {i} squares to {:.17e} against the diagonal {diagonal:.17e}",
+                    se * se
+                );
+            }
+        }
+    }
+
+    /// gam#2943: a covariance correction reaches the published covariances and
+    /// their standard errors in one step. The marginal-slope Murphy–Topel
+    /// correction used to add to the top-level matrices only, so the inference
+    /// copies kept the uncorrected matrix and every saved-model load refused the
+    /// fit; with one store (#2955) there is no second copy to miss.
     #[test]
     fn covariance_correction_reaches_every_published_copy_2943() {
         let conditional = Array2::from_shape_vec((2, 2), vec![2.0, 0.3, 0.3, 3.0]).expect("2x2");
@@ -3496,14 +3573,6 @@ mod assembly_inner_status_gate_tests {
         let mut parts = parts_with_inner_status(PirlsStatus::Converged);
         parts.covariance_conditional = Some(conditional.clone());
         parts.covariance_corrected = Some(corrected.clone());
-        if let Some(inference) = parts.inference.as_mut() {
-            inference.beta_covariance = Some(gam_problem::dispersion_cov::PhiScaledCovariance::wrap(
-                conditional.clone(),
-            ));
-            inference.beta_standard_errors = Some(conditional.diag().mapv(f64::sqrt));
-            inference.beta_covariance_corrected = Some(corrected.clone());
-            inference.beta_standard_errors_corrected = Some(corrected.diag().mapv(f64::sqrt));
-        }
         let mut fit = UnifiedFitResult::try_from_parts(parts).expect("a consistent fit mints");
 
         let wrong_shape = Array2::<f64>::zeros((3, 3));
@@ -3514,48 +3583,196 @@ mod assembly_inner_status_gate_tests {
         fit.add_coefficient_covariance_correction(&correction)
             .expect("the correction applies");
 
-        let top_conditional = fit.covariance_conditional.clone().expect("conditional covariance");
-        let top_corrected = fit.covariance_corrected.clone().expect("corrected covariance");
-        assert_eq!(top_conditional, &conditional + &correction);
-        assert_eq!(top_corrected, &corrected + &correction);
-        let inference = fit.inference.as_ref().expect("inference block");
-        assert_eq!(
-            inference.beta_covariance.as_ref().expect("inference conditional copy").as_array(),
-            &top_conditional,
-            "the inference conditional copy must equal the top-level matrix bit for bit"
-        );
-        assert_eq!(
-            inference.beta_covariance_corrected.as_ref().expect("inference corrected copy"),
-            &top_corrected,
-            "the inference corrected copy must equal the top-level matrix bit for bit"
-        );
-        for (label, standard_errors, covariance) in [
-            ("conditional", fit.beta_standard_errors(), fit.beta_covariance()),
-            ("corrected", fit.beta_standard_errors_corrected(), fit.beta_covariance_corrected()),
-        ] {
-            let standard_errors = standard_errors.expect("published standard errors");
-            let covariance = covariance.expect("published covariance");
-            for (i, (se, diagonal)) in standard_errors.iter().zip(covariance.diag().iter()).enumerate() {
-                assert!(
-                    (se * se - diagonal).abs() <= 1.0e-12 * diagonal.abs().max(1.0),
-                    "{label} standard error {i} squares to {:.17e} against the diagonal {diagonal:.17e}",
-                    se * se
-                );
-            }
-        }
+        assert_eq!(fit.covariance_conditional, Some(&conditional + &correction));
+        assert_eq!(fit.covariance_corrected, Some(&corrected + &correction));
+        assert_standard_errors_are_the_published_diagonal(&fit);
 
-        // The corrected state mints again under the strict invariant.
+        // The corrected state mints again under try_from_parts.
         let mut round_trip = parts_with_inner_status(PirlsStatus::Converged);
         round_trip.covariance_conditional = fit.covariance_conditional.clone();
         round_trip.covariance_corrected = fit.covariance_corrected.clone();
-        if let (Some(target), Some(source)) = (round_trip.inference.as_mut(), fit.inference.as_ref()) {
-            target.beta_covariance = source.beta_covariance.clone();
-            target.beta_standard_errors = source.beta_standard_errors.clone();
-            target.beta_covariance_corrected = source.beta_covariance_corrected.clone();
-            target.beta_standard_errors_corrected = source.beta_standard_errors_corrected.clone();
-        }
         UnifiedFitResult::try_from_parts(round_trip)
-            .expect("the corrected covariance copies must mint again under try_from_parts");
+            .expect("the corrected covariances must mint again under try_from_parts");
+
+        // A correction cannot reach a diagonal published without its covariance.
+        let mut factorized = parts_with_inner_status(PirlsStatus::Converged);
+        if let Some(inference) = factorized.inference.as_mut() {
+            inference.factorized_standard_errors = Some(Array1::from_vec(vec![1.0, 2.0]));
+        }
+        let mut factorized =
+            UnifiedFitResult::try_from_parts(factorized).expect("factorized standard errors mint");
+        assert!(
+            factorized
+                .add_coefficient_covariance_correction(&correction)
+                .is_err(),
+            "a correction must refuse standard errors published without their covariance"
+        );
+    }
+
+    /// #2955: the standard errors derive from the one covariance store for both
+    /// pairs, survive a `try_from_parts` re-mint of the fit's own fields, and
+    /// are not written as a second copy.
+    #[test]
+    fn standard_errors_derive_from_the_one_covariance_store_2955() {
+        let mut parts = parts_with_inner_status(PirlsStatus::Converged);
+        parts.covariance_conditional =
+            Some(Array2::from_shape_vec((2, 2), vec![2.0, 0.3, 0.3, 3.0]).expect("2x2"));
+        parts.covariance_corrected =
+            Some(Array2::from_shape_vec((2, 2), vec![2.5, 0.4, 0.4, 3.5]).expect("2x2"));
+        let fit = UnifiedFitResult::try_from_parts(parts).expect("a consistent fit mints");
+        assert_standard_errors_are_the_published_diagonal(&fit);
+        fit.validate_numeric_finiteness()
+            .expect("the minted fit re-mints from its own fields");
+
+        let encoded = serde_json::to_string(&fit).expect("serialize the fit");
+        assert!(
+            !encoded.contains("beta_standard_errors") && !encoded.contains("\"beta_covariance\""),
+            "the one-store schema writes no covariance or standard-error copy"
+        );
+        let decoded: UnifiedFitResult = serde_json::from_str(&encoded).expect("the fit parses back");
+        assert_eq!(decoded.beta_standard_errors(), fit.beta_standard_errors());
+        assert_eq!(
+            decoded.beta_standard_errors_corrected(),
+            fit.beta_standard_errors_corrected()
+        );
+    }
+
+    /// #2955: a covariance whose diagonal `se_from_covariance` refuses is refused
+    /// at mint, by name, so the derived standard errors need no `Result`.
+    #[test]
+    fn a_materially_negative_covariance_diagonal_is_refused_at_mint_2955() {
+        let negative = Array2::from_shape_vec((2, 2), vec![-1.0, 0.0, 0.0, 2.0]).expect("2x2");
+        for label in ["conditional", "smoothing-corrected"] {
+            let mut parts = parts_with_inner_status(PirlsStatus::Converged);
+            if label == "conditional" {
+                parts.covariance_conditional = Some(negative.clone());
+            } else {
+                parts.covariance_corrected = Some(negative.clone());
+            }
+            let message = UnifiedFitResult::try_from_parts(parts)
+                .expect_err("a materially negative diagonal must be refused")
+                .to_string();
+            assert!(
+                message.contains(&format!("{label} covariance has an invalid diagonal")),
+                "refused for another reason: {message}"
+            );
+        }
+
+        // A roundoff-sized negative diagonal is inside `se_from_covariance`'s own
+        // band: it mints and derives a zero standard error (gam-2929's arm).
+        let mut parts = parts_with_inner_status(PirlsStatus::Converged);
+        parts.covariance_conditional =
+            Some(Array2::from_shape_vec((2, 2), vec![2.0, 0.0, 0.0, -1.0e-17]).expect("2x2"));
+        let snapped = UnifiedFitResult::try_from_parts(parts)
+            .expect("a roundoff-sized negative diagonal mints");
+        assert_eq!(
+            snapped.beta_standard_errors().expect("standard errors")[1],
+            0.0,
+            "a roundoff-sized negative diagonal derives a zero standard error"
+        );
+
+        // A correction that drives a diagonal materially negative is refused
+        // before either store changes.
+        let unit = Array2::from_diag(&Array1::from_vec(vec![2.0, 3.0]));
+        let mut parts = parts_with_inner_status(PirlsStatus::Converged);
+        parts.covariance_conditional = Some(unit.clone());
+        let mut fit = UnifiedFitResult::try_from_parts(parts).expect("a consistent fit mints");
+        let correction = Array2::from_diag(&Array1::from_vec(vec![0.0, -4.0]));
+        let message = fit
+            .add_coefficient_covariance_correction(&correction)
+            .expect_err("a correction that drives a diagonal materially negative must be refused")
+            .to_string();
+        assert!(
+            message.contains("corrected conditional covariance has an invalid diagonal"),
+            "refused for another reason: {message}"
+        );
+        assert_eq!(
+            fit.covariance_conditional.as_ref(),
+            Some(&unit),
+            "a refused correction leaves the fit as it was"
+        );
+    }
+
+    /// #2955: standard errors beside a conditional covariance are a second copy
+    /// of its diagonal, so the fit is refused. Without a covariance they are the
+    /// factorized branch's published uncertainty (#2960).
+    #[test]
+    fn factorized_standard_errors_beside_a_covariance_are_refused_2955() {
+        let standard_errors = Array1::from_vec(vec![1.0, 2.0]);
+        let mut alone = parts_with_inner_status(PirlsStatus::Converged);
+        if let Some(inference) = alone.inference.as_mut() {
+            inference.factorized_standard_errors = Some(standard_errors.clone());
+        }
+        let fit = UnifiedFitResult::try_from_parts(alone).expect("factorized standard errors alone mint");
+        assert_eq!(fit.beta_standard_errors(), Some(standard_errors.clone()));
+
+        let mut beside = parts_with_inner_status(PirlsStatus::Converged);
+        beside.covariance_conditional = Some(Array2::from_diag(&Array1::from_vec(vec![4.0, 9.0])));
+        if let Some(inference) = beside.inference.as_mut() {
+            inference.factorized_standard_errors = Some(standard_errors);
+        }
+        let message = UnifiedFitResult::try_from_parts(beside)
+            .expect_err("a second diagonal beside the store must be refused")
+            .to_string();
+        assert!(message.contains("beside a conditional covariance"), "{message}");
+    }
+
+    /// #2955: an inference block written before the one-store schema carries the
+    /// covariance copies. The reader drops them and the standard errors come from
+    /// the top-level store, and a fit that published only standard errors keeps
+    /// them as its factorized standard errors.
+    #[test]
+    fn a_covariance_copies_inference_block_reads_the_top_level_store_2955() {
+        let mut parts = parts_with_inner_status(PirlsStatus::Converged);
+        parts.covariance_conditional = Some(Array2::from_diag(&Array1::from_vec(vec![4.0, 9.0])));
+        let dense = UnifiedFitResult::try_from_parts(parts).expect("a dense fit mints");
+        let mut encoded = serde_json::to_value(&dense).expect("serialize the dense fit");
+        let inference = encoded["inference"]
+            .as_object_mut()
+            .expect("the fit serializes its inference block");
+        inference.insert(
+            "beta_covariance".to_string(),
+            serde_json::to_value(dense.beta_covariance()).expect("encode the copy"),
+        );
+        inference.insert(
+            "beta_standard_errors".to_string(),
+            serde_json::to_value(Array1::from_vec(vec![7.0, 7.0])).expect("encode a copy"),
+        );
+        let decoded: UnifiedFitResult =
+            serde_json::from_value(encoded).expect("the copies-schema fit parses");
+        decoded
+            .validate_numeric_finiteness()
+            .expect("the copies-schema fit mints");
+        assert_eq!(
+            decoded.beta_standard_errors(),
+            Some(Array1::from_vec(vec![2.0, 3.0])),
+            "the standard errors come from the top-level store, not the copy"
+        );
+
+        let only_standard_errors = UnifiedFitResult::try_from_parts(parts_with_inner_status(
+            PirlsStatus::Converged,
+        ))
+        .expect("a fit without a covariance mints");
+        let mut encoded =
+            serde_json::to_value(&only_standard_errors).expect("serialize the covariance-free fit");
+        let inference = encoded["inference"]
+            .as_object_mut()
+            .expect("the fit serializes its inference block");
+        inference.remove("factorized_standard_errors");
+        inference.insert(
+            "beta_standard_errors".to_string(),
+            serde_json::to_value(Array1::from_vec(vec![1.5, 2.5])).expect("encode the diagonal"),
+        );
+        let decoded: UnifiedFitResult =
+            serde_json::from_value(encoded).expect("the copies-schema fit parses");
+        decoded
+            .validate_numeric_finiteness()
+            .expect("the copies-schema fit mints");
+        assert_eq!(
+            decoded.beta_standard_errors(),
+            Some(Array1::from_vec(vec![1.5, 2.5])),
+            "a fit that published only standard errors keeps them"
+        );
     }
 
     #[test]
@@ -3701,13 +3918,28 @@ impl std::fmt::Display for CoefficientCovarianceDefinition {
 /// errors and (optional) covariance from the SAME definition, tagged with
 /// that definition. Produced by
 /// [`UnifiedFitResult::display_coefficient_uncertainty`].
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct DisplayCoefficientUncertainty<'a> {
     pub definition: CoefficientCovarianceDefinition,
-    pub standard_errors: &'a Array1<f64>,
+    /// Derived from the covariance of the same definition (#2955).
+    pub standard_errors: Array1<f64>,
     /// The covariance matrix of the same definition, when the fit persists
     /// it. `None` here never falls back to another definition's matrix.
     pub covariance: Option<&'a Array2<f64>>,
+}
+
+/// `sqrt(diag)` of a published covariance, by `se_from_covariance`'s rule.
+///
+/// [`UnifiedFitResult::try_from_parts`] and
+/// [`UnifiedFitResult::add_coefficient_covariance_correction`] refuse a store
+/// whose diagonal that rule refuses, so it cannot refuse a minted store. A store
+/// mutated past those checks reads back `NaN` on a materially negative
+/// coordinate, never a fabricated standard error.
+fn standard_errors_of_published_covariance(covariance: &Array2<f64>) -> Array1<f64> {
+    match gam_problem::dispersion_cov::se_from_covariance(covariance) {
+        Ok(standard_errors) => standard_errors,
+        Err(_) => covariance.diag().mapv(f64::sqrt),
+    }
 }
 
 /// Unified fit result for all model types (standard GAM, GAMLSS, survival).
@@ -3949,17 +4181,11 @@ impl FitInference {
             "fit_result.penalized_hessian",
             self.penalized_hessian.iter().copied(),
         )?;
-        if let Some(v) = self.beta_covariance.as_ref() {
-            validate_all_finite_estimation("fit_result.beta_covariance", v.iter().copied())?;
-        }
-        if let Some(v) = self.beta_covariance_corrected.as_ref() {
+        if let Some(v) = self.factorized_standard_errors.as_ref() {
             validate_all_finite_estimation(
-                "fit_result.beta_covariance_corrected",
+                "fit_result.factorized_standard_errors",
                 v.iter().copied(),
             )?;
-        }
-        if let Some(v) = self.beta_standard_errors.as_ref() {
-            validate_all_finite_estimation("fit_result.beta_standard_errors", v.iter().copied())?;
         }
         // These three are INFERENCE-ONLY objects derived from `H⁻¹` at the
         // fitted mode, not the fitted mean coefficients. They go non-finite
@@ -3987,12 +4213,6 @@ impl FitInference {
         if let Some(v) = self.weighted_gram.as_ref() {
             gam_problem::validate_all_finite_trial_point(
                 "fit_result.weighted_gram",
-                v.iter().copied(),
-            )?;
-        }
-        if let Some(v) = self.beta_standard_errors_corrected.as_ref() {
-            validate_all_finite_estimation(
-                "fit_result.beta_standard_errors_corrected",
                 v.iter().copied(),
             )?;
         }
@@ -4498,6 +4718,21 @@ impl UnifiedFitResult {
                 v.iter().copied(),
             )?;
         }
+        // The published standard errors derive from these stores (#2955), so a
+        // store whose diagonal `se_from_covariance` refuses is refused here, by
+        // name, and the derived standard errors need no `Result`.
+        for (label, covariance) in [
+            ("conditional", covariance_conditional.as_ref()),
+            ("smoothing-corrected", covariance_corrected.as_ref()),
+        ] {
+            if let Some(covariance) = covariance {
+                gam_problem::dispersion_cov::se_from_covariance(covariance).map_err(|reason| {
+                    EstimationError::InvalidInput(format!(
+                        "UnifiedFitResult {label} covariance has an invalid diagonal: {reason}"
+                    ))
+                })?;
+            }
+        }
         if let Some(inf) = inference.as_ref() {
             inf.validate_numeric_finiteness()?;
         }
@@ -4601,67 +4836,27 @@ impl UnifiedFitResult {
                 &inf.penalized_hessian,
                 penalized_hessian_dim,
             )?;
-            if let Some(cov) = inf.beta_covariance.as_ref() {
-                if cov.nrows() != p || cov.ncols() != p {
+            if let Some(se) = inf.factorized_standard_errors.as_ref() {
+                if se.len() != p {
                     bail_fit_result_invariant!(
-                        "UnifiedFitResult inference conditional covariance shape mismatch: got {}x{}, expected {}x{}",
-                        cov.nrows(),
-                        cov.ncols(),
-                        p,
+                        "UnifiedFitResult factorized standard error length mismatch: got {}, expected {}",
+                        se.len(),
                         p
                     );
                 }
-                match covariance_conditional.as_ref() {
-                    Some(top) if **cov == *top => {}
-                    Some(_) => {
-                        bail_fit_result_invariant!("UnifiedFitResult inference conditional covariance must match top-level covariance_conditional"
-                                .to_string(),);
-                    }
-                    None => {
-                        bail_fit_result_invariant!("UnifiedFitResult inference conditional covariance requires top-level covariance_conditional"
-                                .to_string(),);
-                    }
-                }
-            }
-            if let Some(se) = inf.beta_standard_errors.as_ref()
-                && se.len() != p
-            {
-                bail_fit_result_invariant!(
-                    "UnifiedFitResult beta standard error length mismatch: got {}, expected {}",
-                    se.len(),
-                    p
-                );
-            }
-            if let Some(cov) = inf.beta_covariance_corrected.as_ref() {
-                if cov.nrows() != p || cov.ncols() != p {
+                if let Some((index, value)) = se.iter().copied().enumerate().find(|&(_, v)| v < 0.0) {
                     bail_fit_result_invariant!(
-                        "UnifiedFitResult inference corrected covariance shape mismatch: got {}x{}, expected {}x{}",
-                        cov.nrows(),
-                        cov.ncols(),
-                        p,
-                        p
+                        "UnifiedFitResult factorized standard error {index} is negative: {value:?}"
                     );
                 }
-                match covariance_corrected.as_ref() {
-                    Some(top) if **cov == *top => {}
-                    Some(_) => {
-                        bail_fit_result_invariant!("UnifiedFitResult inference corrected covariance must match top-level covariance_corrected"
-                                .to_string(),);
-                    }
-                    None => {
-                        bail_fit_result_invariant!("UnifiedFitResult inference corrected covariance requires top-level covariance_corrected"
-                                .to_string(),);
-                    }
+                // The standard errors of a published covariance derive from it;
+                // a second diagonal beside it is a copy that can go stale (#2955).
+                if covariance_conditional.is_some() {
+                    bail_fit_result_invariant!(
+                        "UnifiedFitResult carries factorized standard errors beside a conditional \
+                         covariance; the standard errors of a published covariance derive from it"
+                    );
                 }
-            }
-            if let Some(se) = inf.beta_standard_errors_corrected.as_ref()
-                && se.len() != p
-            {
-                bail_fit_result_invariant!(
-                    "UnifiedFitResult corrected beta standard error length mismatch: got {}, expected {}",
-                    se.len(),
-                    p
-                );
             }
             if let Some(cov) = inf.beta_covariance_frequentist.as_ref()
                 && (cov.nrows() != p || cov.ncols() != p)
@@ -5007,47 +5202,51 @@ impl UnifiedFitResult {
     /// [`SmoothingCorrectionMethod::SigmaPointCubature::max_node_criterion_rise`]
     /// is the published diagnostic for the one that produced #2728.
     pub fn beta_covariance_corrected(&self) -> Option<&Array2<f64>> {
-        self.covariance_corrected
-            .as_ref()
-            .or_else(|| {
-                self.inference
-                    .as_ref()
-                    .and_then(|inf| inf.beta_covariance_corrected.as_ref())
-            })
-            .or_else(|| {
-                has_no_smoothing_coordinate(&self.log_lambdas, &self.artifacts)
-                    .then(|| self.beta_covariance())
-                    .flatten()
-            })
+        self.covariance_corrected.as_ref().or_else(|| {
+            has_no_smoothing_coordinate(&self.log_lambdas, &self.artifacts)
+                .then(|| self.beta_covariance())
+                .flatten()
+        })
     }
 
-    /// Get beta standard errors (conditional) if available.
-    pub fn beta_standard_errors(&self) -> Option<&Array1<f64>> {
-        self.inference
-            .as_ref()
-            .and_then(|inf| inf.beta_standard_errors.as_ref())
+    /// Conditional standard errors: `sqrt(diag)` of [`Self::beta_covariance`],
+    /// the one store (#2955), or the factorized branch's solved diagonal when
+    /// the fit publishes no covariance (#2960).
+    pub fn beta_standard_errors(&self) -> Option<Array1<f64>> {
+        match self.beta_covariance() {
+            Some(covariance) => Some(standard_errors_of_published_covariance(covariance)),
+            None => self
+                .inference
+                .as_ref()
+                .and_then(|inf| inf.factorized_standard_errors.clone()),
+        }
     }
 
-    /// Get smoothing-corrected beta standard errors if available.
-    pub fn beta_standard_errors_corrected(&self) -> Option<&Array1<f64>> {
-        self.inference
-            .as_ref()
-            .and_then(|inf| inf.beta_standard_errors_corrected.as_ref())
+    /// Smoothing-corrected standard errors: `sqrt(diag)` of
+    /// [`Self::beta_covariance_corrected`], with its exact identity form for a
+    /// fit that has no smoothing coordinate, whose standard errors are then the
+    /// conditional ones.
+    pub fn beta_standard_errors_corrected(&self) -> Option<Array1<f64>> {
+        match self.covariance_corrected.as_ref() {
+            Some(covariance) => Some(standard_errors_of_published_covariance(covariance)),
+            None => has_no_smoothing_coordinate(&self.log_lambdas, &self.artifacts)
+                .then(|| self.beta_standard_errors())
+                .flatten(),
+        }
     }
 
-    /// Add one correction matrix to every published coefficient covariance in
-    /// a single step: the top-level `covariance_conditional` and
-    /// `covariance_corrected`, and their copies in the inference block, whose
-    /// standard errors are re-derived from the corrected matrices.
+    /// Add one correction matrix to the published conditional and corrected
+    /// covariances, the only store of each (#2955), whose standard errors then
+    /// derive from the corrected matrices.
     ///
-    /// [`Self::try_from_parts`] requires each inference copy to equal its
-    /// top-level matrix bit for bit. A correction added to the top-level
-    /// matrices alone (gam#2943: the marginal-slope Murphy–Topel
-    /// generated-regressor correction) produced fits that every saved-model
-    /// load refused, and published uncorrected standard errors in the
-    /// meantime. Each copy here is a clone of the one corrected matrix. The
-    /// frequentist covariance and the smoothing-correction matrix are separate
-    /// estimators and stay as they are.
+    /// A correction added to one copy of a covariance and not another (gam#2943:
+    /// the marginal-slope Murphy–Topel generated-regressor correction) produced
+    /// fits that every saved-model load refused, and published uncorrected
+    /// standard errors in the meantime; with one store there is no other copy.
+    /// The frequentist covariance and the smoothing-correction matrix are
+    /// separate estimators and stay as they are. A fit that publishes standard
+    /// errors without a covariance is refused, because no correction can reach
+    /// a diagonal alone.
     pub fn add_coefficient_covariance_correction(
         &mut self,
         correction: &Array2<f64>,
@@ -5066,57 +5265,39 @@ impl UnifiedFitResult {
                 );
             }
         }
-        if let Some(covariance) = self.covariance_conditional.as_mut() {
-            *covariance = &*covariance + correction;
+        if self
+            .inference
+            .as_ref()
+            .is_some_and(|inf| inf.factorized_standard_errors.is_some())
+        {
+            crate::bail_invalid_estim!(
+                "a covariance correction cannot reach standard errors published without their covariance"
+            );
         }
-        if let Some(covariance) = self.covariance_corrected.as_mut() {
-            *covariance = &*covariance + correction;
+        // Both corrected matrices are formed and judged before either is assigned,
+        // so a refused correction leaves the fit as it was (gam-2929).
+        let conditional = self
+            .covariance_conditional
+            .as_ref()
+            .map(|covariance| covariance + correction);
+        let corrected = self
+            .covariance_corrected
+            .as_ref()
+            .map(|covariance| covariance + correction);
+        for (label, covariance) in [
+            ("conditional", conditional.as_ref()),
+            ("smoothing-corrected", corrected.as_ref()),
+        ] {
+            if let Some(covariance) = covariance {
+                gam_problem::dispersion_cov::se_from_covariance(covariance).map_err(|reason| {
+                    EstimationError::InvalidInput(format!(
+                        "corrected {label} covariance has an invalid diagonal: {reason}"
+                    ))
+                })?;
+            }
         }
-        let Some(inference) = self.inference.as_mut() else {
-            return Ok(());
-        };
-        let standard_errors = |covariance: &Array2<f64>, label: &str| {
-            gam_problem::dispersion_cov::se_from_covariance(covariance).map_err(|reason| {
-                EstimationError::InvalidInput(format!(
-                    "corrected {label} covariance has an invalid diagonal: {reason}"
-                ))
-            })
-        };
-        match self.covariance_conditional.as_ref() {
-            Some(conditional) => {
-                if inference.beta_covariance.is_some() {
-                    inference.beta_covariance = Some(
-                        gam_problem::dispersion_cov::PhiScaledCovariance::wrap(conditional.clone()),
-                    );
-                }
-                if inference.beta_standard_errors.is_some() {
-                    inference.beta_standard_errors = Some(standard_errors(conditional, "conditional")?);
-                }
-            }
-            None if inference.beta_covariance.is_some() => {
-                crate::bail_invalid_estim!(
-                    "UnifiedFitResult inference conditional covariance requires top-level covariance_conditional"
-                );
-            }
-            None => {}
-        }
-        match self.covariance_corrected.as_ref() {
-            Some(corrected) => {
-                if inference.beta_covariance_corrected.is_some() {
-                    inference.beta_covariance_corrected = Some(corrected.clone());
-                }
-                if inference.beta_standard_errors_corrected.is_some() {
-                    inference.beta_standard_errors_corrected =
-                        Some(standard_errors(corrected, "smoothing-corrected")?);
-                }
-            }
-            None if inference.beta_covariance_corrected.is_some() => {
-                crate::bail_invalid_estim!(
-                    "UnifiedFitResult inference corrected covariance requires top-level covariance_corrected"
-                );
-            }
-            None => {}
-        }
+        self.covariance_conditional = conditional;
+        self.covariance_corrected = corrected;
         Ok(())
     }
 

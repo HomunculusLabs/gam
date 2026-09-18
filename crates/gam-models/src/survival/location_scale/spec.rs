@@ -746,11 +746,12 @@ pub fn survival_fit_from_parts(
         Vec::new()
     };
     // One gate owns the negative-diagonal judgement for every lane's
-    // `sqrt(diag(V))` (`gam_problem::se_from_covariance`). The location-scale
+    // `sqrt(diag(V))` (`gam_problem::se_from_covariance`), and the published
+    // standard errors derive from this matrix (#2955). The location-scale
     // conditional covariance is only conditionally SPD, and a local
     // `max(0, ·)` would publish a materially negative variance as `SE = 0` —
     // an infinitely precise coefficient — instead of refusing it.
-    let beta_standard_errors = covariance_conditional
+    covariance_conditional
         .as_ref()
         .map(gam_problem::se_from_covariance)
         .transpose()
@@ -786,7 +787,7 @@ pub fn survival_fit_from_parts(
     // One gate for the CORRECTED marginal SEs too: `V_c = V_cond + C` is only
     // conditionally SPD, so a materially negative variance must be refused
     // here rather than published as `SE = 0`.
-    let beta_standard_errors_corrected = covariance_corrected
+    covariance_corrected
         .as_ref()
         .map(gam_problem::se_from_covariance)
         .transpose()
@@ -815,10 +816,7 @@ pub fn survival_fit_from_parts(
             penalized_hessian: geom.penalized_hessian.clone(),
             reparam_qs: None,
             dispersion: gam_solve::estimate::Dispersion::UNIT,
-            beta_covariance: covariance_conditional.clone().map(Into::into),
-            beta_standard_errors,
-            beta_covariance_corrected: covariance_corrected.clone(),
-            beta_standard_errors_corrected: beta_standard_errors_corrected.clone(),
+            factorized_standard_errors: None,
             beta_covariance_frequentist: None,
             coefficient_influence: None,
             weighted_gram: None,

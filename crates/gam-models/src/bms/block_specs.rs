@@ -3154,10 +3154,7 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         solved_fit.covariance_conditional = None;
         solved_fit.covariance_corrected = None;
         if let Some(inference) = solved_fit.inference.as_mut() {
-            inference.beta_covariance = None;
-            inference.beta_standard_errors = None;
-            inference.beta_covariance_corrected = None;
-            inference.beta_standard_errors_corrected = None;
+            inference.factorized_standard_errors = None;
         }
         let declined = gam_solve::estimate::CovarianceDeclined::
             BmsGeneratedRegressorLatentMeasureNotStandardNormal {

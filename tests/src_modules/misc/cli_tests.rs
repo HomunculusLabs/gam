@@ -3742,10 +3742,7 @@ fn compact_fit_result_for_batch_preserves_unified_geometry_invariant() {
             reparam_qs: Some(Array2::eye(2)),
             dispersion: gam::estimate::Dispersion::known(1.0)
                 .expect("unit known dispersion is valid"),
-            beta_covariance: None,
-            beta_standard_errors: None,
-            beta_covariance_corrected: None,
-            beta_standard_errors_corrected: None,
+            factorized_standard_errors: None,
             beta_covariance_frequentist: None,
             coefficient_influence: None,
             weighted_gram: None,

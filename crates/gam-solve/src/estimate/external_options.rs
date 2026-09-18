@@ -36,6 +36,11 @@ pub struct ExternalOptimResult {
     pub artifacts: FitArtifacts,
     pub geometry: Option<FitGeometry>,
     pub inference: Option<FitInference>,
+    /// Conditional coefficient covariance `Vb`, the only store of it (#2955):
+    /// the fit's standard errors derive from it.
+    pub covariance_conditional: Option<Array2<f64>>,
+    /// Smoothing-corrected coefficient covariance `Vp`, the only store of it.
+    pub covariance_corrected: Option<Array2<f64>>,
     /// Complete REML/LAML objective value used for smoothing selection, or
     /// `None` when the converged fit sits on the zero-dispersion Gaussian
     /// boundary and therefore has no finite criterion value at all. Same

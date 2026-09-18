@@ -3029,7 +3029,9 @@ fn fit_bounded_term_collection_with_design(
             "bounded coefficient covariance scaling produced a non-finite value".to_string(),
         ));
     }
-    let beta_standard_errors = beta_covariance
+    // The published standard errors derive from this matrix (#2955); judging its
+    // diagonal here names this lane in the refusal.
+    beta_covariance
         .as_ref()
         .map(gam_problem::se_from_covariance)
         .transpose()
@@ -3064,7 +3066,7 @@ fn fit_bounded_term_collection_with_design(
     } else {
         None
     };
-    let beta_standard_errors_corrected = covariance_corrected
+    covariance_corrected
         .as_ref()
         .map(gam_problem::se_from_covariance)
         .transpose()
@@ -3114,12 +3116,7 @@ fn fit_bounded_term_collection_with_design(
                 penalized_hessian: penalized_hessian.clone().into(),
                 reparam_qs: None,
                 dispersion,
-                beta_covariance: beta_covariance
-                    .clone()
-                    .map(gam_problem::dispersion_cov::PhiScaledCovariance::from),
-                beta_standard_errors,
-                beta_covariance_corrected: covariance_corrected.clone(),
-                beta_standard_errors_corrected,
+                factorized_standard_errors: None,
                 beta_covariance_frequentist: None,
                 coefficient_influence: None,
                 weighted_gram: None,
