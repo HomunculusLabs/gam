@@ -1263,3 +1263,151 @@ fn a_ritz_step_below_storage_resolution_keeps_the_stored_bits_2502() {
     let (current, stepped) = step(1.2e-5);
     assert_ne!(stepped, current, "a resolvable Ritz step must move the frame");
 }
+
+#[test]
+fn a_frame_trial_commits_on_its_paired_decrease_over_the_rows_it_changes_2502() {
+    // Ten rows lie on the line (1, 1e-4, 0, 0) and ten thousand lie in the e2-e3 plane
+    // with a large e3 component no block spans. Block 0, a line in the e0-e1 plane, serves
+    // the ten; block 1 = e2 serves the ten thousand; no row admits both. The proposal rotates
+    // block 0 halfway toward the ten rows' line and lowers their loss by about 7.5e-8, inside
+    // the corpus-wide band of about 4.4e-6 that the others' residuals (RSS about 1e8) set.
+    // Those rows admit only the unmoved block 1 in both passes and are priced to the same
+    // bits, so the trial is decided over the ten rows, where the decrease clears its band by
+    // orders of magnitude. The corpus-wide rule refused such steps and cycled the Spark fit
+    // at a frame residual of 1.163e-4 (#2502, lane job 1248199).
+    let mut x = Array2::<f32>::zeros((10_010, 4));
+    for row in 0..10 {
+        x[[row, 0]] = 1.0;
+        x[[row, 1]] = 1.0e-4;
+    }
+    for row in 10..x.nrows() {
+        x[[row, 2]] = 10.0;
+        x[[row, 3]] = 100.0;
+    }
+    let theta = 5.0e-5_f64;
+    let baseline = array![[1.0_f32, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+    let proposal = array![
+        [theta.cos() as f32, theta.sin() as f32, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0]
+    ];
+    let mut config = BlockSparseConfig::new(2, 1);
+    config.block_topk = 2;
+    config.minibatch = 4096;
+    config.aux_k = 0;
+    let mut state = BlockSparseStreamState::new_with_decoder(proposal.clone(), &config).unwrap();
+    state.gamma = 1.0;
+    state.pending_frame = Some(super::PendingFrameTrial {
+        baseline_decoder: baseline,
+        baseline_gamma: 1.0,
+        proposed_decoder: proposal,
+        baseline_rss: 0.0,
+        baseline_gamma_num: 0.0,
+        baseline_gamma_den: 0.0,
+        baseline_rows: 0,
+        baseline_usage: vec![0; 2],
+        baseline_second: vec![Array2::zeros((1, 1)); 2],
+        baseline_supports: Vec::new(),
+        rerouted_rows: 0,
+        moves: super::TrialMoves::default(),
+    });
+    state.partial_fit(x.view()).unwrap();
+    let trial = state
+        .end_epoch()
+        .unwrap()
+        .frame_trial
+        .expect("the pending trial is adjudicated");
+    // Positive control: over the whole corpus the decrease lies inside its band, so a
+    // corpus-wide rule refuses the step.
+    assert!(
+        trial.decrease <= trial.resolution,
+        "the corpus decrease {:e} clears its band {:e}, so the fixture cannot tell the rules apart",
+        trial.decrease,
+        trial.resolution
+    );
+    assert_eq!(trial.moved_rows, 10);
+    assert!(
+        trial.moved_decrease > 1.0e6 * trial.moved_resolution,
+        "paired decrease {:e} against its band {:e}",
+        trial.moved_decrease,
+        trial.moved_resolution
+    );
+    assert!(trial.committed, "a paired decrease far above its band must commit");
+}
+
+#[test]
+fn a_resumed_stream_continues_bit_for_bit_2502() {
+    // A long fit runs as a chain of bounded jobs, each resuming the last one's checkpoint, so a
+    // resumed stream must continue exactly as the uninterrupted one does. Checkpointing and
+    // resuming at EVERY epoch boundary must reproduce every epoch of the straight run bit for
+    // bit. Positive controls: some boundary carries a staged birth and some carries a pending
+    // frame trial, the two transactions a checkpoint must carry across.
+    let mut seed = 2502_u64;
+    let mut sample = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (seed >> 33) as f32 / 2147483648.0 - 0.5
+    };
+    let x = Array2::from_shape_fn((37, 8), |_| sample());
+    let mut decoder = Array2::from_shape_fn((12, 8), |_| sample());
+    for block in 0..5 {
+        let mut frame = decoder
+            .slice(ndarray::s![block * 2..(block + 1) * 2, ..])
+            .to_owned();
+        crate::sparse_dict::block::gram_schmidt_rows(&mut frame);
+        decoder
+            .slice_mut(ndarray::s![block * 2..(block + 1) * 2, ..])
+            .assign(&frame);
+    }
+    // A dead block: its zero frame has the zero projector, so no row admits it and a birth
+    // can be staged there.
+    decoder.slice_mut(ndarray::s![10.., ..]).fill(0.0);
+    let mut config = BlockSparseConfig::new(6, 2);
+    config.block_topk = 3;
+    config.minibatch = 13;
+    config.aux_k = 1;
+    let epochs = 8;
+    let record = |state: &BlockSparseStreamState, stats: &super::BlockEpochStats| {
+        (
+            state.decoder.iter().map(|value| value.to_bits()).collect::<Vec<u32>>(),
+            state.gamma.to_bits(),
+            stats.explained_variance.to_bits(),
+            stats.frame_residual.to_bits(),
+            stats.gamma_residual.to_bits(),
+            stats.accepted_births,
+            stats.converged,
+            state.retained_supports.clone(),
+        )
+    };
+    let mut straight = BlockSparseStreamState::new_with_decoder(decoder.clone(), &config).unwrap();
+    let mut expected = Vec::new();
+    for _ in 0..epochs {
+        straight.partial_fit(x.view()).unwrap();
+        let stats = straight.end_epoch().unwrap();
+        expected.push(record(&straight, &stats));
+    }
+    let path = std::env::temp_dir().join(format!("gam-block-stream-checkpoint-{}.bin", std::process::id()));
+    let mut chained = BlockSparseStreamState::new_with_decoder(decoder, &config).unwrap();
+    let mut births = 0usize;
+    let mut trials = 0usize;
+    for epoch in 0..epochs {
+        chained.partial_fit(x.view()).unwrap();
+        if epoch == 0 {
+            let error = chained.checkpoint(&path).unwrap_err();
+            assert!(error.contains("unfinished pass"), "{error}");
+        }
+        let stats = chained.end_epoch().unwrap();
+        assert_eq!(record(&chained, &stats), expected[epoch], "epoch {epoch} diverged after a resume");
+        births += usize::from(chained.pending_birth.is_some());
+        trials += usize::from(chained.pending_frame.is_some());
+        chained.checkpoint(&path).unwrap();
+        chained = BlockSparseStreamState::resume(&path, &config).unwrap();
+    }
+    assert!(births > 0, "no boundary carried a staged birth, so the checkpoint never had to");
+    assert!(trials > 0, "no boundary carried a pending frame trial, so the checkpoint never had to");
+    let mut other = config;
+    other.tolerance *= 2.0;
+    let error = BlockSparseStreamState::resume(&path, &other)
+        .err()
+        .expect("a checkpoint written under another tolerance must be refused");
+    assert!(error.contains("tolerance"), "{error}");
+    std::fs::remove_file(&path).unwrap();
+}

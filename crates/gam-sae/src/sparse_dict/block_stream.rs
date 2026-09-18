@@ -52,8 +52,9 @@
 //! EV describes the pass's measured frames with their profiled γ. Proposed frames
 //! remain an uncertified checkpoint until a paired pass reroutes both proposal
 //! and baseline and profiles a gamma for each. Only a strict full-objective
-//! improvement commits; rejection retracts halfway along the same frame direction
-//! and cannot certify stationarity. Finalize
+//! improvement commits, measured over the rows whose codes can differ between the two
+//! passes, since every other row is priced to the same bits in both; rejection retracts
+//! halfway along the same frame direction and cannot certify stationarity. Finalize
 //! requires EV, γ, projector closure and tangent stationarity and returns the exact measured frames,
 //! γ and EV; an EV coincidence alone never certifies an unmeasured proposal.
 
@@ -373,6 +374,21 @@ fn same_admitted_blocks(left: &RowBlockCode, right: &RowBlockCode) -> bool {
     admitted(left) == admitted(right)
 }
 
+/// Whether two codes admit the same blocks in the same slots. In a paired frame trial a
+/// row whose two codes agree slot for slot on blocks the proposal did not move is coded,
+/// decoded and priced by the same operations on the same bits in both passes.
+fn same_slot_support(left: &RowBlockCode, right: &RowBlockCode) -> bool {
+    let admitted = |code: &RowBlockCode| {
+        code.blocks
+            .iter()
+            .zip(&code.gates)
+            .filter(|(_, gate)| **gate != 0.0)
+            .map(|(block, _)| *block)
+            .collect::<Vec<u32>>()
+    };
+    admitted(left) == admitted(right)
+}
+
 /// One selected row's contribution to its block's tied projector moments over
 /// `W = [U, D]`: `coupling += v (Wᵀx)ᵀ + x (Wᵀv)ᵀ − m x (Wᵀx)ᵀ` and
 /// `data_cross += x (Wᵀx)ᵀ`, where `v = m P_g x − Σ_h P_h x` is formed from the
@@ -526,11 +542,11 @@ pub struct BlockShardStats {
 /// at the shared pass γ, so the passes' difference at that γ lives in the moved rows.
 #[derive(Clone, Copy, Debug)]
 pub struct FrameTrialMeasurement {
-    /// Whether the proposal committed.
+    /// Whether the proposal committed: `moved_decrease` exceeded `moved_resolution`.
     pub committed: bool,
-    /// Baseline RSS minus proposal RSS, each at its own profiled γ.
+    /// Baseline RSS minus proposal RSS over the whole corpus, each at its own profiled γ.
     pub decrease: f64,
-    /// The bar `decrease` had to exceed: `√(rows·p)·ε` times the baseline RSS.
+    /// `√(rows·p)·ε` times the baseline RSS: the corpus-wide rounding band of `decrease`.
     pub resolution: f64,
     /// The baseline's profiled γ.
     pub baseline_gamma: f32,
@@ -540,11 +556,14 @@ pub struct FrameTrialMeasurement {
     pub moved_blocks: usize,
     /// The largest relative projector distance among the moved blocks.
     pub moved_displacement: f64,
-    /// Rows whose admitted blocks, in either pass, include a moved block.
+    /// Rows whose codes can differ between the passes: their admitted blocks, in either pass,
+    /// include a moved block, or the two passes admit different blocks or slots. Every other
+    /// row is priced to the same bits in both passes.
     pub moved_rows: usize,
     /// Baseline RSS minus proposal RSS over the moved rows, at the pass γ.
     pub moved_decrease: f64,
-    /// `√(moved_rows·p)·ε` times the baseline RSS over the moved rows.
+    /// `√(moved_rows·p)·ε` times the baseline RSS over the moved rows: the bar
+    /// `moved_decrease` had to exceed to commit.
     pub moved_resolution: f64,
 }
 
@@ -1281,7 +1300,10 @@ impl BlockSparseStreamState {
                             .zip(baseline_codes)
                             .zip(projected.iter().zip(baseline))
                     {
-                        if reaches_moved_block(candidate) || reaches_moved_block(baseline_code) {
+                        if reaches_moved_block(candidate)
+                            || reaches_moved_block(baseline_code)
+                            || !same_slot_support(candidate, baseline_code)
+                        {
                             moved_rows += 1;
                             moved_baseline_rss += baseline_projection.rss;
                             moved_proposal_rss += proposal_projection.rss;
@@ -1384,17 +1406,28 @@ impl BlockSparseStreamState {
                 trial.baseline_gamma_num,
                 trial.baseline_gamma_den,
             );
-            // The two objectives were accumulated on identical rows. Only a
-            // measured decrease may commit a rerouted proposal (#2634): each RSS
-            // sums `rows · p` cells, so two sums closer than `√cells · ε · RSS` are
-            // two roundings of one number, not a direction. A tie inside that band
-            // carries no directional information and is handled by backtracking.
+            // The two passes route and code identical rows at the pass γ they share. A row
+            // whose two committed codes admit the same blocks in the same slots, none of them
+            // moved, is priced to the same bits in both, so the objectives can differ only over
+            // the other rows, which the paired pass sums on their own (`TrialMoves`). Only a
+            // measured decrease may commit a rerouted proposal (#2634): each of those sums
+            // covers `rows · p` cells, so two sums closer than `√cells · ε · RSS` are two
+            // roundings of one number, not a direction. A tie inside that band carries no
+            // directional information and is handled by backtracking. Over the whole corpus
+            // the same band also counts the rounding of every row the passes share. On the
+            // Spark layer-18 fit that bar (2.462e-6) refused, from epoch 3792 on, a step whose
+            // paired decrease of 2.461e-6 cleared its own bar (7.7e-7) three times over, and
+            // the fit cycled at a frame residual of 1.163e-4 against 1e-4 (#2502, lane job
+            // 1248199). The profiled corpus decrease and its bar are still reported.
             let cells = (self.row_count * p).max(1) as f64;
             let resolution = cells.sqrt() * f64::EPSILON * baseline_rss.abs();
             let moves = &trial.moves;
             let moved_cells = (moves.rows * p) as f64;
+            let moved_decrease = moves.baseline_rss - moves.proposal_rss;
+            let moved_resolution = moved_cells.sqrt() * f64::EPSILON * moves.baseline_rss.abs();
+            let committed = moved_decrease > moved_resolution;
             frame_trial = Some(FrameTrialMeasurement {
-                committed: baseline_rss - candidate_rss > resolution,
+                committed,
                 decrease: baseline_rss - candidate_rss,
                 resolution,
                 baseline_gamma,
@@ -1405,10 +1438,10 @@ impl BlockSparseStreamState {
                     .map_or(0, |moved| moved.iter().filter(|&&flag| flag).count()),
                 moved_displacement: moves.displacement,
                 moved_rows: moves.rows,
-                moved_decrease: moves.baseline_rss - moves.proposal_rss,
-                moved_resolution: moved_cells.sqrt() * f64::EPSILON * moves.baseline_rss.abs(),
+                moved_decrease,
+                moved_resolution,
             });
-            if !(baseline_rss - candidate_rss > resolution) {
+            if !committed {
                 let midpoint =
                     bisect_frame_trial(&trial.baseline_decoder, &trial.proposed_decoder, b)?;
                 self.decoder = trial.baseline_decoder.clone();
@@ -2054,6 +2087,331 @@ fn validate_config(config: &BlockSparseConfig) -> Result<(), String> {
         return Err("BlockSparseStream tolerance must be finite".to_string());
     }
     Ok(())
+}
+
+/// Schema tag of a stream checkpoint's fixed little-endian layout. Bump on any layout change,
+/// so a checkpoint written by another layout is refused rather than mis-decoded.
+const CHECKPOINT_SCHEMA: &[u8; 8] = b"GAMBSS01";
+
+/// A little-endian writer for [`BlockSparseStreamState::checkpoint`].
+#[derive(Default)]
+struct CheckpointWriter {
+    bytes: Vec<u8>,
+}
+
+impl CheckpointWriter {
+    fn u8(&mut self, value: u8) {
+        self.bytes.push(value);
+    }
+    fn usize(&mut self, value: usize) {
+        self.bytes.extend_from_slice(&(value as u64).to_le_bytes());
+    }
+    fn f32(&mut self, value: f32) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    fn f64(&mut self, value: f64) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    fn f32s<'a>(&mut self, values: impl IntoIterator<Item = &'a f32>) {
+        for &value in values {
+            self.f32(value);
+        }
+    }
+    fn f64s<'a>(&mut self, values: impl IntoIterator<Item = &'a f64>) {
+        for &value in values {
+            self.f64(value);
+        }
+    }
+    fn u32s(&mut self, values: &[u32]) {
+        self.usize(values.len());
+        for &value in values {
+            self.bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    fn u64s(&mut self, values: &[u64]) {
+        self.usize(values.len());
+        for &value in values {
+            self.bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+/// The reader matching [`CheckpointWriter`]; every read names the checkpoint when it runs out.
+struct CheckpointReader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> CheckpointReader<'a> {
+    fn take(&mut self, count: usize) -> Result<&'a [u8], String> {
+        let end = self
+            .at
+            .checked_add(count)
+            .filter(|&end| end <= self.bytes.len())
+            .ok_or_else(|| format!("checkpoint is truncated at byte {}", self.at))?;
+        let chunk = &self.bytes[self.at..end];
+        self.at = end;
+        Ok(chunk)
+    }
+    fn u8(&mut self) -> Result<u8, String> {
+        Ok(self.take(1)?[0])
+    }
+    fn usize(&mut self) -> Result<usize, String> {
+        let value = u64::from_le_bytes(self.take(8)?.try_into().map_err(|_| "u64 width")?);
+        usize::try_from(value).map_err(|_| format!("checkpoint count {value} overflows usize"))
+    }
+    fn f32(&mut self) -> Result<f32, String> {
+        Ok(f32::from_le_bytes(self.take(4)?.try_into().map_err(|_| "f32 width")?))
+    }
+    fn f64(&mut self) -> Result<f64, String> {
+        Ok(f64::from_le_bytes(self.take(8)?.try_into().map_err(|_| "f64 width")?))
+    }
+    fn f32s(&mut self, count: usize) -> Result<Vec<f32>, String> {
+        (0..count).map(|_| self.f32()).collect()
+    }
+    fn f64s(&mut self, count: usize) -> Result<Vec<f64>, String> {
+        (0..count).map(|_| self.f64()).collect()
+    }
+    fn u32s(&mut self) -> Result<Vec<u32>, String> {
+        let count = self.usize()?;
+        (0..count)
+            .map(|_| Ok(u32::from_le_bytes(self.take(4)?.try_into().map_err(|_| "u32 width")?)))
+            .collect()
+    }
+    fn u64s(&mut self) -> Result<Vec<u64>, String> {
+        let count = self.usize()?;
+        (0..count)
+            .map(|_| Ok(u64::from_le_bytes(self.take(8)?.try_into().map_err(|_| "u64 width")?)))
+            .collect()
+    }
+    fn matrix_f32(&mut self, rows: usize, columns: usize) -> Result<Array2<f32>, String> {
+        Array2::from_shape_vec((rows, columns), self.f32s(rows * columns)?)
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl BlockSparseStreamState {
+    /// Write the stream's complete cross-epoch state to `path`, so [`Self::resume`] continues
+    /// the fit where it stands: every later epoch of the resumed stream is bit-identical to
+    /// the same epoch of this one. A long fit then runs as a chain of bounded jobs (#2502).
+    ///
+    /// A checkpoint is taken between epochs, after `end_epoch` and before the next
+    /// `partial_fit`. Every per-pass accumulator is zero there, and a staged birth or frame
+    /// trial holds only its baseline and proposal, so those are all it records; a state with
+    /// rows of an unfinished pass streamed is refused. The layout is fixed little-endian under
+    /// [`CHECKPOINT_SCHEMA`]. The file is written to a sibling and renamed into place, so an
+    /// interrupted write never leaves a truncated checkpoint at `path`.
+    pub fn checkpoint(&self, path: &std::path::Path) -> Result<(), String> {
+        if self.row_count != 0 {
+            return Err(format!(
+                "BlockSparseStream.checkpoint: {} rows of an unfinished pass are streamed; a \
+                 checkpoint is taken between epochs, after end_epoch",
+                self.row_count
+            ));
+        }
+        let mut out = CheckpointWriter::default();
+        out.bytes.extend_from_slice(CHECKPOINT_SCHEMA);
+        let config = &self.config;
+        for value in [
+            config.n_blocks,
+            config.block_size,
+            config.block_topk,
+            config.max_epochs,
+            config.minibatch,
+            config.block_tile,
+            config.aux_k,
+        ] {
+            out.usize(value);
+        }
+        out.f64(config.frame_ridge);
+        out.f64(config.tolerance);
+        out.u8(u8::from(config.matryoshka_prefix));
+        out.usize(self.p);
+        out.f32s(self.decoder.iter());
+        out.f32(self.gamma);
+        out.f32s(self.search_directions.iter());
+        out.f64s(
+            [
+                self.prev_ev,
+                self.last_ev,
+                self.last_ev_residual,
+                self.last_gamma_residual,
+                self.last_frame_residual,
+                self.last_rss,
+            ]
+            .iter(),
+        );
+        out.usize(self.epochs_run);
+        out.usize(self.last_accepted_births);
+        out.usize(self.last_rows);
+        out.u8(u8::from(self.converged));
+        out.f32s(self.last_util.iter());
+        out.f32s(self.last_stable.iter());
+        for second in &self.last_second {
+            out.f64s(second.iter());
+        }
+        for &usage in &self.last_usage {
+            out.usize(usage);
+        }
+        out.u32s(&self.retained_supports);
+        out.u64s(&self.retained_fingerprints);
+        match &self.pending_birth {
+            None => out.u8(0),
+            Some(birth) => {
+                out.u8(1);
+                out.usize(birth.block);
+                out.f32(birth.baseline_gamma);
+                out.f32s(birth.baseline_decoder.iter());
+            }
+        }
+        match &self.pending_frame {
+            None => out.u8(0),
+            Some(trial) => {
+                out.u8(1);
+                out.f32(trial.baseline_gamma);
+                out.f32s(trial.baseline_decoder.iter());
+                out.f32s(trial.proposed_decoder.iter());
+            }
+        }
+        let staged = path.with_extension("staged");
+        std::fs::write(&staged, &out.bytes)
+            .map_err(|error| format!("BlockSparseStream.checkpoint {}: {error}", staged.display()))?;
+        std::fs::rename(&staged, path)
+            .map_err(|error| format!("BlockSparseStream.checkpoint {}: {error}", path.display()))
+    }
+
+    /// Continue a stream from a [`Self::checkpoint`] written with the same `config`. A
+    /// checkpoint of another layout, another configuration or a truncated file is refused
+    /// by name.
+    pub fn resume(path: &std::path::Path, config: &BlockSparseConfig) -> Result<Self, String> {
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("BlockSparseStream.resume {}: {error}", path.display()))?;
+        let mut input = CheckpointReader {
+            bytes: &bytes,
+            at: 0,
+        };
+        if input.take(CHECKPOINT_SCHEMA.len())? != CHECKPOINT_SCHEMA {
+            return Err(format!(
+                "BlockSparseStream.resume {}: not a {} checkpoint",
+                path.display(),
+                String::from_utf8_lossy(CHECKPOINT_SCHEMA)
+            ));
+        }
+        for (name, expected) in [
+            ("n_blocks", config.n_blocks),
+            ("block_size", config.block_size),
+            ("block_topk", config.block_topk),
+            ("max_epochs", config.max_epochs),
+            ("minibatch", config.minibatch),
+            ("block_tile", config.block_tile),
+            ("aux_k", config.aux_k),
+        ] {
+            let saved = input.usize()?;
+            if saved != expected {
+                return Err(format!(
+                    "BlockSparseStream.resume: the checkpoint was written with {name}={saved}, \
+                     not {expected}"
+                ));
+            }
+        }
+        for (name, expected) in [
+            ("frame_ridge", config.frame_ridge),
+            ("tolerance", config.tolerance),
+        ] {
+            let saved = input.f64()?;
+            if saved.to_bits() != expected.to_bits() {
+                return Err(format!(
+                    "BlockSparseStream.resume: the checkpoint was written with {name}={saved:e}, \
+                     not {expected:e}"
+                ));
+            }
+        }
+        let saved_matryoshka = input.u8()? != 0;
+        if saved_matryoshka != config.matryoshka_prefix {
+            return Err(format!(
+                "BlockSparseStream.resume: the checkpoint was written with \
+                 matryoshka_prefix={saved_matryoshka}, not {}",
+                config.matryoshka_prefix
+            ));
+        }
+        let p = input.usize()?;
+        let (g, b) = (config.n_blocks, config.block_size);
+        let decoder = input.matrix_f32(g * b, p)?;
+        let mut state = Self::new_with_decoder(decoder, config)?;
+        state.gamma = input.f32()?;
+        state.search_directions = input.matrix_f32(g * 2 * b, p)?;
+        let scalars = input.f64s(6)?;
+        state.prev_ev = scalars[0];
+        state.last_ev = scalars[1];
+        state.last_ev_residual = scalars[2];
+        state.last_gamma_residual = scalars[3];
+        state.last_frame_residual = scalars[4];
+        state.last_rss = scalars[5];
+        state.epochs_run = input.usize()?;
+        state.last_accepted_births = input.usize()?;
+        state.last_rows = input.usize()?;
+        state.converged = input.u8()? != 0;
+        state.last_util = input.f32s(g)?;
+        state.last_stable = input.f32s(g)?;
+        state.last_second = (0..g)
+            .map(|_| {
+                Array2::from_shape_vec((b, b), input.f64s(b * b)?).map_err(|error| error.to_string())
+            })
+            .collect::<Result<_, String>>()?;
+        state.last_usage = (0..g).map(|_| input.usize()).collect::<Result<_, String>>()?;
+        state.retained_supports = input.u32s()?;
+        state.retained_fingerprints = input.u64s()?;
+        if state.retained_supports.len() != state.retained_fingerprints.len() * state.k {
+            return Err(format!(
+                "BlockSparseStream.resume: {} retained support slots for {} rows at k={}",
+                state.retained_supports.len(),
+                state.retained_fingerprints.len(),
+                state.k
+            ));
+        }
+        if input.u8()? == 1 {
+            let block = input.usize()?;
+            let baseline_gamma = input.f32()?;
+            let baseline_decoder = input.matrix_f32(g * b, p)?;
+            state.pending_birth = Some(PendingBlockBirth {
+                block,
+                baseline_decoder,
+                baseline_gamma,
+                baseline_rss: 0.0,
+                baseline_rows: 0,
+                baseline_usage: vec![0; g],
+                baseline_second: (0..g).map(|_| Array2::<f64>::zeros((b, b))).collect(),
+                baseline_supports: Vec::new(),
+            });
+        }
+        if input.u8()? == 1 {
+            let baseline_gamma = input.f32()?;
+            let baseline_decoder = input.matrix_f32(g * b, p)?;
+            let proposed_decoder = input.matrix_f32(g * b, p)?;
+            state.pending_frame = Some(PendingFrameTrial {
+                baseline_decoder,
+                baseline_gamma,
+                proposed_decoder,
+                baseline_rss: 0.0,
+                baseline_gamma_num: 0.0,
+                baseline_gamma_den: 0.0,
+                baseline_rows: 0,
+                baseline_usage: vec![0; g],
+                baseline_second: (0..g).map(|_| Array2::<f64>::zeros((b, b))).collect(),
+                baseline_supports: Vec::new(),
+                rerouted_rows: 0,
+                moves: TrialMoves::default(),
+            });
+        }
+        if input.at != bytes.len() {
+            return Err(format!(
+                "BlockSparseStream.resume {}: {} trailing bytes after the state",
+                path.display(),
+                bytes.len() - input.at
+            ));
+        }
+        Ok(state)
+    }
 }
 
 #[cfg(test)]
