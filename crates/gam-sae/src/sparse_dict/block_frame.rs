@@ -236,12 +236,24 @@ fn write_unit_columns(columns: ArrayView2<'_, f64>, mut rows: ArrayViewMut2<'_, 
 /// residual is one pass behind, because `H·R` exists only once a pass has
 /// accumulated it. Returns the stationarity certificate of `tied_frame_tangent`,
 /// read at U, which does not depend on the step.
+///
+/// A block whose stationarity already meets `bar`, the fit's certificate bar, keeps its
+/// stored bits too, with its tangent gradient as the next search row. Its step cannot
+/// bring the certificate closer, since the block already passes it, but it shifts the
+/// conditional optimum of every block that shares its rows. On the Spark layer-18 fit
+/// 1021 of 1024 blocks sat below a 1e-4 bar (median 5.7e-7) while 89 to 517 blocks still
+/// moved per trial (lane job 1229606), and the largest residual above it fell only 0.17%
+/// per epoch. Moving only blocks above the bar certified the fit 8 epochs after the saved
+/// epoch-3360 state, against 530 epochs when every block moved (#2502, lane jobs 1255653
+/// and 1250595). A kept block's stationarity is read again every pass, so a block its
+/// neighbors push back above the bar moves again.
 pub(super) fn ritz_tied_frame_step(
     current: ArrayView2<'_, f32>,
     directions: ArrayView2<'_, f32>,
     action: ArrayView2<'_, f64>,
     code_second: ArrayView2<'_, f64>,
     normal_multiplier: f64,
+    bar: f64,
     mut proposal: ArrayViewMut2<'_, f32>,
     mut next_directions: ArrayViewMut2<'_, f32>,
 ) -> Result<f64, String> {
@@ -254,6 +266,11 @@ pub(super) fn ritz_tied_frame_step(
     }
     let (tangent, stationarity) =
         tied_frame_tangent(current, own_action, code_second, normal_multiplier)?;
+    if stationarity <= bar {
+        proposal.assign(&current);
+        write_unit_columns(tangent.view(), next_directions.slice_mut(s![..b, ..]));
+        return Ok(stationarity);
+    }
     // A zero search row has a zero action column and spans nothing.
     let searched: Vec<usize> = (0..directions.nrows())
         .filter(|&row| directions.row(row).iter().any(|&value| value != 0.0))

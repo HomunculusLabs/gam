@@ -1252,6 +1252,7 @@ fn a_ritz_step_below_storage_resolution_keeps_the_stored_bits_2502() {
             action.view(),
             Array2::<f64>::zeros((b, b)).view(),
             1.0,
+            0.0,
             proposal.view_mut(),
             next.view_mut(),
         )
@@ -1410,4 +1411,57 @@ fn a_resumed_stream_continues_bit_for_bit_2502() {
         .expect("a checkpoint written under another tolerance must be refused");
     assert!(error.contains("tolerance"), "{error}");
     std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn a_block_that_meets_the_certificate_bar_keeps_its_stored_bits_2502() {
+    // H = diag(2, 1, −g) + ε(e1e2ᵀ + e2e1ᵀ) on span[U, R], U = [e0, e1], R = [e2]: the top
+    // Ritz pair rotates e1 toward e2 by a resolvable angle, and the stationarity certificate
+    // is ε over the action's norm. A bar at or above that certificate means the block already
+    // passes it, so its step can only shift its neighbors' conditional optima: it must keep
+    // U's stored bits, with its tangent as the next search row. A bar just below it must let
+    // the block move (#2502).
+    let (b, p) = (2usize, 3usize);
+    let g = 10.0_f64;
+    let coupling = 0.05_f64;
+    let current = array![[1.0_f32, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    let directions = array![[0.0_f32, 0.0, 1.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]];
+    let mut h = Array2::<f64>::zeros((p, p));
+    h[[0, 0]] = 2.0;
+    h[[1, 1]] = 1.0;
+    h[[2, 2]] = -g;
+    h[[1, 2]] = coupling;
+    h[[2, 1]] = coupling;
+    let mut action = Array2::<f64>::zeros((p, 3 * b));
+    for column in 0..p {
+        action.column_mut(column).assign(&h.column(column));
+    }
+    let step = |bar: f64| {
+        let mut proposal = Array2::<f32>::zeros((b, p));
+        let mut next = Array2::<f32>::zeros((2 * b, p));
+        let stationarity = crate::sparse_dict::block_frame::ritz_tied_frame_step(
+            current.view(),
+            directions.view(),
+            action.view(),
+            Array2::<f64>::zeros((b, b)).view(),
+            1.0,
+            bar,
+            proposal.view_mut(),
+            next.view_mut(),
+        )
+        .expect("the Ritz step on a resolved subspace");
+        (stationarity, proposal, next)
+    };
+    let (stationarity, moved, _) = step(0.0);
+    assert!(stationarity > 0.0);
+    assert_ne!(moved, current, "with no bar the resolvable step must move the frame");
+    let (_, kept, next) = step(stationarity);
+    assert_eq!(kept, current, "a block that meets the bar must keep its stored bits");
+    assert_eq!(
+        next.row(1),
+        array![0.0_f32, 0.0, 1.0].view(),
+        "a kept block's next search row is its unit tangent gradient"
+    );
+    let (_, below, _) = step(0.5 * stationarity);
+    assert_ne!(below, current, "a block above the bar must still move");
 }

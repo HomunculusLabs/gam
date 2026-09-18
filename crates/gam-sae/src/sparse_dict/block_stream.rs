@@ -1612,6 +1612,7 @@ impl BlockSparseStreamState {
                             moment.view(),
                             normal.view(),
                             1.0,
+                            frame_bar,
                             proposal.view_mut(),
                             directions.view_mut(),
                         )
