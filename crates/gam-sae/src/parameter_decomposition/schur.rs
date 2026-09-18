@@ -57,15 +57,13 @@
 //! # Recovery
 //!
 //! [`recover_invariant_blocks`] proposes, certifies and merges. Eigenvalue estimates
-//! come from faer's eigenvalues-only `evd_real` at gam-linalg's [`evd_parallelism`].
-//! faer 0.24 keeps its Schur vectors private, so the estimates only seed proposals
-//! and no claim rests on them. gam-linalg's certified `real_general_eigenvalues`
-//! refuses whenever an eigenvector's measured backward error exceeds its band. At
-//! an exactly repeated semisimple eigenvalue (a fixed space, a zero cluster, a
-//! doubled plane), that refuses a converged spectrum, and such spectra are this
-//! module's core case. `evd_real` can return from an unconverged iteration. An
-//! inaccurate estimate then yields proposals that fail certification and merge,
-//! and a non-finite estimate is refused.
+//! come from gam-linalg's certified [`real_general_spectrum`]. It certifies each
+//! eigenvalue by its measured backward error: the eigenvector residual, or where
+//! faer's vector is no evidence (an exactly repeated semisimple pair), σ_min(A − λI).
+//! It refuses an unconverged or moved eigenvalue with a typed refusal. faer 0.24 keeps
+//! its Schur vectors private, so the estimates only seed proposals and no claim rests
+//! on them: an estimate the owner's certificate cannot rule out yields proposals that
+//! fail certification and merge.
 //! Each real estimate and each conjugate pair starts as its own cluster.
 //!
 //! A cluster of `k` estimates proposes the `k` smallest right singular vectors of
@@ -89,9 +87,7 @@
 //! certifying a `k`-dimensional cluster adds `O((k (n - k))^3)` time and a
 //! `k (n - k)` square workspace.
 
-use faer::dyn_stack::{MemBuffer, MemStack};
-use faer::linalg::evd::{self, ComputeEigenvectors, EvdError};
-use gam_linalg::faer_ndarray::{FaerLinalgError, FaerQr, FaerSvd, evd_parallelism};
+use gam_linalg::faer_ndarray::{FaerLinalgError, FaerQr, FaerSvd, real_general_spectrum};
 use gam_linalg::roundoff::{accumulation_band, accumulation_growth, factor_singular_band};
 use ndarray::{Array2, ArrayView2, s};
 use std::f64::consts::SQRT_2;
@@ -115,10 +111,8 @@ pub enum InvariantSubspaceError {
     /// The candidate basis resolves fewer columns than it has, above the SVD
     /// owner's backward band.
     RankDeficientBasis { resolved: usize, columns: usize },
-    /// A singular value or QR decomposition failed.
+    /// A singular value, QR or certified general eigendecomposition failed or refused.
     Linalg(FaerLinalgError),
-    /// The eigenvalue estimation did not converge.
-    Eigen(EvdError),
     /// A complex eigenvalue estimate whose neighbour is not its conjugate.
     UnpairedComplexEigenvalue { index: usize },
 }
@@ -148,9 +142,6 @@ impl std::fmt::Display for InvariantSubspaceError {
             ),
             Self::Linalg(error) => {
                 write!(formatter, "invariant-subspace decomposition failed: {error}")
-            }
-            Self::Eigen(error) => {
-                write!(formatter, "eigenvalue estimation failed: {error:?}")
             }
             Self::UnpairedComplexEigenvalue { index } => write!(
                 formatter,
@@ -412,78 +403,20 @@ fn validate_operator(matrix: ArrayView2<'_, f64>) -> Result<(), InvariantSubspac
     Ok(())
 }
 
-/// Eigenvalue estimates `(re, im)` in faer's order, conjugate pairs adjacent.
-///
-/// **Owner bypass (interim, gam-67 ruling 09-17, #2951).** This calls faer's
-/// `evd_real` with `ComputeEigenvectors::No` at [`evd_parallelism`] instead of
-/// gam-linalg's `real_general_spectrum`. That owner refuses as
-/// `GeneralEigen(NoConvergence)` whenever an eigenvector's measured backward error
-/// exceeds its band. At an exactly repeated semisimple pair, faer's eigenvector
-/// back-substitution degenerates, so the owner falsely refuses a converged
-/// spectrum. The repeated-planes test pins that case.
-///
-/// The estimates only seed proposals, and every claim is this module's own
-/// Stewart certificate on the operator, so a finite unconverged estimate costs a
-/// failed proposal, never a false claim. Non-finite input is refused before the
-/// call. faer's own error and non-finite estimates are refused through
-/// [`InvariantSubspaceError::Eigen`].
-///
-/// **Removal tracker (gam-21, 09-17).** This call is a second owner of general
-/// eigenvalues, kept only until ad-2627b's certificate fix lands in
-/// `gam_linalg::faer_ndarray` (#2627, reproduced on the repeated-planes fixture
-/// here). That fix is a cluster invariant-subspace residual, or a separately typed
-/// estimates API. When gam-21 announces its sha, delete this faer call and
-/// [`validated_estimates`], call the owner, keep the repeated-planes test as the
-/// pin, and re-gate.
+/// Eigenvalue estimates `(re, im)` from gam-linalg's certified general
+/// eigendecomposition, conjugate pairs adjacent with the positive imaginary part
+/// first. Non-finite input is refused before faer, and a refusal of the owner's
+/// certificate arrives as [`InvariantSubspaceError::Linalg`].
 fn eigenvalue_estimates(
     matrix: ArrayView2<'_, f64>,
 ) -> Result<Vec<(f64, f64)>, InvariantSubspaceError> {
-    let dimension = matrix.nrows();
-    let source = faer::Mat::<f64>::from_fn(dimension, dimension, |row, col| matrix[[row, col]]);
-    let mut real = faer::diag::Diag::<f64>::zeros(dimension);
-    let mut imaginary = faer::diag::Diag::<f64>::zeros(dimension);
-    let par = evd_parallelism();
-    let mut memory = MemBuffer::new(evd::evd_scratch::<f64>(
-        dimension,
-        ComputeEigenvectors::No,
-        ComputeEigenvectors::No,
-        par,
-        Default::default(),
-    ));
-    evd::evd_real(
-        source.as_ref(),
-        real.as_mut(),
-        imaginary.as_mut(),
-        None,
-        None,
-        par,
-        MemStack::new(&mut memory),
-        Default::default(),
-    )
-    .map_err(InvariantSubspaceError::Eigen)?;
-    let real = real.column_vector().as_mat();
-    let imaginary = imaginary.column_vector().as_mat();
-    validated_estimates(
-        (0..dimension)
-            .map(|index| (real[(index, 0)], imaginary[(index, 0)]))
-            .collect(),
-    )
-}
-
-/// Refuse non-finite estimates. faer can return `Ok` from an unconverged
-/// iteration. A finite but inaccurate estimate only weakens the proposals, since
-/// every claim is certified on the operator itself. A non-finite one leaves the
-/// merge distances undefined, so no merge could fire.
-fn validated_estimates(
-    estimates: Vec<(f64, f64)>,
-) -> Result<Vec<(f64, f64)>, InvariantSubspaceError> {
-    if estimates
+    let spectrum = real_general_spectrum(&matrix).map_err(InvariantSubspaceError::Linalg)?;
+    Ok(spectrum
+        .re
         .iter()
-        .any(|(real, imaginary)| !real.is_finite() || !imaginary.is_finite())
-    {
-        return Err(InvariantSubspaceError::Eigen(EvdError::NoConvergence));
-    }
-    Ok(estimates)
+        .copied()
+        .zip(spectrum.im.iter().copied())
+        .collect())
 }
 
 fn initial_clusters(estimates: &[(f64, f64)]) -> Result<Vec<Vec<usize>>, InvariantSubspaceError> {
@@ -679,6 +612,12 @@ fn certify_frame(
 /// value of `I_r ⊗ M_11 - M_22^T ⊗ I_k` (column-major `vec`), less the SVD owner's
 /// band and the rounding of the diagonal entries `m_11[a, a] - m_22[j, j]`. Every
 /// other entry is a copy or a negation, which is exact.
+///
+/// The SVD's backward error is gam-linalg's `factor_singular_band`,
+/// `max(m, n) ε σ_max`: the LAPACK convention, not a bound counted for faer 0.24.
+/// This bound, and so every `Certified` verdict, rests on that declared assumption
+/// (#2951, mpd-verify batch 22 NOTE 2 and batch 23's SPEC-tension note). A counted
+/// band or an a posteriori SVD certificate is an owner change in gam-linalg.
 fn kronecker_separation(reduced: &Array2<f64>, columns: usize) -> Result<f64, InvariantSubspaceError> {
     let dimension = reduced.nrows();
     let complement = dimension - columns;
@@ -725,8 +664,12 @@ fn block_kind(restriction: &Array2<f64>, restriction_error: f64) -> InvariantBlo
     match restriction.nrows() {
         1 => {
             let value = restriction[[0, 0]];
+            let absolute_sum = value.abs() + restriction_error;
             InvariantBlockKind::Real {
-                eigenvalue_interval: (value - restriction_error, value + restriction_error),
+                eigenvalue_interval: (
+                    round_down(value - restriction_error, absolute_sum, 1),
+                    round_up(value + restriction_error, absolute_sum, 1),
+                ),
             }
         }
         2 => plane_kind(restriction, restriction_error),
@@ -746,29 +689,73 @@ fn plane_kind(restriction: &Array2<f64>, restriction_error: f64) -> InvariantBlo
     let determinant = first * second - upper * lower;
     // `|tr E| <= sqrt(2) ||E||_F`; `|det(L + E) - det L| <= ||adj L||_F ||E||_F +
     // ||E||_F^2 / 2` with `||adj L||_F = ||L||_F`; plus the rounding of forming each.
-    let trace_error =
-        SQRT_2 * restriction_error + accumulation_band(1, first.abs() + second.abs());
-    let determinant_error = frobenius_norm(restriction.view()) * restriction_error
-        + 0.5 * restriction_error * restriction_error
-        + accumulation_band(2, (first * second).abs() + (upper * lower).abs());
-    let discriminant_upper =
-        (trace.abs() + trace_error).powi(2) - 4.0 * (determinant - determinant_error);
-    let discriminant_lower =
-        (trace.abs() - trace_error).max(0.0).powi(2) - 4.0 * (determinant + determinant_error);
+    // Every bound below is rounded outward from exact-arithmetic bounds, so a certified
+    // endpoint or sign holds for the exact restriction, not only to within an ulp.
+    // `SQRT_2` exceeds `sqrt(2)`.
+    let trace_error = {
+        let value = SQRT_2 * restriction_error + accumulation_band(1, first.abs() + second.abs());
+        // `sqrt(2) ε`, the band's `γ_1`, its absolute sum and product, and the sum.
+        round_up(value, value, 6)
+    };
+    let determinant_error = {
+        let value = frobenius_norm(restriction.view()) * restriction_error
+            + 0.5 * restriction_error * restriction_error
+            + accumulation_band(2, (first * second).abs() + (upper * lower).abs());
+        // The Frobenius norm (4 squares, 3 sums, 1 root), its product with `ε`, `ε^2`,
+        // the band's `γ_2`, two products, their sum and the band product, and two sums.
+        round_up(value, value, 18)
+    };
+    let magnitude = trace.abs();
+    let trace_high = round_up(magnitude + trace_error, magnitude + trace_error, 1);
+    let trace_low = round_down(magnitude - trace_error, magnitude + trace_error, 1).max(0.0);
+    let determinant_absolute_sum = determinant.abs() + determinant_error;
+    let determinant_low = round_down(
+        determinant - determinant_error,
+        determinant_absolute_sum,
+        1,
+    );
+    let determinant_high = round_up(
+        determinant + determinant_error,
+        determinant_absolute_sum,
+        1,
+    );
+    let square_high = round_up(trace_high * trace_high, trace_high * trace_high, 2);
+    let square_low = round_down(trace_low * trace_low, trace_low * trace_low, 2);
+    // `t^2 - 4 d` over `|t| in [trace_low, trace_high]`, `d in [determinant_low,
+    // determinant_high]`; `4 d` scales exactly.
+    let discriminant_upper = round_up(
+        square_high - 4.0 * determinant_low,
+        square_high + 4.0 * determinant_low.abs(),
+        1,
+    );
+    let discriminant_lower = round_down(
+        square_low - 4.0 * determinant_high,
+        square_low + 4.0 * determinant_high.abs(),
+        1,
+    );
     if discriminant_upper < 0.0 {
-        let determinant_interval = (
-            determinant - determinant_error,
-            determinant + determinant_error,
+        // `discriminant_upper < 0` gives `4 determinant_low > trace_high^2 >= 0`, so both
+        // square roots are of positive numbers; a correctly rounded root moves by at most
+        // half an ulp.
+        let modulus_interval = (
+            determinant_low.sqrt().next_down(),
+            determinant_high.sqrt().next_up(),
         );
-        // `t / (2 sqrt d)` is monotone in `t` and, for a fixed sign of `t`, in `d`,
-        // so its extremes over the box are at the corners.
+        // `t / (2 sqrt d)` is monotone in `t` and, for a fixed sign of `t`, in `d`, so its
+        // extremes over the outward box are at its corners. Each corner rounds in the
+        // root and the division (`2 sqrt d` doubles exactly), and its band is taken on the
+        // rounded quotient, which costs one more counted operation.
+        let corner_traces = [
+            round_down(trace - trace_error, magnitude + trace_error, 1),
+            round_up(trace + trace_error, magnitude + trace_error, 1),
+        ];
         let mut cosine_low = f64::INFINITY;
         let mut cosine_high = f64::NEG_INFINITY;
-        for corner_trace in [trace - trace_error, trace + trace_error] {
-            for corner_determinant in [determinant_interval.0, determinant_interval.1] {
+        for corner_trace in corner_traces {
+            for corner_determinant in [determinant_low, determinant_high] {
                 let cosine = corner_trace / (2.0 * corner_determinant.sqrt());
-                cosine_low = cosine_low.min(cosine);
-                cosine_high = cosine_high.max(cosine);
+                cosine_low = cosine_low.min(round_down(cosine, cosine.abs(), 3));
+                cosine_high = cosine_high.max(round_up(cosine, cosine.abs(), 3));
             }
         }
         let half_trace = 0.5 * trace;
@@ -778,10 +765,7 @@ fn plane_kind(restriction: &Array2<f64>, restriction_error: f64) -> InvariantBlo
         complex_structure[[1, 1]] -= half_trace;
         complex_structure.mapv_inplace(|value| value / sine_part);
         InvariantBlockKind::RotationScaling {
-            modulus_interval: (
-                determinant_interval.0.sqrt(),
-                determinant_interval.1.sqrt(),
-            ),
+            modulus_interval,
             cosine_interval: (cosine_low.max(-1.0), cosine_high.min(1.0)),
             angle: sine_part.atan2(half_trace),
             complex_structure,
@@ -794,6 +778,18 @@ fn plane_kind(restriction: &Array2<f64>, restriction_error: f64) -> InvariantBlo
     } else {
         InvariantBlockKind::Unresolved
     }
+}
+
+/// `value` less the counted rounding of the `operations` round-to-nearest steps that
+/// formed it, `γ_k Σ|terms|` (Higham, Lemma 3.1), then one ulp further down for the
+/// subtraction itself. `absolute_sum` majorizes the exact terms.
+fn round_down(value: f64, absolute_sum: f64, operations: usize) -> f64 {
+    (value - accumulation_band(operations, absolute_sum)).next_down()
+}
+
+/// The upward counterpart of [`round_down`].
+fn round_up(value: f64, absolute_sum: f64, operations: usize) -> f64 {
+    (value + accumulation_band(operations, absolute_sum)).next_up()
 }
 
 fn cluster_distance(estimates: &[(f64, f64)], left: &[usize], right: &[usize]) -> f64 {
@@ -926,21 +922,25 @@ mod tests {
             } => (*modulus_interval, *cosine_interval, *angle, complex_structure),
             other => panic!("expected a rotation-scaling, got {other:?}"),
         };
-        // `real^2 + imaginary^2` is exact; the square root rounds once and the
-        // division once more.
+        // `real^2 + imaginary^2` is exact, and the correctly rounded root is within half
+        // an ulp of the exact modulus. The cosine carries the root and the division, with
+        // its band taken on the rounded quotient. Each truth enclosure must lie inside its
+        // reported interval, which proves the exact value does; no slack is added to the
+        // intervals themselves.
         let modulus = (real * real + imaginary * imaginary).sqrt();
+        let modulus_truth = (modulus.next_down(), modulus.next_up());
         let cosine = real / modulus;
-        let modulus_slack = accumulation_growth(1) * modulus;
-        let cosine_slack = accumulation_growth(2) * cosine.abs();
-        assert!(
-            modulus_interval.0 - modulus_slack <= modulus
-                && modulus <= modulus_interval.1 + modulus_slack,
-            "modulus {modulus} outside {modulus_interval:?}"
+        let cosine_truth = (
+            round_down(cosine, cosine.abs(), 3),
+            round_up(cosine, cosine.abs(), 3),
         );
         assert!(
-            cosine_interval.0 - cosine_slack <= cosine
-                && cosine <= cosine_interval.1 + cosine_slack,
-            "cosine {cosine} outside {cosine_interval:?}"
+            modulus_interval.0 <= modulus_truth.0 && modulus_truth.1 <= modulus_interval.1,
+            "modulus enclosure {modulus_truth:?} outside {modulus_interval:?}"
+        );
+        assert!(
+            cosine_interval.0 <= cosine_truth.0 && cosine_truth.1 <= cosine_interval.1,
+            "cosine enclosure {cosine_truth:?} outside {cosine_interval:?}"
         );
         assert!(angle > 0.0 && angle < PI, "angle {angle} outside (0, pi)");
         assert_spans(certificate, frame.slice(s![.., first..first + 2]));
@@ -1048,16 +1048,22 @@ mod tests {
                 cosine_interval,
                 ..
             } => {
+                // `0.5^2 + 0.5^2 = 0.5` exactly. Enclose the exact modulus and cosine as in
+                // `assert_rotation`, and require the enclosures inside the intervals.
                 let modulus = 0.5_f64.sqrt();
+                let modulus_truth = (modulus.next_down(), modulus.next_up());
                 let cosine = 0.5 / modulus;
-                let slack = accumulation_growth(2);
-                assert!(
-                    modulus_interval.0 - slack <= modulus && modulus <= modulus_interval.1 + slack,
-                    "modulus {modulus} outside {modulus_interval:?}"
+                let cosine_truth = (
+                    round_down(cosine, cosine.abs(), 3),
+                    round_up(cosine, cosine.abs(), 3),
                 );
                 assert!(
-                    cosine_interval.0 - slack <= cosine && cosine <= cosine_interval.1 + slack,
-                    "cosine {cosine} outside {cosine_interval:?}"
+                    modulus_interval.0 <= modulus_truth.0 && modulus_truth.1 <= modulus_interval.1,
+                    "modulus enclosure {modulus_truth:?} outside {modulus_interval:?}"
+                );
+                assert!(
+                    cosine_interval.0 <= cosine_truth.0 && cosine_truth.1 <= cosine_interval.1,
+                    "cosine enclosure {cosine_truth:?} outside {cosine_interval:?}"
                 );
             }
             other => panic!("expected a rotation-scaling, got {other:?}"),
@@ -1162,20 +1168,25 @@ mod tests {
     }
 
     #[test]
-    fn non_finite_eigenvalue_estimates_are_refused_2951() {
-        // Positive control: finite estimates pass through unchanged.
-        let finite = vec![(0.5, 0.75), (0.5, -0.75), (-1.0, 0.0)];
-        assert_eq!(
-            validated_estimates(finite.clone()).expect("finite estimates"),
-            finite
-        );
-        assert!(matches!(
-            validated_estimates(vec![(0.5, 0.75), (f64::NAN, 0.0)]),
-            Err(InvariantSubspaceError::Eigen(EvdError::NoConvergence))
-        ));
-        assert!(matches!(
-            validated_estimates(vec![(-1.0, 0.0), (0.25, f64::INFINITY)]),
-            Err(InvariantSubspaceError::Eigen(EvdError::NoConvergence))
-        ));
+    fn outward_rounding_keeps_an_endpoint_that_round_to_nearest_cuts_off_2951() {
+        // `2^-60` is below half an ulp of 1.0, so round-to-nearest returns exactly 1.0 for
+        // `1 - e` and `1 + e`: both nearest endpoints cut off the exact bounds.
+        let e = 2.0_f64.powi(-60);
+        assert_eq!(1.0 - e, 1.0);
+        assert_eq!(1.0 + e, 1.0);
+        // Outward rounding reaches the neighbouring floats, which enclose `1 ± e`.
+        let lower = round_down(1.0 - e, 1.0 + e, 1);
+        let upper = round_up(1.0 + e, 1.0 + e, 1);
+        assert!(lower < 1.0 && upper > 1.0, "outward endpoints {lower}, {upper}");
+        // A 1x1 restriction [1.0] with restriction error 2^-60.
+        match block_kind(&Array2::<f64>::from_elem((1, 1), 1.0), e) {
+            InvariantBlockKind::Real {
+                eigenvalue_interval,
+            } => assert!(
+                eigenvalue_interval.0 < 1.0 && eigenvalue_interval.1 > 1.0,
+                "interval {eigenvalue_interval:?} cuts off 1 ± 2^-60"
+            ),
+            other => panic!("expected a real block, got {other:?}"),
+        }
     }
 }
