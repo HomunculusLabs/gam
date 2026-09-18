@@ -8,7 +8,13 @@
 //! "REML smoothing optimization failed to converge: survival transformation
 //! smoothing-parameter selection (dim=3): ..." (job 1217032). The outer search's
 //! `EstimationError` now reaches the boundary whole, so the class names
-//! convergence and the message is unchanged.
+//! convergence and the message is the engine's.
+//!
+//! Which convergence refusal ends the search is the engine's choice. By
+//! 19143a1511 it had become `EstimationError::TrialPointRefused` ("survival
+//! transformation inner P-IRLS at this trial rho ended with status
+//! LmStepSearchExhausted ...", sw1a job 1277503), so the pin names the category,
+//! the typed variant and the route's own words, not one verdict's text.
 
 use csv::StringRecord;
 use gam::{
@@ -63,9 +69,7 @@ fn survival_transformation_search_failure_raises_its_category_2937() {
         error.variant_name()
     );
     assert!(
-        error
-            .to_string()
-            .starts_with("REML smoothing optimization failed to converge"),
+        error.to_string().contains("survival transformation"),
         "the message must stay the engine's: {error}"
     );
 }
