@@ -38,20 +38,28 @@
 //!
 //! # Stages
 //!
-//! [`BlockExecution`] keeps each stage that a torch block exports as a module
-//! output: the two normalized inputs, the attention execution with its
-//! forward-error radius, the MLP pre-activation, activation and write, and the
-//! layer output. A receipt compares an external executor with the native block
+//! [`BlockExecution`] and [`GatedBlockExecution`] keep each stage that a torch
+//! block exports as a module output: the two normalized inputs, the attention
+//! execution with its forward-error radius, the MLP's stages (the pre-activation,
+//! activation and write of an activated MLP, or the `gate_proj`, `up_proj`,
+//! hidden and `down_proj` rows of a gated one), and the layer output. A receipt compares an external executor with the native block
 //! stage by stage (A12). The tests propagate the stage radii into a derived
 //! replay band over the whole block.
 //!
 //! # Validity domain
 //!
-//! The block covers what its sublayers cover: query and key projections that feed
-//! the rotary embedding directly (no per-head query/key norm), an MLP with a ReLU
-//! or exact GELU activation, and normalizations with the source's own gain and
-//! bias. Masks on the value and output projections, on normalization gains, and on
-//! a gated (SwiGLU) MLP are not carried by [`ComponentBlock`].
+//! The block covers what its sublayers cover: query and key projections feeding
+//! the rotary embedding with the source's projection biases, and normalizations
+//! with the source's own gain and bias. A per-head query/key norm, when the source
+//! attention carries one ([`NativeAttention::with_query_key_norm`]), runs inside
+//! the attention sublayer on both paths, and [`super::attention`] certifies it; the
+//! replay bands below exercise attention without it.
+//! The MLP is either an activated residual MLP with a ReLU or exact GELU
+//! activation ([`NativeBlock`], [`ComponentBlock`]) or a gated SwiGLU MLP with a
+//! SiLU gate and no biases ([`NativeGatedBlock`], [`ComponentGatedBlock`]). The
+//! two kinds are separate types, so a mask of one kind can never reach the
+//! other. Masks on the value and output projections and on normalization gains
+//! are not carried by either component block.
 //!
 //! # Attention-only layers
 //!
@@ -84,7 +92,10 @@ use super::attention::{
     ComponentProjection, NativeAttention, ProjectedAttention, ProjectedRows, QueryKeyMasks,
     RotaryCausalAttention, RotaryEmbedding,
 };
-use super::gated_rewrite::{GatedRewriteError, MaskedNorm, ResidualLayout, decoder_layer};
+use super::gated_rewrite::{
+    ComponentSwiglu, GatedRewriteError, MaskedNorm, NativeSwiglu, ResidualLayout, SwigluError,
+    SwigluMask, SwigluStages, decoder_layer,
+};
 use super::occurrence::PositionScope;
 use super::rewrite::{
     ComponentMlp, ComponentRead, ExactFactor, FactorRefusal, MlpMask, NativeMlp, RewriteError,
@@ -156,6 +167,8 @@ pub enum BlockError {
     Layer(GatedRewriteError),
     Attention(AttentionProgramError),
     Mlp(RewriteError),
+    /// The gated MLP sublayer refused.
+    Swiglu(SwigluError),
     /// The decoder layer returned a stream without running this sublayer: an
     /// executor invariant.
     SublayerNotExecuted { sublayer: Sublayer },
@@ -196,6 +209,12 @@ pub enum BlockError {
     },
 }
 
+impl From<SwigluError> for BlockError {
+    fn from(error: SwigluError) -> Self {
+        Self::Swiglu(error)
+    }
+}
+
 impl From<GatedRewriteError> for BlockError {
     fn from(error: GatedRewriteError) -> Self {
         Self::Layer(error)
@@ -223,6 +242,7 @@ impl fmt::Display for BlockError {
             Self::Layer(error) => write!(formatter, "the decoder layer refused a write: {error}"),
             Self::Attention(error) => write!(formatter, "the attention sublayer refused: {error}"),
             Self::Mlp(error) => write!(formatter, "the MLP sublayer refused: {error}"),
+            Self::Swiglu(error) => write!(formatter, "the gated MLP sublayer refused: {error}"),
             Self::SublayerNotExecuted { sublayer } => write!(
                 formatter,
                 "executor invariant: the decoder layer returned without running the {sublayer} sublayer"
@@ -297,19 +317,29 @@ struct MlpStage {
     write: Array2<f64>,
 }
 
+/// Every stage of one executed decoder layer, with the MLP sublayer's own stages.
+struct LayerStages<Stages> {
+    attention_input: Array2<f64>,
+    attention: AttentionExecution,
+    mlp_input: Array2<f64>,
+    mlp: Stages,
+    output: Array2<f64>,
+}
+
 /// The decoder layer over `residual`, with each sublayer normalizing the stream
-/// the layer hands it, and every stage kept.
-fn execute_layer<Attend, Mlp>(
+/// the layer hands it, and every stage kept. The MLP closure returns its stages
+/// and its write.
+fn execute_layer<Attend, Mlp, Stages>(
     layout: ResidualLayout,
     attention_norm: &NativeNorm,
     mlp_norm: &NativeNorm,
     residual: ArrayView2<'_, f64>,
     attend: Attend,
     mlp: Mlp,
-) -> Result<BlockExecution, BlockError>
+) -> Result<LayerStages<Stages>, BlockError>
 where
     Attend: FnOnce(ArrayView2<'_, f64>) -> Result<AttentionExecution, BlockError>,
-    Mlp: FnOnce(ArrayView2<'_, f64>) -> Result<MlpStage, BlockError>,
+    Mlp: FnOnce(ArrayView2<'_, f64>) -> Result<(Stages, Array2<f64>), BlockError>,
 {
     let mut attention_stage = None;
     let mut mlp_stage = None;
@@ -337,27 +367,37 @@ where
                     sublayer: Sublayer::Mlp,
                     error,
                 })?;
-            let stage = mlp(input.view())?;
-            let write = stage.write.clone();
-            mlp_stage = Some((input, stage));
+            let (stages, write) = mlp(input.view())?;
+            mlp_stage = Some((input, stages));
             Ok(write)
         },
     )?;
     let (attention_input, attention) = attention_stage.ok_or(BlockError::SublayerNotExecuted {
         sublayer: Sublayer::Attention,
     })?;
-    let (mlp_input, stage) = mlp_stage.ok_or(BlockError::SublayerNotExecuted {
+    let (mlp_input, mlp) = mlp_stage.ok_or(BlockError::SublayerNotExecuted {
         sublayer: Sublayer::Mlp,
     })?;
-    Ok(BlockExecution {
+    Ok(LayerStages {
         attention_input,
         attention,
         mlp_input,
-        mlp_summed_input: stage.summed_input,
-        mlp_activations: stage.activations,
-        mlp_write: stage.write,
+        mlp,
         output,
     })
+}
+
+/// The execution record of a block whose MLP is an activated residual MLP.
+fn activated_execution(layer: LayerStages<MlpStage>) -> BlockExecution {
+    BlockExecution {
+        attention_input: layer.attention_input,
+        attention: layer.attention,
+        mlp_input: layer.mlp_input,
+        mlp_summed_input: layer.mlp.summed_input,
+        mlp_activations: layer.mlp.activations,
+        mlp_write: layer.mlp.write,
+        output: layer.output,
+    }
 }
 
 /// A decoder block on its original tensors.
@@ -401,7 +441,7 @@ impl NativeBlock {
         residual: ArrayView2<'_, f64>,
         positions: &[i64],
     ) -> Result<BlockExecution, BlockError> {
-        execute_layer(
+        let layer = execute_layer(
             self.layout,
             &self.attention_norm,
             &self.mlp_norm,
@@ -417,13 +457,18 @@ impl NativeBlock {
                     .mlp
                     .written(activations.view())
                     .map_err(RewriteError::from)?;
-                Ok(MlpStage {
-                    summed_input,
-                    activations,
-                    write,
-                })
+                let stage_write = write.clone();
+                Ok((
+                    MlpStage {
+                        summed_input,
+                        activations,
+                        write,
+                    },
+                    stage_write,
+                ))
             },
-        )
+        )?;
+        Ok(activated_execution(layer))
     }
 }
 
@@ -492,7 +537,7 @@ impl ComponentBlock {
         residual: ArrayView2<'_, f64>,
         positions: &[i64],
     ) -> Result<BlockExecution, BlockError> {
-        execute_layer(
+        let layer = execute_layer(
             self.layout,
             &self.attention_norm,
             &self.mlp_norm,
@@ -512,13 +557,183 @@ impl ComponentBlock {
                     .mlp
                     .written(activations.view(), masks.mlp.write_out)
                     .map_err(RewriteError::from)?;
-                Ok(MlpStage {
-                    summed_input,
-                    activations,
-                    write,
-                })
+                let stage_write = write.clone();
+                Ok((
+                    MlpStage {
+                        summed_input,
+                        activations,
+                        write,
+                    },
+                    stage_write,
+                ))
             },
-        )
+        )?;
+        Ok(activated_execution(layer))
+    }
+}
+
+/// Every stage of one executed gated block. Rows are positions throughout.
+#[derive(Clone, Debug)]
+pub struct GatedBlockExecution {
+    /// `N₁(h)`, the attention sublayer's input.
+    pub attention_input: Array2<f64>,
+    /// The attention sublayer on [`Self::attention_input`], with its radius.
+    pub attention: AttentionExecution,
+    /// `N₂` of the stream the gated MLP reads.
+    pub mlp_input: Array2<f64>,
+    /// The gated MLP's `gate_proj`, `up_proj`, hidden `s(gate) ⊙ up` and
+    /// `down_proj` rows on [`Self::mlp_input`]; its write carries no residual.
+    pub mlp: SwigluStages,
+    /// The residual stream after both writes.
+    pub output: Array2<f64>,
+}
+
+/// The execution record of a block whose MLP is a gated (SwiGLU) MLP.
+fn gated_execution(layer: LayerStages<SwigluStages>) -> GatedBlockExecution {
+    GatedBlockExecution {
+        attention_input: layer.attention_input,
+        attention: layer.attention,
+        mlp_input: layer.mlp_input,
+        mlp: layer.mlp,
+        output: layer.output,
+    }
+}
+
+/// A decoder block with a gated (SwiGLU) MLP on its original tensors: Qwen3 or
+/// Llama, with a SiLU gate and no MLP biases.
+#[derive(Clone, Debug)]
+pub struct NativeGatedBlock {
+    layout: ResidualLayout,
+    attention_norm: NativeNorm,
+    attention: NativeAttention,
+    mlp_norm: NativeNorm,
+    mlp: NativeSwiglu,
+}
+
+impl NativeGatedBlock {
+    /// A block of the source's sublayers. Each width is refused where its owner
+    /// reads it.
+    pub fn new(
+        layout: ResidualLayout,
+        attention_norm: NativeNorm,
+        attention: NativeAttention,
+        mlp_norm: NativeNorm,
+        mlp: NativeSwiglu,
+    ) -> Self {
+        Self {
+            layout,
+            attention_norm,
+            attention,
+            mlp_norm,
+            mlp,
+        }
+    }
+
+    pub fn layout(&self) -> ResidualLayout {
+        self.layout
+    }
+
+    /// The source block on its original tensors, over the residual rows at their
+    /// absolute positions.
+    pub fn execute(
+        &self,
+        residual: ArrayView2<'_, f64>,
+        positions: &[i64],
+    ) -> Result<GatedBlockExecution, BlockError> {
+        let layer = execute_layer(
+            self.layout,
+            &self.attention_norm,
+            &self.mlp_norm,
+            residual,
+            |input| Ok(self.attention.execute(input, positions)?),
+            |input| {
+                let stages = self.mlp.execute_stages(input).map_err(SwigluError::from)?;
+                let write = stages.write.clone();
+                Ok((stages, write))
+            },
+        )?;
+        Ok(gated_execution(layer))
+    }
+}
+
+/// The masks of a [`ComponentGatedBlock`]: the query and key component masks of
+/// its attention and the factor masks of its gated MLP.
+#[derive(Clone, Copy, Debug)]
+pub struct GatedBlockMasks<'a> {
+    pub attention: &'a QueryKeyMasks,
+    pub mlp: SwigluMask<'a>,
+}
+
+/// A decoder block with its query and key projections and the three gated-MLP
+/// weights executed through masked component coordinates.
+#[derive(Clone, Debug)]
+pub struct ComponentGatedBlock {
+    layout: ResidualLayout,
+    attention_norm: NativeNorm,
+    attention: ComponentAttention,
+    mlp_norm: NativeNorm,
+    mlp: ComponentSwiglu,
+}
+
+impl ComponentGatedBlock {
+    /// Factors `native`'s sublayers: `query` and `key` must factor the attention's
+    /// query and key projections exactly, and the gate, up and down weights are
+    /// solved for their exact writes ([`ComponentSwiglu::new`]).
+    pub fn new(
+        native: NativeGatedBlock,
+        query: ComponentProjection,
+        key: ComponentProjection,
+        gate: ComponentRead<'_>,
+        up: ComponentRead<'_>,
+        down: ComponentRead<'_>,
+    ) -> Result<Self, BlockError> {
+        let NativeGatedBlock {
+            layout,
+            attention_norm,
+            attention,
+            mlp_norm,
+            mlp,
+        } = native;
+        Ok(Self {
+            layout,
+            attention_norm,
+            attention: ComponentAttention::new(attention, query, key)?,
+            mlp_norm,
+            mlp: ComponentSwiglu::new(mlp, gate, up, down)?,
+        })
+    }
+
+    pub fn layout(&self) -> ResidualLayout {
+        self.layout
+    }
+
+    /// The gated MLP sublayer and its exact factors.
+    pub fn mlp(&self) -> &ComponentSwiglu {
+        &self.mlp
+    }
+
+    /// The block under `masks`, over the residual rows at their absolute
+    /// positions. All-on masks execute the original tensors on their original
+    /// paths.
+    pub fn execute(
+        &self,
+        masks: GatedBlockMasks<'_>,
+        residual: ArrayView2<'_, f64>,
+        positions: &[i64],
+    ) -> Result<GatedBlockExecution, BlockError> {
+        let layer = execute_layer(
+            self.layout,
+            &self.attention_norm,
+            &self.mlp_norm,
+            residual,
+            |input| Ok(self.attention.execute(masks.attention, input, positions)?),
+            |input| {
+                let stages = self.mlp.execute_stages(input, masks.mlp)?;
+                let write = stages.write.clone();
+                Ok((stages, write))
+            },
+        )?;
+        Ok(gated_execution(layer))
     }
 }
 
@@ -905,6 +1120,9 @@ mod tests {
     const QUERY_COMPONENTS: usize = 5;
     const KEY_COMPONENTS: usize = 4;
     const TOKENS: usize = 5;
+    const GATE_COMPONENTS: usize = 5;
+    const UP_COMPONENTS: usize = 5;
+    const DOWN_COMPONENTS: usize = 7;
     /// Qwen3's declared `rms_norm_eps`.
     const RMS_EPSILON: f64 = 1.0e-6;
     /// Pythia's declared `layer_norm_eps`.
@@ -973,6 +1191,12 @@ mod tests {
         bias_out: Array1<f64>,
         residual: Array2<f64>,
         positions: Vec<i64>,
+        gate_candidate: Array2<f64>,
+        gate_read: Array2<f64>,
+        up_candidate: Array2<f64>,
+        up_read: Array2<f64>,
+        down_candidate: Array2<f64>,
+        down_read: Array2<f64>,
     }
 
     impl Fixture {
@@ -1006,7 +1230,68 @@ mod tests {
                     rng.random_range(-16..=16) as f64 / 8.0
                 }),
                 positions: vec![2, 3, 5, 6, 9],
+                gate_candidate: eighths(&mut rng, HIDDEN, GATE_COMPONENTS),
+                gate_read: eighths(&mut rng, GATE_COMPONENTS, WIDTH),
+                up_candidate: eighths(&mut rng, HIDDEN, UP_COMPONENTS),
+                up_read: eighths(&mut rng, UP_COMPONENTS, WIDTH),
+                down_candidate: eighths(&mut rng, WIDTH, DOWN_COMPONENTS),
+                down_read: eighths(&mut rng, DOWN_COMPONENTS, HIDDEN),
             }
+        }
+
+        fn native_attention(&self, query: Array2<f64>, key: Array2<f64>) -> NativeAttention {
+            NativeAttention::new(
+                geometry(),
+                rotary(),
+                1.0 / (geometry().head_dim as f64).sqrt(),
+                unbiased(query),
+                unbiased(key),
+                unbiased(self.value.clone()),
+                unbiased(self.output.clone()),
+            )
+            .expect("fixture attention tensors match the geometry")
+        }
+
+        /// The source gated block: every weight is its factors' product.
+        fn native_gated_block(&self) -> NativeGatedBlock {
+            NativeGatedBlock::new(
+                self.layout,
+                self.norm(&self.attention_gain, &self.attention_bias),
+                self.native_attention(
+                    self.query_outputs.dot(&self.query_readins),
+                    self.key_outputs.dot(&self.key_readins),
+                ),
+                self.norm(&self.mlp_gain, &self.mlp_bias),
+                NativeSwiglu::new(
+                    self.gate_candidate.dot(&self.gate_read),
+                    self.up_candidate.dot(&self.up_read),
+                    self.down_candidate.dot(&self.down_read),
+                )
+                .expect("fixture SwiGLU shapes compose"),
+            )
+        }
+
+        fn component_gated_block(&self) -> ComponentGatedBlock {
+            ComponentGatedBlock::new(
+                self.native_gated_block(),
+                ComponentProjection::new(self.query_outputs.clone(), self.query_readins.clone())
+                    .expect("query factor shapes agree"),
+                ComponentProjection::new(self.key_outputs.clone(), self.key_readins.clone())
+                    .expect("key factor shapes agree"),
+                ComponentRead {
+                    read: self.gate_read.view(),
+                    candidate_write: self.gate_candidate.view(),
+                },
+                ComponentRead {
+                    read: self.up_read.view(),
+                    candidate_write: self.up_candidate.view(),
+                },
+                ComponentRead {
+                    read: self.down_read.view(),
+                    candidate_write: self.down_candidate.view(),
+                },
+            )
+            .expect("random overcomplete reads are resolved")
         }
 
         fn norm(&self, gain: &Array1<f64>, bias: &Array1<f64>) -> NativeNorm {
@@ -1033,16 +1318,7 @@ mod tests {
             NativeBlock::new(
                 self.layout,
                 self.norm(&self.attention_gain, &self.attention_bias),
-                NativeAttention::new(
-                    geometry(),
-                    rotary(),
-                    1.0 / (geometry().head_dim as f64).sqrt(),
-                    unbiased(query),
-                    unbiased(key),
-                    unbiased(self.value.clone()),
-                    unbiased(self.output.clone()),
-                )
-                .expect("fixture attention tensors match the geometry"),
+                self.native_attention(query, key),
                 self.norm(&self.mlp_gain, &self.mlp_bias),
                 NativeMlp::new(
                     read_in_weight,
@@ -2134,5 +2410,190 @@ mod tests {
             "an output weight of another shape must be refused at construction"
         );
         assert_eq!(output.dim(), (LAYER_WIDTH, LAYER_WIDTH), "control: the fixture weight has the geometry's shape");
+    }
+
+    /// Eighths in `[-3/2, 3/2]` for each gated-MLP factor.
+    struct GatedMasks {
+        gate: Array1<f64>,
+        up: Array1<f64>,
+        down: Array1<f64>,
+    }
+
+    impl GatedMasks {
+        fn draw(rng: &mut StdRng) -> Self {
+            let mut vector =
+                |len: usize| Array1::from_shape_simple_fn(len, || rng.random_range(-12..=12) as f64 / 8.0);
+            Self {
+                gate: vector(GATE_COMPONENTS),
+                up: vector(UP_COMPONENTS),
+                down: vector(DOWN_COMPONENTS),
+            }
+        }
+
+        fn swiglu(&self) -> SwigluMask<'_> {
+            SwigluMask {
+                gate: ComponentMask::Components(self.gate.view()),
+                up: ComponentMask::Components(self.up.view()),
+                down: ComponentMask::Components(self.down.view()),
+            }
+        }
+    }
+
+    fn gated_stage_bits(execution: &GatedBlockExecution) -> Vec<u64> {
+        execution
+            .attention_input
+            .iter()
+            .chain(execution.attention.output.iter())
+            .chain(execution.attention.weights.iter())
+            .chain(execution.mlp_input.iter())
+            .chain(execution.mlp.gate.iter())
+            .chain(execution.mlp.up.iter())
+            .chain(execution.mlp.hidden.iter())
+            .chain(execution.mlp.write.iter())
+            .chain(execution.output.iter())
+            .map(|value| value.to_bits())
+            .collect()
+    }
+
+    /// All-on masks run both sublayers of a gated block on their original tensors
+    /// and paths, so every stage is bit-identical to the native gated block.
+    #[test]
+    fn all_on_masks_execute_the_native_gated_block_bit_for_bit() {
+        for (layout, seed) in [(ResidualLayout::Sequential, 2968), (ResidualLayout::Parallel, 2969)] {
+            let fixture = Fixture::new(layout, GaussianActivation::Relu, seed);
+            let block = fixture.component_gated_block();
+            let native = fixture
+                .native_gated_block()
+                .execute(fixture.residual.view(), &fixture.positions)
+                .expect("native gated block");
+            let ones = FixtureMasks::ones();
+            let attention_masks = ones.attention();
+            let all_on = GatedBlockMasks {
+                attention: &attention_masks,
+                mlp: SwigluMask {
+                    gate: ComponentMask::AllOn,
+                    up: ComponentMask::AllOn,
+                    down: ComponentMask::AllOn,
+                },
+            };
+            let executed = block
+                .execute(all_on, fixture.residual.view(), &fixture.positions)
+                .expect("all-on gated block");
+            assert!(
+                gated_stage_bits(&executed) == gated_stage_bits(&native),
+                "{layout:?}: the all-on gated block must execute the original tensors on their original paths"
+            );
+
+            // Positive control: the factored all-ones gate read is algebraically the
+            // same block but not the same bits.
+            let gate_ones = Array1::ones(GATE_COMPONENTS);
+            let factored = block
+                .execute(
+                    GatedBlockMasks {
+                        attention: &attention_masks,
+                        mlp: SwigluMask {
+                            gate: ComponentMask::Components(gate_ones.view()),
+                            up: ComponentMask::AllOn,
+                            down: ComponentMask::AllOn,
+                        },
+                    },
+                    fixture.residual.view(),
+                    &fixture.positions,
+                )
+                .expect("all-ones factored gate");
+            assert!(
+                gated_stage_bits(&factored) != gated_stage_bits(&native),
+                "{layout:?}: the bit-identity check must distinguish the factored all-ones gate path"
+            );
+        }
+    }
+
+    /// A gated block's stages are its owners' stages on the current stream,
+    /// composed in the source's order, bit for bit. A key mask reaches the gated MLP
+    /// input exactly in the sequential layout.
+    #[test]
+    fn a_gated_block_is_its_owners_stages_on_the_current_stream() {
+        for (layout, seed) in [(ResidualLayout::Sequential, 2970), (ResidualLayout::Parallel, 2971)] {
+            let fixture = Fixture::new(layout, GaussianActivation::Relu, seed);
+            let block = fixture.component_gated_block();
+            let mut rng = StdRng::seed_from_u64(seed + 100);
+            let [(kind, masks), ..] = FixtureMasks::family(&mut rng);
+            let gated_masks = GatedMasks::draw(&mut rng);
+            let attention_masks = masks.attention();
+            let block_masks = GatedBlockMasks {
+                attention: &attention_masks,
+                mlp: gated_masks.swiglu(),
+            };
+            let execution = block
+                .execute(block_masks, fixture.residual.view(), &fixture.positions)
+                .expect("masked gated block");
+
+            let attention_input = fixture
+                .norm(&fixture.attention_gain, &fixture.attention_bias)
+                .as_masked_norm()
+                .apply(fixture.residual.view())
+                .expect("attention norm");
+            let attention = ComponentAttention::new(
+                fixture.native_gated_block().attention,
+                ComponentProjection::new(fixture.query_outputs.clone(), fixture.query_readins.clone())
+                    .expect("query factor shapes agree"),
+                ComponentProjection::new(fixture.key_outputs.clone(), fixture.key_readins.clone())
+                    .expect("key factor shapes agree"),
+            )
+            .expect("attention factors match the geometry")
+            .execute(&attention_masks, attention_input.view(), &fixture.positions)
+            .expect("masked attention");
+            let stream = match layout {
+                ResidualLayout::Sequential => &fixture.residual + &attention.output,
+                ResidualLayout::Parallel => fixture.residual.clone(),
+            };
+            let mlp_input = fixture
+                .norm(&fixture.mlp_gain, &fixture.mlp_bias)
+                .as_masked_norm()
+                .apply(stream.view())
+                .expect("MLP norm");
+            let stages = block
+                .mlp()
+                .execute_stages(mlp_input.view(), gated_masks.swiglu())
+                .expect("masked gated MLP");
+            let output = match layout {
+                ResidualLayout::Sequential => &stream + &stages.write,
+                ResidualLayout::Parallel => &(&stages.write + &attention.output) + &fixture.residual,
+            };
+            let composed = GatedBlockExecution {
+                attention_input,
+                attention,
+                mlp_input,
+                mlp: stages,
+                output,
+            };
+            assert!(
+                gated_stage_bits(&execution) == gated_stage_bits(&composed),
+                "{layout:?}, {kind} masks: the gated block must be its owners' stages composed on the current stream"
+            );
+
+            let mut moved = masks.clone();
+            moved.key[1] += 0.125;
+            let moved_attention = moved.attention();
+            let moved_execution = block
+                .execute(
+                    GatedBlockMasks {
+                        attention: &moved_attention,
+                        mlp: gated_masks.swiglu(),
+                    },
+                    fixture.residual.view(),
+                    &fixture.positions,
+                )
+                .expect("moved-mask gated block");
+            assert!(
+                bits(&moved_execution.attention.output) != bits(&execution.attention.output),
+                "{layout:?}: positive control: the moved key mask must reach the attention write"
+            );
+            assert_eq!(
+                bits(&moved_execution.mlp_input) != bits(&execution.mlp_input),
+                layout == ResidualLayout::Sequential,
+                "{layout:?}: a key mask must reach the gated MLP input exactly in the sequential layout"
+            );
+        }
     }
 }
