@@ -278,7 +278,7 @@ pub(crate) fn fused_rail_logdet_gradient_beats_naive_trace_minus_rank_on_identic
     // Naive production form: full trace, then subtract the integer rank.
     let naive = op.trace_logdet_block_local(&s_block, lambda, 0, 1) - 1.0;
     // Fused production form.
-    let fused = op.fused_logdet_gradient_minus_rank_full_block(&s_block, 0, 1, lambda);
+    let fused = op.fused_logdet_gradient_minus_rank_full_block(0, &s_block, 0, 1, lambda);
 
     // Compensated (Neumaier) reference over the SAME per-eigenpair terms the
     // fused method sums naively — the ground truth for the gradient value.
@@ -520,6 +520,7 @@ pub(crate) fn fused_rank_deficient_rail_gradient_preserves_value_and_projector_i
     let naive = trace - rank as f64;
     // Production fused (rank-deficient) form.
     let fused = op.fused_logdet_gradient_minus_rank_from_root_chart(
+        0,
         &s_block,
         &range_root,
         0,
@@ -673,7 +674,7 @@ pub(crate) fn fused_rank_projector_uses_root_chart_when_gram_leaks_into_nullspac
     let op = DenseSpectralOperator::from_symmetric(&h).expect("leaky Gram Hessian");
     let naive = op.trace_logdet_block_local(&s_block, lambda, 0, 2) - 1.0;
     let fused =
-        op.fused_logdet_gradient_minus_rank_from_root_chart(&s_block, &range_root, 0, 2, lambda);
+        op.fused_logdet_gradient_minus_rank_from_root_chart(0, &s_block, &range_root, 0, 2, lambda);
     assert!(
         (fused - naive).abs() <= 1.0e-12 * (1.0 + naive.abs()),
         "root-chart fusion must subtract structural rank 1: fused={fused:.15e} naive={naive:.15e}"
@@ -701,8 +702,9 @@ pub(crate) fn fused_rank_deficient_matches_full_block_on_full_rank_penalty() {
         }
     }
     let op = DenseSpectralOperator::from_symmetric(&h).expect("full-rank fixture");
-    let full = op.fused_logdet_gradient_minus_rank_full_block(&s_block, 0, 2, lambda);
+    let full = op.fused_logdet_gradient_minus_rank_full_block(0, &s_block, 0, 2, lambda);
     let deficient = op.fused_logdet_gradient_minus_rank_from_root_chart(
+        0,
         &s_block,
         &Array2::<f64>::eye(2),
         0,
@@ -765,7 +767,7 @@ fn assert_weighted_fused_kernel_gate(
     let naive = op.trace_logdet_block_local(&s_k_full[target], lambdas[target], 0, p) - det1_k;
     // Production weighted fused.
     let (fused, weight_sum) =
-        op.fused_logdet_gradient_weighted_block(&s_k_full[target], 0, p, lambdas[target], ws);
+        op.fused_logdet_gradient_weighted_block(0, &s_k_full[target], 0, p, lambdas[target], ws);
 
     // (1) The per-direction weights sum to the cost's det derivative.
     assert!(
@@ -1003,6 +1005,7 @@ pub(crate) fn fused_rank_deficient_logdet_gradient_masked_null_matches_central_d
 
     let s_block = second_difference_penalty(width);
     let fused = op.fused_logdet_gradient_minus_rank_from_root_chart(
+        0,
         &s_block,
         &second_difference_root(width),
         0,
@@ -1161,7 +1164,7 @@ pub(crate) fn fused_logdet_gradient_reductions_exact_under_masked_null_space() {
     // (1) Full-rank square block: det derivative = integer rank = width.
     let s_full = array![[1.5_f64, 0.4], [0.4, 2.2]];
     let naive_full = op.trace_logdet_block_local(&s_full, 1.0, 0, 2) - 2.0;
-    let fused_full = op.fused_logdet_gradient_minus_rank_full_block(&s_full, 0, 2, 1.0);
+    let fused_full = op.fused_logdet_gradient_minus_rank_full_block(0, &s_full, 0, 2, 1.0);
     assert!(
         (fused_full - naive_full).abs() <= tol(naive_full),
         "full-block fused {fused_full:.15e} vs masked naive {naive_full:.15e}"
@@ -1171,6 +1174,7 @@ pub(crate) fn fused_logdet_gradient_reductions_exact_under_masked_null_space() {
     let s_def = second_difference_penalty(3);
     let naive_def = op.trace_logdet_block_local(&s_def, 1.0, 0, 3) - 1.0;
     let fused_def = op.fused_logdet_gradient_minus_rank_from_root_chart(
+        0,
         &s_def,
         &second_difference_root(3),
         0,
@@ -1200,7 +1204,7 @@ pub(crate) fn fused_logdet_gradient_reductions_exact_under_masked_null_space() {
         "weighted fixture det1[0]={det1_0:.6e} must be fractional"
     );
     let naive_w = op.trace_logdet_block_local(&s0, lambdas[0], 0, p) - det1_0;
-    let (fused_w, weight_sum) = op.fused_logdet_gradient_weighted_block(&s0, 0, p, lambdas[0], ws);
+    let (fused_w, weight_sum) = op.fused_logdet_gradient_weighted_block(0, &s0, 0, p, lambdas[0], ws);
     // Completeness of the weight distribution survives the mask (Σ_j runs over
     // the full eigenbasis), so the self-consistency gate the call site trusts
     // still holds.

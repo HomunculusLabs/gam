@@ -9,12 +9,23 @@ use crate::estimate::smooth_floor_dp;
 /// bounds by `rank(S_k)` — see
 /// [`HessianFactorization::trace_logdet_block_root`] (#2644).
 ///
+/// An operator priced from the Hessian's own root reads coordinate `penalty`'s
+/// trace off that root's left singular vectors instead (#2959 D2); see
+/// [`DenseSpectralOperator::root_penalty_mode_terms`].
+///
 /// `None` only when `lambda` is negative or not finite.
 fn penalty_logdet_trace_from_root_opt(
     hop: &dyn HessianFactorization,
+    penalty: usize,
     coord: &gam_problem::PenaltyCoordinate,
     lambda: f64,
 ) -> Option<f64> {
+    if let Some(terms) = hop
+        .as_exact_dense_spectral()
+        .and_then(|ds| ds.root_penalty_mode_terms(penalty, lambda))
+    {
+        return Some(terms.sum());
+    }
     let (root, start, end) = coord.scaled_block_root(lambda)?;
     Some(hop.trace_logdet_block_root(root.view(), start, end))
 }
@@ -23,10 +34,11 @@ fn penalty_logdet_trace_from_root_opt(
 /// scale that admits no real root.
 fn penalty_logdet_trace_from_root(
     hop: &dyn HessianFactorization,
+    penalty: usize,
     coord: &gam_problem::PenaltyCoordinate,
     lambda: f64,
 ) -> f64 {
-    penalty_logdet_trace_from_root_opt(hop, coord, lambda).unwrap_or_else(|| {
+    penalty_logdet_trace_from_root_opt(hop, penalty, coord, lambda).unwrap_or_else(|| {
         let (block, start, end) = coord.scaled_block_local(1.0);
         hop.trace_logdet_block_local(&block, lambda, start, end)
     })
@@ -980,6 +992,7 @@ pub(crate) fn reml_laml_evaluate(
                             let is_square_full_rank = end - start == rank;
                             let fused = if is_square_full_rank {
                                 ds.fused_logdet_gradient_minus_rank_full_block(
+                                    idx,
                                     &s_block,
                                     start,
                                     end,
@@ -1003,6 +1016,7 @@ pub(crate) fn reml_laml_evaluate(
                                      must match the coordinate's evaluated span ({start}, {end})"
                                 );
                                 ds.fused_logdet_gradient_minus_rank_from_root_chart(
+                                    idx,
                                     &s_block,
                                     range_root,
                                     start,
@@ -1020,6 +1034,7 @@ pub(crate) fn reml_laml_evaluate(
                         // joint quantity (e.g. a not-yet-cutover per-block seam).
                         let ws = joint_whitening.as_ref()?;
                         let (fused, weight_sum) = ds.fused_logdet_gradient_weighted_block(
+                            idx,
                             &s_block,
                             start,
                             end,
@@ -1165,11 +1180,11 @@ pub(crate) fn reml_laml_evaluate(
                     // by `rank(S_k)`. The moving-curvature half `C[v_k]` is not
                     // PSD and has no root, so it keeps its own path and is added
                     // here unchanged.
-                    penalty_logdet_trace_from_root(hop, coord, curvature_lambdas[idx])
+                    penalty_logdet_trace_from_root(hop, idx, coord, curvature_lambdas[idx])
                         + correction_trace
                 } else if rho_corrections[idx].is_none()
                     && let Some(trace) =
-                        penalty_logdet_trace_from_root_opt(hop, coord, curvature_lambdas[idx])
+                        penalty_logdet_trace_from_root_opt(hop, idx, coord, curvature_lambdas[idx])
                 {
                     // No moving-curvature correction, so the whole drift IS the
                     // penalty and the root form prices all of it (#2644).
