@@ -2350,12 +2350,14 @@ pub(crate) fn joint_objective_roundoff_slack(
 /// to show.
 ///
 /// The accumulation is NOT `|F|`, which is the whole content of gam#2612: the
-/// penalty `½βᵀS_λβ` is evaluated as `β·(S_λβ)` with signed `S_ij`, so it
-/// accumulates at scale `max|S_λ|·‖β‖₁²` while returning `O(10)`. That term is
-/// carried explicitly here, which is what keeps the ceiling far above the
-/// resolutions gam#2612 was opened to measure (its banded witness measures
-/// `1.5e-10` against a ceiling of `O(1e-5)`) while refusing this one by nine
-/// orders.
+/// penalty `½βᵀS_λβ` is evaluated as `β·(S_λβ)` with signed `S_ij`, so it sums
+/// `½Σ|β_i S_ij β_j|` while returning `O(10)`. That term is carried explicitly
+/// here, as each endpoint's own sum from one pass over the entries (gam#2959),
+/// which is what keeps the ceiling far above the resolutions gam#2612 was
+/// opened to measure (its banded witness measures `6.1e-11` against a ceiling
+/// of `1.2e-6`) while refusing this one by nine orders. The cruder
+/// `max|S_λ|·‖β‖₁²` it replaced sat four decades higher on the survival
+/// marginal-slope fixture and admitted an evaluator gap (gam#2952) as rounding.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct ObjectiveAccumulation {
     /// Number of summands charged: the likelihood's rows, plus the penalty entries
@@ -2401,6 +2403,31 @@ impl ObjectiveAccumulation {
             return f64::INFINITY;
         }
         growth * self.magnitude.abs() + self.logdet_roundoff.max(0.0)
+    }
+
+    /// What comparing one evaluation of `F = −ℓ + ½βᵀS_λβ − Φ` at each of two
+    /// coefficient vectors accumulates (gam#2748, gam#2959).
+    ///
+    /// The summands are the likelihood's rows and every penalty entry. The
+    /// magnitude is both objective values plus what each endpoint's `½βᵀS_λβ`
+    /// summed, `½Σ|β_i S_ij β_j|` from one explicit pass
+    /// ([`crate::blockwise_solve::total_quadratic_penalty_with_accumulation`]).
+    /// The log-determinant rounding is both endpoints' certified bound.
+    pub(crate) fn between_endpoints(
+        likelihood_rows: usize,
+        penalty_entries: usize,
+        objectives: [f64; 2],
+        penalty_accumulations: [f64; 2],
+        logdet_roundoffs: [f64; 2],
+    ) -> Self {
+        Self {
+            summed_terms: likelihood_rows + penalty_entries,
+            magnitude: objectives[0].abs()
+                + objectives[1].abs()
+                + penalty_accumulations[0]
+                + penalty_accumulations[1],
+            logdet_roundoff: logdet_roundoffs[0] + logdet_roundoffs[1],
+        }
     }
 }
 

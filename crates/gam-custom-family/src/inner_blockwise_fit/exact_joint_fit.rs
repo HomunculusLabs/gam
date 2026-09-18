@@ -653,27 +653,17 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // every cycle after it is two attempts at the radius floor. See
     // [`ObjectiveResolutionWitness`].
     let mut objective_resolution_witness = ObjectiveResolutionWitness::default();
-    // The penalty's own ACCUMULATION scale, which is not its value (gam#2612's
-    // central observation, gam#2748's ceiling). `block_quadratic_penalty`
-    // evaluates `½β·(S_λβ)` with signed `S_ij`, so one evaluation accumulates at
-    // scale `max|S_λ|·‖β‖₁²` while returning something that can be many orders
-    // smaller. `S_λ` is a function of ρ alone and ρ is fixed for this solve, so
-    // the matrix factor is read once here; the `‖β‖₁²` factor is per trial point.
-    let local_penalty_entry_magnitude: f64 = s_lambdas
-        .iter()
-        .flat_map(|s_lambda| s_lambda.iter())
-        .filter(|value| value.is_finite())
-        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
-    // Full-width penalties are evaluated separately by the objective. Their
-    // signed quadratic forms can cancel just as the block-local forms do.
-    let joint_penalty_entry_magnitude = joint_bundle.map_or(0.0, |bundle| {
-        bundle.specs().iter().zip(bundle.lambdas())
-            .map(|(spec, lambda)| {
-                lambda.abs() * spec.matrix.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()))
-            })
-            .sum::<f64>()
-    });
-    let penalty_entry_magnitude = local_penalty_entry_magnitude + joint_penalty_entry_magnitude;
+    // The penalty's own ACCUMULATION, which is not its value (gam#2612's central
+    // observation, gam#2748's ceiling): `½β·(S_λβ)` with signed `S_ij` sums
+    // `½Σ|β_i S_ij β_j|` while returning something that can be many orders
+    // smaller. Each endpoint's magnitude comes from one explicit pass over its
+    // own `β` (gam#2959); this counts the summands that pass charges, every
+    // entry of each block `S_λ` and of each full-width penalty. `S_λ` is a
+    // function of ρ alone and ρ is fixed for this solve, so the count is too.
+    let penalty_entries = s_lambdas.iter().map(|s_lambda| s_lambda.len()).sum::<usize>()
+        + joint_bundle.map_or(0, |bundle| {
+            bundle.specs().iter().map(|spec| spec.matrix.len()).sum::<usize>()
+        });
     let mut cycles_since_residual_improved: usize = 0;
     // Number of consecutive non-improving cycles after which the
     // conditioning-based self-vanishing Levenberg–Marquardt damping is
@@ -2592,13 +2582,15 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         let step_inf = delta.iter().copied().map(f64::abs).fold(0.0_f64, f64::max);
 
         let old_beta: Vec<Array1<f64>> = states.iter().map(|s| s.beta.clone()).collect();
-        // `‖β‖₁` at the cycle's incumbent, for the penalty term's accumulation
-        // scale in the objective-resolution ceiling (gam#2748).
-        let old_beta_l1_norm: f64 = old_beta
-            .iter()
-            .flat_map(|beta| beta.iter())
-            .map(|value| value.abs())
-            .sum();
+        // What the incumbent's penalty accumulates, for the objective-resolution
+        // ceiling (gam#2748, gam#2959).
+        let old_penalty_accumulation =
+            crate::blockwise_solve::total_quadratic_penalty_with_accumulation(
+                &old_beta,
+                &s_lambdas,
+                joint_bundle,
+            )
+            .1;
         // Firth value Φ at the OLD (start-of-cycle) β, folded under the SAME
         // skippable gate the trial uses below — so `actual_reduction =
         // old_objective − trialobjective` compares two points on one objective
@@ -4062,22 +4054,28 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // (gam#2748, gam#2718). Built once, before the line search, because
             // TWO decisions read it: the early exit below and the resolution
             // witness after the trial objective is known. The objective
-            // magnitudes cover the likelihood accumulation; the penalty's
-            // cancellation scale is carried separately because it is precisely
-            // the term whose accumulation exceeds its value; the log-determinant
-            // is not a sum at all and carries its own certified bound.
-            let trial_beta_l1_norm: f64 = states
-                .iter()
-                .flat_map(|state| state.beta.iter())
-                .map(|value| value.abs())
-                .sum();
-            let penalty_accumulation_scale = penalty_entry_magnitude
-                * (old_beta_l1_norm * old_beta_l1_norm + trial_beta_l1_norm * trial_beta_l1_norm);
-            let pre_trial_accumulation = ObjectiveAccumulation {
-                summed_terms: total_joint_n,
-                magnitude: 2.0 * old_objective.abs() + penalty_accumulation_scale,
-                logdet_roundoff: old_jeffreys.roundoff + trial_jeffreys_roundoff,
-            };
+            // magnitudes cover the likelihood accumulation; the penalty's is
+            // carried separately because it is precisely the term whose
+            // accumulation exceeds its value, and each endpoint is charged what
+            // its own `½βᵀS_λβ` summed; the log-determinant is not a sum at all
+            // and carries its own certified bound.
+            let trial_betas: Vec<Array1<f64>> =
+                states.iter().map(|state| state.beta.clone()).collect();
+            let trial_penalty_accumulation =
+                crate::blockwise_solve::total_quadratic_penalty_with_accumulation(
+                    &trial_betas,
+                    &s_lambdas,
+                    joint_bundle,
+                )
+                .1;
+            // The trial's objective is not known yet, so the incumbent's stands in.
+            let pre_trial_accumulation = ObjectiveAccumulation::between_endpoints(
+                total_joint_n,
+                penalty_entries,
+                [old_objective, old_objective],
+                [old_penalty_accumulation, trial_penalty_accumulation],
+                [old_jeffreys.roundoff, trial_jeffreys_roundoff],
+            );
             // The early exit is a CERTIFICATE that the accept test below would
             // refuse this trial, so its slack must be one that no admissible
             // reading of the objective's rounding could overturn: the larger of
@@ -4277,10 +4275,13 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // an unreadable one.
             // The accumulation the early exit certified against, with the trial
             // objective's own magnitude in place of the incumbent's stand-in.
-            let accumulation = ObjectiveAccumulation {
-                magnitude: old_objective.abs() + trialobjective.abs() + penalty_accumulation_scale,
-                ..pre_trial_accumulation
-            };
+            let accumulation = ObjectiveAccumulation::between_endpoints(
+                total_joint_n,
+                penalty_entries,
+                [old_objective, trialobjective],
+                [old_penalty_accumulation, trial_penalty_accumulation],
+                [old_jeffreys.roundoff, trial_jeffreys_roundoff],
+            );
             objective_resolution_witness.observe(
                 step_norm,
                 actual_reduction,
@@ -4645,12 +4646,13 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             log::warn!(
                 "[joint-newton objective-resolution gam#2748] cycle={cycle} REFUSED a \
                  resolution claim of {claim:.6e} against an arithmetic ceiling of \
-                 {ceiling:.6e} (= m*eps*(1+sum|terms|) with m={total_joint_n}): the ladder's \
+                 {ceiling:.6e} (= gamma_m*sum|terms| over m={summands} summands): the ladder's \
                  discrepancy did not fall at the model remainder's rate, but no evaluation of \
                  this objective can round by that much, so what failed to decay is MODEL \
                  error from steps outside the quadratic model's validity. The {} shrink(s) \
                  this ladder took STAND.",
                 line_search_attempts,
+                summands = total_joint_n + penalty_entries,
             );
         }
         if objective_resolution_witness.measured() > resolution_before_this_ladder {
@@ -6077,22 +6079,14 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 // against 2.445e-12 (gam#2959).
                 //
                 // The penalty half is what each endpoint's `½βᵀS_λβ` really summed,
-                // `½Σ|β_i S_ij β_j|` from one explicit pass. The trust loop's early exit
-                // charges the cruder `max|S_λ|·‖β‖₁²`, which on that fixture would put
-                // this floor at 0.307. The data half is `|f_old| + |f_new|`: per-row
-                // log-likelihood terms can cancel, so it is at most `Σ|ℓ_i|` and the
-                // floor errs small, which only declines more. Where the floor is still
-                // loose, the step and exact-model arms carry the guarantee
-                // (`constrained_numerical_fixed_point_failures`).
+                // `½Σ|β_i S_ij β_j|` from one explicit pass, the same charge the trust
+                // loop's early exit and resolution witness read. The data half is
+                // `|f_old| + |f_new|`: per-row log-likelihood terms can cancel, so it is
+                // at most `Σ|ℓ_i|` and the floor errs small, which only declines more.
+                // Where the floor is still loose, the step and exact-model arms carry
+                // the guarantee (`constrained_numerical_fixed_point_failures`).
                 let accepted_beta: Vec<Array1<f64>> =
                     states.iter().map(|state| state.beta.clone()).collect();
-                let old_penalty_accumulation =
-                    crate::blockwise_solve::total_quadratic_penalty_with_accumulation(
-                        &old_beta,
-                        &s_lambdas,
-                        joint_bundle,
-                    )
-                    .1;
                 let accepted_penalty_accumulation =
                     crate::blockwise_solve::total_quadratic_penalty_with_accumulation(
                         &accepted_beta,
@@ -6100,20 +6094,13 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         joint_bundle,
                     )
                     .1;
-                // Every summand charged: the likelihood's rows and each penalty
-                // entry the explicit pass accumulated.
-                let penalty_entries = s_lambdas.iter().map(|s_lambda| s_lambda.len()).sum::<usize>()
-                    + joint_bundle.map_or(0, |bundle| {
-                        bundle.specs().iter().map(|spec| spec.matrix.len()).sum::<usize>()
-                    });
-                let objective_floor = ObjectiveAccumulation {
-                    summed_terms: total_joint_n + penalty_entries,
-                    magnitude: old_objective.abs()
-                        + (lastobjective - new_phi).abs()
-                        + old_penalty_accumulation
-                        + accepted_penalty_accumulation,
-                    logdet_roundoff: old_jeffreys.roundoff + new_jeffreys_roundoff,
-                }
+                let objective_floor = ObjectiveAccumulation::between_endpoints(
+                    total_joint_n,
+                    penalty_entries,
+                    [old_objective, lastobjective - new_phi],
+                    [old_penalty_accumulation, accepted_penalty_accumulation],
+                    [old_jeffreys.roundoff, new_jeffreys_roundoff],
+                )
                 .roundoff_ceiling();
                 // `step_at_eps_floor` records whether the accepted step also reached
                 // its OWN machine-eps floor, used only to label the log line with
