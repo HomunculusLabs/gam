@@ -30,6 +30,21 @@
 //!   is unchanged under `(w, β, W_k) ↦ (D w, D β, W_k D⁻¹)` for every invertible
 //!   diagonal `D`, because `W_k (diag(w) n + β) = W_k D⁻¹ (diag(D w) n + D β)`. The
 //!   normalizer `n(h)` is formed before the gain and never sees `D`.
+//! * **Rotary query/key.** A score `σ α² qᵀ R_Δ k`, with `q = W_Q x`, `k = W_K x` and
+//!   the source's rotations `R_Δ = R_1^Δ`, is unchanged under
+//!   `(W_K,g, W_Q,h) ↦ (S W_K,g, S⁻ᵀ W_Q,h)` for every query head `h` of key/value head
+//!   `g` iff `S` commutes with `R_1`.
+//!   - For frequencies in `(0, π)`, the eigenvalues `e^{±iθ}` of distinct frequencies
+//!     and the pass-through eigenvalue `1` are pairwise distinct. So `S` is block
+//!     diagonal over the planes of one frequency and the pass-through coordinates.
+//!   - On `m` planes of one frequency, `R_1 = cos θ I + sin θ J` with `sin θ ≠ 0`, so `S`
+//!     commutes with `J`. That is `GL(m, ℂ)` on the complex coordinates `x_a + i x_b`,
+//!     of real dimension `2m²`.
+//!   - The pass-through coordinates carry `GL(n_pass)`.
+//!
+//!   A per-head norm between the projection and the rotation (Qwen3's
+//!   `q_norm`/`k_norm`) does not execute this program, so this family does not apply
+//!   to it.
 //! * **Residual-stream basis.** `h ↦ Q h` acts on every write (embedding columns,
 //!   block writes and their biases) and `W ↦ W Q⁻¹` on every read.
 //!   - A stream read only linearly admits `GL(d)`.
@@ -81,6 +96,7 @@ use gam_linalg::roundoff::{accumulation_growth, factor_singular_band};
 use gam_math::gaussian_activation::GaussianActivation;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, concatenate, s};
 
+use super::attention::{AttentionGeometry, RotaryEmbedding};
 use super::supports::{EvidenceStatus, EvidenceStatusError, ExactBasis};
 
 /// Why a gauge detection, gauge change or comparison was declined.
@@ -116,6 +132,13 @@ pub enum GaugeRefusal {
     Decomposition { what: &'static str, detail: String },
     /// A reported number was refused by its evidence constructor.
     Evidence(EvidenceStatusError),
+    /// A rotary frequency outside `(0, π)`. There two frequencies, or a plane and the
+    /// pass-through coordinates, may share a rotation eigenvalue, so the commutant is
+    /// not the block structure detected here.
+    FrequencyOutsideHalfTurn { plane: usize, frequency: f64 },
+    /// A zero or non-finite `attention_scaling` scales every score by zero or by
+    /// nothing finite, so it determines no query/key gauge.
+    ZeroRotaryScaling,
 }
 
 impl From<EvidenceStatusError> for GaugeRefusal {
@@ -137,6 +160,9 @@ pub enum ContinuousGauge {
     Orthogonal { order: usize },
     /// `O(1) × O(order − 1)`: the orthogonal maps with `Q 1 = ±1`.
     OrthogonalFixingOnes { order: usize },
+    /// `copies` independent copies, one per key/value head, of a rotary commutant of
+    /// real dimension `per_copy`.
+    RotaryCommutant { copies: usize, per_copy: usize },
     /// No continuous gauge.
     Trivial,
 }
@@ -152,6 +178,7 @@ impl ContinuousGauge {
                 let rest = order.saturating_sub(1);
                 rest * rest.saturating_sub(1) / 2
             }
+            Self::RotaryCommutant { copies, per_copy } => copies * per_copy,
             Self::Trivial => 0,
         }
     }
@@ -174,6 +201,7 @@ pub enum GaugeFamilyKind {
     HiddenUnits(GaussianActivation),
     SwigluUnits,
     NormGain,
+    RotaryQueryKey,
 }
 
 /// A dimension resolved from below at the registered tensors, with the largest
@@ -794,6 +822,292 @@ impl NormGain {
     }
 }
 
+/// One block of the commutant of a rotary embedding's rotations within one head.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RotaryBlock {
+    /// The planes rotated at one frequency: `GL(m, ℂ)` on `x_a + i x_b`.
+    Planes { frequency: f64, planes: Vec<usize> },
+    /// Head coordinates `start..end` past the rotary dimension: `GL(end − start)`.
+    PassThrough { start: usize, end: usize },
+}
+
+impl RotaryBlock {
+    /// The block's real dimension: `2m²` for `m` planes, `n²` for `n` pass-through
+    /// coordinates.
+    pub fn dimension(&self) -> usize {
+        match self {
+            Self::Planes { planes, .. } => 2 * planes.len() * planes.len(),
+            Self::PassThrough { start, end } => (end - start) * (end - start),
+        }
+    }
+}
+
+/// The commutant blocks of `rotary`'s rotations within a head of `head_dim`
+/// coordinates. Planes are grouped by bitwise-equal frequency, in first-occurrence
+/// order. It refuses a frequency outside `(0, π)` and a zero or non-finite scaling.
+pub fn rotary_commutant(rotary: &RotaryEmbedding, head_dim: usize) -> Result<Vec<RotaryBlock>, GaugeRefusal> {
+    if rotary.rotary_dim() > head_dim {
+        return Err(GaugeRefusal::DimensionMismatch {
+            what: "rotary dimension within one head",
+            expected: head_dim,
+            found: rotary.rotary_dim(),
+        });
+    }
+    if !(rotary.attention_scaling.is_finite() && rotary.attention_scaling != 0.0) {
+        return Err(GaugeRefusal::ZeroRotaryScaling);
+    }
+    let mut blocks: Vec<RotaryBlock> = Vec::new();
+    for (plane, &frequency) in rotary.inverse_frequencies.iter().enumerate() {
+        if !(frequency > 0.0 && frequency < std::f64::consts::PI) {
+            return Err(GaugeRefusal::FrequencyOutsideHalfTurn { plane, frequency });
+        }
+        let existing = blocks.iter().position(|block| {
+            matches!(block, RotaryBlock::Planes { frequency: shared, .. } if shared.to_bits() == frequency.to_bits())
+        });
+        match existing {
+            Some(index) => {
+                if let RotaryBlock::Planes { planes, .. } = &mut blocks[index] {
+                    planes.push(plane);
+                }
+            }
+            None => blocks.push(RotaryBlock::Planes {
+                frequency,
+                planes: vec![plane],
+            }),
+        }
+    }
+    if rotary.rotary_dim() < head_dim {
+        blocks.push(RotaryBlock::PassThrough {
+            start: rotary.rotary_dim(),
+            end: head_dim,
+        });
+    }
+    Ok(blocks)
+}
+
+/// Whether `S` (`head_dim × head_dim`) lies in the commutant. Every nonzero entry must
+/// couple coordinates of one block, and on a plane block `S[a_i, a_j] = S[b_i, b_j]`
+/// and `S[b_i, a_j] = −S[a_i, b_j]`. The check is exact on the declared entries, as
+/// for any declared group element.
+fn check_rotary_commutant(
+    gauge_change: ArrayView2<'_, f64>,
+    rotary: &RotaryEmbedding,
+    blocks: &[RotaryBlock],
+) -> Result<(), GaugeRefusal> {
+    let head_dim = gauge_change.nrows();
+    let mut block_of = vec![0usize; head_dim];
+    for (index, block) in blocks.iter().enumerate() {
+        match block {
+            RotaryBlock::Planes { planes, .. } => {
+                for &plane in planes {
+                    let (a, b) = rotary.plane(plane);
+                    block_of[a] = index;
+                    block_of[b] = index;
+                }
+            }
+            RotaryBlock::PassThrough { start, end } => {
+                for slot in block_of.iter_mut().take(*end).skip(*start) {
+                    *slot = index;
+                }
+            }
+        }
+    }
+    for ((i, j), &entry) in gauge_change.indexed_iter() {
+        if entry != 0.0 && block_of[i] != block_of[j] {
+            return Err(GaugeRefusal::NotInGroup {
+                what: "rotary gauge coupling across commutant blocks",
+                index: i * head_dim + j,
+                value: entry,
+            });
+        }
+    }
+    for block in blocks {
+        if let RotaryBlock::Planes { planes, .. } = block {
+            for &first in planes {
+                for &second in planes {
+                    let (ai, bi) = rotary.plane(first);
+                    let (aj, bj) = rotary.plane(second);
+                    if gauge_change[[ai, aj]] != gauge_change[[bi, bj]] || gauge_change[[bi, aj]] != -gauge_change[[ai, bj]] {
+                        return Err(GaugeRefusal::NotInGroup {
+                            what: "rotary gauge not complex-linear on one frequency",
+                            index: ai * head_dim + aj,
+                            value: gauge_change[[ai, aj]],
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The query and key projections `W x + b` of a rotary attention block, with the
+/// source's geometry and rotary embedding. The weights are `n_heads·head_dim × d` and
+/// `n_kv_heads·head_dim × d`, and each has its bias.
+#[derive(Clone, Debug)]
+pub struct RotaryQueryKey {
+    geometry: AttentionGeometry,
+    rotary: RotaryEmbedding,
+    query_weight: Array2<f64>,
+    query_bias: Array1<f64>,
+    key_weight: Array2<f64>,
+    key_bias: Array1<f64>,
+}
+
+impl RotaryQueryKey {
+    /// A bias-free source passes zero biases, as the attention owner's projections do.
+    pub fn new(
+        geometry: AttentionGeometry,
+        rotary: RotaryEmbedding,
+        query_weight: Array2<f64>,
+        query_bias: Array1<f64>,
+        key_weight: Array2<f64>,
+        key_bias: Array1<f64>,
+    ) -> Result<Self, GaugeRefusal> {
+        if geometry.n_kv_heads == 0 || geometry.head_dim == 0 || geometry.n_heads % geometry.n_kv_heads != 0 {
+            return Err(GaugeRefusal::DimensionMismatch {
+                what: "key/value heads dividing query heads",
+                expected: geometry.n_heads,
+                found: geometry.n_kv_heads,
+            });
+        }
+        check_len("query rows", geometry.query_dim(), query_weight.nrows())?;
+        check_len("query columns", geometry.model_dim, query_weight.ncols())?;
+        check_len("query bias length", geometry.query_dim(), query_bias.len())?;
+        check_len("key rows", geometry.key_value_dim(), key_weight.nrows())?;
+        check_len("key columns", geometry.model_dim, key_weight.ncols())?;
+        check_len("key bias length", geometry.key_value_dim(), key_bias.len())?;
+        require_finite_matrix("query weight", query_weight.view())?;
+        require_finite_vector("query bias", query_bias.view())?;
+        require_finite_matrix("key weight", key_weight.view())?;
+        require_finite_vector("key bias", key_bias.view())?;
+        rotary_commutant(&rotary, geometry.head_dim)?;
+        Ok(Self {
+            geometry,
+            rotary,
+            query_weight,
+            query_bias,
+            key_weight,
+            key_bias,
+        })
+    }
+
+    pub fn query_weight(&self) -> ArrayView2<'_, f64> {
+        self.query_weight.view()
+    }
+
+    pub fn query_bias(&self) -> ArrayView1<'_, f64> {
+        self.query_bias.view()
+    }
+
+    pub fn key_weight(&self) -> ArrayView2<'_, f64> {
+        self.key_weight.view()
+    }
+
+    pub fn key_bias(&self) -> ArrayView1<'_, f64> {
+        self.key_bias.view()
+    }
+
+    fn head_rows(&self, head: usize) -> std::ops::Range<usize> {
+        head * self.geometry.head_dim..(head + 1) * self.geometry.head_dim
+    }
+
+    /// The homogeneous rows `[W | b]` of one head, `head_dim × (d + 1)`: the read of
+    /// `(x, 1)`.
+    fn homogeneous_rows(weight: &Array2<f64>, bias: &Array1<f64>, rows: std::ops::Range<usize>) -> Result<Array2<f64>, GaugeRefusal> {
+        concatenate(
+            Axis(1),
+            &[weight.slice(s![rows.clone(), ..]), bias.slice(s![rows]).insert_axis(Axis(1))],
+        )
+        .map_err(shape_failed)
+    }
+
+    /// The commutant family, with `c = Σ 2m² + n_pass²` per key/value head.
+    ///
+    /// A head's orbit is charged `c` when its key's homogeneous rows `[W_K | b_K]`, or
+    /// those of one of its query heads, resolve full row rank. That forces the tangent
+    /// condition `X [W_K | b_K] = 0` or `Xᵀ [W_Q | b_Q] = 0` to give `X = 0`. Otherwise
+    /// nothing is charged for that head.
+    pub fn family(&self) -> Result<GaugeFamily, GaugeRefusal> {
+        let g = self.geometry;
+        let per_copy: usize = rotary_commutant(&self.rotary, g.head_dim)?
+            .iter()
+            .map(RotaryBlock::dimension)
+            .sum();
+        let mut resolved = 0;
+        for kv in 0..g.n_kv_heads {
+            let key_rows = Self::homogeneous_rows(&self.key_weight, &self.key_bias, self.head_rows(kv))?;
+            let mut full = resolved_rank("key head", key_rows.view())? == g.head_dim;
+            for head in 0..g.n_heads {
+                if full {
+                    break;
+                }
+                if g.key_value_head(head) == kv {
+                    let query_rows = Self::homogeneous_rows(&self.query_weight, &self.query_bias, self.head_rows(head))?;
+                    full = resolved_rank("query head", query_rows.view())? == g.head_dim;
+                }
+            }
+            if full {
+                resolved += per_copy;
+            }
+        }
+        Ok(GaugeFamily {
+            kind: GaugeFamilyKind::RotaryQueryKey,
+            continuous: ContinuousGauge::RotaryCommutant {
+                copies: g.n_kv_heads,
+                per_copy,
+            },
+            discrete: DiscreteGauge::None,
+            parameter_coordinates: (g.n_heads + g.n_kv_heads) * g.head_dim * (g.model_dim + 1),
+            orbit_dimension: DimensionInterval {
+                resolved,
+                at_most: g.n_kv_heads * per_copy,
+            },
+            null_coordinates: 0,
+        })
+    }
+
+    /// `([W_K | b_K]_g, [W_Q | b_Q]_h) ↦ (S_g [W_K | b_K]_g, S_g⁻ᵀ [W_Q | b_Q]_h)`, one
+    /// `S_g` per key/value head. It refuses an `S_g` outside the commutant, or one whose
+    /// SVD resolves fewer than `head_dim` singular values.
+    pub fn apply(&self, gauge_changes: &[Array2<f64>]) -> Result<Self, GaugeRefusal> {
+        let g = self.geometry;
+        check_len("rotary gauge changes", g.n_kv_heads, gauge_changes.len())?;
+        let blocks = rotary_commutant(&self.rotary, g.head_dim)?;
+        let mut carried = self.clone();
+        for (kv, gauge_change) in gauge_changes.iter().enumerate() {
+            check_len("rotary gauge change rows", g.head_dim, gauge_change.nrows())?;
+            check_len("rotary gauge change columns", g.head_dim, gauge_change.ncols())?;
+            require_finite_matrix("rotary gauge change", gauge_change.view())?;
+            check_rotary_commutant(gauge_change.view(), &self.rotary, &blocks)?;
+            let inverse = invert_gauge_change(gauge_change.view())?;
+            let rows = self.head_rows(kv);
+            carried
+                .key_weight
+                .slice_mut(s![rows.clone(), ..])
+                .assign(&fast_ab(gauge_change, &self.key_weight.slice(s![rows.clone(), ..])));
+            carried
+                .key_bias
+                .slice_mut(s![rows.clone()])
+                .assign(&fast_av(gauge_change, &self.key_bias.slice(s![rows])));
+            for head in 0..g.n_heads {
+                if g.key_value_head(head) == kv {
+                    let rows = self.head_rows(head);
+                    carried
+                        .query_weight
+                        .slice_mut(s![rows.clone(), ..])
+                        .assign(&fast_ab(&inverse.t(), &self.query_weight.slice(s![rows.clone(), ..])));
+                    carried
+                        .query_bias
+                        .slice_mut(s![rows.clone()])
+                        .assign(&fast_av(&inverse.t(), &self.query_bias.slice(s![rows])));
+                }
+            }
+        }
+        Ok(carried)
+    }
+}
+
 /// How one read site reads the residual stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResidualRead {
@@ -1047,6 +1361,7 @@ fn invert_gauge_change(gauge_change: ArrayView2<'_, f64>) -> Result<Array2<f64>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parameter_decomposition::attention::{AffineProjection, NativeAttention, RotaryPairing};
     use crate::parameter_decomposition::rewrite::NativeMlp;
     use rand::rngs::StdRng;
     use rand::seq::SliceRandom;
@@ -1773,4 +2088,238 @@ mod tests {
             assert!(moved > 0, "centred={centred}: a sheared basis must move the logits past the band");
         }
     }
+
+    fn half_split_rotary(frequencies: [f64; 2]) -> RotaryEmbedding {
+        RotaryEmbedding {
+            pairing: RotaryPairing::HalfSplit,
+            inverse_frequencies: frequencies.to_vec(),
+            attention_scaling: 1.0,
+        }
+    }
+
+    /// `A + iB` on the complex coordinates `x_a + i x_b` of every rotated plane (rows
+    /// `a`: `A` on `a`, `−B` on `b`; rows `b`: `B` on `a`, `A` on `b`), and a random
+    /// `GL(n_pass)` block on the pass-through coordinates. Every entry is a copy or a
+    /// negation of a draw, so the complex-linear relations hold bitwise.
+    fn complex_plane_change(rng: &mut StdRng, rotary: &RotaryEmbedding, head_dim: usize) -> Array2<f64> {
+        let planes = rotary.inverse_frequencies.len();
+        let real = uniform_matrix(rng, planes, planes);
+        let imaginary = uniform_matrix(rng, planes, planes);
+        let mut change = Array2::<f64>::zeros((head_dim, head_dim));
+        for i in 0..planes {
+            for j in 0..planes {
+                let (ai, bi) = rotary.plane(i);
+                let (aj, bj) = rotary.plane(j);
+                change[[ai, aj]] = real[[i, j]];
+                change[[bi, bj]] = real[[i, j]];
+                change[[bi, aj]] = imaginary[[i, j]];
+                change[[ai, bj]] = -imaginary[[i, j]];
+            }
+        }
+        let rotary_dim = rotary.rotary_dim();
+        let pass = uniform_matrix(rng, head_dim - rotary_dim, head_dim - rotary_dim);
+        change.slice_mut(s![rotary_dim.., rotary_dim..]).assign(&pass);
+        change
+    }
+
+    /// The carry `S [W_K | b_K]`, `S⁻ᵀ [W_Q | b_Q]` without the membership check, for
+    /// the forced positive control.
+    fn forced_query_key_carry(teacher: &RotaryQueryKey, changes: &[Array2<f64>]) -> RotaryQueryKey {
+        let g = teacher.geometry;
+        let mut carried = teacher.clone();
+        for (kv, change) in changes.iter().enumerate() {
+            let inverse = invert_gauge_change(change.view()).expect("invertible");
+            let rows = teacher.head_rows(kv);
+            carried
+                .key_weight
+                .slice_mut(s![rows.clone(), ..])
+                .assign(&fast_ab(change, &teacher.key_weight.slice(s![rows.clone(), ..])));
+            carried
+                .key_bias
+                .slice_mut(s![rows.clone()])
+                .assign(&fast_av(change, &teacher.key_bias.slice(s![rows])));
+            for head in 0..g.n_heads {
+                if g.key_value_head(head) == kv {
+                    let rows = teacher.head_rows(head);
+                    carried
+                        .query_weight
+                        .slice_mut(s![rows.clone(), ..])
+                        .assign(&fast_ab(&inverse.t(), &teacher.query_weight.slice(s![rows.clone(), ..])));
+                    carried
+                        .query_bias
+                        .slice_mut(s![rows.clone()])
+                        .assign(&fast_av(&inverse.t(), &teacher.query_bias.slice(s![rows])));
+                }
+            }
+        }
+        carried
+    }
+
+    fn native_attention(block: &RotaryQueryKey, score_scale: f64, value: &AffineProjection, output: &AffineProjection) -> NativeAttention {
+        NativeAttention::new(
+            block.geometry,
+            block.rotary.clone(),
+            score_scale,
+            AffineProjection {
+                weight: block.query_weight.clone(),
+                bias: block.query_bias.clone(),
+            },
+            AffineProjection {
+                weight: block.key_weight.clone(),
+                bias: block.key_bias.clone(),
+            },
+            value.clone(),
+            output.clone(),
+        )
+        .expect("the fixture's shapes compose")
+    }
+
+    /// A complex-linear change on the planes of one frequency, with any invertible
+    /// pass-through block, keeps every executed score within a bar.
+    ///
+    /// The bar is both executions' radii (attention.rs's own forward-error bars) plus
+    /// the construction band
+    /// `|σ| α² ‖(x_t, 1)‖ ‖(x_s, 1)‖ ‖[W_Q | b_Q]_h‖_F ‖[W_K | b_K]_g‖_F (η + 2 γ_hd κ_F)`.
+    /// It is derived as for the pass-through, on the homogeneous reads, since
+    /// `Ŝ⁻¹ R S − R = (Ŝ⁻¹ − S⁻¹) R S` meets `η` once. The biases are random, so a carry
+    /// that dropped them would move the scores.
+    ///
+    /// The positive control is the same construction with distinct frequencies. Its
+    /// cross-plane entries couple two commutant blocks, so `apply` refuses it, and the
+    /// forced carry moves some score with `s < t` past the same bar. The diagonal
+    /// `s = t` has `Δ = 0` and is invariant under every `S`.
+    #[test]
+    fn a_complex_linear_change_on_one_frequency_keeps_every_score_and_is_refused_across_frequencies() {
+        let mut rng = StdRng::seed_from_u64(295_411);
+        let geometry = AttentionGeometry {
+            model_dim: 8,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 6,
+        };
+        let positions: Vec<i64> = vec![0, 1, 3, 4, 7];
+        let score_scale = 1.0 / (geometry.head_dim as f64).sqrt();
+        let query_weight = uniform_matrix(&mut rng, geometry.query_dim(), geometry.model_dim);
+        let query_bias = uniform_vector(&mut rng, geometry.query_dim());
+        let key_weight = uniform_matrix(&mut rng, geometry.key_value_dim(), geometry.model_dim);
+        let key_bias = uniform_vector(&mut rng, geometry.key_value_dim());
+        let value = AffineProjection {
+            weight: uniform_matrix(&mut rng, geometry.key_value_dim(), geometry.model_dim),
+            bias: uniform_vector(&mut rng, geometry.key_value_dim()),
+        };
+        let output = AffineProjection {
+            weight: uniform_matrix(&mut rng, geometry.model_dim, geometry.query_dim()),
+            bias: uniform_vector(&mut rng, geometry.model_dim),
+        };
+        let x = uniform_matrix(&mut rng, positions.len(), geometry.model_dim);
+        let hd = geometry.head_dim;
+        for (frequencies, shared) in [([0.7, 0.7], true), ([1.0, 0.3], false)] {
+            let rotary = half_split_rotary(frequencies);
+            let teacher = RotaryQueryKey::new(
+                geometry,
+                rotary.clone(),
+                query_weight.clone(),
+                query_bias.clone(),
+                key_weight.clone(),
+                key_bias.clone(),
+            )
+            .expect("shapes");
+            let mut changes = Vec::new();
+            while changes.len() < geometry.n_kv_heads {
+                changes.push(complex_plane_change(&mut rng, &rotary, hd));
+            }
+            let carried = if shared {
+                teacher.apply(&changes).expect("complex-linear on one frequency")
+            } else {
+                assert!(matches!(teacher.apply(&changes), Err(GaugeRefusal::NotInGroup { .. })));
+                forced_query_key_carry(&teacher, &changes)
+            };
+            let before = native_attention(&teacher, score_scale, &value, &output)
+                .execute(x.view(), &positions)
+                .expect("execute");
+            let after = native_attention(&carried, score_scale, &value, &output)
+                .execute(x.view(), &positions)
+                .expect("execute");
+            let mut moved = 0;
+            for head in 0..geometry.n_heads {
+                let kv = geometry.key_value_head(head);
+                let inverse = invert_gauge_change(changes[kv].view()).expect("invertible");
+                let kappa = frobenius(changes[kv].view()) * frobenius(inverse.view());
+                let eta = kappa * hd as f64 * (f64::EPSILON + accumulation_growth(2 * hd));
+                let query_rows = RotaryQueryKey::homogeneous_rows(&query_weight, &query_bias, teacher.head_rows(head)).expect("rows");
+                let key_rows = RotaryQueryKey::homogeneous_rows(&key_weight, &key_bias, teacher.head_rows(kv)).expect("rows");
+                let factors = frobenius(query_rows.view()) * frobenius(key_rows.view());
+                for t in 0..positions.len() {
+                    for s_index in 0..=t {
+                        let (xt, xs) = (x.row(t), x.row(s_index));
+                        let construction = score_scale.abs()
+                            * (xt.dot(&xt) + 1.0).sqrt()
+                            * (xs.dot(&xs) + 1.0).sqrt()
+                            * factors
+                            * (eta + 2.0 * accumulation_growth(hd) * kappa);
+                        let bar =
+                            before.score_radius[[head, t, s_index]] + after.score_radius[[head, t, s_index]] + construction;
+                        let gap = (after.scores[[head, t, s_index]] - before.scores[[head, t, s_index]]).abs();
+                        if shared {
+                            assert!(gap <= bar, "head {head} ({t}, {s_index}): score moved {gap:.3e}, bar {bar:.3e}");
+                        } else if s_index < t && gap > bar {
+                            moved += 1;
+                        }
+                    }
+                }
+            }
+            assert!(shared || moved > 0, "a cross-frequency coupling must move an off-diagonal score past the bar");
+        }
+    }
+
+    /// The commutant dimension is `2m²` per equal-frequency group plus `n_pass²`: 12
+    /// for two planes at one frequency with two pass-through coordinates, and 8 for two
+    /// distinct frequencies.
+    ///
+    /// The orbit is charged per key/value head only when a key or query head's
+    /// homogeneous rows resolve full row rank. The positive control zeros one key/value
+    /// head and its query heads, weights and biases, and the resolved side must drop to
+    /// one copy. Frequencies outside `(0, π)` are refused.
+    #[test]
+    fn the_rotary_commutant_counts_equal_frequency_groups_and_resolved_heads() {
+        let mut rng = StdRng::seed_from_u64(295_412);
+        let geometry = AttentionGeometry {
+            model_dim: 8,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 6,
+        };
+        let mut query_weight = uniform_matrix(&mut rng, geometry.query_dim(), geometry.model_dim);
+        let mut query_bias = uniform_vector(&mut rng, geometry.query_dim());
+        let mut key_weight = uniform_matrix(&mut rng, geometry.key_value_dim(), geometry.model_dim);
+        let mut key_bias = uniform_vector(&mut rng, geometry.key_value_dim());
+        let block = |rotary: RotaryEmbedding, qw: &Array2<f64>, qb: &Array1<f64>, kw: &Array2<f64>, kb: &Array1<f64>| {
+            RotaryQueryKey::new(geometry, rotary, qw.clone(), qb.clone(), kw.clone(), kb.clone())
+        };
+        for (frequencies, per_copy) in [([0.7, 0.7], 12), ([1.0, 0.3], 8)] {
+            let family = block(half_split_rotary(frequencies), &query_weight, &query_bias, &key_weight, &key_bias)
+                .expect("shapes")
+                .family()
+                .expect("svd");
+            assert_eq!(family.continuous.dimension(), 2 * per_copy);
+            assert_eq!(family.orbit_dimension, DimensionInterval { resolved: 2 * per_copy, at_most: 2 * per_copy });
+            assert_eq!(family.parameter_coordinates, 6 * 6 * 9);
+        }
+        key_weight.slice_mut(s![6..12, ..]).fill(0.0);
+        key_bias.slice_mut(s![6..12]).fill(0.0);
+        query_weight.slice_mut(s![12..24, ..]).fill(0.0);
+        query_bias.slice_mut(s![12..24]).fill(0.0);
+        let family = block(half_split_rotary([0.7, 0.7]), &query_weight, &query_bias, &key_weight, &key_bias)
+            .expect("shapes")
+            .family()
+            .expect("svd");
+        assert_eq!(family.orbit_dimension, DimensionInterval { resolved: 12, at_most: 24 });
+        for frequency in [std::f64::consts::PI, 0.0] {
+            assert!(matches!(
+                block(half_split_rotary([0.7, frequency]), &query_weight, &query_bias, &key_weight, &key_bias),
+                Err(GaugeRefusal::FrequencyOutsideHalfTurn { plane: 1, .. })
+            ));
+        }
+    }
 }
+
