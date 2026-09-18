@@ -15,12 +15,18 @@ Stage S0 is torch only; ``registry`` and ``execute`` are the torch end of S1.
   input tokens and every file's md5. Every array has two axes, so
   ``crates/gam-sae/examples/mpd_induction_registry.rs`` reads it through
   ``examples/support/npy_header.rs``.
-* ``execute`` runs the same float64 forward under declared settings through the runner (all-on, one
-  layer-0 head's ``W_O.0`` block zeroed at every position, and at each declared position) and writes
-  every stage a native receipt compares: per layer the residual in, attention pattern, mixed head
-  outputs, the write and the residual out, then the logits. One two-axis float64 ``.npy`` per stage
-  holds every setting's rows, in setting order, and ``execute.json`` names the settings, the edit's
-  factors and every file's md5.
+* ``execute`` is the torch driver of the direct-lane receipt runner:
+  ``execute --harvest REGISTRY_EXPORT --settings SETTINGS_JSON --out-dir RUN``.
+  * The harvest is a registry export, read only; its ``registry.json`` names the run file, the
+    checkpoint and the token rows. The settings declare one layer-0 head and the positions its
+    ``W_O.0`` block is zeroed at.
+  * It runs the same float64 forward through the runner under all-on, the head zeroed at every
+    position, and the head zeroed at each declared position.
+  * It writes every stage a native receipt compares: per layer the residual in, attention pattern,
+    mixed head outputs, the write and the residual out, then the logits. One two-axis float64
+    ``.npy`` per stage holds every setting's rows, in setting order.
+  * ``execute.json`` names the harvest, the declared settings, the settings run, the edit's factors,
+    the executor's dtype, device and TF32 flag, and every file's md5.
 
 Every weight is one matrix per layer: ``W_Q.l``, ``W_K.l`` and ``W_V.l`` of shape
 ``(heads x d_head, d_model)`` and ``W_O.l`` of shape ``(d_model, heads x d_head)``, applied by
@@ -555,8 +561,14 @@ def save_array(out_dir, files, array_id, values):
     files[array_id] = {"path": path, "md5": md5_of(path)}
 
 
-def teacher(args):
-    """One checkpoint in float64 and the leading test sequences it runs on."""
+def registry(args):
+    """The torch end of S1: one checkpoint in float64 with its registry, use sites, weights and native logits."""
+    from gamfit.torch.parameter_interventions import (
+        discover_parameter_use_sites,
+        execute_native,
+        parameter_registry,
+    )
+
     run = torch.load(args.run, map_location="cpu", weights_only=True)
     config = run["config"]
     if not 0 < args.sequences <= config["n_test"]:
@@ -566,18 +578,6 @@ def teacher(args):
     model = load_model(config, state, torch.device("cpu")).double()
     tokens = run["tokens"][config["n_train"] : config["n_train"] + args.sequences]
     os.makedirs(args.out_dir, exist_ok=True)
-    return config, state, model, tokens
-
-
-def registry(args):
-    """The torch end of S1: one checkpoint in float64 with its registry, use sites, weights and native logits."""
-    from gamfit.torch.parameter_interventions import (
-        discover_parameter_use_sites,
-        execute_native,
-        parameter_registry,
-    )
-
-    config, state, model, tokens = teacher(args)
     files = {}
     tensors = parameter_registry(model)
     uses = discover_parameter_use_sites(model, tokens)
@@ -622,13 +622,26 @@ def execute(args):
         execute_parameter_edits,
     )
 
-    config, state, model, tokens = teacher(args)
+    with open(os.path.join(args.harvest, "registry.json")) as handle:
+        export = json.load(handle)
+    with open(args.settings) as handle:
+        declared = json.load(handle)
+    run = torch.load(export["run"], map_location="cpu", weights_only=True)
+    config = run["config"]
+    state = run["checkpoints"][export["checkpoint"]]
+    # Float32 checkpoint values widen exactly, so the teacher executes its trained numbers in binary64.
+    model = load_model(config, state, torch.device("cpu")).double()
+    tokens = run["tokens"][config["n_train"] : config["n_train"] + export["sequences"]]
+    if tokens.tolist() != export["tokens"]:
+        raise SystemExit(f"{export['run']}: the test token rows are not the registry export's")
     seq_len, d_head = config["seq_len"], config["d_head"]
-    if not 0 <= args.head < config["n_heads"]:
-        raise SystemExit(f"--head must lie in 0..{config['n_heads'] - 1}; got {args.head}")
-    # Zero head --head's output block of W_O.0: left = -W_O.0[:, block], right = the block's unit columns,
+    head, positions = declared["head"], declared["positions"]
+    if not 0 <= head < config["n_heads"]:
+        raise SystemExit(f"the settings' head must lie in 0..{config['n_heads'] - 1}; got {head}")
+    os.makedirs(args.out_dir, exist_ok=True)
+    # Zero the head's output block of W_O.0: left = -W_O.0[:, block], right = the block's unit columns,
     # the factors the native record carries.
-    block = slice(args.head * d_head, (args.head + 1) * d_head)
+    block = slice(head * d_head, (head + 1) * d_head)
     output = state["W_O.0"].double()
     left = np.ascontiguousarray((-output[:, block]).numpy())
     right = np.zeros((output.shape[1], d_head))
@@ -636,15 +649,15 @@ def execute(args):
     files = {}
     save_array(args.out_dir, files, "edit.left", left)
     save_array(args.out_dir, files, "edit.right", right)
-    settings = [("all_on", None), ("global", None)] + [(f"position_{j}", (j,)) for j in args.positions]
+    settings = [("all_on", None), ("global", None)] + [(f"position_{j}", (j,)) for j in positions]
     rows, ran = {}, []
-    for name, positions in settings:
+    for name, scope in settings:
         model.captured = []
         if name == "all_on":
             executed = execute_native(model, tokens)
             substituted = []
         else:
-            edit = UseSiteParameterEdit("W_O.0", 0, FactoredDelta(left=left, right=right), positions)
+            edit = UseSiteParameterEdit("W_O.0", 0, FactoredDelta(left=left, right=right), scope)
             result = execute_parameter_edits(model, tokens, [edit], leading_shape=(tokens.shape[0], seq_len))
             executed = result.output
             substituted = [site.use_site_id for site in result.substituted]
@@ -658,27 +671,34 @@ def execute(args):
                 values = stages[stage].detach().numpy()
                 rows.setdefault(f"{stage}.{layer}", []).append(values.reshape(-1, values.shape[-1]))
         rows.setdefault("logits", []).append(executed.values.reshape(-1, config["vocab"]))
-        ran.append({"name": name, "positions": list(positions) if positions else None, "substituted": substituted})
-        print(f"EXECUTE {name} substituted={substituted}", flush=True)
+        ran.append({"name": name, "positions": list(scope) if scope else None, "substituted": substituted})
+        print(f"[execute] {name} substituted={substituted}", flush=True)
     for array_id, blocks in rows.items():
         save_array(args.out_dir, files, array_id, np.concatenate(blocks))
     document = {
         "stage": "execute",
-        "run": args.run,
-        "checkpoint": args.checkpoint,
-        "sequences": args.sequences,
-        "tokens": tokens.tolist(),
+        "harvest": args.harvest,
+        "declared": declared,
+        "settings_md5": md5_of(args.settings),
+        "run": export["run"],
+        "checkpoint": export["checkpoint"],
+        "sequences": export["sequences"],
+        "tokens": export["tokens"],
         "config": config,
-        "edit": {"tensor_id": "W_O.0", "ordinal": 0, "head": args.head, "left": "edit.left", "right": "edit.right"},
+        "edit": {"tensor_id": "W_O.0", "ordinal": 0, "head": head, "left": "edit.left", "right": "edit.right"},
         "settings": ran,
         # Every stage array stacks the settings in order; within a setting rows run over sequence and
         # position, and pattern rows over sequence, head and query position.
         "rows_per_setting": {array_id: blocks[0].shape[0] for array_id, blocks in rows.items()},
+        # What a receipt's bands assume: the executed dtype, the device and whether TF32 matmul was on.
+        "external_dtype": executed.dtype,
+        "external_device": str(next(model.parameters()).device),
+        "tf32_matmul": bool(torch.backends.cuda.matmul.allow_tf32),
         "files": files,
     }
     with open(os.path.join(args.out_dir, "execute.json"), "w") as handle:
         json.dump(document, handle, indent=2)
-    print(f"EXECUTE {len(ran)} settings, {len(files)} arrays in {args.out_dir}", flush=True)
+    print(f"[execute] {len(ran)} settings, {len(files)} arrays in {args.out_dir}", flush=True)
 
 
 def int_list(text):
@@ -720,11 +740,8 @@ def main():
     export.add_argument("--sequences", type=int, required=True)
     export.add_argument("--out-dir", required=True)
     stages = commands.add_parser("execute")
-    stages.add_argument("--run", required=True)
-    stages.add_argument("--checkpoint", type=int, required=True)
-    stages.add_argument("--sequences", type=int, required=True)
-    stages.add_argument("--head", type=int, required=True)
-    stages.add_argument("--positions", type=int_list, required=True)
+    stages.add_argument("--harvest", required=True)
+    stages.add_argument("--settings", required=True)
     stages.add_argument("--out-dir", required=True)
     args = parser.parse_args()
     if args.command == "train":
