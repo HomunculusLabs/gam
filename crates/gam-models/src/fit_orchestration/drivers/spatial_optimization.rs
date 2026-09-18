@@ -6526,9 +6526,11 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                     .collect()
             })
             .unwrap_or_default();
+        // A rebuild with the same NUMBER of blocks is aligned the same way. Pairing
+        // by position alone let a count-1 Primary cache take an OperatorMass rebuild
+        // without a refusal. An identical topology aligns to the identity.
         let (active_penalties, dropped_penalties) = if cached_penalties.len()
             == smooth_penalty_range.len()
-            && active_penalties.len() != smooth_penalty_range.len()
         {
             let rebuilt_active: Vec<(usize, gam_terms::basis::PenaltySource)> = active_penalties
                 .iter()
@@ -7362,6 +7364,38 @@ mod penalty_alignment_2953_tests {
             panic!("the cached block is present with its own source, so the rebuild aligns");
         };
         assert_eq!(slots, vec![0]);
+    }
+
+    /// The same NUMBER of blocks is no license to pair by position. A cached
+    /// double-penalty Matérn without an intercept is [Primary 0]. A rebuild on the
+    /// operator branch at ν = 1/2 is [OperatorMass 0]. The source mismatch refuses.
+    #[test]
+    fn a_same_count_family_switch_refuses_2953() {
+        let cached = [(0, PenaltySource::Primary)];
+        let rebuilt = [(0, PenaltySource::OperatorMass)];
+        let PenaltyAlignment::Inconsistent { detail } = align_rebuilt_penalties(&cached, &rebuilt, &[])
+        else {
+            panic!("a same-count penalty-family switch must be inconsistent");
+        };
+        assert!(
+            detail.contains("cached penalty 0 is Primary but the rebuild's block 0 is OperatorMass"),
+            "{detail}"
+        );
+    }
+
+    /// An identical same-count topology aligns to the identity, so routing the
+    /// equal-count path through the alignment changes nothing where the builds agree.
+    #[test]
+    fn an_identical_same_count_topology_aligns_to_the_identity_2953() {
+        let blocks = [
+            (0, PenaltySource::OperatorMass),
+            (1, PenaltySource::OperatorTension),
+            (2, PenaltySource::OperatorStiffness),
+        ];
+        let PenaltyAlignment::Aligned { slots } = align_rebuilt_penalties(&blocks, &blocks, &[]) else {
+            panic!("an identical topology must align");
+        };
+        assert_eq!(slots, vec![0, 1, 2]);
     }
 }
 
