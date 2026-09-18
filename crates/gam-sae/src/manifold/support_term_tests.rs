@@ -1534,3 +1534,92 @@ fn dense_pencil_by_column_probes(
     }
     (exact, majorizer)
 }
+
+/// #2933 F08 — the exact Newton displacement solves at a row the majorizer does not
+/// curve. At `t = 1/2 + 1e-8` the von-Mises prior's PSD clamp is 0 and a cosine
+/// decoder's tangent is about `4π²·1e-8`, so the row's majorizer block is about
+/// 1.6e-13, while the exact block carries the residual curvature `−r·f'' = 4π²` less
+/// the prior's `1`. Preconditioned by `B⁻¹`, such a row was amplified by the
+/// reciprocal of its majorizer block, and flexible GMRES could not certify: the
+/// two-circle Tier-2 witness had `B = 5.8e-14` against `A = 12.4` (lane probe
+/// 1249076). The exact-A preconditioner's row block `B_i + (A_i − B_i)_+` is `A_i`
+/// there.
+#[test]
+fn exact_newton_displacement_solves_at_a_row_the_majorizer_does_not_curve_2933_f08() {
+    let evaluator: Arc<dyn SaeBasisSecondJet> =
+        Arc::new(PeriodicHarmonicEvaluator::new(3).expect("periodic"));
+    let decoder = array![[0.2], [0.0], [1.0]];
+    let coordinates = [0.5 + 1.0e-8, 0.1, 0.3];
+    let residuals = [-1.0, 0.3, -0.2];
+    let n = coordinates.len();
+    let atoms = vec![atom(
+        "flat-tangent",
+        SaeAtomBasisKind::Periodic,
+        1,
+        evaluator,
+        &[coordinates[0]],
+        decoder.clone(),
+    )];
+    let specs = vec![SaeAssignmentAtomSpec {
+        latent_dim: 1,
+        manifold: SaeAtomBasisKind::Periodic.latent_manifold(1),
+        retraction: gam_problem::LatentRetractionRegistry::all_euclidean(),
+    }];
+    let state = SaeAssignmentState::from_topk_support_heterogeneous(
+        n,
+        1,
+        1,
+        specs,
+        vec![vec![0]; n],
+        vec![vec![1.0]; n],
+        coordinates.iter().map(|&t| vec![t]).collect(),
+    )
+    .expect("state");
+    let term = SaeSupportSparseTerm::new(atoms, state).expect("term");
+    let target = Array2::from_shape_fn((n, 1), |(row, _)| {
+        let phase = std::f64::consts::TAU * coordinates[row];
+        decoder[[0, 0]] + decoder[[1, 0]] * phase.sin() + decoder[[2, 0]] * phase.cos()
+            + residuals[row]
+    });
+    let lambda = vec![1.0_f64];
+    let ard = vec![vec![1.0_f64]];
+    let system = term
+        .assemble_arrow_schur(target.view(), &lambda, &ard)
+        .expect("arrow system");
+    let (beta_offsets, beta_dim) = term.beta_layout().expect("beta layout");
+    let rows = term
+        .support_outer_differential_rows(target.view(), &ard, &beta_offsets)
+        .expect("exact differential rows");
+    let coordinate_dim = *system.row_offsets.last().unwrap_or(&0);
+    let (exact, majorizer) = term
+        .support_outer_dense_hessian_matrices(&system, &rows, coordinate_dim, beta_dim)
+        .expect("dense pencil");
+    let preconditioner = term
+        .support_exact_a_preconditioner_rows(&system, &rows)
+        .expect("preconditioner rows");
+    let solved = term.exact_newton_solve(target.view(), &lambda, &ard);
+    println!(
+        "[#2933 F08 flat tangent] majorizer {:.3e}, exact {:.3e}, preconditioner {:.3e}; \
+         solve {:?}",
+        majorizer[[0, 0]],
+        exact[[0, 0]],
+        preconditioner[0].htt[[0, 0]],
+        solved.as_ref().map(|(displacement, _)| displacement.max_abs()),
+    );
+    assert!(
+        majorizer[[0, 0]] <= f64::EPSILON.sqrt() * exact[[0, 0]],
+        "the fixture's row must be one the majorizer does not curve: B {:.3e} vs A {:.3e}",
+        majorizer[[0, 0]],
+        exact[[0, 0]],
+    );
+    assert!(
+        (preconditioner[0].htt[[0, 0]] - exact[[0, 0]]).abs() <= 1.0e-12 * exact[[0, 0]],
+        "the preconditioner's row block must be the exact block where it exceeds the \
+         majorizer: {:.12e} vs {:.12e}",
+        preconditioner[0].htt[[0, 0]],
+        exact[[0, 0]],
+    );
+    let (displacement, _) = solved
+        .expect("the exact Newton displacement certifies at a row the majorizer does not curve");
+    assert!(displacement.max_abs().is_finite());
+}

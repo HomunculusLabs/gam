@@ -3645,6 +3645,112 @@ impl SaeSupportSparseTerm {
             })
         }
     }
+
+    /// `Σ_m Σ_p ∂²φ_m/∂t_a∂t_b · B_mp · r_p` for one slot of one row: the second
+    /// derivative of the slot's decoder output contracted with the row residual.
+    /// The exact coordinate block carries it with a minus sign.
+    fn support_outer_residual_second_derivative(
+        &self,
+        row: &SupportOuterDifferentialRow,
+        slot: &SupportOuterDifferentialSlot,
+        axis_a: usize,
+        axis_b: usize,
+    ) -> f64 {
+        let atom = &self.atoms[slot.atom];
+        let decoder = atom.decoder_coefficients();
+        let mut residual_second = 0.0_f64;
+        for basis in 0..atom.basis_size() {
+            let coefficient = slot.second_jet[[basis, axis_a, axis_b]];
+            for output in 0..self.output_dim {
+                residual_second += coefficient * decoder[[basis, output]] * row.residual[output];
+            }
+        }
+        residual_second
+    }
+
+    /// Row factors of the preconditioner for the solves against the exact `A`: the
+    /// Newton displacement (#2933 F08) and the reduced-logdet adjoint. Each row block
+    /// is the majorizer block `B_i` plus the positive part of the exact block's excess
+    /// over it, `B_i + (A_i − B_i)_+` ([`Self::support_exact_a_preconditioner_rows`]).
+    fn support_exact_a_preconditioner(
+        &self,
+        system: &ArrowSchurSystem,
+        rows: &[SupportOuterDifferentialRow],
+    ) -> Result<ArrowFactorSlab, String> {
+        let preconditioner_rows = self.support_exact_a_preconditioner_rows(system, rows)?;
+        CpuBatchedBlockSolver
+            .factor_blocks(&preconditioner_rows, 0.0, system.d, true)
+            .map_err(|error| format!("support exact-A preconditioner row factorization: {error}"))
+    }
+
+    /// `B_i + (A_i − B_i)_+` for every row block.
+    ///
+    /// `B` majorizes the prior's signed curvature, not the residual curvature
+    /// `−Σ_p r_p ∂²f_p` that `A` adds, which is positive wherever the decoder curves
+    /// toward the row's residual. Where a coordinate's decoder tangent vanishes and
+    /// its periodic prior sits at the antipode, `B_i` keeps no curvature while `A_i`
+    /// does. On the two-circle Tier-2 witness one row had `B_i = 5.8e-14` against
+    /// `A_i = 12.4` (lane probe 1249076), so `B⁻¹` amplified that coordinate by
+    /// 7.65e13 and flexible GMRES could not represent the gradient in the span it
+    /// built. `B_i + (A_i − B_i)_+` majorizes `A_i`, equals `B_i` wherever `B_i`
+    /// already does, and is positive definite wherever `A_i` has positive curvature.
+    /// It changes how fast the solve converges, never what it certifies: flexible
+    /// GMRES certifies the physical residual `‖rhs − AΔ‖`.
+    fn support_exact_a_preconditioner_rows(
+        &self,
+        system: &ArrowSchurSystem,
+        rows: &[SupportOuterDifferentialRow],
+    ) -> Result<Vec<ArrowRowBlock>, String> {
+        if rows.len() != system.rows.len() {
+            return Err(format!(
+                "support Newton preconditioner: {} differential rows for {} system rows",
+                rows.len(),
+                system.rows.len()
+            ));
+        }
+        system
+            .rows
+            .iter()
+            .zip(rows)
+            .map(|(block, row)| {
+                let q = block.htt.nrows();
+                let mut excess = Array2::<f64>::zeros((q, q));
+                for slot in &row.slots {
+                    let offset = slot.coordinate_offset;
+                    let d = self.atoms[slot.atom].latent_dim();
+                    for axis_a in 0..d {
+                        for axis_b in 0..d {
+                            excess[[offset + axis_a, offset + axis_b]] -= self
+                                .support_outer_residual_second_derivative(row, slot, axis_a, axis_b);
+                        }
+                        excess[[offset + axis_a, offset + axis_a]] +=
+                            row.prior_hessian_remainder[offset + axis_a];
+                    }
+                }
+                let symmetric = (&excess + &excess.t()) * 0.5;
+                let (values, vectors) = symmetric.eigh(Side::Lower).map_err(|error| {
+                    format!("support Newton preconditioner: row excess eigendecomposition: {error}")
+                })?;
+                let mut htt = block.htt.clone();
+                for (index, &value) in values.iter().enumerate() {
+                    if value > 0.0 {
+                        let direction = vectors.column(index);
+                        for left in 0..q {
+                            for right in 0..q {
+                                htt[[left, right]] += value * direction[left] * direction[right];
+                            }
+                        }
+                    }
+                }
+                Ok(ArrowRowBlock {
+                    htt,
+                    htbeta: Array2::<f64>::zeros((q, 0)),
+                    gt: Array1::<f64>::zeros(q),
+                })
+            })
+            .collect()
+    }
+
     fn support_outer_exact_hessian_apply(
         &self,
         system: &ArrowSchurSystem,
@@ -3668,15 +3774,9 @@ impl SaeSupportSparseTerm {
                 for axis_a in 0..d {
                     let mut correction = 0.0_f64;
                     for axis_b in 0..d {
-                        let mut residual_second = 0.0_f64;
-                        for basis in 0..m {
-                            let coefficient = slot.second_jet[[basis, axis_a, axis_b]];
-                            for output in 0..self.output_dim {
-                                residual_second += coefficient
-                                    * atom.decoder_coefficients()[[basis, output]]
-                                    * row.residual[output];
-                            }
-                        }
+                        let residual_second = self.support_outer_residual_second_derivative(
+                            row, slot, axis_a, axis_b,
+                        );
                         correction -= residual_second * local_t[axis_b];
                     }
                     // Exact coordinate-decoder residual cross block.
@@ -3816,21 +3916,14 @@ impl SaeSupportSparseTerm {
                 let atom = &self.atoms[slot.atom];
                 let d = atom.latent_dim();
                 let m = atom.basis_size();
-                let decoder = atom.decoder_coefficients();
                 for axis_a in 0..d {
                     let t_a = row_start + slot.coordinate_offset + axis_a;
                     // Exact residual curvature `-sum_p r_p d2f_p/dt_a dt_b`, and the
                     // prior's Hessian remainder on the diagonal.
                     for axis_b in 0..d {
-                        let mut residual_second = 0.0_f64;
-                        for basis in 0..m {
-                            let coefficient = slot.second_jet[[basis, axis_a, axis_b]];
-                            for output in 0..self.output_dim {
-                                residual_second += coefficient
-                                    * decoder[[basis, output]]
-                                    * row.residual[output];
-                            }
-                        }
+                        let residual_second = self.support_outer_residual_second_derivative(
+                            row, slot, axis_a, axis_b,
+                        );
                         let mut correction = -residual_second;
                         if axis_a == axis_b {
                             correction +=
@@ -4300,7 +4393,6 @@ impl SaeSupportSparseTerm {
         self.support_reduced_logdet_adjoint_solves(
             system,
             &rows,
-            &factors,
             std::slice::from_ref(&gamma),
             derivative,
         )?
@@ -4352,7 +4444,6 @@ impl SaeSupportSparseTerm {
         let adjoints = self.support_reduced_logdet_adjoint_solves(
             system,
             &rows,
-            &factors,
             directions,
             bundle,
         )?;
@@ -4418,12 +4509,14 @@ impl SaeSupportSparseTerm {
     /// storage, not a dimension knob. Otherwise flexible GMRES runs, and where the
     /// bundle spans the reduced Schur's inverse exactly
     /// ([`RationalLogdetDerivativeBundle::exact_inverse_vectors`]) its preconditioner
-    /// folds that inverse instead of running a CG per direction (#2576).
+    /// folds that inverse instead of running a CG per direction (#2576). Its row
+    /// factors are the exact-A preconditioner's ([`Self::support_exact_a_preconditioner`]);
+    /// with the folded border inverse they invert the arrow whose row blocks are
+    /// `B_i + (A_i − B_i)_+` and whose reduced Schur is the one the evidence priced.
     fn support_reduced_logdet_adjoint_solves(
         &self,
         system: &ArrowSchurSystem,
         rows: &[SupportOuterDifferentialRow],
-        factors: &ArrowFactorSlab,
         rhs: &[SaeArrowVector],
         derivative: &RationalLogdetDerivativeBundle,
     ) -> Result<Vec<SaeArrowVector>, String> {
@@ -4440,6 +4533,9 @@ impl SaeSupportSparseTerm {
         if full_dim <= derivative_vector_count && dense_workspace <= in_core_budget {
             self.support_outer_dense_pseudoinverse_apply(system, rows, rhs)
         } else {
+            let factors = self
+                .support_exact_a_preconditioner(system, rows)
+                .map_err(|error| format!("support reduced-logdet profile adjoint: {error}"))?;
             rhs.iter()
                 .map(|rhs| {
                     solve_b_preconditioned_gmres_with(
@@ -4448,7 +4544,7 @@ impl SaeSupportSparseTerm {
                         |residual| {
                             support_arrow_majorizer_inverse(
                                 system,
-                                factors,
+                                &factors,
                                 residual,
                                 derivative.exact_inverse_vectors(),
                             )
@@ -4716,10 +4812,11 @@ impl SaeSupportSparseTerm {
     /// along (#2933 F08).
     ///
     /// The solve is the profile adjoint's large-system route: flexible GMRES on the
-    /// exact stationarity Jacobian, right-preconditioned by the majorizer arrow's
-    /// per-row factors and reduced-Schur solve. It adds no dense factorization, and
-    /// it certifies the physical residual rather than a preconditioned proxy. `A` may
-    /// be indefinite; GMRES does not assume otherwise.
+    /// exact stationarity Jacobian, right-preconditioned by the majorizer arrow whose
+    /// row blocks also carry the positive part of the exact row excess
+    /// ([`Self::support_exact_a_preconditioner_rows`]), and its reduced-Schur solve. It
+    /// adds no dense factorization, and it certifies the physical residual rather than
+    /// a preconditioned proxy. `A` may be indefinite; GMRES does not assume otherwise.
     ///
     /// The residual bar is `‖g − AΔ‖ ≤ max(√ε‖g‖, β_g + γ_dim·‖A‖·‖Δ‖)`
     /// ([`solve_b_preconditioned_gmres_to_rounding_floor`]), with `β_g` the gradient's
@@ -4762,9 +4859,9 @@ impl SaeSupportSparseTerm {
                 .assign(&block.gt);
         }
         let rows = self.support_outer_differential_rows(target, ard_precisions, &beta_offsets)?;
-        let factors = CpuBatchedBlockSolver
-            .factor_blocks(&system.rows, 0.0, system.d, true)
-            .map_err(|error| format!("support Newton displacement row factorization: {error}"))?;
+        let factors = self
+            .support_exact_a_preconditioner(&system, &rows)
+            .map_err(|error| format!("support Newton displacement: {error}"))?;
         let gradient_band = self.gradient_rounding_band(target, lambda_smooth, ard_precisions)?;
         let prepared = started.elapsed();
         let (displacement, iterations) = solve_b_preconditioned_gmres_to_rounding_floor(
