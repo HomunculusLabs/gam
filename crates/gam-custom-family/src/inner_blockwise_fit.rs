@@ -593,6 +593,60 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
     Ok((clipped, blocking_row, certified_step))
 }
 
+/// The trust-ball KKT verdict on a mathematically feasible reduced-face candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrustBallVerdict {
+    /// Inside the ball, and complementary at the solver's curvature resolution.
+    Admitted,
+    /// A chord-repaired candidate inside the ball whose shift is not complementary
+    /// to its norm. The shift belongs to the Moré--Sorensen solution the repair
+    /// pulled back along the feasible chord, not to the repaired step, so the
+    /// check fails by construction of the repair, and the caller's general
+    /// constrained QP owns the subproblem, as for a repair failing first-order KKT
+    /// (gam#2600).
+    DeclinedChordRepair,
+    /// The subproblem's own solution violates the trust-ball KKT conditions.
+    Refused,
+}
+
+/// Judge a reduced-face candidate's metric norm against the trust ball its step
+/// was solved in.
+///
+/// Complementarity is judged at the curvature resolution the step solver declined
+/// at. When its hard case declines to fill along an unresolvable negative pole, it
+/// returns the minimum-norm base at `λ_lo = −γ_min`: an interior step with a
+/// positive shift no larger than that resolution. The shift perturbs the model
+/// within resolution into a convex one whose interior Newton step this is, so it
+/// is not a boundary multiplier. Exact zero refused such a step on the 3-D CTN κ
+/// gate (trust_shift=4.978800e-8 for an interior metric_norm=8.794692e-3 against
+/// radius=3.164101e-2, MSI job 440833).
+///
+/// `chord_repair` is the fraction of the solver's step the feasible-chord repair
+/// removed. On the CTN order-0 power-9 κ fixture the repair kept 24.7% of a
+/// boundary step: metric_norm=2.069838e-5 = radius·(1 − chord_repair) against
+/// radius=8.365122e-5, with the boundary shift 1.043848e-7 above the resolution
+/// 4.246907e-13 (gam#2959). Refusing that candidate ended the fit on a heuristic
+/// repair, not on a violated contract.
+fn trust_ball_verdict(
+    trust_norm: f64,
+    trust_radius: f64,
+    trust_tolerance: f64,
+    trust_shift: f64,
+    curvature_resolution: f64,
+    chord_repair: f64,
+) -> TrustBallVerdict {
+    let feasible = trust_norm.is_finite() && trust_norm <= trust_radius + trust_tolerance;
+    let complementary = trust_shift <= curvature_resolution
+        || (trust_norm - trust_radius).abs() <= trust_tolerance;
+    if feasible && complementary {
+        TrustBallVerdict::Admitted
+    } else if feasible && chord_repair > 0.0 {
+        TrustBallVerdict::DeclinedChordRepair
+    } else {
+        TrustBallVerdict::Refused
+    }
+}
+
 /// Solve the physical-H constrained trust-region subproblem on an inequality
 /// face, exchanging blockers and invalid multiplier rows to closure.
 ///
@@ -1292,26 +1346,38 @@ fn certified_reduced_face_candidate(
         let trust_tolerance = f64::EPSILON.sqrt()
             * (p.max(1) as f64)
             * trust_radius.abs().max(trust_norm.abs()).max(1.0);
-        let trust_feasible = trust_norm <= trust_radius + trust_tolerance;
-        // Complementarity at the curvature resolution the step solver declined at.
-        // When its hard case declines to fill along an unresolvable negative pole,
-        // it returns the minimum-norm base at `λ_lo = −γ_min`: an interior step with
-        // a positive shift no larger than that resolution. The shift perturbs the
-        // model within resolution into a convex one whose interior Newton step this
-        // is, so it is not a boundary multiplier. Exact zero refused such a step on
-        // the 3-D CTN κ gate (trust_shift=4.978800e-8 for an interior
-        // metric_norm=8.794692e-3 against radius=3.164101e-2, MSI job 440833).
-        let trust_complementary = face_step.trust_shift <= face_step.curvature_resolution
-            || (trust_norm - trust_radius).abs() <= trust_tolerance;
-        if !trust_norm.is_finite() || !trust_feasible || !trust_complementary {
-            return Err(CustomFamilyError::trial_point(format!(
-                "physical reduced-face trust-ball KKT failed \
-                 (metric_norm={trust_norm:.6e}, radius={trust_radius:.6e}, \
-                 trust_shift={:.6e}, curvature_resolution={:.6e}, \
-                 tolerance={trust_tolerance:.6e})",
-                face_step.trust_shift,
-                face_step.curvature_resolution,
-            )));
+        match trust_ball_verdict(
+            trust_norm,
+            trust_radius,
+            trust_tolerance,
+            face_step.trust_shift,
+            face_step.curvature_resolution,
+            chord_repair,
+        ) {
+            TrustBallVerdict::Admitted => {}
+            TrustBallVerdict::DeclinedChordRepair => {
+                log::warn!(
+                    "[gam#2959 reduced-face] declining a chord-repaired candidate whose trust shift \
+                     is not complementary to its norm (face_rows={}, chord_repair={:.6e}, \
+                     metric_norm={trust_norm:.6e}, radius={trust_radius:.6e}, trust_shift={:.6e}, \
+                     curvature_resolution={:.6e}); the general constrained QP owns this subproblem",
+                    working_active.len(),
+                    chord_repair,
+                    face_step.trust_shift,
+                    face_step.curvature_resolution,
+                );
+                return Ok(None);
+            }
+            TrustBallVerdict::Refused => {
+                return Err(CustomFamilyError::trial_point(format!(
+                    "physical reduced-face trust-ball KKT failed \
+                     (metric_norm={trust_norm:.6e}, radius={trust_radius:.6e}, \
+                     trust_shift={:.6e}, curvature_resolution={:.6e}, \
+                     tolerance={trust_tolerance:.6e})",
+                    face_step.trust_shift,
+                    face_step.curvature_resolution,
+                )));
+            }
         }
 
         if original_base_violation <= 0.0 {
@@ -1533,6 +1599,62 @@ mod exact_face_newton_tests {
                 .to_string()
                 .contains("dimension/metric contract failed"),
             "unexpected reduced-face diagnostic: {error}"
+        );
+    }
+
+    #[test]
+    fn a_chord_repaired_candidate_that_fails_complementarity_declines_2959() {
+        // The CTN order-0 power-9 κ fixture's refused candidate (lane probe job
+        // 1213300): a boundary Moré--Sorensen step, shift 1.043848e-7 above the
+        // resolution 4.246907e-13, pulled back by the feasible-chord repair to
+        // 24.7% of its length, inside the ball and not complementary.
+        let radius = 8.365122e-5_f64;
+        let chord_repair = 7.525634e-1_f64;
+        let norm = radius * (1.0 - chord_repair);
+        let tolerance = 1.192093e-6_f64;
+        let shift = 1.043848e-7_f64;
+        let resolution = 4.246907e-13_f64;
+        assert_eq!(
+            trust_ball_verdict(norm, radius, tolerance, shift, resolution, chord_repair),
+            TrustBallVerdict::DeclinedChordRepair,
+            "a repaired step is not the solution its shift was computed for"
+        );
+        // The same norm and shift from an unrepaired step is the subproblem's own
+        // solution violating complementarity.
+        assert_eq!(
+            trust_ball_verdict(norm, radius, tolerance, shift, resolution, 0.0),
+            TrustBallVerdict::Refused
+        );
+        // A repaired step outside the ball is still refused: the repair only
+        // shortens a step, so leaving the ball is not its construction.
+        assert_eq!(
+            trust_ball_verdict(2.0 * radius, radius, tolerance, shift, resolution, chord_repair),
+            TrustBallVerdict::Refused
+        );
+        assert_eq!(
+            trust_ball_verdict(f64::NAN, radius, tolerance, shift, resolution, chord_repair),
+            TrustBallVerdict::Refused
+        );
+    }
+
+    #[test]
+    fn trust_ball_verdict_admits_boundary_and_within_resolution_interior_steps_2959() {
+        let radius = 3.164101e-2_f64;
+        let tolerance = 1.192093e-6_f64;
+        // A boundary step carries a positive multiplier.
+        assert_eq!(
+            trust_ball_verdict(radius, radius, tolerance, 4.978800e-8, 1.0e-12, 0.0),
+            TrustBallVerdict::Admitted
+        );
+        // An interior step whose shift is within the curvature resolution.
+        assert_eq!(
+            trust_ball_verdict(8.794692e-3, radius, tolerance, 4.978800e-8, 1.0e-7, 0.0),
+            TrustBallVerdict::Admitted
+        );
+        // A complementary repaired step is admitted like any other.
+        assert_eq!(
+            trust_ball_verdict(8.794692e-3, radius, tolerance, 4.978800e-8, 1.0e-7, 0.5),
+            TrustBallVerdict::Admitted
         );
     }
 
