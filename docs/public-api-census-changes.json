@@ -4357,5 +4357,13 @@
     },
     "reason": "#932: the pub(crate) row_program! declaration binomial_ls_row_program is replaced by the row_atom! declaration binomial_ls_row (same row, same fourth-order Taylor loss in q, lowered exactly at delta = 0), read only through the pub(crate) wrappers binomial_ls_row_order2, binomial_ls_row_third_contracted and binomial_ls_row_fourth_contracted.",
     "evidence": "git grep -c -w binomial_ls_row_program at 7c01c5dc958bc4220f601f96faf58e47c5c7c08f finds callers only in gamlss/binomial/kernel.rs and gamlss/binomial/location_scale.rs, all converted here; no gam-cli, gam-pyffi, python or other-crate code names it. The workspace check with the replacement is green (job 1269170)."
+  },
+  {
+    "base": "a7a0301949fabfcf51ccce64214a0c9f741c222f",
+    "removed": {
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs::fixed_frame_geometry": 1
+    },
+    "reason": "#2933 F33/F35/F39: ShapeInformationRoute::fixed_frame_geometry returned the fixed-frame geometry the dispersion could share, or None on the frame-marginal route, which then formed its frame-integrated information twice. The route now carries that FrameMarginalInformation, and held_response_geometry returns the operator the dispersion shares on either route.",
+    "evidence": "The removed map is the census's own refusal in direct lane dy7 run adf39-g2 (base bdc83e85fe, exact tree bd9f9571): 12669 to 12673 public function declarations with this one removed. git grep -n -w fixed_frame_geometry at bdc83e85fe501ea97e57d1b3a897e1d600ce6324 finds the declaration (construction_quasi_laplace.rs:8276) and its two callers (construction_reconstruction.rs:662, outer_objective.rs:1912), both rewritten in this commit."
   }
 ]

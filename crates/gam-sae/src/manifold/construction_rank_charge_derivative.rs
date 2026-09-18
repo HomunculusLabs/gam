@@ -81,7 +81,7 @@ impl SaeManifoldTerm {
                 cache,
                 rho,
                 residual.view(),
-                geometry.map(|geometry| &geometry.block),
+                geometry.map(|geometry| HeldResponseGeometry::FixedFrame(&geometry.block)),
             )?
             .raw_output_noise_variance;
         let mut grams = self.empty_decoder_gram_accumulator();

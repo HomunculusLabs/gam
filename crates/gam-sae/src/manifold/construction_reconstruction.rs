@@ -227,15 +227,17 @@ impl SaeManifoldTerm {
     /// every observation has `ν = 0`, leaves no residual to estimate a scale from,
     /// and is refused.
     ///
-    /// Learned decoder frames are estimated, so where their tangent operator is
-    /// admitted the divergence and both residual dofs integrate them
-    /// ([`SaeFrameConditioning::MarginalOverLearnedFrames`], #2933 F39). Where
-    /// [`Self::frame_marginal_admission`] refuses, the response holds the frames at
-    /// their fitted orientation, and each frame's `r·(p − r)` unpenalized tangent
-    /// dimensions are charged as fully determined response directions: `tr R` and
-    /// `‖R‖²_F` each gain that count and `ν` loses it. When the frame block carries
-    /// Gauss–Newton curvature and no prior, that count bounds the frame-coupled
-    /// divergence from above, which makes that scale conservative.
+    /// Learned decoder frames are estimated, so wherever every framed decoder has
+    /// its frame's rank the divergence and both residual dofs integrate them
+    /// ([`SaeFrameConditioning::MarginalOverLearnedFrames`], #2933 F39), densely or
+    /// by output-space probes as the host's memory admits. Where a frame is rank
+    /// deficient, or the host cannot hold the unframed evidence factor either route
+    /// reads, the response holds the frames at their fitted orientation, and each
+    /// frame's `r·(p − r)` unpenalized tangent dimensions are charged as fully
+    /// determined response directions: `tr R` and `‖R‖²_F` each gain that count and
+    /// `ν` loses it. When the frame block carries Gauss–Newton curvature and no
+    /// prior, that count bounds the frame-coupled divergence from above, which makes
+    /// that scale conservative.
     ///
     /// # Selection is conditioned on, not charged
     ///
@@ -283,9 +285,9 @@ impl SaeManifoldTerm {
     }
 
     /// [`Self::reconstruction_dispersion`] with the fitted-response divergence read
-    /// off a fixed-frame exact stationarity geometry the caller already holds, so a
-    /// shape report on the fixed-frame route pays one dense eigendecomposition of
-    /// `A` for the divergence and the covariance together (#2933 F33). `None`
+    /// off a stationarity operator the caller already holds, so a shape report pays
+    /// one dense eigendecomposition for the divergence and the covariance together
+    /// (#2933 F33), on the fixed-frame route and on the frame-marginal one. `None`
     /// routes the divergence by admission.
     pub(crate) fn reconstruction_dispersion_with_geometry(
         &self,
@@ -293,7 +295,7 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
         rho: &SaeManifoldRho,
         residual: ArrayView2<'_, f64>,
-        geometry: Option<&super::construction::ExactHessianSpectralBlock>,
+        geometry: Option<super::construction::HeldResponseGeometry<'_>>,
     ) -> Result<SaeReconstructionDispersion, String> {
         self.assignment.validate_rho_domain(rho)?;
         // FRAME CONSISTENCY: the raw energy prices the output-frame noise the MP
@@ -325,16 +327,20 @@ impl SaeManifoldTerm {
                 response.likelihood_residual_dof,
                 response.raw_residual_dof
             ),
-            FittedResponseDivergenceEstimator::Hutchinson {
-                probes,
-                standard_error,
-            } => log::debug!(
+            FittedResponseDivergenceEstimator::Hutchinson { likelihood, raw } => log::debug!(
                 "[SAE-DISPERSION] Hutchinson fitted-response divergence {:.6e} (standard error \
-                 {standard_error:.3e}) and residual dof {:.6e} likelihood / {:.6e} raw from \
-                 {probes} probes",
-                response.divergence,
-                response.likelihood_residual_dof,
-                response.raw_residual_dof
+                 {:.3e}); residual dof {:.6e} (standard error {:.3e}) likelihood from {} probes, \
+                 {:.6e} (standard error {:.3e}) raw from {} probes",
+                likelihood.divergence,
+                likelihood.divergence_standard_error,
+                likelihood.residual_dof,
+                likelihood.residual_dof_standard_error,
+                likelihood.probes,
+                raw.map_or(likelihood.residual_dof, |raw| raw.residual_dof),
+                raw.map_or(likelihood.residual_dof_standard_error, |raw| {
+                    raw.residual_dof_standard_error
+                }),
+                raw.map_or(likelihood.probes, |raw| raw.probes)
             ),
         }
         let frame_dimension = match response.frame_conditioning {
@@ -650,18 +656,17 @@ impl SaeManifoldTerm {
             )
             .map_err(|error| error.to_string())?;
         let residual = self.reconstruction_residual(target, rho)?;
-        // One decision of which operator the report inverts. On the fixed-frame
-        // route its exact-A geometry feeds both the dispersion's divergence and the
-        // covariance (#2933 F33).
-        let route = self.shape_information_route(rho, target, &cache)?;
+        // One decision of which operator the report inverts, which feeds both the
+        // dispersion's divergence and the covariance (#2933 F33).
+        let route = self.shape_information_route(rho, target, registry, &cache)?;
         let dispersion = self.reconstruction_dispersion_with_geometry(
             &loss,
             &cache,
             rho,
             residual.view(),
-            route.fixed_frame_geometry(),
+            Some(route.held_response_geometry()),
         )?;
-        let information = self.shape_information(&route, rho, target, registry, &cache)?;
+        let information = self.shape_information(&route, rho, target, &cache)?;
         self.assemble_shape_uncertainty(&information, dispersion)
     }
 

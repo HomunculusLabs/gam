@@ -27,6 +27,7 @@
 //! the same rows (cross-atom coupling), free gate logits, an atom with ARD
 //! disabled, and ARD rows on the concave side of a periodic axis.
 
+use super::tests_fitted_response_frames_2933::rademacher_quadratic_form_variance;
 use super::*;
 use crate::basis::{AmbientSphereHarmonicEvaluator, TorusHarmonicEvaluator};
 use crate::manifold::arrow_solver::{SaeArrowVector, SaeLocalRowVar};
@@ -153,8 +154,10 @@ fn scientific(values: &[f64]) -> String {
         .join(", ")
 }
 
-/// The two functionals of the re-solved response Jacobian the fit prices.
+/// The re-solved response Jacobian and the two functionals of it the fit prices.
 struct ResolvedResponse {
+    /// `R` over the raw output scalars.
+    jacobian: Array2<f64>,
     /// `tr R`.
     trace: f64,
     /// `‖I − R‖²_F` over the raw output scalars.
@@ -207,6 +210,7 @@ fn resolved_response(
         })
         .sum();
     ResolvedResponse {
+        jacobian,
         trace,
         residual_dof,
     }
@@ -470,17 +474,14 @@ fn torus_and_ard_free_divergence_prices_the_dispersion_2933() {
 #[test]
 fn hutchinson_divergence_brackets_the_resolved_response_2933() {
     let (mut term, target, rho, cache) = obb_torus_and_circle_state();
-    let resolved = resolved_response(&term, &target, &rho).trace;
+    let resolved = resolved_response(&term, &target, &rho);
     // No host memory admits the dense eigensystem, so the matrix-free estimator
     // must carry the divergence.
     term.host_available_bytes = 0;
     let response = term
         .fitted_response_divergence(target.view(), &rho, &cache)
         .expect("the matrix-free estimator solves where the dense route is refused");
-    let FittedResponseDivergenceEstimator::Hutchinson {
-        probes,
-        standard_error,
-    } = response.estimator
+    let FittedResponseDivergenceEstimator::Hutchinson { likelihood, .. } = response.estimator
     else {
         panic!(
             "without an admitted eigensystem the divergence must be the Hutchinson estimate, \
@@ -488,23 +489,51 @@ fn hutchinson_divergence_brackets_the_resolved_response_2933() {
             response.estimator
         );
     };
+    // The standard errors of the estimator at the probe count it chose, from the
+    // re-solved response itself, so the bracket is not read off the estimate's own
+    // sample spread.
+    let probes = likelihood.probes;
+    let complement = Array2::<f64>::eye(resolved.jacobian.nrows()) - &resolved.jacobian;
+    let gram = complement.t().dot(&complement);
+    let residual_dof_standard_error =
+        (rademacher_quadratic_form_variance(&gram) / probes as f64).sqrt();
+    let divergence_standard_error =
+        (rademacher_quadratic_form_variance(&resolved.jacobian) / probes as f64).sqrt();
     eprintln!(
-        "[#2933 F36 Hutchinson] divergence={:.9e} standard error={standard_error:.3e} \
-         probes={probes} resolved={resolved:.9e}",
-        response.divergence
+        "[#2933 F36 Hutchinson] probes={probes} divergence={:.9e} (sample se {:.3e}, resolved \
+         se {divergence_standard_error:.3e}) resolved tr R={:.9e}; residual dof {:.9e} (sample \
+         se {:.3e}, resolved se {residual_dof_standard_error:.3e}) resolved ‖I−R‖²={:.9e}",
+        response.divergence,
+        likelihood.divergence_standard_error,
+        resolved.trace,
+        response.likelihood_residual_dof,
+        likelihood.residual_dof_standard_error,
+        resolved.residual_dof
     );
     assert!(
-        standard_error.is_finite() && standard_error > 0.0 && standard_error < 0.5 * resolved,
-        "a Hutchinson estimate with standard error {standard_error} cannot resolve a trace of \
-         {resolved}"
+        probes >= 2
+            && likelihood.residual_dof_standard_error.powi(2) <= 2.0 * likelihood.residual_dof,
+        "the probes stopped at {probes} with a residual-dof Monte Carlo variance {:.3e} above \
+         the 2ν̂ = {:.3e} the dispersion carries",
+        likelihood.residual_dof_standard_error.powi(2),
+        2.0 * likelihood.residual_dof
     );
     // Four standard errors of a fixed-seed estimate: a deterministic bracket whose
     // width is the estimator's own sampling error, not a tuned band.
     assert!(
-        (response.divergence - resolved).abs() <= 4.0 * standard_error,
-        "the Hutchinson divergence {} is more than four standard errors ({standard_error:.3e}) \
-         from the re-solved response trace {resolved}",
-        response.divergence
+        (response.likelihood_residual_dof - resolved.residual_dof).abs()
+            <= 4.0 * residual_dof_standard_error,
+        "the Hutchinson residual dof {} is more than four standard errors \
+         ({residual_dof_standard_error:.3e}) from the re-solved ‖I − R‖²_F {}",
+        response.likelihood_residual_dof,
+        resolved.residual_dof
+    );
+    assert!(
+        (response.divergence - resolved.trace).abs() <= 4.0 * divergence_standard_error,
+        "the Hutchinson divergence {} is more than four standard errors \
+         ({divergence_standard_error:.3e}) from the re-solved response trace {}",
+        response.divergence,
+        resolved.trace
     );
 }
 

@@ -663,7 +663,7 @@ impl SaeManifoldTerm {
                     &cache,
                     rho,
                     residual.view(),
-                    Some(&geometry.block),
+                    Some(HeldResponseGeometry::FixedFrame(&geometry.block)),
                 )
                 .map_err(|e| {
                     format!(
@@ -8066,20 +8066,24 @@ impl SaeManifoldTerm {
     ///
     /// A learned frame is estimated, so the covariance integrates it wherever the
     /// dense observed information of the unframed decoder is admitted
-    /// ([`Self::frame_marginal_shape_information`]). Otherwise, and with no frames
-    /// at all, the report holds the frames fixed and reads the fixed-frame exact
-    /// stationarity geometry formed here. The dispersion's fitted-response
-    /// divergence reads that geometry too (#2933 F33), so it is formed once. On the
-    /// frame-marginal route the covariance inverts a different operator, and the
-    /// divergence, which is conditional on the fitted frames, still forms its own.
+    /// ([`Self::frame_marginal_shape_information`]). The route then carries that
+    /// frame-integrated information, formed here under `registry`. The covariance
+    /// inverts it and the dispersion's fitted-response divergence reads it, so it
+    /// is formed once. Otherwise, and with no frames at all, the report holds the
+    /// frames fixed and reads the fixed-frame exact stationarity geometry formed
+    /// here. The dispersion's divergence reads that geometry too (#2933 F33), unless
+    /// it integrates frames the covariance holds fixed.
     pub(crate) fn shape_information_route(
         &self,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
+        registry: Option<&AnalyticPenaltyRegistry>,
         cache: &ArrowFactorCache,
     ) -> Result<ShapeInformationRoute, String> {
         if self.frames_active() && self.frame_marginal_admission()?.is_none() {
-            Ok(ShapeInformationRoute::FrameMarginal)
+            Ok(ShapeInformationRoute::FrameMarginal(
+                self.frame_marginal_information(rho, target, registry)?,
+            ))
         } else {
             Ok(ShapeInformationRoute::FixedFrame(
                 self.materialize_exact_stationarity_geometry(rho, target, cache)?,
@@ -8096,12 +8100,11 @@ impl SaeManifoldTerm {
         route: &ShapeInformationRoute,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
-        registry: Option<&AnalyticPenaltyRegistry>,
         cache: &ArrowFactorCache,
     ) -> Result<SaeShapeInformation, String> {
         match route {
-            ShapeInformationRoute::FrameMarginal => {
-                self.frame_marginal_shape_information(rho, target, registry)
+            ShapeInformationRoute::FrameMarginal(information) => {
+                self.frame_marginal_shape_information(information, rho, target)
             }
             ShapeInformationRoute::FixedFrame(geometry) => {
                 self.exact_observed_information_shape_covariance(geometry, rho, target, cache)
@@ -8184,37 +8187,16 @@ impl SaeManifoldTerm {
     /// #2933 F35 — the joint observed information of this framed state in the
     /// identified tangent coordinates `(t, ξ)` of its learned frames, classified
     /// through the lifted `B` metric. One owner for every consumer that integrates
-    /// the frames.
-    ///
-    /// `Clone` resets the collapse-prevention gates, and an unframed assembly with
-    /// no gates re-derives them from the state. The criterion priced the gates this
-    /// term holds, declared by the outer objective or frozen at the criterion's
-    /// entry, so the clone declares exactly those. Otherwise the separation
-    /// barrier's routing coactivations `q_jk` and effective sample sizes, the
-    /// repulsion gate and the amplitude turn-on radius of the frame-integrated
-    /// operator would be re-derived at this state, and it would not be the operator
-    /// the criterion and the fixed-frame covariance read.
+    /// the frames densely, on the unframed evidence factor of
+    /// [`Self::unframed_evidence_factorization`].
     fn frame_marginal_information(
         &self,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
         registry: Option<&AnalyticPenaltyRegistry>,
     ) -> Result<FrameMarginalInformation, String> {
-        let mut unframed = self.clone();
-        for atom in unframed.atoms.iter_mut() {
-            atom.deactivate_decoder_frame();
-        }
-        unframed.declare_collapse_prevention_gates(&self.collapse_prevention_gates());
-        let mut sys = unframed.assemble_arrow_schur(target, rho, registry)?;
+        let (unframed, sys, cache) = self.unframed_evidence_factorization(rho, target, registry)?;
         let tangent = LearnedFrameTangentMap::new(self, sys.gb.view())?;
-        Self::ensure_row_gauge_deflation_for_quasi_laplace(&mut sys);
-        let (_delta_t, _delta_beta, cache) = solve_arrow_newton_step_with_options(
-            &sys,
-            0.0,
-            0.0,
-            &unframed.evidence_factor_options(),
-        )
-        .map_err(|err| format!("frame-marginal shape covariance: unframed evidence factor: {err}"))?;
         let total_t = cache.delta_t_len();
         let (a, _gap_border) =
             unframed.materialize_exact_hessian_dense_with_gap_border(rho, target, &cache)?;
@@ -8260,13 +8242,13 @@ impl SaeManifoldTerm {
     /// directions is pushed forward, `Cov(vec B_k) = T_k·Σ_ξ·T_kᵀ`, and the row
     /// sandwich uses the meat `Tᵀ·J·T`. The tangent coordinates name physical
     /// decoder motions only, so the `GL(r_k)` factorization gauge never enters.
+    /// `information` is this state's [`Self::frame_marginal_information`].
     pub(crate) fn frame_marginal_shape_information(
         &self,
+        information: &FrameMarginalInformation,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
-        registry: Option<&AnalyticPenaltyRegistry>,
     ) -> Result<SaeShapeInformation, String> {
-        let information = self.frame_marginal_information(rho, target, registry)?;
         let tangent = &information.tangent;
         let sandwich = tangent.tangent_sandwich(information.unframed.row_sandwich_meat(
             rho,
@@ -8300,21 +8282,20 @@ impl SaeManifoldTerm {
 /// #2933 F33/F35 — the operator a shape report inverts, decided once by
 /// [`SaeManifoldTerm::shape_information_route`].
 pub(crate) enum ShapeInformationRoute {
-    /// Every learned frame admits integration: the frame-marginal covariance,
-    /// over an operator of its own.
-    FrameMarginal,
+    /// Every learned frame admits integration: the frame-integrated information
+    /// the covariance inverts and the dispersion's fitted-response divergence reads.
+    FrameMarginal(FrameMarginalInformation),
     /// No learned frames, or frames held fixed: the fixed-frame exact stationarity
     /// geometry, which the dispersion's fitted-response divergence reads too.
     FixedFrame(ExactHessianSpectralBlock),
 }
 
 impl ShapeInformationRoute {
-    /// The fixed-frame geometry the dispersion may share, or `None` on the
-    /// frame-marginal route, whose covariance inverts a different operator.
-    pub(crate) fn fixed_frame_geometry(&self) -> Option<&ExactHessianSpectralBlock> {
+    /// The operator the dispersion shares with the covariance on this route.
+    pub(crate) fn held_response_geometry(&self) -> HeldResponseGeometry<'_> {
         match self {
-            Self::FrameMarginal => None,
-            Self::FixedFrame(geometry) => Some(geometry),
+            Self::FrameMarginal(information) => HeldResponseGeometry::FrameMarginal(information),
+            Self::FixedFrame(geometry) => HeldResponseGeometry::FixedFrame(geometry),
         }
     }
 }
@@ -8412,7 +8393,7 @@ impl ExactHessianSpectralBlock {
 
 /// The observed information of a framed state integrated over its learned frames
 /// (#2933 F35); see [`SaeManifoldTerm::frame_marginal_information`].
-struct FrameMarginalInformation {
+pub(crate) struct FrameMarginalInformation {
     /// `vec B = T·ξ`, the cross curvature `E` and the per-atom `ξ` ranges.
     tangent: LearnedFrameTangentMap,
     /// The joint `(t, ξ)` operator `[[A_tt, A_tB·T], [Tᵀ·A_Bt, Tᵀ·A_BB·T + E]]` and
