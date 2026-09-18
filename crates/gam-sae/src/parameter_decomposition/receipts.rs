@@ -39,11 +39,14 @@
 //! as a measured discrepancy. The measured discrepancy is reported beside the
 //! band and never folded into it (#2951 correction C2).
 
-use super::apply::{ApplyError, FactorView, apply_anchored_linear};
+use super::apply::{ApplyError, FactorView, apply_anchored_linear, native_linear};
+use super::gated_rewrite::{GatedRewriteError, swiglu_hidden};
+use super::occurrence::{OccurrenceError, PositionScope};
 use super::rewrite::{NativeMlp, ShapeMismatch};
 use gam_linalg::roundoff::accumulation_growth;
 use gam_math::gaussian_activation::{GaussianActivation, GaussianActivationError};
-use ndarray::{Array2, ArrayView1, ArrayView2};
+use gam_math::gaussian_gated::silu_derivatives;
+use ndarray::{Array2, ArrayView1, ArrayView2, Zip};
 use std::fmt;
 
 /// What an external executor ran a stage in, as it reports it.
@@ -59,8 +62,18 @@ pub struct ExternalExecution<'a> {
 }
 
 impl ExternalExecution<'_> {
-    fn covered_by_binary64_bands(&self) -> bool {
-        self.dtype == "float64" && !self.tf32_matmul
+    /// Refuses unless the stage ran in binary64 with TF32 off, the precondition every band
+    /// here assumes.
+    fn require_binary64_bands(&self) -> Result<(), ReceiptRefusal> {
+        let float64 = self.dtype == "float64";
+        if float64 && !self.tf32_matmul {
+            Ok(())
+        } else {
+            Err(ReceiptRefusal::ExternalPrecision {
+                float64,
+                tf32_matmul: self.tf32_matmul,
+            })
+        }
     }
 }
 
@@ -81,6 +94,10 @@ pub enum ReceiptRefusal {
     Apply(ApplyError),
     /// The native activation refused.
     Activation(GaussianActivationError),
+    /// The native gated primitive refused.
+    GatedRewrite(GatedRewriteError),
+    /// An edit's declared rows do not fit the receipt's rows.
+    Occurrence(OccurrenceError),
 }
 
 impl From<ShapeMismatch> for ReceiptRefusal {
@@ -98,6 +115,18 @@ impl From<ApplyError> for ReceiptRefusal {
 impl From<GaussianActivationError> for ReceiptRefusal {
     fn from(error: GaussianActivationError) -> Self {
         Self::Activation(error)
+    }
+}
+
+impl From<GatedRewriteError> for ReceiptRefusal {
+    fn from(error: GatedRewriteError) -> Self {
+        Self::GatedRewrite(error)
+    }
+}
+
+impl From<OccurrenceError> for ReceiptRefusal {
+    fn from(error: OccurrenceError) -> Self {
+        Self::Occurrence(error)
     }
 }
 
@@ -121,6 +150,12 @@ impl fmt::Display for ReceiptRefusal {
                 write!(formatter, "the native factored-edit kernel refused: {error:?}")
             }
             Self::Activation(error) => write!(formatter, "the native activation refused: {error}"),
+            Self::GatedRewrite(error) => {
+                write!(formatter, "the native gated primitive refused: {error}")
+            }
+            Self::Occurrence(error) => {
+                write!(formatter, "an edit's declared rows do not fit the receipt: {error}")
+            }
         }
     }
 }
@@ -282,12 +317,7 @@ pub fn compare_stage(
     external_band: ArrayView2<'_, f64>,
     native_band: ArrayView2<'_, f64>,
 ) -> Result<StageAgreement, ReceiptRefusal> {
-    if !external_execution.covered_by_binary64_bands() {
-        return Err(ReceiptRefusal::ExternalPrecision {
-            float64: external_execution.dtype == "float64",
-            tf32_matmul: external_execution.tf32_matmul,
-        });
-    }
+    external_execution.require_binary64_bands()?;
     let (rows, columns) = native.dim();
     for (what, array) in [
         ("external", external),
@@ -421,12 +451,7 @@ pub struct MlpBlockReceipt {
 /// The whole stage map of one residual MLP block ([`MlpBlockReceipt`]). It refuses before
 /// executing anything unless `external_execution` is binary64 with TF32 off.
 pub fn mlp_block_receipt(block: MlpBlockReceiptInputs<'_>) -> Result<MlpBlockReceipt, ReceiptRefusal> {
-    if !block.external_execution.covered_by_binary64_bands() {
-        return Err(ReceiptRefusal::ExternalPrecision {
-            float64: block.external_execution.dtype == "float64",
-            tf32_matmul: block.external_execution.tf32_matmul,
-        });
-    }
+    block.external_execution.require_binary64_bands()?;
     check("read-in bias length", block.weight.nrows(), block.bias.len())?;
     let native = NativeMlp::new(
         block.weight.to_owned(),
@@ -496,6 +521,194 @@ pub fn mlp_block_receipt(block: MlpBlockReceiptInputs<'_>) -> Result<MlpBlockRec
     })
 }
 
+/// A factored edit of one stored read, executed as `W + L diag(s) Rᵀ` at the rows it
+/// reaches and as `W` at every other row.
+#[derive(Clone, Copy, Debug)]
+pub struct FactoredEditViews<'a> {
+    pub factors: FactorView<'a>,
+    pub coefficients: ArrayView1<'a, f64>,
+    /// The rows of a receipt are the positions of one pass, so a declared position is a row
+    /// index. [`PositionScope::every`] reaches every row.
+    pub rows: &'a PositionScope,
+}
+
+/// One bias-free linear read of a block: its stored weight and an optional factored edit.
+#[derive(Clone, Copy, Debug)]
+pub struct EditedRead<'a> {
+    pub weight: ArrayView2<'a, f64>,
+    pub edit: Option<FactoredEditViews<'a>>,
+}
+
+/// `edited`'s rows where `scope` reaches, `unedited`'s rows elsewhere.
+fn reached_rows(scope: &PositionScope, mut unedited: Array2<f64>, edited: &Array2<f64>) -> Array2<f64> {
+    for row in (0..unedited.nrows()).filter(|&row| scope.reaches(row)) {
+        unedited.row_mut(row).assign(&edited.row(row));
+    }
+    unedited
+}
+
+/// The native execution of one read at `inputs`: [`apply_anchored_linear`] at anchor one on
+/// the rows the edit reaches, [`native_linear`] on every other row.
+fn read_native(read: EditedRead<'_>, inputs: ArrayView2<'_, f64>) -> Result<Array2<f64>, ReceiptRefusal> {
+    let unedited = native_linear(read.weight, inputs)?;
+    let Some(edit) = read.edit else {
+        return Ok((*unedited).clone());
+    };
+    edit.rows.check_within(inputs.nrows())?;
+    let edited = apply_anchored_linear(read.weight, 1.0, edit.factors, edit.coefficients, inputs)?;
+    Ok(reached_rows(edit.rows, (*unedited).clone(), &edited))
+}
+
+/// The band of one read at `inputs`: the factored-edit band on the rows the edit reaches, the
+/// affine band on every other row. Without a bias an edited term rounds at most `C + d + 2`
+/// times, inside the factored-edit band's `C + d + 3`.
+fn read_band(read: EditedRead<'_>, inputs: ArrayView2<'_, f64>) -> Result<Array2<f64>, ReceiptRefusal> {
+    let unedited = affine_stage_band(read.weight, None, inputs)?;
+    let Some(edit) = read.edit else {
+        return Ok(unedited);
+    };
+    edit.rows.check_within(inputs.nrows())?;
+    let edited = factored_edit_stage_band(
+        read.weight,
+        edit.factors.left(),
+        edit.coefficients,
+        edit.factors.right(),
+        None,
+        inputs,
+    )?;
+    Ok(reached_rows(edit.rows, unedited, &edited))
+}
+
+/// One read executed natively at `inputs` and compared with the executor's rows against its
+/// band on both sides.
+fn banded_read_stage(
+    external_execution: ExternalExecution<'_>,
+    read: EditedRead<'_>,
+    inputs: ArrayView2<'_, f64>,
+    external: ArrayView2<'_, f64>,
+) -> Result<StageAgreement, ReceiptRefusal> {
+    let native = read_native(read, inputs)?;
+    let band = read_band(read, inputs)?;
+    compare_stage(external_execution, external, native.view(), band.view(), band.view())
+}
+
+/// Per-entry band of one evaluation of `a ⊙ u`: one rounded product, `k = 1`. The operands are
+/// floats, so `up(|fl(a·u)|)` lies at or above the exact `|a·u|`.
+fn product_stage_band(left: ArrayView2<'_, f64>, right: ArrayView2<'_, f64>) -> Array2<f64> {
+    Zip::from(left)
+        .and(right)
+        .map_collect(|&a, &u| evaluation_band(1, up((a * u).abs())))
+}
+
+/// One SwiGLU MLP block's tensors and the stages an external executor ran.
+///
+/// The block writes `g W_dᵀ` with `g = SiLU(x W_gᵀ) ⊙ x W_uᵀ`, without the residual and without
+/// MLP biases, as in Qwen3. `inputs` are the MLP module's input rows (the normalized stream),
+/// and the `external_*` arrays are the executor's stage outputs, with rows matching `inputs`.
+#[derive(Clone, Copy, Debug)]
+pub struct SwigluBlockReceiptInputs<'a> {
+    pub external_execution: ExternalExecution<'a>,
+    pub inputs: ArrayView2<'a, f64>,
+    pub gate: EditedRead<'a>,
+    pub up: EditedRead<'a>,
+    pub down: EditedRead<'a>,
+    pub external_gate: ArrayView2<'a, f64>,
+    pub external_up: ArrayView2<'a, f64>,
+    pub external_activation: ArrayView2<'a, f64>,
+    pub external_hidden: ArrayView2<'a, f64>,
+    pub external_output: ArrayView2<'a, f64>,
+}
+
+/// A SwiGLU block's receipt, stage by stage. Each stage compares from the external executor's
+/// own stage input, so an upstream discrepancy never enters a downstream band.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SwigluBlockReceipt {
+    /// The gate read `x W_gᵀ` against its band on both sides.
+    pub gate: StageAgreement,
+    /// The up read `x W_uᵀ` against its band on both sides.
+    pub up: StageAgreement,
+    /// SiLU at the external gate rows against the external activation: measured only.
+    pub activation_measured: MeasuredDiscrepancy,
+    /// The external activation times the external up rows, entry by entry, against the
+    /// external hidden rows: one rounded product on each side.
+    pub hidden: StageAgreement,
+    /// [`swiglu_hidden`] at the external gate and up rows against the external hidden rows:
+    /// measured only, since it carries the SiLU implementation discrepancy.
+    pub hidden_measured_propagation: MeasuredDiscrepancy,
+    /// The down read at the external hidden rows against its band on both sides.
+    pub output: StageAgreement,
+    /// The native block run from `inputs` alone against the external output: measured only.
+    pub end_to_end_measured: MeasuredDiscrepancy,
+}
+
+/// The whole stage map of one SwiGLU block ([`SwigluBlockReceipt`]). It refuses before executing
+/// anything unless `external_execution` is binary64 with TF32 off, and refuses an edit whose
+/// declared rows fall outside the rows it reads.
+pub fn swiglu_block_receipt(
+    block: SwigluBlockReceiptInputs<'_>,
+) -> Result<SwigluBlockReceipt, ReceiptRefusal> {
+    block.external_execution.require_binary64_bands()?;
+    let gate = banded_read_stage(block.external_execution, block.gate, block.inputs, block.external_gate)?;
+    let up_stage = banded_read_stage(block.external_execution, block.up, block.inputs, block.external_up)?;
+
+    let native_activation = block.external_gate.mapv(|value| silu_derivatives(value)[0]);
+    let activation_measured = measured_discrepancy(
+        "external activation",
+        "native activation",
+        block.external_activation,
+        native_activation.view(),
+    )?;
+
+    // The gate, up and activation stages fixed both operands' rows to the inputs' rows and
+    // refused a non-finite entry; the gate and up widths must agree too.
+    check("up read width", block.external_activation.ncols(), block.external_up.ncols())?;
+    let native_hidden = Zip::from(block.external_activation)
+        .and(block.external_up)
+        .map_collect(|&a, &u| a * u);
+    let hidden_band = product_stage_band(block.external_activation, block.external_up);
+    let hidden = compare_stage(
+        block.external_execution,
+        block.external_hidden,
+        native_hidden.view(),
+        hidden_band.view(),
+        hidden_band.view(),
+    )?;
+    let hidden_measured_propagation = measured_discrepancy(
+        "external hidden",
+        "native hidden",
+        block.external_hidden,
+        swiglu_hidden(block.external_gate, block.external_up)?.view(),
+    )?;
+
+    let output = banded_read_stage(
+        block.external_execution,
+        block.down,
+        block.external_hidden,
+        block.external_output,
+    )?;
+
+    let native_hidden_from_inputs = swiglu_hidden(
+        read_native(block.gate, block.inputs)?.view(),
+        read_native(block.up, block.inputs)?.view(),
+    )?;
+    let end_to_end = read_native(block.down, native_hidden_from_inputs.view())?;
+    let end_to_end_measured = measured_discrepancy(
+        "external output",
+        "native end-to-end output",
+        block.external_output,
+        end_to_end.view(),
+    )?;
+    Ok(SwigluBlockReceipt {
+        gate,
+        up: up_stage,
+        activation_measured,
+        hidden,
+        hidden_measured_propagation,
+        output,
+        end_to_end_measured,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,6 +747,26 @@ mod tests {
             }
             sum
         })
+    }
+
+    /// `W + L diag(s) Rᵀ` formed densely, each entry's edit accumulated left to right.
+    fn dense_edit(
+        weight: &Array2<f64>,
+        left: &Array2<f64>,
+        coefficients: &Array1<f64>,
+        right: &Array2<f64>,
+    ) -> Array2<f64> {
+        let mut edited = weight.clone();
+        for output in 0..weight.nrows() {
+            for input in 0..weight.ncols() {
+                let mut edit = 0.0;
+                for component in 0..coefficients.len() {
+                    edit += left[[output, component]] * coefficients[component] * right[[input, component]];
+                }
+                edited[[output, input]] += edit;
+            }
+        }
+        edited
     }
 
     /// Two summation orders of the row `[2⁵³, 1, …, 1, −2⁵³]` against ones differ by
@@ -592,17 +825,7 @@ mod tests {
         let bias: Array1<f64> = Array1::from_shape_simple_fn(outputs, || rng.random_range(-1.0..1.0));
         let coefficients = array![-1.0, -0.37, 0.5];
 
-        let mut edited = weight.clone();
-        for output in 0..outputs {
-            for input in 0..width {
-                let mut edit = 0.0;
-                for component in 0..components {
-                    edit += left[[output, component]] * coefficients[component] * right[[input, component]];
-                }
-                edited[[output, input]] += edit;
-            }
-        }
-        let dense = affine_forward(&edited, &inputs) + &bias;
+        let dense = affine_forward(&dense_edit(&weight, &left, &coefficients, &right), &inputs) + &bias;
 
         let read = affine_forward(&right.t().to_owned(), &inputs) * &coefficients;
         let matrix_free = affine_forward(&weight, &inputs) + affine_forward(&left, &read) + &bias;
@@ -760,17 +983,8 @@ mod tests {
             Array1::from_shape_simple_fn(width, || rng.random_range(-1.0..1.0));
         let coefficients = array![-1.0, 0.5];
 
-        let mut edited = weight.clone();
-        for output in 0..hidden {
-            for input in 0..width {
-                let mut edit = 0.0;
-                for component in 0..components {
-                    edit += left[[output, component]] * coefficients[component] * right[[input, component]];
-                }
-                edited[[output, input]] += edit;
-            }
-        }
-        let external_pre_activation = affine_forward(&edited, &inputs) + &bias;
+        let external_pre_activation =
+            affine_forward(&dense_edit(&weight, &left, &coefficients, &right), &inputs) + &bias;
         let executor = NativeMlp::new(
             weight.clone(),
             bias.clone(),
@@ -837,6 +1051,123 @@ mod tests {
         };
         assert_eq!(
             receipt_for(float32, &external_pre_activation),
+            Err(ReceiptRefusal::ExternalPrecision {
+                float64: false,
+                tf32_matmul: false,
+            })
+        );
+    }
+
+    /// A dense float64 program stands in for the executor of a SwiGLU block writing `g W_dᵀ`,
+    /// `g = SiLU(x W_gᵀ) ⊙ x W_uᵀ`. The gate read carries a factored edit declared at row 1
+    /// only, the up read none, and the down read one reaching every row. The executor forms each
+    /// edited weight densely, applies it at the rows it reaches, and sums left to right. The
+    /// receipt agrees at every banded stage, and both measured discrepancies are zero because
+    /// both sides call one SiLU owner.
+    ///
+    /// Positive controls:
+    /// - an executor applying the gate edit at every row is refuted at the gate stage, at a row
+    ///   the edit does not reach;
+    /// - an external hidden entry displaced by four times its band sum is refuted there;
+    /// - a declared position past the last row refuses;
+    /// - a float32 record refuses before anything executes.
+    #[test]
+    fn swiglu_block_receipt_agrees_with_a_row_scoped_program_and_refutes_an_unscoped_edit() {
+        let (hidden, width, components, rows) = (6, 4, 2, 3);
+        let mut rng = StdRng::seed_from_u64(2951);
+        let gate_weight = uniform(&mut rng, hidden, width);
+        let gate_left = uniform(&mut rng, hidden, components);
+        let gate_right = uniform(&mut rng, width, components);
+        let up_weight = uniform(&mut rng, hidden, width);
+        let down_weight = uniform(&mut rng, width, hidden);
+        let down_left = uniform(&mut rng, width, components);
+        let down_right = uniform(&mut rng, hidden, components);
+        let inputs = uniform(&mut rng, rows, width);
+        let coefficients = array![-1.0, 0.5];
+        let row_one = PositionScope::declared(vec![1]).expect("one position");
+        let every_row = PositionScope::every();
+
+        let unscoped_gate =
+            affine_forward(&dense_edit(&gate_weight, &gate_left, &coefficients, &gate_right), &inputs);
+        let mut external_gate = affine_forward(&gate_weight, &inputs);
+        external_gate.row_mut(1).assign(&unscoped_gate.row(1));
+        let external_up = affine_forward(&up_weight, &inputs);
+        let external_activation = external_gate.mapv(|value| silu_derivatives(value)[0]);
+        let external_hidden = &external_activation * &external_up;
+        let external_output = affine_forward(
+            &dense_edit(&down_weight, &down_left, &coefficients, &down_right),
+            &external_hidden,
+        );
+
+        let receipt_for = |execution: ExternalExecution<'static>,
+                           gate_rows: &PositionScope,
+                           executed_gate: &Array2<f64>,
+                           executed_hidden: &Array2<f64>| {
+            swiglu_block_receipt(SwigluBlockReceiptInputs {
+                external_execution: execution,
+                inputs: inputs.view(),
+                gate: EditedRead {
+                    weight: gate_weight.view(),
+                    edit: Some(FactoredEditViews {
+                        factors: FactorView::new(gate_left.view(), gate_right.view())
+                            .expect("the gate factors share components"),
+                        coefficients: coefficients.view(),
+                        rows: gate_rows,
+                    }),
+                },
+                up: EditedRead {
+                    weight: up_weight.view(),
+                    edit: None,
+                },
+                down: EditedRead {
+                    weight: down_weight.view(),
+                    edit: Some(FactoredEditViews {
+                        factors: FactorView::new(down_left.view(), down_right.view())
+                            .expect("the down factors share components"),
+                        coefficients: coefficients.view(),
+                        rows: &every_row,
+                    }),
+                },
+                external_gate: executed_gate.view(),
+                external_up: external_up.view(),
+                external_activation: external_activation.view(),
+                external_hidden: executed_hidden.view(),
+                external_output: external_output.view(),
+            })
+        };
+
+        let receipt = receipt_for(BINARY64_CPU, &row_one, &external_gate, &external_hidden)
+            .expect("a binary64 execution compares");
+        for stage in [receipt.gate, receipt.up, receipt.hidden, receipt.output] {
+            assert!(stage.agrees && !stage.refutes, "{receipt:?}");
+        }
+        assert_eq!(receipt.activation_measured.largest, 0.0, "{receipt:?}");
+        assert_eq!(receipt.hidden_measured_propagation.largest, 0.0, "{receipt:?}");
+
+        let unscoped = receipt_for(BINARY64_CPU, &row_one, &unscoped_gate, &external_hidden)
+            .expect("a binary64 execution compares");
+        assert!(unscoped.gate.refutes && unscoped.gate.witness.0 != 1, "{unscoped:?}");
+
+        let hidden_band = product_stage_band(external_activation.view(), external_up.view());
+        let mut displaced = external_hidden.clone();
+        displaced[[2, 3]] += 4.0 * (hidden_band[[2, 3]] + hidden_band[[2, 3]]);
+        let refuted = receipt_for(BINARY64_CPU, &row_one, &external_gate, &displaced)
+            .expect("a binary64 execution compares");
+        assert!(refuted.hidden.refutes && refuted.hidden.witness == (2, 3), "{refuted:?}");
+
+        let past_the_last_row = PositionScope::declared(vec![rows]).expect("one position");
+        assert!(matches!(
+            receipt_for(BINARY64_CPU, &past_the_last_row, &external_gate, &external_hidden),
+            Err(ReceiptRefusal::Occurrence(..))
+        ));
+
+        let float32 = ExternalExecution {
+            dtype: "float32",
+            device: "cpu",
+            tf32_matmul: false,
+        };
+        assert_eq!(
+            receipt_for(float32, &row_one, &external_gate, &external_hidden),
             Err(ReceiptRefusal::ExternalPrecision {
                 float64: false,
                 tf32_matmul: false,
