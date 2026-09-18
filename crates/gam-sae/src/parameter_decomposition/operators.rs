@@ -13,7 +13,8 @@
 //!   control per block. Any other mask names an intervention only together with
 //!   the basis it was written in, and is carried as an operator, `M → S⁻¹ M S`.
 //!   Independent diagonal masks on an arbitrary basis of one block are not
-//!   intrinsic interventions.
+//!   intrinsic interventions. [`mask_gauge_evidence`] reports the verdict as an
+//!   [`EvidenceStatus`]: exact at 0, or a counterexample with its witness.
 //! * **Curved versus straight paths (P2).** For a rotation
 //!   `W = I + U (R(α) − I) Uᵀ` in orthonormal planes, the angle path
 //!   `W(t) = I + U (R(tα) − I) Uᵀ` is orthogonal for every `t` and moves the
@@ -37,6 +38,8 @@ use gam_geometry::manifolds::lie_so::rho_so2;
 use gam_linalg::faer_ndarray::{FaerSvd, fast_ab, fast_abt, fast_atb, fast_atv, fast_av};
 use gam_linalg::roundoff::{accumulation_growth, factor_singular_band};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+
+use super::supports::{EvidenceStatus, EvidenceStatusError, ExactBasis};
 
 /// Why an operator construction or application was declined.
 #[derive(Clone, Debug, PartialEq)]
@@ -76,6 +79,9 @@ pub enum OperatorRefusal {
     InvalidRotaryDeclaration { coordinate: usize },
     /// The linear-algebra backend failed to decompose a matrix.
     DecompositionFailed { what: &'static str, detail: String },
+    /// The evidence constructor refused the status, e.g. a counterexample whose shift overflowed
+    /// to a non-finite value.
+    Evidence(EvidenceStatusError),
 }
 
 /// A declared implementation gauge of an `r`-coordinate internal space: the group
@@ -369,6 +375,61 @@ pub fn classify_under(mask: ArrayView2<'_, f64>, gauge: &DeclaredGauge) -> Resul
             Ok(classify_rotary(mask, groups))
         }
     }
+}
+
+/// A point of the domain of [`mask_gauge_evidence`]: a gauge change in the declared group and
+/// the internal entry whose movement it measures.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaskWitness {
+    /// `S`, an element of the declared group.
+    pub gauge_change: Array2<f64>,
+    /// `(i, j)`, the entry of `S M S⁻¹ − M` the value measures.
+    pub moved: (usize, usize),
+}
+
+/// The evidence status of P1's claim for one fixed mask under one declared gauge.
+pub type MaskGaugeEvidence = EvidenceStatus<MaskWitness, DeclaredGauge>;
+
+/// P1 as evidence. The claim is that a fixed internal mask names an intervention that does
+/// not depend on the basis: `sup Q <= 0` with `Q(S, (i, j)) = |(S M S⁻¹ − M)_ij|` over the
+/// gauge changes `S` of the declared group and the internal entries `(i, j)`. With
+/// full-column-rank factors ([`FactoredOperator::new`] refuses others), a moved entry moves
+/// `U M Vᵀ`.
+///
+/// - [`MaskGaugeVerdict::Intrinsic`] is `Exact` with value 0, basis `Algebraic` and the
+///   declared gauge as its domain. A mask in the group's commutant commutes with every
+///   element, and nothing is evaluated.
+/// - [`MaskGaugeVerdict::BasisDependent`] is a `Counterexample` at threshold 0, with the
+///   witness and value `|shift|`. [`classify_under`]'s witnesses only permute, negate or double
+///   entries, so each shift is exact (`−2 M_ij` or `M_ij`) or one rounded subtraction of two
+///   declared entries, `fl(a − b) = (a − b)(1 + δ)` with `|δ| <= u`. Then
+///   `|fl(a − b) − (a − b)| <= γ₁ |fl(a − b)| <= ε |fl(a − b)|`. `ε |shift|` is a power-of-two
+///   scaling, exact unless it underflows, and rounding it up once covers the underflow. A
+///   subnormal difference of two floats is exact, because both are multiples of the smallest
+///   subnormal, so a subnormal shift carries no error. `a ≠ b` gives `fl(a − b) ≠ 0`, so every
+///   finite shift exceeds its error.
+/// - A shift that overflows is refused. That happens when `|M_ij| > f64::MAX / 2` under a
+///   reflection, or when two opposite-sign entries differ by more than `f64::MAX`.
+///   [`EvidenceStatus::counterexample`] refuses the non-finite value, and the refusal returns as
+///   [`OperatorRefusal::Evidence`] although the mask is basis-dependent.
+pub fn mask_gauge_evidence(mask: ArrayView2<'_, f64>, gauge: &DeclaredGauge) -> Result<MaskGaugeEvidence, OperatorRefusal> {
+    let status = match classify_under(mask, gauge)? {
+        MaskGaugeVerdict::Intrinsic { .. } => EvidenceStatus::exact(0.0, 0.0, ExactBasis::Algebraic, None, gauge.clone()),
+        MaskGaugeVerdict::BasisDependent {
+            gauge_change,
+            moved,
+            shift,
+        } => {
+            let value = shift.abs();
+            let numerical_error = if value < f64::MIN_POSITIVE {
+                0.0
+            } else {
+                (f64::EPSILON * value).next_up()
+            };
+            EvidenceStatus::counterexample(value, numerical_error, 0.0, MaskWitness { gauge_change, moved })
+        }
+    };
+    status.map_err(OperatorRefusal::Evidence)
 }
 
 fn check_declared_mask(mask: ArrayView2<'_, f64>, order: usize) -> Result<(), OperatorRefusal> {
@@ -2067,5 +2128,118 @@ mod tests {
         // Positive control: a declaration covering 0..3 exactly once is accepted.
         let valid = RotaryGroups::new(vec![vec![(0, 1)]], 2..3).expect("valid declaration");
         assert_eq!(valid.dim(), 3);
+    }
+
+    /// P1 as evidence: a commutant mask is `Exact` at 0, and any other mask is a
+    /// `Counterexample` whose witness moves its entry by exactly the reported value.
+    ///
+    /// Positive controls:
+    /// - the diagonal mask that GL(4) refutes is exact under the per-component scale gauge;
+    /// - the numerical error covers a shift that rounds. Under unit permutations the shift of
+    ///   `diag(1, x)` with `x = 1e-17` is `fl(x − 1) = −1`, which drops `x`, so a zero error
+    ///   would claim an exactness the subtraction does not have;
+    /// - a subnormal shift is an exact counterexample, which the rounded-up bound alone would refuse;
+    /// - an overflowing shift is refused as non-finite (mpd-verify's review note).
+    #[test]
+    fn mask_gauge_evidence_is_exact_or_a_counterexample() {
+        let diagonal = Array2::from_diag(&Array1::from(vec![1.0, 0.0, 1.0, 0.5]));
+        let full = DeclaredGauge::Blocks(GaugeBlocks::new(&[4]).expect("one block"));
+        let per_component = DeclaredGauge::Blocks(GaugeBlocks::new(&[1, 1, 1, 1]).expect("four scale blocks"));
+        for (mask, gauge) in [(Array2::<f64>::eye(4) * 0.6, &full), (diagonal.clone(), &per_component)] {
+            let status = mask_gauge_evidence(mask.view(), gauge).expect("evidence");
+            assert!(
+                matches!(
+                    &status,
+                    EvidenceStatus::Exact {
+                        value,
+                        numerical_error,
+                        basis: ExactBasis::Algebraic,
+                        witness: None,
+                        domain,
+                        ..
+                    } if *value == 0.0 && *numerical_error == 0.0 && domain == gauge
+                ),
+                "expected exact evidence at 0 under {gauge:?}, got {status:?}"
+            );
+            assert!(status.certifies_at_most(0.0));
+        }
+
+        let (groups, rotary) = rotary_fixture();
+        let mut cross_block = rotary;
+        cross_block[[0, 4]] = 0.1;
+        let mut off_diagonal = Array2::<f64>::from_elem((4, 4), 0.2);
+        off_diagonal[[2, 3]] = 0.7;
+        let cases = [
+            (diagonal, full),
+            (off_diagonal.clone(), DeclaredGauge::UnitPermutations { units: 4 }),
+            (off_diagonal, DeclaredGauge::ScaledPermutations { units: 4 }),
+            (cross_block, DeclaredGauge::RotaryCommutant(groups)),
+        ];
+        for (mask, gauge) in &cases {
+            let status = mask_gauge_evidence(mask.view(), gauge).expect("evidence");
+            assert!(status.refutes_at_most(0.0) && !status.certifies_at_most(0.0));
+            let EvidenceStatus::Counterexample {
+                value,
+                threshold,
+                witness,
+                ..
+            } = &status
+            else {
+                panic!("expected a counterexample under {gauge:?}, got {status:?}");
+            };
+            assert_eq!(*threshold, 0.0);
+            let MaskGaugeVerdict::BasisDependent {
+                gauge_change,
+                moved,
+                shift,
+            } = classify_under(mask.view(), gauge).expect("classify")
+            else {
+                panic!("the classifier and the evidence disagree under {gauge:?}");
+            };
+            assert_eq!((&witness.gauge_change, witness.moved, *value), (&gauge_change, moved, shift.abs()));
+            let conjugated = witness.gauge_change.dot(mask).dot(&exact_inverse(&witness.gauge_change));
+            assert_eq!((conjugated[witness.moved] - mask[witness.moved]).abs(), *value);
+        }
+
+        let x = 1e-17;
+        let rounding = Array2::from_diag(&Array1::from(vec![1.0, x]));
+        let status = mask_gauge_evidence(rounding.view(), &DeclaredGauge::UnitPermutations { units: 2 }).expect("evidence");
+        let EvidenceStatus::Counterexample {
+            value,
+            numerical_error,
+            ..
+        } = &status
+        else {
+            panic!("expected a counterexample, got {status:?}");
+        };
+        assert_eq!(*value, 1.0);
+        assert_eq!((x - 1.0) + 1.0, 0.0, "the control needs a subtraction that drops x");
+        assert!(*numerical_error >= x, "the error bound {numerical_error:e} misses the dropped {x:e}");
+
+        // A subnormal shift is exact and carries no error. The rounded-up power-of-two bound
+        // alone would leave it inside its own error, and the constructor would refuse it.
+        let tiny = f64::from_bits(1);
+        let subnormal = Array2::from_diag(&Array1::from(vec![0.0, tiny]));
+        let status = mask_gauge_evidence(subnormal.view(), &DeclaredGauge::UnitPermutations { units: 2 }).expect("evidence");
+        assert!(
+            matches!(
+                &status,
+                EvidenceStatus::Counterexample {
+                    value,
+                    numerical_error,
+                    ..
+                } if *value == tiny && *numerical_error == 0.0
+            ),
+            "a subnormal shift is an exact counterexample, got {status:?}"
+        );
+        assert!(EvidenceStatus::<(), ()>::counterexample(tiny, (f64::EPSILON * tiny).next_up(), 0.0, ()).is_err());
+
+        // An overflowing shift is a typed refusal, never a status.
+        let mut overflow = Array2::<f64>::zeros((2, 2));
+        overflow[[0, 1]] = f64::MAX;
+        assert!(matches!(
+            mask_gauge_evidence(overflow.view(), &DeclaredGauge::Blocks(GaugeBlocks::new(&[2]).expect("one block"))),
+            Err(OperatorRefusal::Evidence(EvidenceStatusError::NonFinite { .. }))
+        ));
     }
 }
