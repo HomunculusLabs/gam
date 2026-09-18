@@ -1745,24 +1745,26 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
     /// is therefore bit-for-bit what `program_full_tower(row)` would produce, so the
     /// build-once batched override contracts against it without changing any
     /// downstream arithmetic.
+    ///
+    /// The towers live in a heap vector that the Rayon workers fill in place
+    /// through [`SurvivalMarginalSlopeFamily::write_row_primary_tower`], so a
+    /// split frame holds a row index and a slot pointer, never a tower or the
+    /// row program (gam#2967).
     fn build_row_towers(&self) -> Result<Vec<G::Tower4>, String> {
         let n = gam_math::jet_tower::RowProgram::n_rows(self);
-        (0..n)
-            .into_par_iter()
-            .map(|row| {
-                let inputs = rigid_row_inputs(
-                    &self.family,
-                    &self.block_states,
+        let mut towers = vec![G::Tower4::constant(0.0); n];
+        towers
+            .par_iter_mut()
+            .enumerate()
+            .try_for_each(|(row, tower)| {
+                self.family.write_row_primary_tower::<P, G, _>(
                     row,
+                    &self.block_states,
                     "survival marginal-slope rigid row fourth tower (build-once)",
-                )?;
-                let p =
-                    rigid_row_kernel_primaries::<P, G>(&self.family, &self.block_states, row)?;
-                let vars: [G::Tower4; P] =
-                    std::array::from_fn(|a| G::Tower4::variable(p[a], a));
-                rigid_row_nll::<P, G, _>(&vars, &inputs)
-            })
-            .collect()
+                    tower,
+                )
+            })?;
+        Ok(towers)
     }
 
     /// Build every row's order-≤3 primary tower ONCE for the first-directional
@@ -1776,25 +1778,23 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
     /// the `t3` build; standalone oracle scratchpad/sparse_t3_probe.rs,
     /// 5000/5000 rows `to_bits`-identical to the engine `Tower3<4>` / `Tower4<4>`
     /// `t3` channel). The cached `t3` is bit-for-bit what the dense tower would
-    /// produce.
+    /// produce. Built in place like [`Self::build_row_towers`], so no split frame
+    /// holds a tower (gam#2967).
     fn build_row_third_towers(&self) -> Result<Vec<G::Tower3>, String> {
         let n = gam_math::jet_tower::RowProgram::n_rows(self);
-        (0..n)
-            .into_par_iter()
-            .map(|row| {
-                let inputs = rigid_row_inputs(
-                    &self.family,
-                    &self.block_states,
+        let mut towers = vec![G::Tower3::constant(0.0); n];
+        towers
+            .par_iter_mut()
+            .enumerate()
+            .try_for_each(|(row, tower)| {
+                self.family.write_row_primary_tower::<P, G, _>(
                     row,
+                    &self.block_states,
                     "survival marginal-slope rigid row third tower (build-once)",
-                )?;
-                let p =
-                    rigid_row_kernel_primaries::<P, G>(&self.family, &self.block_states, row)?;
-                let vars: [G::Tower3; P] =
-                    std::array::from_fn(|a| G::Tower3::variable(p[a], a));
-                rigid_row_nll::<P, G, _>(&vars, &inputs)
-            })
-            .collect()
+                    tower,
+                )
+            })?;
+        Ok(towers)
     }
 
     /// Deterministic `ARROW_ROW_CHUNK`-chunked reduction matching

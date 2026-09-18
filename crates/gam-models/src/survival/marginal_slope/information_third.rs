@@ -799,9 +799,12 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                     }
                 }
                 if let Some(z) = z {
-                    let vars: [G::Tower4; P] =
-                        std::array::from_fn(|axis| G::Tower4::variable(primaries[axis], axis));
-                    let tower = rigid_row_nll::<P, G, _>(&vars, &inputs)?;
+                    let mut tower = G::Tower4::constant(0.0);
+                    SurvivalMarginalSlopeFamily::write_primary_tower::<P, G, _>(
+                        &primaries,
+                        &inputs,
+                        &mut tower,
+                    )?;
                     let t4 = tower.t4();
                     for a in 0..P {
                         for b in 0..P {
@@ -920,17 +923,13 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                     .collect::<Vec<_>>()
             },
             |row, accumulators| -> Result<(), String> {
-                let inputs = rigid_row_inputs(
-                    family,
-                    &self.block_states,
+                let mut tower = G::Tower4::constant(0.0);
+                family.write_row_primary_tower::<P, G, _>(
                     row,
+                    &self.block_states,
                     "design ψ third information derivative",
+                    &mut tower,
                 )?;
-                let primaries =
-                    rigid_row_kernel_primaries::<P, G>(family, &self.block_states, row)?;
-                let vars: [G::Tower4; P] =
-                    std::array::from_fn(|axis| G::Tower4::variable(primaries[axis], axis));
-                let tower = rigid_row_nll::<P, G, _>(&vars, &inputs)?;
                 let t4 = tower.t4();
                 let jv = self.jacobian_action(row, d_beta);
                 let channels = channels_at(row)?;
@@ -1140,17 +1139,13 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                     .collect::<Vec<_>>()
             },
             |row, accumulators| -> Result<(), String> {
-                let inputs = rigid_row_inputs(
-                    family,
-                    &self.block_states,
+                let mut tower = G::Tower4::constant(0.0);
+                family.write_row_primary_tower::<P, G, _>(
                     row,
+                    &self.block_states,
                     "design ψ-pair third information derivative",
+                    &mut tower,
                 )?;
-                let primaries =
-                    rigid_row_kernel_primaries::<P, G>(family, &self.block_states, row)?;
-                let vars: [G::Tower4; P] =
-                    std::array::from_fn(|axis| G::Tower4::variable(primaries[axis], axis));
-                let tower = rigid_row_nll::<P, G, _>(&vars, &inputs)?;
                 let t4 = tower.t4();
                 let (channels_i, channels_j, channels_ij) = channels_at(row)?;
                 let d_i = primary_array(&channels_i.direction(beta_i.view()))?;
@@ -1412,9 +1407,12 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                 let inputs = rigid_row_inputs(family, &self.block_states, row, context)?;
                 let primaries =
                     rigid_row_kernel_primaries::<P, G>(family, &self.block_states, row)?;
-                let vars: [G::Tower4; P] =
-                    std::array::from_fn(|axis| G::Tower4::variable(primaries[axis], axis));
-                let tower = rigid_row_nll::<P, G, _>(&vars, &inputs)?;
+                let mut tower = G::Tower4::constant(0.0);
+                SurvivalMarginalSlopeFamily::write_primary_tower::<P, G, _>(
+                    &primaries,
+                    &inputs,
+                    &mut tower,
+                )?;
                 let fifth = fifth(&primaries, &inputs)?;
                 let psi_row = psi_map
                     .row_vector(row)
@@ -1623,9 +1621,12 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                 let inputs = rigid_row_inputs(family, &self.block_states, row, context)?;
                 let primaries =
                     rigid_row_kernel_primaries::<P, G>(family, &self.block_states, row)?;
-                let vars: [G::Tower4; P] =
-                    std::array::from_fn(|axis| G::Tower4::variable(primaries[axis], axis));
-                let tower = rigid_row_nll::<P, G, _>(&vars, &inputs)?;
+                let mut tower = G::Tower4::constant(0.0);
+                SurvivalMarginalSlopeFamily::write_primary_tower::<P, G, _>(
+                    &primaries,
+                    &inputs,
+                    &mut tower,
+                )?;
                 let fifth = fifth(&primaries, &inputs)?;
                 let sixth = sixth(&primaries, &inputs)?;
                 let row_error = |error: String| format!("survival {context} row: {error}");
