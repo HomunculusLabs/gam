@@ -1518,23 +1518,37 @@ fn arena_vector<'arena>(
 /// flat index)`, writing every entry exactly once. Every formula this file
 /// passes is symmetric in `(row, column)`, so the full matrix is produced
 /// directly instead of filling one triangle and mirroring it.
+///
+/// The block is reserved unwritten (an uninitialized fill stores nothing) and
+/// the formula runs in this function's own row/column loop. Handed to
+/// `alloc_slice_fill_with` as a per-entry closure, that closure is LLVM's to
+/// outline: once 79ea1f0e7a gave `product_pair_sum_plus` and
+/// `scaled_product_sum` two-seed callers, both closures were emitted out of line
+/// and the one-seed flex row program paid a call per jet entry (gnomon#2359's
+/// 64-row CI fit: the gradient's third-trace pass 15% slower per call).
 #[inline(always)]
 fn arena_square<'arena>(
     arena: &'arena DynamicJetArena,
     n: usize,
     mut entry: impl FnMut(usize, usize, usize) -> f64,
 ) -> &'arena mut [f64] {
-    let mut row = 0usize;
-    let mut column = 0usize;
-    arena.alloc_slice_fill_with(n * n, |index| {
-        let value = entry(row, column, index);
-        column += 1;
-        if column == n {
-            column = 0;
-            row += 1;
+    let square = arena
+        .bump
+        .alloc_slice_fill_copy(n * n, std::mem::MaybeUninit::<f64>::uninit());
+    for row in 0..n {
+        for column in 0..n {
+            let index = row * n + column;
+            square[index].write(entry(row, column, index));
         }
-        value
-    })
+    }
+    let len = square.len();
+    // SAFETY: every one of the `n·n` entries was written through its
+    // `MaybeUninit` slot by the loop above, before any `f64` reference to the
+    // block exists; if `entry` panics mid-fill, no `f64` view is ever formed
+    // and the partly written block is only leaked arena memory until the next
+    // reset. `MaybeUninit<f64>` has the layout and alignment of `f64`, so the
+    // cast preserves the allocation, provenance, length and arena lifetime.
+    unsafe { std::slice::from_raw_parts_mut(square.as_mut_ptr().cast::<f64>(), len) }
 }
 
 /// `total += first · input.h + second · input.g ⊗ input.g`, one row at a time.
