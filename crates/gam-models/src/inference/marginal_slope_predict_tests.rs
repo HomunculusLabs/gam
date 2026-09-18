@@ -534,6 +534,8 @@ fn empirical_law_prediction_accepts_deep_tail_intercept_roots() {
         gaussian_frailty_sd: None,
         latent_z_calibration: None,
         latent_conditioning_span: LatentConditioningSpan::PrimaryDesign,
+        residual_repair: None,
+        beta_residual: None,
         latent_z_conditional_calibration: None,
     };
     let theta = predictor.theta();
