@@ -14,3 +14,4 @@ pub mod state_blocks;
 pub mod compose;
 pub mod compile;
 pub mod hermite;
+pub mod interaction;
