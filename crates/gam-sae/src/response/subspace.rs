@@ -9,6 +9,8 @@
 //! - [`KnownBlock::explained_variance`], [`KnownBlock::discarded_error`] and
 //!   [`KnownBlock::explained_variance_of_coordinates`] are R4 on a frame or on a coordinate set.
 //! - [`KnownBlock::explained_variance_gradient`] is R6.
+//! - [`KnownGatedBlock::new`] and [`KnownGatedBlock::retained_response`] are R9's gated block and its best retained
+//!   response, with the SiLU quadrature band of every entry.
 //! - [`covariance_rounding_band`] and [`frame_defect`] own the Cauchy–Schwarz rounding band a caller states to the
 //!   pair kernels.
 //!
@@ -69,6 +71,15 @@
 //! No `d × d` matrix is formed, and the only resident `h × h` object is the packed half of `D`, charged to the
 //! memory governor. The gradient is then `Wᵀ(B R) − Q (Qᵀ Wᵀ (B R))`.
 //!
+//! # R9, gated units
+//!
+//! A SwiGLU unit is `u_j (a_jᵀ z + c_j) s(w_jᵀ z + b_j)` with the SiLU gate `s(t) = t σ(t)`. Given `PZ = Pz`, the
+//! discarded parts `A = a_jᵀ(I − P)Z` and `W = w_jᵀ(I − P)Z` are a zero-mean Gaussian pair independent of `PZ`, with
+//! `Var W = v_j⊥ = w_jᵀ(I − P)w_j` and `Cov(A, W) = κ_j⊥ = a_jᵀ(I − P)w_j`, and Stein's lemma `E[A h(W)] = κ E h'(W)`
+//! gives the unit's conditional mean exactly as `α_j T_{v⊥} s(t_j) + κ_j⊥ T_{v⊥} s'(t_j)`, with `α_j = a_jᵀPz + c_j`
+//! and `t_j = w_jᵀPz + b_j`. SiLU has no closed-form Gaussian smoothing, so each value carries its derived quadrature
+//! bound from `gaussian_gated`.
+//!
 //! # Rounding of the pair law
 //!
 //! The exact law of a pair has `|w_jᵀ P w_k| ≤ √(v_j v_k)`. The computed triple `(v̂_j, v̂_k, r̂_jk)` can leave that
@@ -84,6 +95,7 @@ use gam_math::gaussian_activation::{
     GaussianActivation, GaussianActivationError, PairKernel, PreactivationPair, gaussian_smoothing_derivatives,
     pair_kernel,
 };
+use gam_math::gaussian_gated::{GatedMean, GaussianGatedError, gated_conditional_mean};
 use gam_runtime::resource::byte_balanced_row_chunk;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
 use rayon::prelude::*;
@@ -133,6 +145,10 @@ pub enum ResponseError {
     ReaderGram {
         error: ReaderGramError,
     },
+    GatedKernel {
+        context: &'static str,
+        error: GaussianGatedError,
+    },
 }
 
 impl fmt::Display for ResponseError {
@@ -165,6 +181,7 @@ impl fmt::Display for ResponseError {
             ),
             Self::Kernel { context, error } => write!(f, "{context}: {error}"),
             Self::ReaderGram { error } => write!(f, "reader Gram: {error}"),
+            Self::GatedKernel { context, error } => write!(f, "{context}: {error}"),
         }
     }
 }
@@ -352,25 +369,11 @@ impl KnownBlock {
         require_length("block writer columns", width, writers.ncols())?;
         let output_dim = writers.nrows();
         require_length("block output bias", output_dim, output_bias.len())?;
-        require_length("output metric rows", output_dim, metric.nrows())?;
-        require_length("output metric columns", output_dim, metric.ncols())?;
         require_finite("block readers", readers.iter())?;
         require_finite("block biases", biases.iter())?;
         require_finite("block writers", writers.iter())?;
         require_finite("block output bias", output_bias.iter())?;
-        require_finite("output metric", metric.iter())?;
-        for row in 0..output_dim {
-            for column in (row + 1)..output_dim {
-                if metric[[row, column]] != metric[[column, row]] {
-                    return Err(ResponseError::MetricNotSymmetric { row, column });
-                }
-            }
-        }
-        metric
-            .cholesky(Side::Lower)
-            .map_err(|error| ResponseError::MetricNotPositiveDefinite {
-                reason: error.to_string(),
-            })?;
+        require_metric(output_dim, metric)?;
         let metric_writers = fast_ab(&metric, &writers);
         // `M U` of finite factors can still overflow. Both routes to `D` read it, so it is refused here, once.
         require_finite("output metric times writers", metric_writers.iter())?;
@@ -467,7 +470,7 @@ impl KnownBlock {
         frame: ArrayView2<'_, f64>,
         points: ArrayView2<'_, f64>,
     ) -> Result<Array2<f64>, ResponseError> {
-        self.require_frame(frame)?;
+        require_frame(self.input_dim(), frame)?;
         require_length("retained-response point columns", self.input_dim(), points.ncols())?;
         require_finite("retained-response points", points.iter())?;
         let units = &self.units;
@@ -503,7 +506,7 @@ impl KnownBlock {
 
     /// R4: `V(P)`, the output variance explained by the best response of the input inside `frame` (`d × k`).
     pub fn explained_variance(&self, frame: ArrayView2<'_, f64>) -> Result<f64, ResponseError> {
-        let defect = self.require_frame(frame)?;
+        let defect = require_frame(self.input_dim(), frame)?;
         let coordinates = fast_ab(&self.units.readers, &frame);
         self.units.pair_pass(
             coordinates.view(),
@@ -539,7 +542,7 @@ impl KnownBlock {
         &self,
         frame: ArrayView2<'_, f64>,
     ) -> Result<FrameGradient, ResponseError> {
-        let defect = self.require_frame(frame)?;
+        let defect = require_frame(self.input_dim(), frame)?;
         let units = &self.units;
         let coordinates = fast_ab(&units.readers, &frame);
         let mut weighted_coordinates = Array2::<f64>::zeros(coordinates.dim());
@@ -580,23 +583,45 @@ impl KnownBlock {
         }
         variances
     }
+}
 
-    /// Validate a frame and return its measured defect [`frame_defect`], refusing a defect of at least 1.
-    fn require_frame(&self, frame: ArrayView2<'_, f64>) -> Result<f64, ResponseError> {
-        require_length("retained frame rows", self.input_dim(), frame.nrows())?;
-        if frame.ncols() > self.input_dim() {
-            return Err(ResponseError::FrameWiderThanInput {
-                rank: frame.ncols(),
-                input_dim: self.input_dim(),
-            });
-        }
-        require_finite("retained frame", frame.iter())?;
-        let defect = frame_defect(frame);
-        if !(defect < 1.0) {
-            return Err(ResponseError::FrameNotOrthonormal { defect });
-        }
-        Ok(defect)
+/// Validate a frame in `ℝ^{input_dim}` and return its measured defect [`frame_defect`], refusing a defect of at
+/// least 1.
+fn require_frame(input_dim: usize, frame: ArrayView2<'_, f64>) -> Result<f64, ResponseError> {
+    require_length("retained frame rows", input_dim, frame.nrows())?;
+    if frame.ncols() > input_dim {
+        return Err(ResponseError::FrameWiderThanInput {
+            rank: frame.ncols(),
+            input_dim,
+        });
     }
+    require_finite("retained frame", frame.iter())?;
+    let defect = frame_defect(frame);
+    if !(defect < 1.0) {
+        return Err(ResponseError::FrameNotOrthonormal { defect });
+    }
+    Ok(defect)
+}
+
+/// Validate an output metric for `output_dim` outputs: square of that size, finite, exactly symmetric and positive
+/// definite.
+fn require_metric(output_dim: usize, metric: ArrayView2<'_, f64>) -> Result<(), ResponseError> {
+    require_length("output metric rows", output_dim, metric.nrows())?;
+    require_length("output metric columns", output_dim, metric.ncols())?;
+    require_finite("output metric", metric.iter())?;
+    for row in 0..output_dim {
+        for column in (row + 1)..output_dim {
+            if metric[[row, column]] != metric[[column, row]] {
+                return Err(ResponseError::MetricNotSymmetric { row, column });
+            }
+        }
+    }
+    metric
+        .cholesky(Side::Lower)
+        .map_err(|error| ResponseError::MetricNotPositiveDefinite {
+            reason: error.to_string(),
+        })?;
+    Ok(())
 }
 
 impl BlockUnits {
@@ -733,6 +758,193 @@ impl BlockUnits {
         }
         Ok(unit_sums.iter().sum())
     }
+}
+
+/// A known SwiGLU block `F(z) = Σ_j u_j (a_jᵀ z + c_j) s(w_jᵀ z + b_j) + c_out` with the SiLU gate `s(t) = t σ(t)`,
+/// under the declared law `Z ~ N(0, I_d)` and its output metric (#2946 R9).
+#[derive(Debug, Clone)]
+pub struct KnownGatedBlock {
+    /// `W`, `h × d`: the gate readers.
+    gate_readers: Array2<f64>,
+    /// `b`, length `h`.
+    gate_biases: Array1<f64>,
+    /// `A`, `h × d`: the up-projection readers.
+    up_readers: Array2<f64>,
+    /// `c`, length `h`.
+    up_biases: Array1<f64>,
+    /// `U`, `p × h`.
+    writers: Array2<f64>,
+    /// `c_out`, length `p`.
+    output_bias: Array1<f64>,
+    /// `M`, `p × p`.
+    metric: Array2<f64>,
+}
+
+/// A response at points with a derived bound on each entry's quadrature error. Rounding is excluded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BandedResponse {
+    /// `n × p`.
+    pub values: Array2<f64>,
+    /// `n × p`: entry `(i, o)` bounds the quadrature error of `values[(i, o)]` by `Σ_j |U_oj| bound_ij`, with
+    /// `bound_ij` the kernel's bound on unit `j`'s conditional mean at point `i`.
+    pub quadrature_band: Array2<f64>,
+}
+
+impl KnownGatedBlock {
+    /// Build the block from gate readers `W` (`h × d`) and biases `b` (`h`), up-projection readers `A` (`h × d`) and
+    /// biases `c` (`h`), writers `U` (`p × h`), the output bias (`p`; zeros for a layer without one) and a symmetric
+    /// positive definite output metric `M` (`p × p`). A Qwen3 layer's `gate_proj`, `up_proj` and `down_proj` give `W`,
+    /// `A` and `U` once the declared law is absorbed into readers and biases.
+    pub fn new(
+        gate_readers: Array2<f64>,
+        gate_biases: Array1<f64>,
+        up_readers: Array2<f64>,
+        up_biases: Array1<f64>,
+        writers: Array2<f64>,
+        output_bias: Array1<f64>,
+        metric: ArrayView2<'_, f64>,
+    ) -> Result<Self, ResponseError> {
+        let (width, input_dim) = gate_readers.dim();
+        require_length("gated block gate biases", width, gate_biases.len())?;
+        require_length("gated block up-reader rows", width, up_readers.nrows())?;
+        require_length("gated block up-reader columns", input_dim, up_readers.ncols())?;
+        require_length("gated block up biases", width, up_biases.len())?;
+        require_length("gated block writer columns", width, writers.ncols())?;
+        require_length("gated block output bias", writers.nrows(), output_bias.len())?;
+        require_finite("gated block gate readers", gate_readers.iter())?;
+        require_finite("gated block gate biases", gate_biases.iter())?;
+        require_finite("gated block up readers", up_readers.iter())?;
+        require_finite("gated block up biases", up_biases.iter())?;
+        require_finite("gated block writers", writers.iter())?;
+        require_finite("gated block output bias", output_bias.iter())?;
+        require_metric(writers.nrows(), metric)?;
+        Ok(Self {
+            gate_readers,
+            gate_biases,
+            up_readers,
+            up_biases,
+            writers,
+            output_bias,
+            metric: metric.to_owned(),
+        })
+    }
+
+    /// Input dimension `d`.
+    pub fn input_dim(&self) -> usize {
+        self.gate_readers.ncols()
+    }
+
+    /// Unit count `h`.
+    pub fn width(&self) -> usize {
+        self.gate_readers.nrows()
+    }
+
+    /// Output dimension `p`.
+    pub fn output_dim(&self) -> usize {
+        self.writers.nrows()
+    }
+
+    /// The output metric `M`, `p × p`.
+    pub fn metric(&self) -> ArrayView2<'_, f64> {
+        self.metric.view()
+    }
+
+    /// R9: the best retained response `F̄_P(Pz)`, output bias included, at each row `z` of `points` (`n × d`), with
+    /// the derived quadrature band of every entry.
+    pub fn retained_response(
+        &self,
+        frame: ArrayView2<'_, f64>,
+        points: ArrayView2<'_, f64>,
+    ) -> Result<BandedResponse, ResponseError> {
+        // The conditional mean reads no pair law, so the frame needs only the orthonormality refusal.
+        require_frame(self.input_dim(), frame)?;
+        require_length("gated retained-response point columns", self.input_dim(), points.ncols())?;
+        require_finite("gated retained-response points", points.iter())?;
+        let gate_coordinates = fast_ab(&self.gate_readers, &frame);
+        let up_coordinates = fast_ab(&self.up_readers, &frame);
+        let (discarded_variances, discarded_couplings) =
+            self.discarded_law(frame, gate_coordinates.view(), up_coordinates.view());
+        let absolute_writers = self.writers.mapv(f64::abs);
+        // The band's own sum of `h` nonnegative products is inflated by its rounding, so it bounds the exact sum.
+        let band_rounding = 1.0 + accumulation_growth(self.width());
+        let rows = points.nrows();
+        let mut values = Array2::<f64>::zeros((rows, self.output_dim()));
+        let mut quadrature_band = Array2::<f64>::zeros((rows, self.output_dim()));
+        let chunk = byte_balanced_row_chunk(3 * self.width() + self.input_dim(), rows);
+        for start in (0..rows).step_by(chunk) {
+            let end = (start + chunk).min(rows);
+            // Row `i` of `retained` is `zᵢᵀ Q`, so the products hold `w_jᵀ P zᵢ` and `a_jᵀ P zᵢ`.
+            let retained = fast_ab(&points.slice(s![start..end, ..]), &frame);
+            let gate_arguments = fast_abt(&retained, &gate_coordinates);
+            let up_arguments = fast_abt(&retained, &up_coordinates);
+            let mut unit_means = Array2::<f64>::zeros(gate_arguments.dim());
+            let mut unit_bounds = Array2::<f64>::zeros(gate_arguments.dim());
+            unit_means
+                .axis_iter_mut(Axis(0))
+                .into_par_iter()
+                .zip(unit_bounds.axis_iter_mut(Axis(0)).into_par_iter())
+                .zip(gate_arguments.axis_iter(Axis(0)).into_par_iter())
+                .zip(up_arguments.axis_iter(Axis(0)).into_par_iter())
+                .try_for_each(|(((mut mean_row, mut bound_row), gate_row), up_row)| {
+                    for unit in 0..mean_row.len() {
+                        let mean = gated_mean(
+                            self.up_biases[unit] + up_row[unit],
+                            self.gate_biases[unit] + gate_row[unit],
+                            discarded_variances[unit],
+                            discarded_couplings[unit],
+                        )?;
+                        mean_row[unit] = mean.value.value;
+                        bound_row[unit] = mean.value.quadrature_bound;
+                    }
+                    Ok::<(), ResponseError>(())
+                })?;
+            let mut tile_values = fast_abt(&unit_means, &self.writers);
+            tile_values += &self.output_bias;
+            values.slice_mut(s![start..end, ..]).assign(&tile_values);
+            quadrature_band
+                .slice_mut(s![start..end, ..])
+                .assign(&(fast_abt(&unit_bounds, &absolute_writers) * band_rounding));
+        }
+        Ok(BandedResponse {
+            values,
+            quadrature_band,
+        })
+    }
+
+    /// `v_j⊥ = ‖w_j − Q Qᵀ w_j‖²` and `κ_j⊥ = (a_j − Q Qᵀ a_j) · (w_j − Q Qᵀ w_j) = a_jᵀ (I − P) w_j` for every unit, in
+    /// tiles, from the gate and up coordinates `W Q` and `A Q`. Both are formed from the residual rows, so `v_j⊥` is a
+    /// sum of squares and never negative.
+    fn discarded_law(
+        &self,
+        frame: ArrayView2<'_, f64>,
+        gate_coordinates: ArrayView2<'_, f64>,
+        up_coordinates: ArrayView2<'_, f64>,
+    ) -> (Array1<f64>, Array1<f64>) {
+        let width = self.width();
+        let mut variances = Array1::<f64>::zeros(width);
+        let mut couplings = Array1::<f64>::zeros(width);
+        let tile = byte_balanced_row_chunk(2 * self.input_dim(), width);
+        for start in (0..width).step_by(tile) {
+            let end = (start + tile).min(width);
+            let gate_residual = &self.gate_readers.slice(s![start..end, ..])
+                - &fast_abt(&gate_coordinates.slice(s![start..end, ..]), &frame);
+            let up_residual = &self.up_readers.slice(s![start..end, ..])
+                - &fast_abt(&up_coordinates.slice(s![start..end, ..]), &frame);
+            for (offset, gate_row) in gate_residual.axis_iter(Axis(0)).enumerate() {
+                variances[start + offset] = gate_row.dot(&gate_row);
+                couplings[start + offset] = up_residual.row(offset).dot(&gate_row);
+            }
+        }
+        (variances, couplings)
+    }
+}
+
+/// The gated unit's conditional mean `E[(α + A) s(t + W)]`, with the kernel's refusal carried as a [`ResponseError`].
+pub fn gated_mean(alpha: f64, t: f64, variance: f64, coupling: f64) -> Result<GatedMean, ResponseError> {
+    gated_conditional_mean(alpha, t, variance, coupling).map_err(|error| ResponseError::GatedKernel {
+        context: "gated conditional mean",
+        error,
+    })
 }
 
 /// `T_v σ(t)`, with the kernel's refusal carried as a [`ResponseError`].

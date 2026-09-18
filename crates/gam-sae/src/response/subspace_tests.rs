@@ -1,5 +1,5 @@
 #![cfg(test)]
-//! #2946 A2, A3 and A4 pins for the retained-response operator.
+//! #2946 A2, A3 and A4 pins for the retained-response operator, and R9 pins for the gated block.
 //!
 //! The exact identities (A2 and the planted subspace) run on dyadic data: small-integer readers, frames and rotations
 //! built from `H = I − ½·11ᵀ`, whose entries are all `±½`. Every covariance `w_jᵀ P w_k` the operator forms is then
@@ -10,10 +10,11 @@
 //! truncation, with the same kind of positive control. Every pin prints its numbers whether it passes or fails, so a
 //! green run is a receipt.
 
-use super::{KnownBlock, ResponseError};
+use super::{KnownBlock, KnownGatedBlock, ResponseError};
 use gam_math::gaussian_activation::{
     GaussianActivation, PreactivationPair, gaussian_smoothing_derivatives, pair_kernel,
 };
+use gam_math::gaussian_gated::silu_derivatives;
 use gam_math::probability::{normal_cdf, normal_pdf, standard_normal_quantile};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, array, s};
 use rand::rngs::StdRng;
@@ -897,4 +898,130 @@ fn the_saturated_coordinate_carries_the_discarded_error_and_the_averaged_gradien
         point_first < point_second,
         "the baseline-point Jacobian must rank z2 first: {point_first:e} vs {point_second}",
     );
+}
+
+/// Gate readers `W`, gate biases `b`, up readers `A`, up biases `c` and writers `U` of a small SwiGLU block
+/// (`d = 4`, `h = 3`, `p = 2`): integers and halves, so every product with a dyadic point is exact.
+fn gated_fixture() -> (Array2<f64>, Array1<f64>, Array2<f64>, Array1<f64>, Array2<f64>) {
+    (
+        array![[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0], [1.0, 1.0, 0.0, -1.0]],
+        array![0.5, -1.0, 0.0],
+        array![[0.0, 1.0, 1.0, 0.0], [1.0, 0.0, 0.0, 1.0], [1.0, -1.0, 1.0, 0.0]],
+        array![1.0, 0.0, -0.5],
+        array![[1.0, 0.5, -1.0], [0.0, 1.0, 1.0]],
+    )
+}
+
+fn gated_block(output_bias: Array1<f64>) -> KnownGatedBlock {
+    let (gate_readers, gate_biases, up_readers, up_biases, writers) = gated_fixture();
+    KnownGatedBlock::new(
+        gate_readers,
+        gate_biases,
+        up_readers,
+        up_biases,
+        writers,
+        output_bias,
+        identity(2).view(),
+    )
+    .expect("a finite gated block with a positive definite metric")
+}
+
+/// The executed block `Σ_j u_j (a_jᵀ z + c_j) s(w_jᵀ z + b_j) + c_out`, and its unit terms `(a_jᵀ z + c_j) s(w_jᵀ z + b_j)`.
+fn execute_gated_block(output_bias: &Array1<f64>, z: ArrayView1<'_, f64>) -> (Array1<f64>, Array1<f64>) {
+    let (gate_readers, gate_biases, up_readers, up_biases, writers) = gated_fixture();
+    let units: Array1<f64> = (0..writers.ncols())
+        .map(|unit| {
+            (up_readers.row(unit).dot(&z) + up_biases[unit])
+                * silu_derivatives(gate_readers.row(unit).dot(&z) + gate_biases[unit])[0]
+        })
+        .collect();
+    (writers.dot(&units) + output_bias, units)
+}
+
+#[test]
+fn the_gated_retained_response_on_the_full_frame_is_the_executed_block() {
+    // Q = I discards nothing: v⊥ = 0 and κ⊥ = 0 exactly, the SiLU smoothing at v = 0 is the gate itself with a zero
+    // quadrature bound, and each unit term α s(t) + 0·s'(t) is the executed term's word. The two outputs then add the
+    // same h terms and the bias in possibly different orders, so they agree within 2γ_{h+1} (Σ_j |u_oj t_j| + |c_o|).
+    let output_bias = array![0.25, -0.5];
+    let block = gated_block(output_bias.clone());
+    let writers = gated_fixture().4;
+    let points = array![[0.0, 0.0, 0.0, 0.0], [1.0, -2.0, 0.5, 3.0], [-2.0, 1.0, 1.0, -1.0]];
+    let response = block
+        .retained_response(identity(4).view(), points.view())
+        .expect("finite points");
+    let growth = gam_linalg::roundoff::accumulation_growth(writers.ncols() + 1);
+    for point in 0..points.nrows() {
+        let (executed, units) = execute_gated_block(&output_bias, points.row(point));
+        for output in 0..block.output_dim() {
+            let magnitude: f64 = (0..units.len())
+                .map(|unit| (writers[[output, unit]] * units[unit]).abs())
+                .sum::<f64>()
+                + output_bias[output].abs();
+            let band = 2.0 * growth * magnitude;
+            let operator = response.values[[point, output]];
+            let quadrature = response.quadrature_band[[point, output]];
+            eprintln!(
+                "#2946 R9 full frame point {point} output {output}: operator {operator} executed {} rounding band {band:e} quadrature band {quadrature:e}",
+                executed[output],
+            );
+            assert_eq!(quadrature, 0.0, "the full frame smooths nothing, so it has no quadrature error");
+            assert!(
+                (operator - executed[output]).abs() <= band,
+                "point {point} output {output}: operator {operator} vs executed {} beyond {band:e}",
+                executed[output],
+            );
+        }
+    }
+}
+
+#[test]
+fn the_gated_retained_response_is_the_executed_block_averaged_over_the_discarded_input() {
+    // R9 at fixed points: F̄_P(Pz) = E F(Pz + (I − P) Z̃), estimated by executing the block. Each arm accepts within
+    // its standard-error multiple plus the kernel's derived quadrature band. The positive control is the plug-in
+    // F(Pz), which ignores the discarded input and must be rejected at the origin.
+    let output_bias = Array1::zeros(2);
+    let block = gated_block(output_bias.clone());
+    let frame = retained_frame();
+    let points = array![[0.0, 0.0, 0.0, 0.0], [1.0, -1.0, 0.5, 2.0], [-2.0, 0.5, 1.0, -1.0]];
+    let response = block
+        .retained_response(frame.view(), points.view())
+        .expect("finite points");
+    let draws = 1 << 16;
+    let mut rng = StdRng::seed_from_u64(0x2946_a6);
+    let multiple = standard_error_multiple(points.nrows() * block.output_dim());
+    for point in 0..points.nrows() {
+        let retained = project(frame.view(), points.row(point));
+        let mut samples = Array2::<f64>::zeros((draws, block.output_dim()));
+        for draw in 0..draws {
+            let independent = standard_normal_vector(&mut rng, 4);
+            let input = &retained + &independent - &project(frame.view(), independent.view());
+            samples
+                .row_mut(draw)
+                .assign(&execute_gated_block(&output_bias, input.view()).0);
+        }
+        let plug_in = execute_gated_block(&output_bias, retained.view()).0;
+        for output in 0..block.output_dim() {
+            let column: Vec<f64> = samples.column(output).to_vec();
+            let (estimate, standard_error) = mean_and_standard_error(&column);
+            let analytic = response.values[[point, output]];
+            let band = response.quadrature_band[[point, output]];
+            eprintln!(
+                "#2946 R9 point {point} output {output}: analytic {analytic} quadrature band {band:e} executed MC {estimate} se {standard_error} z {:.3} plug-in {} multiple {multiple:.3} draws {draws}",
+                (analytic - estimate) / standard_error,
+                plug_in[output],
+            );
+            assert!(
+                (analytic - estimate).abs() <= multiple * standard_error + band,
+                "point {point} output {output}: analytic {analytic} vs executed Monte Carlo {estimate} ± {standard_error}",
+            );
+            if point == 0 {
+                assert!(
+                    (plug_in[output] - estimate).abs() > multiple * standard_error + band,
+                    "the plug-in F(Pz) = {} must be rejected at the origin against {estimate} ± {standard_error}",
+                    plug_in[output],
+                );
+            }
+        }
+    }
 }
