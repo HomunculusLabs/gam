@@ -19,6 +19,7 @@ use crate::marginal_slope_shared::{
     add_optional_vector, add_two_surface_psi_outer,
     build_denested_partition_cells as shared_denested_partition_cells, chunked_row_reduction,
     eval_coeff4_at, first_parameter_directional_order2_terms, first_parameter_order2_terms,
+    observed_denested_calibration_newton_coefficients as shared_observed_denested_calibration_newton_coefficients,
     observed_denested_cell_partials as shared_observed_denested_cell_partials, outer_row_indices,
     outer_weighted_rows, parameter_block_specs_match_rows, probit_frailty_scale,
     psi_derivative_location, scale_coeff4, second_parameter_order2_terms,

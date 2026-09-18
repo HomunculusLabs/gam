@@ -362,10 +362,12 @@ impl BernoulliMarginalSlopeFamily {
             return Ok((rigid_a, rigid_abs_deriv, true));
         }
 
-        let near_zero_bound =
-            self.near_zero_deviation_residual_bound(slope, beta_h_linf, beta_w_linf);
         let beta_linf_max = beta_h_linf.max(beta_w_linf);
-        if standard_normal_law && near_zero_bound <= abs_tol && beta_linf_max <= f64::EPSILON.sqrt()
+        // The perturbation bound walks every span of every deviation basis column and
+        // only the StandardNormal law reads it, so an empirical-law row never pays for it.
+        if standard_normal_law
+            && beta_linf_max <= f64::EPSILON.sqrt()
+            && self.near_zero_deviation_residual_bound(slope, beta_h_linf, beta_w_linf) <= abs_tol
         {
             // Numerical guardrail for the conservative perturbation bound: the
             // exact-zero path above avoids all cell machinery, while this

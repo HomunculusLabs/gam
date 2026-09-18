@@ -832,20 +832,33 @@ impl BernoulliMarginalSlopeFamily {
         // come only from the canonical jet expression.
         let marginal = self.marginal_link_map(q)?;
         let root_tol = super::row_primary_hessian::bernoulli_intercept_residual_tolerance(marginal.mu);
+        // Every evaluation also keeps its nodes' observed index `η`, so the node programs
+        // below read the accepted root's `η` instead of re-evaluating both spans of every
+        // node at that same root.
         let mut intercept_root = intercept_seed;
-        let (mut root_residual, mut f_a, _) = self.evaluate_empirical_grid_calibration_newton(
+        let mut root_etas = Vec::with_capacity(grid.nodes.len());
+        let mut candidate_etas = Vec::with_capacity(grid.nodes.len());
+        let (mut root_residual, mut f_a, _) = self.evaluate_empirical_grid_calibration_newton_recording(
             intercept_root,
             q,
             slope,
             beta_h,
             beta_w,
             grid,
+            Some(&mut root_etas),
         )?;
         while root_residual != 0.0 {
             let candidate = intercept_root - root_residual / f_a;
+            candidate_etas.clear();
             let (candidate_residual, candidate_f_a, _) = self
-                .evaluate_empirical_grid_calibration_newton(
-                    candidate, q, slope, beta_h, beta_w, grid,
+                .evaluate_empirical_grid_calibration_newton_recording(
+                    candidate,
+                    q,
+                    slope,
+                    beta_h,
+                    beta_w,
+                    grid,
+                    Some(&mut candidate_etas),
                 )?;
             if !(candidate_residual.abs() < root_residual.abs()) {
                 break;
@@ -853,6 +866,7 @@ impl BernoulliMarginalSlopeFamily {
             intercept_root = candidate;
             root_residual = candidate_residual;
             f_a = candidate_f_a;
+            std::mem::swap(&mut root_etas, &mut candidate_etas);
         }
         if root_residual.abs() > root_tol {
             return Err(format!(
@@ -867,17 +881,9 @@ impl BernoulliMarginalSlopeFamily {
         }
 
         let mut calibration = Vec::with_capacity(grid.nodes.len());
-        for (node, weight) in grid.pairs() {
+        for ((node, weight), &eta) in grid.pairs().zip(&root_etas) {
             let index =
                 self.compile_empirical_bms_index_program(primary, intercept_root, slope, node)?;
-            let obs = self.observed_denested_cell_partials_at_z(
-                node,
-                intercept_root,
-                slope,
-                beta_h,
-                beta_w,
-            )?;
-            let eta = eval_coeff4_at(&obs.coeff, node);
             let cdf_stack = unary_derivatives_normal_cdf(eta);
             calibration.push(BmsFlexCalibrationProgramNode {
                 index,
@@ -3174,15 +3180,53 @@ impl BernoulliMarginalSlopeFamily {
         beta_w: Option<&Array1<f64>>,
         grid: &EmpiricalZGrid,
     ) -> Result<(f64, f64, f64), String> {
+        self.evaluate_empirical_grid_calibration_newton_recording(
+            a,
+            marginal_eta,
+            slope,
+            beta_h,
+            beta_w,
+            grid,
+            None,
+        )
+    }
+
+    /// [`Self::evaluate_empirical_grid_calibration_newton`], also appending every grid
+    /// node's observed index `η` to `node_etas` in node order when one is given.
+    fn evaluate_empirical_grid_calibration_newton_recording(
+        &self,
+        a: f64,
+        marginal_eta: f64,
+        slope: f64,
+        beta_h: Option<&Array1<f64>>,
+        beta_w: Option<&Array1<f64>>,
+        grid: &EmpiricalZGrid,
+        mut node_etas: Option<&mut Vec<f64>>,
+    ) -> Result<(f64, f64, f64), String> {
         let marginal = self.marginal_link_map(marginal_eta)?;
+        let scale = self.probit_frailty_scale();
         let mut f = -marginal.mu;
         let mut f_a = 0.0;
         let mut f_aa = 0.0;
         for (node, weight) in grid.pairs() {
-            let obs = self.observed_denested_cell_partials_at_z(node, a, slope, beta_h, beta_w)?;
-            let eta = eval_coeff4_at(&obs.coeff, node);
-            let eta_a = eval_coeff4_at(&obs.dc_da, node);
-            let eta_aa = eval_coeff4_at(&obs.dc_daa, node);
+            // A Newton step reads only `coeff`, `dc_da` and `dc_daa`; the helper builds
+            // those bit-identically to the full observed partials and skips the rest.
+            let (coeff, dc_da, dc_daa) = shared_observed_denested_calibration_newton_coefficients(
+                node,
+                a,
+                slope,
+                self.score_warp.as_ref(),
+                beta_h,
+                self.link_dev.as_ref(),
+                beta_w,
+                scale,
+            )?;
+            let eta = eval_coeff4_at(&coeff, node);
+            let eta_a = eval_coeff4_at(&dc_da, node);
+            let eta_aa = eval_coeff4_at(&dc_daa, node);
+            if let Some(etas) = node_etas.as_deref_mut() {
+                etas.push(eta);
+            }
             let pdf = normal_pdf(eta);
             f += weight * normal_cdf(eta);
             f_a += weight * pdf * eta_a;
@@ -5205,6 +5249,188 @@ mod empirical_flex_jet_oracle_tests {
                 }
                 assert!(fourth_batched[2].iter().all(|value| *value == 0.0));
             }
+        }
+    }
+
+    /// gnomon#2337: the empirical calibration Newton evaluator builds only the three
+    /// observed channels it sums, and the row plan reads the accepted root's node index `η`
+    /// recorded by that evaluator instead of re-evaluating both spans of every node there.
+    /// Both must match the full observed-partials route bit for bit: the evaluator at three
+    /// intercepts, and the plan's root, `1/F_a` and order-two row jet against a plan
+    /// assembled from full partials at the same polished root.
+    #[test]
+    fn empirical_calibration_newton_reuse_matches_full_partials_bitwise_2337() {
+        for is_score_warp in [true, false] {
+            let fx = make_fixture(is_score_warp);
+            let r = fx.primary.total;
+            let dev_range = if is_score_warp {
+                fx.primary.h.clone().unwrap()
+            } else {
+                fx.primary.w.clone().unwrap()
+            };
+            let mut p0 = vec![0.0; r];
+            p0[fx.primary.q] = 0.2;
+            p0[fx.primary.slope] = 0.35;
+            for (k, i) in dev_range.clone().enumerate() {
+                p0[i] = fx.beta_dev[k];
+            }
+            let (q, b) = (p0[fx.primary.q], p0[fx.primary.slope]);
+            let beta: Array1<f64> = Array1::from_iter(dev_range.map(|i| p0[i]));
+            let (beta_h, beta_w) = if is_score_warp {
+                (Some(&beta), None)
+            } else {
+                (None, Some(&beta))
+            };
+            let marginal = fx.family.marginal_link_map(q).expect("marginal link map");
+            // The evaluator as it stood before gnomon#2337, through the full observed partials.
+            let full_newton = |a: f64| -> (f64, f64, f64) {
+                let mut f = -marginal.mu;
+                let mut f_a = 0.0;
+                let mut f_aa = 0.0;
+                for (node, weight) in fx.grid.pairs() {
+                    let obs = fx
+                        .family
+                        .observed_denested_cell_partials_at_z(node, a, b, beta_h, beta_w)
+                        .expect("full observed partials");
+                    let eta = eval_coeff4_at(&obs.coeff, node);
+                    let eta_a = eval_coeff4_at(&obs.dc_da, node);
+                    let eta_aa = eval_coeff4_at(&obs.dc_daa, node);
+                    let pdf = normal_pdf(eta);
+                    f += weight * normal_cdf(eta);
+                    f_a += weight * pdf * eta_a;
+                    f_aa += weight * pdf * (eta_aa - eta * eta_a * eta_a);
+                }
+                (f, f_a, f_aa)
+            };
+            let bits =
+                |(f, f_a, f_aa): (f64, f64, f64)| [f.to_bits(), f_a.to_bits(), f_aa.to_bits()];
+
+            let plan = compiled_flex_fixture_program(&fx, &p0);
+            for a in [
+                plan.intercept_root - 0.3,
+                plan.intercept_root,
+                plan.intercept_root + 0.3,
+            ] {
+                let trimmed = fx
+                    .family
+                    .evaluate_empirical_grid_calibration_newton(a, q, b, beta_h, beta_w, &fx.grid)
+                    .expect("trimmed calibration Newton evaluation");
+                assert_eq!(
+                    bits(trimmed),
+                    bits(full_newton(a)),
+                    "kind={is_score_warp} a={a}: calibration Newton terms"
+                );
+            }
+
+            // The root polish and node programs as they stood before gnomon#2337, from the
+            // same seed `compiled_flex_fixture_program` passes.
+            let scale = fx.family.probit_frailty_scale();
+            let seed_marginal = bernoulli_marginal_link_map(
+                &InverseLink::Standard(gam_problem::StandardLink::Probit),
+                q,
+            )
+            .expect("link map");
+            let mut root = witness_intercept(&fx, seed_marginal.mu, b, &beta, scale);
+            let (mut residual, mut f_a, _) = full_newton(root);
+            while residual != 0.0 {
+                let candidate = root - residual / f_a;
+                let (candidate_residual, candidate_f_a, _) = full_newton(candidate);
+                if !(candidate_residual.abs() < residual.abs()) {
+                    break;
+                }
+                root = candidate;
+                residual = candidate_residual;
+                f_a = candidate_f_a;
+            }
+            assert_eq!(
+                plan.intercept_root.to_bits(),
+                root.to_bits(),
+                "kind={is_score_warp}: polished calibration root"
+            );
+            assert_eq!(
+                plan.inv_f_a.to_bits(),
+                (1.0 / f_a).to_bits(),
+                "kind={is_score_warp}: 1/F_a at the root"
+            );
+            let calibration = fx
+                .grid
+                .pairs()
+                .map(|(node, weight)| {
+                    let index = fx
+                        .family
+                        .compile_empirical_bms_index_program(&fx.primary, root, b, node)
+                        .expect("node index program");
+                    let obs = fx
+                        .family
+                        .observed_denested_cell_partials_at_z(node, root, b, beta_h, beta_w)
+                        .expect("full observed partials at the root");
+                    let eta = eval_coeff4_at(&obs.coeff, node);
+                    let cdf_stack = unary_derivatives_normal_cdf(eta);
+                    BmsFlexCalibrationProgramNode {
+                        index,
+                        weight,
+                        cdf_stack,
+                        cdf_fifth: (eta.powi(4) - 6.0 * eta * eta + 3.0) * cdf_stack[1],
+                    }
+                })
+                .collect::<Vec<_>>();
+            let z_obs = fx.family.z[0];
+            let observed = fx
+                .family
+                .compile_empirical_bms_index_program(&fx.primary, root, b, z_obs)
+                .expect("observed index program");
+            let obs = fx
+                .family
+                .observed_denested_cell_partials_at_z(z_obs, root, b, beta_h, beta_w)
+                .expect("observed partials at the root");
+            let observed_sign = 2.0 * fx.family.y[0] - 1.0;
+            let signed = observed_sign * eval_coeff4_at(&obs.coeff, z_obs);
+            let point = BmsFlexProgramPoint::new(
+                &fx.primary,
+                b,
+                beta_h,
+                beta_w,
+                root,
+                1.0 / f_a,
+                scale,
+                [
+                    marginal.mu,
+                    marginal.mu1,
+                    marginal.mu2,
+                    marginal.mu3,
+                    marginal.mu4,
+                ],
+            )
+            .expect("reference program point");
+            let reference = BmsFlexRowProgram::from_parts(
+                point,
+                marginal.mu5,
+                calibration,
+                observed,
+                observed_sign,
+                unary_derivatives_neglog_phi(signed, fx.family.weights[0]),
+                signed_probit_neglog_unary_stack_fifth(signed, fx.family.weights[0])[5],
+            )
+            .expect("reference row plan");
+            let order_two_bits = |program: &BmsFlexRowProgram| -> Vec<u64> {
+                let arena = DynamicJetArena::new();
+                let vars = arena.alloc_slice_fill_with(r, |axis| {
+                    gam_math::jet_scalar::DynamicOrder2::variable(p0[axis], axis, r, &arena)
+                });
+                let jet = program
+                    .evaluate(vars, 2, &arena)
+                    .expect("order-two row jet");
+                std::iter::once(jet.value())
+                    .chain(jet.g().iter().copied())
+                    .chain(jet.h().iter().copied())
+                    .map(f64::to_bits)
+                    .collect()
+            };
+            assert_eq!(
+                order_two_bits(&plan),
+                order_two_bits(&reference),
+                "kind={is_score_warp}: order-two row jet"
+            );
         }
     }
 }
