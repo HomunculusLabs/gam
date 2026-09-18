@@ -38,9 +38,9 @@ const FRAME_FIXED_POINT_TOLERANCE: f64 = 1.0e-12;
 /// decoder lies in the span of the first `rank` output axes, so the fit activates
 /// a rank-`rank` frame on that span (the #2933 F35 fixture). `off_span_constant`
 /// adds a constant along output axis 2 at rank 2, a component outside the frame
-/// span meant to bind the rank constraint. Whether it does at the re-solved root,
-/// so that `∇_B L·U⊥ ≠ 0` and the bilinear cross curvature `E` is material, is
-/// measured there and printed, not assumed.
+/// span. It does not bind the rank constraint: the joint root absorbs it (job 1280343
+/// measured `‖∇_B L·U⊥‖_F = 1.58e-4` against `‖∇_B L‖_F = 1.34`), so the bilinear
+/// cross curvature `E` is not material in any arm of this fixture.
 fn framed_circle(
     rank: usize,
     off_span_constant: f64,
@@ -193,7 +193,7 @@ fn assert_agrees(label: &str, value: f64, resolved: f64) {
 
 /// #2933 F39 — at rank 2 on a 3-column basis the frame orientation carries a
 /// response the fixed-frame divergence omits: with the target in the frame span,
-/// and with an off-span constant intended to bind the rank constraint. At rank 3
+/// and with an off-span constant, which the joint root absorbs. At rank 3
 /// the frame is a pure factorization gauge. In each, the divergence, its residual
 /// dof and the residual dof the dispersion prices must be the re-solved response's,
 /// priced integrated over the frame, with no count charged for it. Each arm prints
@@ -206,7 +206,7 @@ fn assert_agrees(label: &str, value: f64, resolved: f64) {
 fn learned_frames_price_their_integrated_response_2933_f39() {
     for (label, rank, off_span_constant) in [
         ("rank 2 in span", 2usize, 0.0_f64),
-        ("rank 2 binding off-span constant", 2, 0.3),
+        ("rank 2 with an absorbed off-span constant", 2, 0.3),
         ("rank 3 gauge", 3, 0.0),
     ] {
         let (mut term, target, rho) = framed_circle(rank, off_span_constant);
@@ -507,11 +507,11 @@ fn a_refused_dense_integrated_route_still_integrates_the_frames_2933_f39() {
 /// solve's resolution tolerance), so the sums agree to `√ε` of the sum of the probe
 /// values' magnitudes. Both of the F39 rank-2 arms are probed, the target in the frame
 /// span and with an off-span constant, and each prints `‖∇_B L·U⊥‖_F`, the normal
-/// gradient the cross curvature `E` is built from, so a record says in which arm `E` is
-/// material.
+/// gradient the cross curvature `E` is built from. Neither arm makes `E` material (job
+/// 1280343), so this pin does not cover `E`.
 #[test]
 fn canonical_probes_of_the_lifted_factor_reproduce_the_dense_integrated_response_2933_f39() {
-    for (label, off_span_constant) in [("in span", 0.0_f64), ("off-span constant", 0.3)] {
+    for (label, off_span_constant) in [("in span", 0.0_f64), ("absorbed off-span constant", 0.3)] {
         let (term, target, rho, cache) = framed_state(12, off_span_constant);
         let dense = term
             .fitted_response_divergence(target.view(), &rho, &cache)
@@ -620,5 +620,58 @@ fn a_frame_marginal_shape_report_decomposes_its_pencil_once_2933_f39() {
         decompositions, 1,
         "one frame-marginal report must decompose its pencil once, for the dispersion and the \
          covariance together"
+    );
+}
+
+/// #2933 F39 — a dense evaluation of a framed state forms its fitted-response divergence
+/// once, for the value's rank charge and the gradient's rank-charge derivative together.
+/// The value leaves its dispersion on the spectral block it hands the gradient. Reading
+/// it there must decompose nothing. Forming it again, the derivative with no block, must
+/// decompose the frame-integrated pencil, which is the counter's positive control. Both
+/// derivatives must agree bit for bit, because they price one dispersion at one state.
+#[test]
+fn a_dense_evaluation_forms_its_fitted_response_once_for_value_and_gradient_2933_f39() {
+    let (mut term, target, rho, _root_cache) = framed_state(12, 0.0);
+    let (_value, loss, priced) = term
+        .penalized_quasi_laplace_criterion_priced_with_lane(
+            target.view(),
+            &rho,
+            None,
+            0,
+            0.4,
+            1.0e-6,
+            1.0e-6,
+            true,
+            None,
+        )
+        .expect("the framed state prices a dense criterion at its own rho");
+    let (cache, geometry) = priced.expect("the dense route hands its spectral block on");
+    let entered = exact_a_pencil_decompositions_on_this_thread();
+    let shared = term
+        .production_rank_charge_derivative(target.view(), &rho, &loss, &cache, Some(&geometry))
+        .expect("the rank-charge derivative reads the value's block");
+    let read = exact_a_pencil_decompositions_on_this_thread() - entered;
+    let formed = term
+        .production_rank_charge_derivative(target.view(), &rho, &loss, &cache, None)
+        .expect("the rank-charge derivative forms its own dispersion");
+    let forming = exact_a_pencil_decompositions_on_this_thread() - entered - read;
+    let bits = |values: &Array1<f64>| values.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+    eprintln!(
+        "[#2933 F39 once per state] decompositions: reading the value's dispersion {read}, \
+         forming it again {forming}"
+    );
+    assert!(
+        forming > 0,
+        "control: forming the framed dispersion must decompose the frame-integrated pencil"
+    );
+    assert_eq!(
+        read, 0,
+        "the gradient's rank charge must read the value's dispersion, not form it again"
+    );
+    assert!(
+        bits(&shared.direct_rho) == bits(&formed.direct_rho)
+            && bits(&shared.theta.t) == bits(&formed.theta.t)
+            && bits(&shared.theta.beta) == bits(&formed.theta.beta),
+        "the derivative off the value's dispersion must equal the one that forms it, bit for bit"
     );
 }

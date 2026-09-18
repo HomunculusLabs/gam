@@ -916,6 +916,10 @@ pub(crate) struct DenseExactAGeometry {
     /// order: one per orbit alone in its connected block of `A` and `Φ`. The value and its
     /// derivative price the orbits from them, off the same eliminated block.
     orbit_generators: Vec<CircleOrbitGenerator>,
+    /// The reconstruction dispersion the value's rank charge priced at this state, which
+    /// the gradient's rank-charge derivative reads instead of forming the fitted-response
+    /// divergence a second time (#2933 F39). `None` until the value has priced it.
+    rank_charge_dispersion: Option<SaeReconstructionDispersion>,
 }
 
 /// Value and classified basin spectrum, without realizing a dense differential.
@@ -5400,6 +5404,7 @@ impl SaeManifoldTerm {
             e_beta,
             total_t,
             orbit_generators,
+            rank_charge_dispersion: None,
         })
     }
 
