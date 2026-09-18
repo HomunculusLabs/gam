@@ -11,3 +11,4 @@ pub mod raw_block;
 pub mod executed_transport;
 pub mod reuse;
 pub mod state_blocks;
+pub mod compose;
