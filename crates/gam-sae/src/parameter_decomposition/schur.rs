@@ -32,11 +32,25 @@
 //! candidate was produced, so an inaccurate candidate is refused, never reported.
 //! The computed `Q` is orthogonal only up to `η_Q >= ||Q^T Q - I||_2`. Every claim
 //! is therefore about its polar factor `Q_o`, with `||Q - Q_o||_2 <= η_Q` and
-//! `||Q^T T Q - Q_o^T T Q_o||_F <= η_Q (2 + η_Q) ||T||_F`, plus the Wilkinson band
-//! of forming `Q^T T Q`. That similarity error adds to `γ` and `η`, and is
-//! subtracted from `δ` once per block, since `sep_F` is 1-Lipschitz in each. The SVD
-//! owner's backward band and the rounding of forming the Kronecker operator are
-//! subtracted from `δ` as well.
+//! `||Q^T T Q - Q_o^T T Q_o||_F <= η_Q (2 + η_Q) ||T||_F`, plus the rounding of
+//! forming `Q^T T Q`. Each block of that similarity error adds to its own `γ`, `η`
+//! or restriction, and the two diagonal blocks' errors are subtracted from `δ`, since
+//! `sep_F` is 1-Lipschitz in each. The SVD owner's backward band and the rounding of
+//! forming the Kronecker operator are subtracted from `δ` as well.
+//!
+//! `Q^T Q` and `Q^T T Q` are formed with compensated (Kahan) sums, whose band,
+//! gam-linalg's `compensated_band`, carries no term count. The naive products' bands
+//! are `γ_{n+1}` and `γ_{2n}` of the same absolute sums. They grow with `n` while the
+//! true `G` of a good proposal does not, and on a trained operator they swamp `G`.
+//! On mpd-modadd's 128-dimensional T1 at step 40000 (#2951), they came to 7.7e-10
+//! against a computed `||G||_F` of 2.8e-11, and alone refused a pair with
+//! `δ = 1.6e-4`.
+//!
+//! Stewart's condition needs `δ^2 > 4 γ η`, and `δ` never exceeds the smallest
+//! singular value of the formed Kronecker operator, which never exceeds any of its
+//! column norms. A proposal whose smallest column norm already fails the condition
+//! is refused without the `O((k (n - k))^3)` SVD, and its reported separation is
+//! `-∞`. The verdict is the one the SVD would give.
 //!
 //! # Classifying a certified plane
 //!
@@ -85,10 +99,13 @@
 //!
 //! The route is dense. One proposal costs `O(n^3)` time with `n x n` workspace;
 //! certifying a `k`-dimensional cluster adds `O((k (n - k))^3)` time and a
-//! `k (n - k)` square workspace.
+//! `k (n - k)` square workspace, unless its column bound refuses it first.
 
 use gam_linalg::faer_ndarray::{FaerLinalgError, FaerQr, FaerSvd, real_general_spectrum};
-use gam_linalg::roundoff::{accumulation_band, accumulation_growth, factor_singular_band};
+use gam_linalg::roundoff::{
+    accumulation_band, accumulation_growth, compensated_band, factor_singular_band,
+};
+use gam_linalg::utils::KahanSum;
 use ndarray::{Array2, ArrayView2, s};
 use std::f64::consts::SQRT_2;
 
@@ -180,7 +197,9 @@ pub struct InvariantSubspaceCertificate {
     pub residual: f64,
     /// Upper bound on `η`, the Frobenius norm of the exact `H` block.
     pub coupling: f64,
-    /// Lower bound on `sep_F(L_1, L_2)`; infinite when `k = n`.
+    /// Lower bound on `sep_F(L_1, L_2)`; infinite when `k = n`, and `-∞` when the
+    /// Kronecker column bound refused the candidate before the SVD (module
+    /// documentation).
     pub separation: f64,
     /// `η_Q`, the bound on `||Q - Q_o||_2`.
     pub frame_defect: f64,
@@ -319,15 +338,20 @@ pub fn certify_invariant_subspace(
             columns: cols,
         });
     }
-    // Householder QR of `[basis, e_1, ..., e_{n-k}]` is orthogonal whatever the
-    // trailing columns are, and its leading `k` columns span `basis`.
+    certify_frame(matrix, &completed_frame(basis)?, cols)
+}
+
+/// Householder QR of `[basis, e_1, ..., e_{n-k}]`: orthogonal whatever the trailing
+/// columns are, with its leading `k` columns spanning `basis`.
+fn completed_frame(basis: ArrayView2<'_, f64>) -> Result<Array2<f64>, InvariantSubspaceError> {
+    let (dimension, cols) = basis.dim();
     let mut completed = Array2::<f64>::zeros((dimension, dimension));
     completed.slice_mut(s![.., ..cols]).assign(&basis);
     for column in cols..dimension {
         completed[[column - cols, column]] = 1.0;
     }
     let (frame, _) = completed.qr().map_err(InvariantSubspaceError::Linalg)?;
-    certify_frame(matrix, &frame, cols)
+    Ok(frame)
 }
 
 /// Partition the whole space into certified invariant blocks (module
@@ -442,20 +466,19 @@ fn initial_clusters(estimates: &[(f64, f64)]) -> Result<Vec<Vec<usize>>, Invaria
     Ok(clusters)
 }
 
-/// Try the proposals `p(T)^m` of one cluster. Returns the first certified one with
-/// its kind, or `None` with the smallest `2 sqrt(ε_sim η)` over the attempts.
-fn propose_and_certify(
+/// `p(T)` and `deg p` for one cluster: `T - μ I` with `μ` the mean estimate when every
+/// estimate is real, else `T^2 - 2 a T + b I` with `a` the mean real part and `b` the
+/// mean `|λ|^2` (module documentation).
+fn cluster_polynomial(
     matrix: ArrayView2<'_, f64>,
     estimates: &[(f64, f64)],
     cluster: &[usize],
-) -> Result<(Option<(InvariantSubspaceCertificate, InvariantBlockKind)>, f64), InvariantSubspaceError>
-{
+) -> (Array2<f64>, usize) {
     let dimension = matrix.nrows();
-    let columns = cluster.len();
-    let count = columns as f64;
+    let count = cluster.len() as f64;
     let all_real = cluster.iter().all(|&index| estimates[index].1 == 0.0);
     let mean_real = cluster.iter().map(|&index| estimates[index].0).sum::<f64>() / count;
-    let (polynomial, degree) = if all_real {
+    if all_real {
         let mut shifted = matrix.to_owned();
         for index in 0..dimension {
             shifted[[index, index]] -= mean_real;
@@ -472,7 +495,19 @@ fn propose_and_certify(
             quadratic[[index, index]] += mean_square;
         }
         (quadratic, 2)
-    };
+    }
+}
+
+/// Try the proposals `p(T)^m` of one cluster. Returns the first certified one with
+/// its kind, or `None` with the smallest `2 sqrt(ε_sim η)` over the attempts.
+fn propose_and_certify(
+    matrix: ArrayView2<'_, f64>,
+    estimates: &[(f64, f64)],
+    cluster: &[usize],
+) -> Result<(Option<(InvariantSubspaceCertificate, InvariantBlockKind)>, f64), InvariantSubspaceError>
+{
+    let columns = cluster.len();
+    let (polynomial, degree) = cluster_polynomial(matrix, estimates, cluster);
     let mut power = polynomial.clone();
     let mut exponent = 1;
     let mut reach_floor = f64::INFINITY;
@@ -543,28 +578,24 @@ fn certify_frame(
 ) -> Result<InvariantSubspaceCertificate, InvariantSubspaceError> {
     let dimension = matrix.nrows();
     let absolute_frame = frame.mapv(f64::abs);
-    // `||Q - Q_o||_2 = max |σ_i - 1| <= ||Q^T Q - I||_F`, plus the rounding of the
-    // Gram and of subtracting the identity: `γ_{n+1}` times each entry's absolute
-    // term sum.
-    let gram_defect = frame.t().dot(frame) - Array2::<f64>::eye(dimension);
-    let frame_defect = frobenius_norm(gram_defect.view())
-        + accumulation_growth(dimension + 1)
-            * frobenius_norm(absolute_frame.t().dot(&absolute_frame).view());
-    let reduced = frame.t().dot(&matrix.dot(frame));
-    // Two nested length-`n` accumulations per entry of `Q^T T Q`.
-    let formation_band = accumulation_growth(2 * dimension)
-        * frobenius_norm(
-            absolute_frame
-                .t()
-                .dot(&matrix.mapv(f64::abs).dot(&absolute_frame))
-                .view(),
-        );
-    // `||Q^T T Q - Q_o^T T Q_o||_F <= ||Q - Q_o||_2 ||T||_F (||Q||_2 + ||Q_o||_2)`.
-    let similarity_error =
-        frame_defect * (2.0 + frame_defect) * frobenius_norm(matrix) + formation_band;
+    // `||Q - Q_o||_2 = max |σ_i - 1| <= ||Q^T Q - I||_F`, formed with compensated sums,
+    // plus each entry's band.
+    let (gram_defect, gram_band) = compensated_gram_defect(frame, &absolute_frame);
+    let frame_defect = frobenius_norm(gram_defect.view()) + frobenius_norm(gram_band.view());
+    let (reduced, formation) = compensated_similarity(matrix, frame, &absolute_frame);
+    // `||Q^T T Q - Q_o^T T Q_o||_F <= ||Q - Q_o||_2 ||T||_F (||Q||_2 + ||Q_o||_2)`. It
+    // bounds every block's difference; each block adds only its own entries' bands.
+    let frame_similarity = frame_defect * (2.0 + frame_defect) * frobenius_norm(matrix);
+    let similarity_error = frame_similarity + frobenius_norm(formation.view());
+    let leading_error =
+        frame_similarity + frobenius_norm(formation.slice(s![..columns, ..columns]));
     let restriction = reduced.slice(s![..columns, ..columns]).to_owned();
-    let residual = frobenius_norm(reduced.slice(s![columns.., ..columns])) + similarity_error;
-    let coupling = frobenius_norm(reduced.slice(s![..columns, columns..])) + similarity_error;
+    let residual = frobenius_norm(reduced.slice(s![columns.., ..columns]))
+        + frame_similarity
+        + frobenius_norm(formation.slice(s![columns.., ..columns]));
+    let coupling = frobenius_norm(reduced.slice(s![..columns, columns..]))
+        + frame_similarity
+        + frobenius_norm(formation.slice(s![..columns, columns..]));
     // `||Q_1 Q_1^T - Q_o1 Q_o1^T||_2 <= ||Q_1 - Q_o1||_2 (||Q_1||_2 + ||Q_o1||_2)`.
     let frame_projector_error = frame_defect * (2.0 + frame_defect);
     let basis = frame.slice(s![.., ..columns]).to_owned();
@@ -579,17 +610,26 @@ fn certify_frame(
             similarity_error,
             verdict: SubspaceVerdict::Certified {
                 projector_bar: frame_projector_error,
-                restriction_error: similarity_error,
+                restriction_error: leading_error,
             },
         });
     }
-    let separation =
-        kronecker_separation(&reduced, columns)? - 2.0 * similarity_error;
+    let trailing_error =
+        frame_similarity + frobenius_norm(formation.slice(s![columns.., columns..]));
+    // Stewart's condition needs `δ^2 > 4 γ η`, and `δ` never exceeds `σ_min` of the
+    // formed Kronecker operator, which never exceeds any of its column norms. When the
+    // smallest column norm already fails the condition, no verdict depends on the SVD.
+    let ceiling = kronecker_column_ceiling(&reduced, columns);
+    let separation = if ceiling * ceiling <= 4.0 * residual * coupling {
+        f64::NEG_INFINITY
+    } else {
+        kronecker_separation(&reduced, columns)? - leading_error - trailing_error
+    };
     let verdict = if separation > 0.0 && 4.0 * residual * coupling < separation * separation {
         let tangent_bar = 2.0 * residual / separation;
         SubspaceVerdict::Certified {
             projector_bar: tangent_bar + frame_projector_error,
-            restriction_error: similarity_error + coupling * tangent_bar,
+            restriction_error: leading_error + coupling * tangent_bar,
         }
     } else {
         SubspaceVerdict::NotSeparated {
@@ -606,6 +646,118 @@ fn certify_frame(
         similarity_error,
         verdict,
     })
+}
+
+/// `Q^T Q - I` with each entry a compensated sum, and each entry's band: one rounding
+/// per product, then [`compensated_band`] over the products and the identity.
+fn compensated_gram_defect(
+    frame: &Array2<f64>,
+    absolute_frame: &Array2<f64>,
+) -> (Array2<f64>, Array2<f64>) {
+    let dimension = frame.ncols();
+    let absolute_gram = majorant(absolute_frame.t().dot(absolute_frame), frame.nrows());
+    let mut defect = Array2::<f64>::zeros((dimension, dimension));
+    let mut band = Array2::<f64>::zeros((dimension, dimension));
+    for left in 0..dimension {
+        for right in left..dimension {
+            let identity = if left == right { 1.0 } else { 0.0 };
+            let mut sum = KahanSum::default();
+            for (first, second) in frame.column(left).iter().zip(frame.column(right)) {
+                sum.add(first * second);
+            }
+            sum.add(-identity);
+            let entry_band = compensated_band(1, absolute_gram[[left, right]] + identity);
+            for (row, col) in [(left, right), (right, left)] {
+                defect[[row, col]] = sum.sum();
+                band[[row, col]] = entry_band;
+            }
+        }
+    }
+    (defect, band)
+}
+
+/// `Q^T T Q` as `Q^T W` with `W = T Q`, each entry of both a compensated sum, and each
+/// entry's band: its own [`compensated_band`] plus `W`'s bands carried through `|Q|^T`.
+/// The compensated band carries no term count, where the naive product's Wilkinson
+/// band is `γ_{2n}` of the same absolute sums.
+fn compensated_similarity(
+    matrix: ArrayView2<'_, f64>,
+    frame: &Array2<f64>,
+    absolute_frame: &Array2<f64>,
+) -> (Array2<f64>, Array2<f64>) {
+    let dimension = matrix.nrows();
+    let mut applied = Array2::<f64>::zeros((dimension, dimension));
+    for (row, operator_row) in matrix.rows().into_iter().enumerate() {
+        for col in 0..dimension {
+            let mut sum = KahanSum::default();
+            for (entry, basis) in operator_row.iter().zip(frame.column(col)) {
+                sum.add(entry * basis);
+            }
+            applied[[row, col]] = sum.sum();
+        }
+    }
+    let applied_band = majorant(matrix.mapv(f64::abs).dot(absolute_frame), dimension)
+        .mapv(|absolute_sum| compensated_band(1, absolute_sum));
+    let mut reduced = Array2::<f64>::zeros((dimension, dimension));
+    for left in 0..dimension {
+        for col in 0..dimension {
+            let mut sum = KahanSum::default();
+            for (basis, entry) in frame.column(left).iter().zip(applied.column(col)) {
+                sum.add(basis * entry);
+            }
+            reduced[[left, col]] = sum.sum();
+        }
+    }
+    let own_band = majorant(absolute_frame.t().dot(&applied.mapv(f64::abs)), dimension)
+        .mapv(|absolute_sum| compensated_band(1, absolute_sum));
+    let carried_band = majorant(absolute_frame.t().dot(&applied_band), dimension);
+    (reduced, own_band + carried_band)
+}
+
+/// A nonnegative matrix product formed in round-to-nearest, raised to majorize the
+/// exact one. Each entry `ĉ` is a length-`terms` inner product of nonnegative terms, so
+/// the exact value is at most `ĉ / (1 - γ_terms)`, which `ĉ (1 + γ_{terms+2})` exceeds
+/// with the rounding of that addition included.
+fn majorant(product: Array2<f64>, terms: usize) -> Array2<f64> {
+    product.mapv(|value| value + accumulation_band(terms + 2, value))
+}
+
+/// An upper bound on `σ_min(I_r ⊗ M_11 - M_22^T ⊗ I_k)` as formed by
+/// [`kronecker_separation`]: its smallest column norm, rounded upward. Column
+/// `a + k j` holds `M_11[:, a]` off the diagonal, `-M_22[j, :]` off the diagonal and
+/// `m_11[a, a] - m_22[j, j]` on it.
+fn kronecker_column_ceiling(reduced: &Array2<f64>, columns: usize) -> f64 {
+    let dimension = reduced.nrows();
+    let leading_off_diagonal: Vec<f64> = (0..columns)
+        .map(|col| {
+            (0..columns)
+                .filter(|&row| row != col)
+                .map(|row| reduced[[row, col]].powi(2))
+                .sum()
+        })
+        .collect();
+    let trailing_off_diagonal: Vec<f64> = (columns..dimension)
+        .map(|row| {
+            (columns..dimension)
+                .filter(|&col| col != row)
+                .map(|col| reduced[[row, col]].powi(2))
+                .sum()
+        })
+        .collect();
+    let mut ceiling = f64::INFINITY;
+    for (leading, leading_sum) in leading_off_diagonal.iter().enumerate() {
+        for (offset, trailing_sum) in trailing_off_diagonal.iter().enumerate() {
+            let trailing = columns + offset;
+            let diagonal = reduced[[leading, leading]] - reduced[[trailing, trailing]];
+            let squared = leading_sum + trailing_sum + diagonal * diagonal;
+            // `n - 1` squares, each passing through at most `n - 1` further roundings, all
+            // positive: `γ_{n+2}` of the computed sum majorizes the exact one, as in
+            // [`majorant`], and the correctly rounded root moves by half an ulp.
+            let raised = squared + accumulation_band(dimension + 2, squared);
+            ceiling = ceiling.min(raised.sqrt().next_up());
+        }
+    }
+    ceiling
 }
 
 /// Lower bound on `sep_F(M_11, M_22)` of the computed blocks: the smallest singular
@@ -1188,5 +1340,120 @@ mod tests {
             ),
             other => panic!("expected a real block, got {other:?}"),
         }
+    }
+
+    /// The Sylvester–Hadamard matrix of order `order` (a power of 4) over its square
+    /// root: entries `±2^-k`, so it is orthogonal exactly in binary64.
+    fn hadamard_frame(order: usize) -> Array2<f64> {
+        let mut matrix = Array2::<f64>::from_elem((1, 1), 1.0);
+        while matrix.nrows() < order {
+            let size = matrix.nrows();
+            let mut next = Array2::<f64>::zeros((2 * size, 2 * size));
+            for row in 0..size {
+                for col in 0..size {
+                    let value = matrix[[row, col]];
+                    next[[row, col]] = value;
+                    next[[row, col + size]] = value;
+                    next[[row + size, col]] = value;
+                    next[[row + size, col + size]] = -value;
+                }
+            }
+            matrix = next;
+        }
+        let scale = (order as f64).sqrt();
+        matrix.mapv(|value| value / scale)
+    }
+
+    #[test]
+    fn the_certificate_floor_carries_no_term_count_2951() {
+        // `T = H B H^T`, dense, with `B` rotating plane `j` by `2 pi (j + 1) / 65`.
+        const ORDER: usize = 64;
+        let frame = hadamard_frame(ORDER);
+        assert_eq!(frame.t().dot(&frame), Array2::<f64>::eye(ORDER));
+        let mut form = Array2::<f64>::zeros((ORDER, ORDER));
+        for plane in 0..ORDER / 2 {
+            let angle = 2.0 * PI * (plane + 1) as f64 / (ORDER + 1) as f64;
+            set_plane(&mut form, 2 * plane, angle.cos(), angle.sin());
+        }
+        let operator = frame.dot(&form).dot(&frame.t());
+
+        // The first cluster's first proposal, the dense frame recovery certifies.
+        let estimates = eigenvalue_estimates(operator.view()).expect("estimates");
+        let clusters = initial_clusters(&estimates).expect("clusters");
+        let (polynomial, _) = cluster_polynomial(operator.view(), &estimates, &clusters[0]);
+        let proposal = proposal_frame(&polynomial).expect("proposal");
+        let certificate =
+            certify_frame(operator.view(), &proposal, clusters[0].len()).expect("certificate");
+        assert!(matches!(certificate.verdict, SubspaceVerdict::Certified { .. }), "{certificate:?}");
+        // The Wilkinson band of forming `Q^T T Q` as a naive product on that frame,
+        // `γ_{2n} ||(|Q|^T |T| |Q|)||_F`, which the compensated sums replaced. The
+        // certificate's whole similarity error, orthogonality defect included, lies
+        // below that one term.
+        let absolute = proposal.mapv(f64::abs);
+        let wilkinson = accumulation_growth(2 * ORDER)
+            * frobenius_norm(absolute.t().dot(&operator.mapv(f64::abs).dot(&absolute)).view());
+        assert!(
+            certificate.similarity_error < wilkinson,
+            "similarity error {:e} not below the naive band {wilkinson:e}",
+            certificate.similarity_error
+        );
+
+        // A planted plane, offered as its own columns of `H`, certifies and spans them.
+        let basis = frame.slice(s![.., 0..2]);
+        let planted = certify_invariant_subspace(operator.view(), basis).expect("certificate");
+        assert!(matches!(planted.verdict, SubspaceVerdict::Certified { .. }), "{planted:?}");
+        assert_spans(&planted, basis);
+
+        // Every planted plane is recovered and certified as a rotation-scaling.
+        let recovery = recover_invariant_blocks(operator.view()).expect("recovery");
+        assert_eq!(recovery.blocks.len(), ORDER / 2, "{:?}", recovery.ambiguities());
+        assert!(
+            recovery
+                .blocks
+                .iter()
+                .all(|block| matches!(block.kind, InvariantBlockKind::RotationScaling { .. })),
+            "{:?}",
+            recovery.ambiguities()
+        );
+    }
+
+    #[test]
+    fn the_kronecker_column_bound_refuses_only_where_the_svd_refuses_2951() {
+        let (operator, frame) = plant(&two_planes_fixed_space_and_an_axis());
+        // The same frame and reduced operator `certify_invariant_subspace` builds, with
+        // the bound, the SVD's lower bound on `sep_F` and Stewart's `4 γ η`.
+        let measure = |basis: ArrayView2<'_, f64>| {
+            let certificate =
+                certify_invariant_subspace(operator.view(), basis).expect("certificate");
+            let completed = completed_frame(basis).expect("frame");
+            let (reduced, _) =
+                compensated_similarity(operator.view(), &completed, &completed.mapv(f64::abs));
+            let ceiling = kronecker_column_ceiling(&reduced, basis.ncols());
+            let singular = kronecker_separation(&reduced, basis.ncols()).expect("svd");
+            let condition = 4.0 * certificate.residual * certificate.coupling;
+            (certificate, ceiling, singular, condition)
+        };
+
+        // The planted plane: the bound admits it, and the SVD certifies it.
+        let (planted, ceiling, singular, condition) = measure(frame.slice(s![.., 0..2]));
+        assert!(ceiling * ceiling > condition, "{ceiling:e}^2 <= {condition:e}");
+        assert!(singular <= ceiling, "SVD bound {singular:e} above the column bound {ceiling:e}");
+        assert!(planted.separation.is_finite() && planted.separation > 0.0, "{planted:?}");
+        assert!(matches!(planted.verdict, SubspaceVerdict::Certified { .. }));
+
+        // A plane mixing the two planted planes: the bound refuses it with no SVD, and
+        // the SVD it skipped refuses it as well.
+        let mut mixed = Array2::<f64>::zeros((DIMENSION, 2));
+        mixed.column_mut(0).assign(&frame.column(0));
+        mixed.column_mut(1).assign(&frame.column(2));
+        let (refused, ceiling, singular, condition) = measure(mixed.view());
+        assert!(ceiling * ceiling <= condition, "{ceiling:e}^2 > {condition:e}");
+        assert_eq!(refused.separation, f64::NEG_INFINITY, "{refused:?}");
+        assert!(matches!(refused.verdict, SubspaceVerdict::NotSeparated { .. }));
+        assert!(singular <= ceiling, "SVD bound {singular:e} above the column bound {ceiling:e}");
+        assert!(
+            singular <= 0.0 || singular * singular <= condition,
+            "the SVD would certify what the bound refused: {singular:e}^2 against {condition:e}"
+        );
     }
 }
