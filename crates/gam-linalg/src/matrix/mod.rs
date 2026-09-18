@@ -1119,6 +1119,17 @@ impl SparseDesignMatrix {
         Some(arc)
     }
 
+    /// The cached CSR view, borrowed. Per-row callers read through this instead of
+    /// [`Self::to_csr_arc`]: cloning the shared `Arc` writes its reference count, and
+    /// under a row-parallel kernel every worker then contends on that one counter for
+    /// every row. The cache is write-once, so the borrow is the same matrix.
+    pub(crate) fn csr_ref(&self) -> Option<&SparseRowMat<usize, f64>> {
+        if self.csr_cache.get().is_none() {
+            self.to_csr_arc()?;
+        }
+        self.csr_cache.get().map(|arc| arc.as_ref())
+    }
+
     fn row_chunk_into(
         &self,
         rows: Range<usize>,
@@ -4850,7 +4861,7 @@ impl DesignMatrix {
                 // invariant was violated upstream.
                 // SAFETY: SparseDesignMatrix invariants guarantee csc→csr conversion succeeds.
                 let csr = matrix
-                    .to_csr_arc()
+                    .csr_ref()
                     .expect("DesignMatrix::dot_row: failed to obtain CSR view");
                 let sym = csr.symbolic();
                 let row_ptr = sym.row_ptr();
@@ -4940,7 +4951,7 @@ impl DesignMatrix {
                 // that `SparseDesignMatrix` is contractually allowed to hold.
                 // SAFETY: SparseDesignMatrix invariants guarantee csc→csr conversion succeeds.
                 let csr = matrix
-                    .to_csr_arc()
+                    .csr_ref()
                     .ok_or_else(|| format!("DesignMatrix::{method}: failed to obtain CSR view"))?;
                 let sym = csr.symbolic();
                 let row_ptr = sym.row_ptr();
@@ -5001,10 +5012,10 @@ impl DesignMatrix {
                 // structurally impossible, but the function returns `Result`
                 // so propagate rather than panic if a future invariant break
                 // surfaces here.
-                let lhs_csr = lhs.to_csr_arc().ok_or_else(|| {
+                let lhs_csr = lhs.csr_ref().ok_or_else(|| {
                     "crossdiag_axpy_row_into: failed to obtain lhs CSR view".to_string()
                 })?;
-                let rhs_csr = rhs.to_csr_arc().ok_or_else(|| {
+                let rhs_csr = rhs.csr_ref().ok_or_else(|| {
                     "crossdiag_axpy_row_into: failed to obtain rhs CSR view".to_string()
                 })?;
                 let lhs_sym = lhs_csr.symbolic();
@@ -5051,7 +5062,7 @@ impl DesignMatrix {
                 // Same CSR conversion contract as the (Sparse, Sparse) arm
                 // above — propagate the (structurally impossible) failure
                 // through this fn's `Result` rather than panicking.
-                let csr = sparse_mat.to_csr_arc().ok_or_else(|| {
+                let csr = sparse_mat.csr_ref().ok_or_else(|| {
                     "crossdiag_axpy_row_into: failed to obtain CSR view".to_string()
                 })?;
                 let sym = csr.symbolic();
@@ -5139,7 +5150,7 @@ impl DesignMatrix {
                 // failure for a malformed sparse matrix; `SparseDesignMatrix`
                 // invariants forbid that case.
                 // SAFETY: SparseDesignMatrix invariants guarantee csc→csr conversion succeeds.
-                let csr = matrix.to_csr_arc().ok_or_else(|| {
+                let csr = matrix.csr_ref().ok_or_else(|| {
                     "DesignMatrix::syr_row_into: failed to obtain CSR view".to_string()
                 })?;
                 let sym = csr.symbolic();
@@ -5230,11 +5241,11 @@ impl DesignMatrix {
                 // upstream guarantee both inputs round-trip to CSR.
                 // SAFETY: SparseDesignMatrix invariants guarantee csc→csr conversion succeeds.
                 let lhs_csr = lhs
-                    .to_csr_arc()
+                    .csr_ref()
                     .ok_or_else(|| "row_outer_into: failed to obtain lhs CSR view".to_string())?;
                 // SAFETY: SparseDesignMatrix invariants guarantee csc→csr conversion succeeds.
                 let rhs_csr = rhs
-                    .to_csr_arc()
+                    .csr_ref()
                     .ok_or_else(|| "row_outer_into: failed to obtain rhs CSR view".to_string())?;
                 let lhs_sym = lhs_csr.symbolic();
                 let rhs_sym = rhs_csr.symbolic();
