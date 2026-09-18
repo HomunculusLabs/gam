@@ -199,10 +199,21 @@ struct Fitted {
 }
 
 fn fit(sample: &Sample, with_block: bool) -> Fitted {
+    fit_with(sample, with_block, "y ~ s(x)", "s(x)", None)
+}
+
+fn fit_with(
+    sample: &Sample,
+    with_block: bool,
+    formula: &str,
+    slope_formula: &str,
+    latent_measure: Option<&str>,
+) -> Fitted {
     let config = FitConfig {
         family: Some("bernoulli-marginal-slope".to_string()),
         z_column: Some("z".to_string()),
-        slope_formula: Some("s(x)".to_string()),
+        slope_formula: Some(slope_formula.to_string()),
+        latent_measure: latent_measure.map(str::to_string),
         residual_columns: if with_block {
             vec!["r1".to_string(), "r2".to_string()]
         } else {
@@ -210,7 +221,7 @@ fn fit(sample: &Sample, with_block: bool) -> Fitted {
         },
         ..FitConfig::default()
     };
-    let payload = fit_formula_to_payload("y ~ s(x)".to_string(), &sample.dataset, &config)
+    let payload = fit_formula_to_payload(formula.to_string(), &sample.dataset, &config)
         .unwrap_or_else(|e| panic!("bernoulli marginal-slope fit (block={with_block}): {e}"));
     let unified = payload
         .unified
@@ -405,6 +416,191 @@ fn residual_block_recovers_beta_and_approaches_the_oracle_repair_value() {
     assert!(
         (last_gain - nested_oracle).abs() < 0.12 * nested_oracle + 1.0e-3,
         "n=32000: held-out gain {last_gain} vs nested gain {nested_oracle}"
+    );
+}
+
+/// The skew of the declared-law arm's score: `z = (e^{0.6u} − μ)/σ`, `u ~ N(0, 1)`,
+/// standardised in population.
+const SKEW: f64 = 0.6;
+const LEVELS: usize = 16;
+
+fn skewed_score(u: f64) -> f64 {
+    let mean = (0.5 * SKEW * SKEW).exp();
+    let sd = (((SKEW * SKEW).exp() - 1.0) * (SKEW * SKEW).exp()).sqrt();
+    ((SKEW * u).exp() - mean) / sd
+}
+
+/// The population law of the skewed score: Simpson nodes over `u ∈ [−8, 8]`
+/// pushed through [`skewed_score`], weighted by `φ(u)`.
+fn skewed_law() -> Vec<(f64, f64)> {
+    let panels = 1600usize;
+    let h = 16.0 / panels as f64;
+    (0..=panels)
+        .map(|i| {
+            let u = -8.0 + i as f64 * h;
+            let simpson = if i == 0 || i == panels {
+                1.0
+            } else if i % 2 == 1 {
+                4.0
+            } else {
+                2.0
+            };
+            (skewed_score(u), simpson * h / 3.0 * normal_pdf(u))
+        })
+        .collect()
+}
+
+fn level_x(level: usize) -> f64 {
+    -1.0 + 2.0 * (level as f64 + 0.5) / LEVELS as f64
+}
+
+/// The true intercept of each context level under the skewed law. Given `z` the
+/// drive `b z + βᵀr` is `N(b z, κ)`, so `E[Φ(α + drive)] = Σ_j w_j Φ((α + b z_j)/τ)`,
+/// `τ = √(1 + κ)`, and `α` is τ times the root of `Σ_j w_j Φ(ã + (b/τ) z_j) = Φ(q)`,
+/// solved here by bisection.
+fn skewed_true_intercepts(beta: &[f64; 2], law: &[(f64, f64)]) -> Vec<f64> {
+    let tau = (1.0 + kappa(beta)).sqrt();
+    (0..LEVELS)
+        .map(|level| {
+            let x = level_x(level);
+            let (target, slope) = (normal_cdf(q_of(x)), b_of(x) / tau);
+            let mass = |a: f64| law.iter().map(|&(z, w)| w * normal_cdf(a + slope * z)).sum::<f64>();
+            let (mut lo, mut hi) = (-30.0, 30.0);
+            for _ in 0..200 {
+                let mid = 0.5 * (lo + hi);
+                if mass(mid) < target {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            tau * 0.5 * (lo + hi)
+        })
+        .collect()
+}
+
+/// `E[(p₁ − p₀)²]` on the skewed arm, `p₀ = Φ((α + b z)/τ)`.
+fn skewed_nested_gain(beta: &[f64; 2], law: &[(f64, f64)], alpha: &[f64]) -> f64 {
+    let kappa = kappa(beta);
+    let tau = (1.0 + kappa).sqrt();
+    let sd_u = kappa.sqrt();
+    (0..LEVELS)
+        .map(|level| {
+            let b = b_of(level_x(level));
+            law.iter()
+                .map(|&(z, w)| {
+                    let m = alpha[level] + b * z;
+                    let second = simpson(-8.0, 8.0, 400, |t| {
+                        let p = normal_cdf(m + sd_u * t);
+                        p * p * normal_pdf(t)
+                    });
+                    let p0 = normal_cdf(m / tau);
+                    w * (second - p0 * p0)
+                })
+                .sum::<f64>()
+        })
+        .sum::<f64>()
+        / LEVELS as f64
+}
+
+fn draw_skewed(n: usize, beta: &[f64; 2], alpha: &[f64], seed: u64) -> Sample {
+    let headers = ["y", "x", "z", "r1", "r2"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    let l11 = SIGMA_RR[0][0].sqrt();
+    let l21 = SIGMA_RR[1][0] / l11;
+    let l22 = (SIGMA_RR[1][1] - l21 * l21).sqrt();
+    let mut state = seed;
+    let mut rows = Vec::with_capacity(n);
+    let (mut x, mut y, mut p_true) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+    for _ in 0..n {
+        let level = ((next_unit(&mut state) * LEVELS as f64) as usize).min(LEVELS - 1);
+        let xi = level_x(level);
+        let z = skewed_score(next_gauss(&mut state));
+        let e1 = next_gauss(&mut state);
+        let e2 = next_gauss(&mut state);
+        let r1 = l11 * e1;
+        let r2 = l21 * e1 + l22 * e2;
+        let p = normal_cdf(alpha[level] + b_of(xi) * z + beta[0] * r1 + beta[1] * r2);
+        let yi = u8::from(next_unit(&mut state) < p);
+        rows.push(StringRecord::from(vec![
+            yi.to_string(),
+            xi.to_string(),
+            z.to_string(),
+            r1.to_string(),
+            r2.to_string(),
+        ]));
+        x.push(xi);
+        y.push(f64::from(yi));
+        p_true.push(p);
+    }
+    Sample {
+        dataset: encode_recordswith_inferred_schema(headers, rows).expect("encode #2924 skewed sample"),
+        x,
+        y,
+        p_true,
+    }
+}
+
+#[test]
+fn residual_block_anchors_on_a_declared_skewed_score_law() {
+    init_parallelism();
+    #[cfg(target_os = "macos")]
+    gam::gpu::configure_global_policy(gam::gpu::GpuPolicy::Off);
+
+    // The score's law is skewed, so the fit declares its finite law and the
+    // block enters through the finite mixture of Gaussian drives.
+    let law = skewed_law();
+    let alpha = skewed_true_intercepts(&BETA, &law);
+    let nested_oracle = skewed_nested_gain(&BETA, &law, &alpha);
+    let test = draw_skewed(N_TEST, &BETA, &alpha, 0x2924_7E57_5E3D_0001);
+    let n = 32_000usize;
+    let train = draw_skewed(n, &BETA, &alpha, 0x2924_5E3D_0003);
+    let score_only = fit_with(&train, false, "y ~ x", "x", Some("global-empirical"));
+    let repaired = fit_with(&train, true, "y ~ x", "x", Some("global-empirical"));
+    let beta_hat = repaired.beta_residual.clone().expect("β̂");
+    let pred0 = predict(&score_only, &test);
+    let pred1 = predict(&repaired, &test);
+    let gain = brier(&test.y, &pred0.plugin) - brier(&test.y, &pred1.plugin);
+    let bins = 8;
+    let cal0 = calibration_gap(&test.x, &pred0.plugin, bins);
+    let cal1 = calibration_gap(&test.x, &pred1.plugin, bins);
+    // The same block anchored on the standard-normal law this score does not
+    // have: what the declared law is for.
+    let gaussian = fit_with(&train, true, "y ~ x", "x", Some("standard-normal"));
+    let cal_gaussian = calibration_gap(&test.x, &predict(&gaussian, &test).plugin, bins);
+    eprintln!(
+        "[2924 skewed] n={n}: beta_hat=({:.4}, {:.4}) truth=({:.4}, {:.4}) log_lambda_r={:.3} | \
+         held-out Brier gain={gain:.5} nested gain={nested_oracle:.5} | calibration gap \
+         score-only={cal0:.4} repaired={cal1:.4} repaired-on-standard-normal={cal_gaussian:.4}",
+        beta_hat[0],
+        beta_hat[1],
+        BETA[0],
+        BETA[1],
+        repaired.residual_log_lambda.unwrap_or(f64::NAN),
+    );
+    let tolerance = 0.16 / (n as f64 / 2_000.0).sqrt() + 0.02;
+    for k in 0..2 {
+        assert!(
+            (beta_hat[k] - BETA[k]).abs() < tolerance,
+            "skewed law: beta_hat[{k}]={} vs {} (tolerance {tolerance:.3})",
+            beta_hat[k],
+            BETA[k]
+        );
+    }
+    let calibration_tolerance = 0.012 + 0.7 / (n as f64).sqrt();
+    assert!(
+        cal0 < calibration_tolerance,
+        "skewed law: score-only calibration gap {cal0} (tolerance {calibration_tolerance:.4})"
+    );
+    assert!(
+        cal1 < calibration_tolerance,
+        "skewed law: repaired calibration gap {cal1} (tolerance {calibration_tolerance:.4})"
+    );
+    assert!(
+        (gain - nested_oracle).abs() < 0.25 * nested_oracle + 1.0e-3,
+        "skewed law: held-out gain {gain} is not near the nested gain {nested_oracle}"
     );
 }
 

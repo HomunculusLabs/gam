@@ -63,6 +63,8 @@ use super::gradient_paths::*;
 use super::hessian_paths::BlockSlices;
 use super::*;
 use gam_math::jet_scalar::{JetScalar, SymmetricQuadraticCoefficients};
+use gam_math::jet_tower::Tower4;
+use gam_math::nested_dual::JetField;
 use ndarray::Zip;
 
 /// Name of the residual block in the parameter-block list and in the
@@ -105,9 +107,6 @@ pub enum ResidualRepairRefusal {
     /// A learned frailty scale is an outer axis the residual kernel does not
     /// differentiate; pass a fixed `frailty_sd` instead.
     LearnedFrailtyUnsupported,
-    /// The empirical latent measure integrates `z` on a grid; integrating the
-    /// joint `(z, r)` law on that grid is not implemented here.
-    EmpiricalLatentMeasureUnsupported,
     /// The CTN Stage-1 influence absorber widens the marginal block; the
     /// residual kernel reads the marginal design at its raw width.
     InfluenceAbsorberUnsupported,
@@ -159,12 +158,6 @@ impl std::fmt::Display for ResidualRepairRefusal {
                 f,
                 "residual_columns requires a fixed frailty_sd (or none): a learned frailty scale is \
                  not differentiated by the residual row kernel"
-            ),
-            Self::EmpiricalLatentMeasureUnsupported => write!(
-                f,
-                "residual_columns requires the standard-normal latent measure: the score did not \
-                 pass the conditional-normality gate and fell back to the empirical grid, on which \
-                 the joint (z, r) anchor is not implemented"
             ),
             Self::InfluenceAbsorberUnsupported => write!(
                 f,
@@ -566,9 +559,246 @@ fn sqrt1p_stack(f: f64) -> [f64; 5] {
     ]
 }
 
+/// Derivative stack of `x ↦ log Φ(x)` at `x`.
+#[inline]
+fn log_probit_stack(x: f64) -> [f64; 5] {
+    signed_probit_neglog_unary_stack(x, 1.0).map(|derivative| -derivative)
+}
+
+/// The anchored intercept of a finite mixture of Gaussian drives, with its
+/// derivatives through order four in `(q, B)`.
+///
+/// Under a declared finite law `z ∼ Σ_k w_k δ_{z_k}` of the score and the
+/// Gaussian law `r | z, a ∼ N(γz, Σ_{r·z})` of the residual block — `γ` and
+/// `Σ_{r·z}` are the first column and the Schur complement of the declared joint
+/// covariance — the genetic drive `s(g z + βᵀr)` given node `k` is `N(m·z_k, v)`
+/// with `m = s(g + βᵀγ)` and `v = s²·βᵀΣ_{r·z}β`: a finite mixture of Gaussians.
+/// Averaging each component (`Descent.Portability.GaussianAnchor.drive_gaussianAverage`)
+/// turns the anchoring equation `E[Φ(α + d)] = Φ(q)` into
+///
+/// ```text
+///   Σ_k w_k Φ(ã + B·z_k) = Φ(q),     α = τ·ã,   B = m/τ,   τ = √(1 + v)
+/// ```
+///
+/// — the probit anchor on a finite declared law, whose root is unique
+/// (`Descent.Portability.ProbitAnchor.exists_unique_anchor_probit`).
+///
+/// The value is the log-space monotone root the rigid empirical kernel solves.
+/// The derivative channels come from frozen-Jacobian Newton on the tower,
+/// `ã ← ã − F(ã)/F′(ã*)` with `F(ã) = log Σ_k w_k Φ(ã + B·z_k) − log Φ(q)`: the
+/// error `e` of a step becomes `e·(1 − F′(ã)/F′(ã*)) + O(e²)`, and the factor has
+/// no constant term, so each step fixes one more Taylor order and four are
+/// exact through order four (its first order is `∂ã/∂B = −E[φ·z]/E[φ]`,
+/// `ProbitAnchor.anchor_deriv_eq_probit`). The value channel is held at the
+/// root, so every path that reads the same root agrees with it bit for bit.
+pub(crate) fn mixture_anchor_tower(
+    marginal_mu: f64,
+    q: f64,
+    b: f64,
+    grid: &EmpiricalZGrid,
+) -> Result<Tower4<2>, String> {
+    let root =
+        empirical_intercept_from_marginal(marginal_mu, q, b, 1.0, &grid.nodes, &grid.weights, None)?;
+    let (_, slope_of_residual, _) = empirical_rigid_calibration_eval(
+        root,
+        marginal_mu.ln(),
+        b,
+        1.0,
+        &grid.nodes,
+        &grid.weights,
+    )?;
+    if !(slope_of_residual.is_finite() && slope_of_residual > 0.0) {
+        return Err(format!(
+            "residual repair mixture anchor: the calibration slope {slope_of_residual} at the root \
+             a={root} is not positive"
+        ));
+    }
+    let inverse_slope = slope_of_residual.recip();
+    let q_var = <Tower4<2> as JetScalar<2>>::variable(q, 0);
+    let b_var = <Tower4<2> as JetScalar<2>>::variable(b, 1);
+    let log_target = q_var.compose_unary(log_probit_stack(q));
+    let log_weights: Vec<f64> = grid.weights.iter().map(|w| w.ln()).collect();
+    let mut intercept = <Tower4<2> as JetScalar<2>>::constant(root);
+    for _ in 0..4 {
+        let residual = log_mixture_probit(&intercept, &b_var, &grid.nodes, &log_weights)
+            .sub(&log_target);
+        intercept = intercept.sub(&residual.scale(inverse_slope).with_value(0.0));
+    }
+    Ok(intercept)
+}
+
+/// `log Σ_k w_k Φ(a + b·z_k)` on towers, by log-sum-exp about the largest term
+/// so every exponential is taken at a non-positive argument.
+fn log_mixture_probit(
+    a: &Tower4<2>,
+    b: &Tower4<2>,
+    nodes: &[f64],
+    log_weights: &[f64],
+) -> Tower4<2> {
+    let terms: Vec<Tower4<2>> = nodes
+        .iter()
+        .zip(log_weights.iter())
+        .map(|(&node, &log_weight)| {
+            let x = a.add(&b.scale(node));
+            x.compose_unary(log_probit_stack(x.value()))
+                .add_constant(log_weight)
+        })
+        .collect();
+    let largest = terms
+        .iter()
+        .map(|term| term.value())
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mut mass = <Tower4<2> as JetScalar<2>>::constant(0.0);
+    for term in &terms {
+        mass = mass.add(&term.add_constant(-largest).exp());
+    }
+    mass.ln().add_constant(largest)
+}
+
+/// Compose a bivariate tower `f(q, B)` with the jets `Q` and `B` through order
+/// four: the Taylor polynomial of `f` about `(Q.value(), B.value())` at the jets'
+/// zero-valued displacements. A displacement's fifth power vanishes in every
+/// truncation, so this is exact on each channel a jet carries.
+fn compose_bivariate_tower<const K: usize, S: JetScalar<K>>(f: &Tower4<2>, q: &S, b: &S) -> S {
+    let dq = q.with_value(0.0);
+    let db = b.with_value(0.0);
+    let dq2 = dq.mul(&dq);
+    let dq3 = dq2.mul(&dq);
+    let db2 = db.mul(&db);
+    let db3 = db2.mul(&db);
+    let monomials = [
+        dq,
+        db,
+        dq2,
+        dq.mul(&db),
+        db2,
+        dq3,
+        dq2.mul(&db),
+        dq.mul(&db2),
+        db3,
+        dq3.mul(&dq),
+        dq3.mul(&db),
+        dq2.mul(&db2),
+        dq.mul(&db3),
+        db3.mul(&db),
+    ];
+    // ∂^{i+j}f/∂q^i∂B^j / (i!·j!) for each monomial dq^i·dB^j above.
+    let coefficients = [
+        f.g[0],
+        f.g[1],
+        f.h[0][0] / 2.0,
+        f.h[0][1],
+        f.h[1][1] / 2.0,
+        f.t3[0][0][0] / 6.0,
+        f.t3[0][0][1] / 2.0,
+        f.t3[0][1][1] / 2.0,
+        f.t3[1][1][1] / 6.0,
+        f.t4[0][0][0][0] / 24.0,
+        f.t4[0][0][0][1] / 6.0,
+        f.t4[0][0][1][1] / 4.0,
+        f.t4[0][1][1][1] / 6.0,
+        f.t4[1][1][1][1] / 24.0,
+    ];
+    S::linear_combination(&monomials, &coefficients).add_constant(f.v)
+}
+
+/// One row of the residual-augmented marginal-slope likelihood, as every
+/// consumer reads it: the kernel's jet lowering, the finite-difference gates
+/// and the plain-`f64` index all go through [`residual_row_nll`] or its first-
+/// order transcription [`residual_row_index`].
+pub(super) struct ResidualRowState<'a> {
+    pub(super) marginal: BernoulliMarginalLinkMap,
+    pub(super) z: f64,
+    pub(super) y: f64,
+    pub(super) w: f64,
+    pub(super) probit_scale: f64,
+    pub(super) r: &'a [f64],
+    /// The declared joint covariance of `(z, r)` at this row.
+    pub(super) covariance: &'a MarginalSlopeCovariance,
+    /// `None`: the standard-normal law of the score. `Some`: its declared
+    /// finite law at this row (global, or this row's local mixture).
+    pub(super) grid: Option<&'a EmpiricalZGrid>,
+}
+
+/// The row negative log-likelihood over primaries `(q_eta, g, β_1, …, β_K)`.
+///
+/// Standard-normal score: `η = c·q + s(g z + βᵀr)`, `c = √(1 + s²·b̃ᵀΣb̃)`.
+/// Declared finite law: `η = τ·ã(q, B) + s(g z + βᵀr)` from
+/// [`mixture_anchor_tower`], with `m = (Σ·s b̃)₀ = s(g + βᵀγ)` and
+/// `v = s²·b̃ᵀΣb̃ − m²`, because `Σ₀₀ = 1` makes `b̃ᵀΣb̃ = (g + βᵀγ)² + βᵀΣ_{r·z}β`.
+/// On a standard-normal grid the two branches agree to quadrature tolerance.
+pub(super) fn residual_row_nll<const K: usize, S: JetScalar<K>>(
+    state: &ResidualRowState<'_>,
+    p: &[S; K],
+) -> Result<S, String> {
+    let s = state.probit_scale;
+    let marginal = state.marginal;
+    // q = Φ⁻¹(Φ(η_m)) through the supplied link stack.
+    let q = p[0].compose_unary([
+        marginal.q,
+        marginal.q1,
+        marginal.q2,
+        marginal.q3,
+        marginal.q4,
+    ]);
+    // Observed drive coefficients b̃ = s·(g, β).
+    let mut drive = [S::constant(0.0); K];
+    for k in 1..K {
+        drive[k - 1] = p[k].scale(s);
+    }
+    let drive = &drive[..K - 1];
+    let quad = S::symmetric_quadratic_form(drive, state.covariance);
+    let quad_value = quad.value();
+    if !(quad_value.is_finite() && quad_value >= -f64::EPSILON * (1.0 + quad_value.abs())) {
+        return Err(format!(
+            "residual repair row: the anchor quadratic form b̃ᵀΣb̃ = {quad_value} is not admissible"
+        ));
+    }
+    let mut linear_weights = [0.0_f64; K];
+    linear_weights[0] = state.z;
+    linear_weights[1..K - 1].copy_from_slice(state.r);
+    let linear = S::linear_combination(drive, &linear_weights[..K - 1]);
+    let eta = match state.grid {
+        None => {
+            let c = quad.compose_unary(sqrt1p_stack((1.0 + quad_value.max(0.0)).sqrt()));
+            q.multiply_add(&c, &linear)
+        }
+        Some(grid) => {
+            let mut first_column = [0.0_f64; K];
+            for (j, entry) in first_column[..K - 1].iter_mut().enumerate() {
+                *entry = state.covariance.coefficient(0, j);
+            }
+            let m = S::linear_combination(drive, &first_column[..K - 1]);
+            let v = quad.sub(&m.mul(&m));
+            let v_value = v.value();
+            if !(v_value.is_finite() && v_value >= -f64::EPSILON * (1.0 + quad_value.abs())) {
+                return Err(format!(
+                    "residual repair row: the residual drive variance βᵀΣ_{{r·z}}β = {v_value} is not \
+                     admissible"
+                ));
+            }
+            let tau = v.compose_unary(sqrt1p_stack((1.0 + v_value.max(0.0)).sqrt()));
+            let b_scaled = m.mul(&tau.recip());
+            let tower = mixture_anchor_tower(marginal.mu, marginal.q, b_scaled.value(), grid)?;
+            compose_bivariate_tower(&tower, &q, &b_scaled).multiply_add(&tau, &linear)
+        }
+    };
+    let margin = eta.scale(2.0 * state.y - 1.0);
+    let nll = margin.compose_unary(signed_probit_neglog_unary_stack(margin.value(), state.w));
+    if !nll.value().is_finite() {
+        return Err(format!(
+            "residual repair row: non-finite log Φ at η={}, y={}, w={}",
+            eta.value(),
+            state.y,
+            state.w
+        ));
+    }
+    Ok(nll)
+}
+
 /// The row index and its first derivatives in plain `f64`: the value-only
 /// path of the fit and the prediction replay share this one statement of the
-/// anchor with the jet program below.
+/// anchor with the jet program [`residual_row_nll`].
 ///
 /// Returns `(η, ∂η/∂q_eta, ∂η/∂g, ∂η/∂β)`.
 pub(crate) fn residual_row_index(
@@ -578,6 +808,7 @@ pub(crate) fn residual_row_index(
     z: f64,
     r: &[f64],
     covariance: &MarginalSlopeCovariance,
+    grid: Option<&EmpiricalZGrid>,
     probit_scale: f64,
 ) -> Result<(f64, f64, f64, Vec<f64>), String> {
     let k = beta.len();
@@ -600,15 +831,44 @@ pub(crate) fn residual_row_index(
             "residual row index: the anchor quadratic form b̃ᵀΣb̃ = {quad} is not admissible"
         ));
     }
-    let c = (1.0 + quad.max(0.0)).sqrt();
-    let inv_c = c.recip();
     let linear = drive[0] * z + drive[1..].iter().zip(r.iter()).map(|(b, x)| b * x).sum::<f64>();
-    let eta = marginal.q * c + linear;
-    let d_q = marginal.q1 * c;
-    // ∂c/∂g = s·(Σ b̃)_0 / c ; ∂c/∂β_k = s·(Σ b̃)_{k+1} / c   (b̃ already carries s).
-    let d_g = marginal.q * s * sigma_drive[0] * inv_c + s * z;
+    let Some(grid) = grid else {
+        let c = (1.0 + quad.max(0.0)).sqrt();
+        let inv_c = c.recip();
+        let eta = marginal.q * c + linear;
+        let d_q = marginal.q1 * c;
+        // ∂c/∂g = s·(Σ b̃)_0 / c ; ∂c/∂β_k = s·(Σ b̃)_{k+1} / c   (b̃ already carries s).
+        let d_g = marginal.q * s * sigma_drive[0] * inv_c + s * z;
+        let d_beta: Vec<f64> = (0..k)
+            .map(|j| marginal.q * s * sigma_drive[j + 1] * inv_c + s * r[j])
+            .collect();
+        return Ok((eta, d_q, d_g, d_beta));
+    };
+    // The declared finite law: m = (Σ b̃)₀ = s(g + βᵀγ), v = b̃ᵀΣb̃ − m², τ = √(1 + v).
+    let m = sigma_drive[0];
+    let v = quad - m * m;
+    if !(v.is_finite() && v >= -f64::EPSILON * (1.0 + quad.abs())) {
+        return Err(format!(
+            "residual row index: the residual drive variance βᵀΣ_{{r·z}}β = {v} is not admissible"
+        ));
+    }
+    let tau = (1.0 + v.max(0.0)).sqrt();
+    let b_scaled = m / tau;
+    let tower = mixture_anchor_tower(marginal.mu, marginal.q, b_scaled, grid)?;
+    let (intercept, intercept_q, intercept_b) = (tower.v, tower.g[0], tower.g[1]);
+    let eta = tau * intercept + linear;
+    let d_q = tau * intercept_q * marginal.q1;
+    // ∂m/∂g = s, ∂v/∂g = 0; ∂m/∂β_j = s·γ_j, ∂v/∂β_j = 2s·((Σ b̃)_{j+1} − m·γ_j).
+    let d_g = s * intercept_b + s * z;
     let d_beta: Vec<f64> = (0..k)
-        .map(|j| marginal.q * s * sigma_drive[j + 1] * inv_c + s * r[j])
+        .map(|j| {
+            let gamma = covariance.coefficient(0, j + 1);
+            let d_m = s * gamma;
+            let d_v = 2.0 * s * (sigma_drive[j + 1] - m * gamma);
+            let d_tau = 0.5 * d_v / tau;
+            let d_b = d_m / tau - m * d_tau / (tau * tau);
+            d_tau * intercept + tau * intercept_b * d_b + s * r[j]
+        })
         .collect();
     Ok((eta, d_q, d_g, d_beta))
 }
@@ -626,6 +886,7 @@ pub(super) fn residual_row_neglog_only(
     let beta = block_states[2].beta.as_slice().ok_or("residual beta not contiguous")?;
     let r = runtime.features.row(row);
     let r = r.as_slice().ok_or("residual feature row not contiguous")?;
+    let grid = family.latent_measure.empirical_grid_for_training_row(row)?;
     let (eta, _, _, _) = residual_row_index(
         &marginal,
         g,
@@ -633,6 +894,7 @@ pub(super) fn residual_row_neglog_only(
         family.z[row],
         r,
         runtime.field.at_row(row),
+        grid.as_deref(),
         family.probit_frailty_scale(),
     )?;
     let w = family.weights[row];
@@ -674,9 +936,6 @@ impl<const K: usize> BernoulliResidualRowKernel<K> {
         }
         if family.flex_active() {
             return Err(ResidualRepairRefusal::FlexBlocksUnsupported.to_string());
-        }
-        if family.latent_measure.is_empirical() {
-            return Err(ResidualRepairRefusal::EmpiricalLatentMeasureUnsupported.to_string());
         }
         family.validate_exact_block_state_shapes(&block_states)?;
         let slices = super::hessian_paths::block_slices(&family);
@@ -726,51 +985,22 @@ impl<const K: usize> gam_math::jet_tower::RowProgram<K> for BernoulliResidualRow
         let marginal = self
             .family
             .marginal_link_map(self.block_states[0].eta[row])?;
-        let s = self.family.probit_frailty_scale();
-        let z = self.family.z[row];
-        let y = self.family.y[row];
-        let w = self.family.weights[row];
-        // q = Φ⁻¹(Φ(η_m)) through the supplied link stack.
-        let q = p[0].compose_unary([
-            marginal.q,
-            marginal.q1,
-            marginal.q2,
-            marginal.q3,
-            marginal.q4,
-        ]);
-        // Observed drive coefficients b̃ = s·(g, β).
-        let mut drive = [S::constant(0.0); K];
-        for k in 1..K {
-            drive[k - 1] = p[k].scale(s);
-        }
-        let drive = &drive[..K - 1];
-        let covariance = self.runtime.field.at_row(row);
-        let quad = S::symmetric_quadratic_form(drive, covariance);
-        let quad_value = quad.value();
-        if !(quad_value.is_finite() && quad_value >= -f64::EPSILON * (1.0 + quad_value.abs())) {
-            return Err(format!(
-                "residual repair row {row}: the anchor quadratic form b̃ᵀΣb̃ = {quad_value} is not \
-                 admissible"
-            ));
-        }
-        let c = quad.compose_unary(sqrt1p_stack((1.0 + quad_value.max(0.0)).sqrt()));
-        let mut linear_weights = [0.0_f64; K];
-        linear_weights[0] = z;
+        let grid = self
+            .family
+            .latent_measure
+            .empirical_grid_for_training_row(row)?;
         let r = self.runtime.features.row(row);
-        for k in 0..K - 2 {
-            linear_weights[1 + k] = r[k];
-        }
-        let linear = S::linear_combination(drive, &linear_weights[..K - 1]);
-        let eta = q.multiply_add(&c, &linear);
-        let margin = eta.scale(2.0 * y - 1.0);
-        let nll = margin.compose_unary(signed_probit_neglog_unary_stack(margin.value(), w));
-        if !nll.value().is_finite() {
-            return Err(format!(
-                "residual repair row {row}: non-finite log Φ at η={}, y={y}, w={w}",
-                eta.value()
-            ));
-        }
-        Ok(nll)
+        let state = ResidualRowState {
+            marginal,
+            z: self.family.z[row],
+            y: self.family.y[row],
+            w: self.family.weights[row],
+            probit_scale: self.family.probit_frailty_scale(),
+            r: r.as_slice().ok_or("residual feature row not contiguous")?,
+            covariance: self.runtime.field.at_row(row),
+            grid: grid.as_deref(),
+        };
+        residual_row_nll(&state, p).map_err(|e| format!("row {row}: {e}"))
     }
 }
 
@@ -1132,41 +1362,211 @@ mod residual_repair_kernel_tests {
         MarginalSlopeCovariance::full(sigma).expect("SPD covariance")
     }
 
+    /// A skewed finite law of the score: a discretised `exp(0.7·u)`,
+    /// standardised to mean 0 and variance 1, on 41 ascending nodes.
+    fn skewed_grid() -> EmpiricalZGrid {
+        let u: Vec<f64> = (0..41).map(|i| -3.0 + 0.15 * i as f64).collect();
+        let raw_weights: Vec<f64> = u.iter().map(|&v| (-0.5 * v * v).exp()).collect();
+        let total: f64 = raw_weights.iter().sum();
+        let weights: Vec<f64> = raw_weights.iter().map(|w| w / total).collect();
+        let raw_nodes: Vec<f64> = u.iter().map(|&v| (0.7 * v).exp()).collect();
+        let mean: f64 = raw_nodes.iter().zip(&weights).map(|(x, w)| x * w).sum();
+        let variance: f64 = raw_nodes
+            .iter()
+            .zip(&weights)
+            .map(|(x, w)| w * (x - mean) * (x - mean))
+            .sum();
+        let nodes = raw_nodes
+            .iter()
+            .map(|x| (x - mean) / variance.sqrt())
+            .collect();
+        EmpiricalZGrid::new(nodes, weights, "residual repair test law").unwrap()
+    }
+
+    /// The probabilists' Gauss–Hermite law: the finite law on which the mixture
+    /// anchor is the Gaussian closed form to quadrature tolerance.
+    fn hermite_grid(m: usize) -> EmpiricalZGrid {
+        let rule = gam_math::quadrature::gauss_hermite_rule(m).unwrap();
+        let mut pairs: Vec<(f64, f64)> = rule
+            .nodes
+            .iter()
+            .zip(&rule.weights)
+            .map(|(&x, &w)| (std::f64::consts::SQRT_2 * x, w / std::f64::consts::PI.sqrt()))
+            .collect();
+        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let total: f64 = pairs.iter().map(|p| p.1).sum();
+        EmpiricalZGrid::new(
+            pairs.iter().map(|p| p.0).collect(),
+            pairs.iter().map(|p| p.1 / total).collect(),
+            "hermite test law",
+        )
+        .unwrap()
+    }
+
     #[test]
     fn plain_index_derivatives_match_central_differences() {
         let link = InverseLink::Standard(StandardLink::Probit);
-        for (k, eta_m, g, z, s) in [(1usize, 0.3, 0.4, -0.7, 1.0), (3, -0.8, -0.5, 1.2, 0.8)] {
-            let cov = covariance(k, 11 + k as u64);
-            let beta: Vec<f64> = (0..k).map(|j| 0.3 - 0.2 * j as f64).collect();
-            let r: Vec<f64> = (0..k).map(|j| 0.5 * (j as f64 + 1.0) - 0.9).collect();
-            let marginal = bernoulli_marginal_link_map(&link, eta_m).unwrap();
-            let (_, d_q, d_g, d_beta) =
-                residual_row_index(&marginal, g, &beta, z, &r, &cov, s).unwrap();
-            let h = 1.0e-5;
-            let value = |eta_m: f64, g: f64, beta: &[f64]| {
+        let skewed = skewed_grid();
+        for grid in [None, Some(&skewed)] {
+            for (k, eta_m, g, z, s) in [(1usize, 0.3, 0.4, -0.7, 1.0), (3, -0.8, -0.5, 1.2, 0.8)] {
+                let cov = covariance(k, 11 + k as u64);
+                let beta: Vec<f64> = (0..k).map(|j| 0.3 - 0.2 * j as f64).collect();
+                let r: Vec<f64> = (0..k).map(|j| 0.5 * (j as f64 + 1.0) - 0.9).collect();
                 let marginal = bernoulli_marginal_link_map(&link, eta_m).unwrap();
-                residual_row_index(&marginal, g, beta, z, &r, &cov, s).unwrap().0
-            };
-            let fd_q = (value(eta_m + h, g, &beta) - value(eta_m - h, g, &beta)) / (2.0 * h);
-            let fd_g = (value(eta_m, g + h, &beta) - value(eta_m, g - h, &beta)) / (2.0 * h);
-            assert!((fd_q - d_q).abs() < 1.0e-7, "k={k}: ∂η/∂q {d_q} vs fd {fd_q}");
-            assert!((fd_g - d_g).abs() < 1.0e-7, "k={k}: ∂η/∂g {d_g} vs fd {fd_g}");
-            for j in 0..k {
-                let mut plus = beta.clone();
-                let mut minus = beta.clone();
-                plus[j] += h;
-                minus[j] -= h;
-                let fd = (value(eta_m, g, &plus) - value(eta_m, g, &minus)) / (2.0 * h);
-                assert!(
-                    (fd - d_beta[j]).abs() < 1.0e-7,
-                    "k={k}: ∂η/∂β_{j} {} vs fd {fd}",
-                    d_beta[j]
-                );
+                let (_, d_q, d_g, d_beta) =
+                    residual_row_index(&marginal, g, &beta, z, &r, &cov, grid, s).unwrap();
+                let h = 1.0e-5;
+                let value = |eta_m: f64, g: f64, beta: &[f64]| {
+                    let marginal = bernoulli_marginal_link_map(&link, eta_m).unwrap();
+                    residual_row_index(&marginal, g, beta, z, &r, &cov, grid, s).unwrap().0
+                };
+                let label = if grid.is_some() { "skewed law" } else { "normal law" };
+                let fd_q = (value(eta_m + h, g, &beta) - value(eta_m - h, g, &beta)) / (2.0 * h);
+                let fd_g = (value(eta_m, g + h, &beta) - value(eta_m, g - h, &beta)) / (2.0 * h);
+                assert!((fd_q - d_q).abs() < 1.0e-7, "{label} k={k}: ∂η/∂q {d_q} vs fd {fd_q}");
+                assert!((fd_g - d_g).abs() < 1.0e-7, "{label} k={k}: ∂η/∂g {d_g} vs fd {fd_g}");
+                for j in 0..k {
+                    let mut plus = beta.clone();
+                    let mut minus = beta.clone();
+                    plus[j] += h;
+                    minus[j] -= h;
+                    let fd = (value(eta_m, g, &plus) - value(eta_m, g, &minus)) / (2.0 * h);
+                    assert!(
+                        (fd - d_beta[j]).abs() < 1.0e-7,
+                        "{label} k={k}: ∂η/∂β_{j} {} vs fd {fd}",
+                        d_beta[j]
+                    );
+                }
             }
         }
     }
 
-    /// A standalone row program with the same body as the kernel's `eval`,
+    #[test]
+    fn mixture_anchor_tower_matches_differences_of_the_root() {
+        let link = InverseLink::Standard(StandardLink::Probit);
+        let grid = skewed_grid();
+        let tower_at = |q: f64, b: f64| {
+            let marginal = bernoulli_marginal_link_map(&link, q).unwrap();
+            mixture_anchor_tower(marginal.mu, marginal.q, b, &grid).unwrap()
+        };
+        let (q, b) = (-0.7, 0.6);
+        let base = tower_at(q, b);
+        let marginal = bernoulli_marginal_link_map(&link, q).unwrap();
+        let root = empirical_intercept_from_marginal(
+            marginal.mu,
+            marginal.q,
+            b,
+            1.0,
+            &grid.nodes,
+            &grid.weights,
+            None,
+        )
+        .unwrap();
+        assert_eq!(base.v, root, "the value channel is the root itself");
+        let h = 1.0e-4;
+        let shifted = |axis: usize, sign: f64| {
+            if axis == 0 {
+                tower_at(q + sign * h, b)
+            } else {
+                tower_at(q, b + sign * h)
+            }
+        };
+        let close = |exact: f64, fd: f64, what: &str| {
+            assert!(
+                (exact - fd).abs() < 2.0e-6 * (1.0 + fd.abs()),
+                "{what}: tower {exact} vs central difference {fd}"
+            );
+        };
+        for a in 0..2 {
+            let (plus, minus) = (shifted(a, 1.0), shifted(a, -1.0));
+            close(base.g[a], (plus.v - minus.v) / (2.0 * h), &format!("g[{a}]"));
+            for i in 0..2 {
+                close(base.h[a][i], (plus.g[i] - minus.g[i]) / (2.0 * h), &format!("h[{a}][{i}]"));
+                for j in 0..2 {
+                    close(
+                        base.t3[a][i][j],
+                        (plus.h[i][j] - minus.h[i][j]) / (2.0 * h),
+                        &format!("t3[{a}][{i}][{j}]"),
+                    );
+                    for l in 0..2 {
+                        close(
+                            base.t4[a][i][j][l],
+                            (plus.t3[i][j][l] - minus.t3[i][j][l]) / (2.0 * h),
+                            &format!("t4[{a}][{i}][{j}][{l}]"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixture_anchor_is_the_gaussian_closed_form_on_a_hermite_law() {
+        let link = InverseLink::Standard(StandardLink::Probit);
+        let grid = hermite_grid(80);
+        let cov = covariance(2, 31);
+        let declared = declare_unit_score_variance(&cov.to_dense()).unwrap();
+        let cov = MarginalSlopeCovariance::full(declared).unwrap();
+        let (g, beta, z, r, s) = (0.55, [0.35, -0.25], -0.4, [0.9, -1.3], 0.85);
+        for eta_m in [-2.5, -0.3, 1.1] {
+            let marginal = bernoulli_marginal_link_map(&link, eta_m).unwrap();
+            let gaussian = residual_row_index(&marginal, g, &beta, z, &r, &cov, None, s).unwrap();
+            let mixture =
+                residual_row_index(&marginal, g, &beta, z, &r, &cov, Some(&grid), s).unwrap();
+            assert!((gaussian.0 - mixture.0).abs() < 1.0e-9, "η {} vs {}", gaussian.0, mixture.0);
+            assert!((gaussian.1 - mixture.1).abs() < 1.0e-8);
+            assert!((gaussian.2 - mixture.2).abs() < 1.0e-8);
+            for j in 0..2 {
+                assert!((gaussian.3[j] - mixture.3[j]).abs() < 1.0e-8);
+            }
+        }
+    }
+
+    #[test]
+    fn mixture_anchor_holds_under_the_declared_joint_law() {
+        // Integrate the drive's law independently: node k of the score law,
+        // then r | z ~ N(γz, Σ_{r·z}) as a one-dimensional Gaussian drive.
+        let link = InverseLink::Standard(StandardLink::Probit);
+        let grid = skewed_grid();
+        let declared = declare_unit_score_variance(&covariance(2, 47).to_dense()).unwrap();
+        let cov = MarginalSlopeCovariance::full(declared.clone()).unwrap();
+        let (g, beta, s) = (0.7, [0.45, -0.3], 0.9);
+        let gamma = [declared[[1, 0]], declared[[2, 0]]];
+        let mut schur = [[0.0; 2]; 2];
+        for i in 0..2 {
+            for j in 0..2 {
+                schur[i][j] = declared[[i + 1, j + 1]] - gamma[i] * gamma[j];
+            }
+        }
+        let m = s * (g + beta[0] * gamma[0] + beta[1] * gamma[1]);
+        let mut v = 0.0;
+        for i in 0..2 {
+            for j in 0..2 {
+                v += s * s * beta[i] * schur[i][j] * beta[j];
+            }
+        }
+        let inner = hermite_grid(64);
+        for eta_m in [-1.8, 0.4] {
+            let marginal = bernoulli_marginal_link_map(&link, eta_m).unwrap();
+            // At z = 0, r = 0 the index is the intercept α itself.
+            let (alpha, _, _, _) =
+                residual_row_index(&marginal, g, &beta, 0.0, &[0.0, 0.0], &cov, Some(&grid), s)
+                    .unwrap();
+            let mut anchored_mean = 0.0;
+            for (z, w) in grid.pairs() {
+                for (u, wu) in inner.pairs() {
+                    anchored_mean += w * wu * normal_cdf(alpha + m * z + v.sqrt() * u);
+                }
+            }
+            assert!(
+                (anchored_mean - marginal.mu).abs() < 1.0e-10,
+                "E[Φ(α + drive)] = {anchored_mean} vs Φ(q) = {}",
+                marginal.mu
+            );
+        }
+    }
+
+    /// A standalone row program over the kernel's own [`residual_row_nll`],
     /// so the jet lowering can be gated without a family fixture.
     struct StandaloneRow<const K: usize> {
         marginal: BernoulliMarginalLinkMap,
@@ -1176,6 +1576,7 @@ mod residual_repair_kernel_tests {
         s: f64,
         r: Vec<f64>,
         cov: MarginalSlopeCovariance,
+        grid: Option<EmpiricalZGrid>,
         base: [f64; K],
     }
 
@@ -1193,29 +1594,17 @@ mod residual_repair_kernel_tests {
             if row != 0 {
                 return Err(format!("standalone row program has one row, got {row}"));
             }
-            let q = p[0].compose_unary([
-                self.marginal.q,
-                self.marginal.q1,
-                self.marginal.q2,
-                self.marginal.q3,
-                self.marginal.q4,
-            ]);
-            let mut drive = [S::constant(0.0); K];
-            for k in 1..K {
-                drive[k - 1] = p[k].scale(self.s);
-            }
-            let drive = &drive[..K - 1];
-            let quad = S::symmetric_quadratic_form(drive, &self.cov);
-            let c = quad.compose_unary(sqrt1p_stack((1.0 + quad.value()).sqrt()));
-            let mut lw = [0.0_f64; K];
-            lw[0] = self.z;
-            for k in 0..K - 2 {
-                lw[1 + k] = self.r[k];
-            }
-            let linear = S::linear_combination(drive, &lw[..K - 1]);
-            let eta = q.multiply_add(&c, &linear);
-            let margin = eta.scale(2.0 * self.y - 1.0);
-            Ok(margin.compose_unary(signed_probit_neglog_unary_stack(margin.value(), self.w)))
+            let state = ResidualRowState {
+                marginal: self.marginal,
+                z: self.z,
+                y: self.y,
+                w: self.w,
+                probit_scale: self.s,
+                r: &self.r,
+                covariance: &self.cov,
+                grid: self.grid.as_ref(),
+            };
+            residual_row_nll(&state, p)
         }
     }
 
@@ -1234,6 +1623,7 @@ mod residual_repair_kernel_tests {
                 s: row.s,
                 r: row.r.clone(),
                 cov: row.cov.clone(),
+                grid: row.grid.clone(),
                 base: p,
             };
             let jets: [Order2<K>; K] =
@@ -1277,9 +1667,17 @@ mod residual_repair_kernel_tests {
         // The plain-f64 index derivatives and the jet gradient agree through
         // the chain rule dℓ/dp = ℓ'(margin)·sign·∂η/∂p.
         let beta: Vec<f64> = row.base[2..].to_vec();
-        let (eta, d_q, d_g, d_beta) =
-            residual_row_index(&row.marginal, row.base[1], &beta, row.z, &row.r, &row.cov, row.s)
-                .unwrap();
+        let (eta, d_q, d_g, d_beta) = residual_row_index(
+            &row.marginal,
+            row.base[1],
+            &beta,
+            row.z,
+            &row.r,
+            &row.cov,
+            row.grid.as_ref(),
+            row.s,
+        )
+        .unwrap();
         let sign = 2.0 * row.y - 1.0;
         let stack = signed_probit_neglog_unary_stack(sign * eta, row.w);
         let outer = stack[1] * sign;
@@ -1293,28 +1691,94 @@ mod residual_repair_kernel_tests {
     #[test]
     fn jet_gradient_and_hessian_match_central_differences() {
         let link = InverseLink::Standard(StandardLink::Probit);
-        let row3 = StandaloneRow::<3> {
-            marginal: bernoulli_marginal_link_map(&link, 0.4).unwrap(),
-            z: -0.6,
-            y: 1.0,
-            w: 1.3,
-            s: 0.9,
-            r: vec![0.7],
-            cov: covariance(1, 5),
-            base: [0.4, 0.3, -0.5],
-        };
-        gate_jet_against_fd(&row3);
-        let row5 = StandaloneRow::<5> {
-            marginal: bernoulli_marginal_link_map(&link, -1.1).unwrap(),
-            z: 1.4,
-            y: 0.0,
-            w: 0.8,
-            s: 1.0,
-            r: vec![0.2, -1.1, 0.6],
-            cov: covariance(3, 7),
-            base: [-1.1, -0.35, 0.25, 0.4, -0.15],
-        };
-        gate_jet_against_fd(&row5);
+        for grid in [None, Some(skewed_grid())] {
+            let row3 = StandaloneRow::<3> {
+                marginal: bernoulli_marginal_link_map(&link, 0.4).unwrap(),
+                z: -0.6,
+                y: 1.0,
+                w: 1.3,
+                s: 0.9,
+                r: vec![0.7],
+                cov: covariance(1, 5),
+                grid: grid.clone(),
+                base: [0.4, 0.3, -0.5],
+            };
+            gate_jet_against_fd(&row3);
+            let row5 = StandaloneRow::<5> {
+                marginal: bernoulli_marginal_link_map(&link, -1.1).unwrap(),
+                z: 1.4,
+                y: 0.0,
+                w: 0.8,
+                s: 1.0,
+                r: vec![0.2, -1.1, 0.6],
+                cov: MarginalSlopeCovariance::full(
+                    declare_unit_score_variance(&covariance(3, 7).to_dense()).unwrap(),
+                )
+                .unwrap(),
+                grid,
+                base: [-1.1, -0.35, 0.25, 0.4, -0.15],
+            };
+            gate_jet_against_fd(&row5);
+        }
+    }
+
+    #[test]
+    fn jet_third_and_fourth_contractions_match_differences_of_the_hessian() {
+        // The outer REML/LAML derivatives read the order-3 and order-4
+        // contractions; on the declared finite law they carry the mixture
+        // anchor tower through its fourth order.
+        let link = InverseLink::Standard(StandardLink::Probit);
+        for grid in [None, Some(skewed_grid())] {
+            let base = [-0.6, 0.45, 0.3, -0.2];
+            let row = |p: [f64; 4]| StandaloneRow::<4> {
+                marginal: bernoulli_marginal_link_map(&link, p[0]).unwrap(),
+                z: 0.8,
+                y: 1.0,
+                w: 1.1,
+                s: 0.95,
+                r: vec![-0.4, 1.2],
+                cov: MarginalSlopeCovariance::full(
+                    declare_unit_score_variance(&covariance(2, 13).to_dense()).unwrap(),
+                )
+                .unwrap(),
+                grid: grid.clone(),
+                base: p,
+            };
+            let direction = [0.3, -0.7, 0.5, 0.9];
+            let second = [-0.2, 0.4, 0.8, -0.6];
+            let t3 = gam_math::jet_tower::program_third_contracted(&row(base), 0, &direction).unwrap();
+            let t4 =
+                gam_math::jet_tower::program_fourth_contracted(&row(base), 0, &direction, &second)
+                    .unwrap();
+            let h = 1.0e-4;
+            let displaced = |scale: f64, dir: &[f64; 4], at: [f64; 4]| {
+                std::array::from_fn::<f64, 4, _>(|a| at[a] + scale * dir[a])
+            };
+            let hessian = |p: [f64; 4]| gam_math::jet_tower::program_row_kernel(&row(p), 0).unwrap().2;
+            let t3_at = |p: [f64; 4]| {
+                gam_math::jet_tower::program_third_contracted(&row(p), 0, &direction).unwrap()
+            };
+            let (hp, hm) = (hessian(displaced(h, &direction, base)), hessian(displaced(-h, &direction, base)));
+            let (tp, tm) = (t3_at(displaced(h, &second, base)), t3_at(displaced(-h, &second, base)));
+            for a in 0..4 {
+                for b in 0..4 {
+                    let fd3 = (hp[a][b] - hm[a][b]) / (2.0 * h);
+                    assert!(
+                        (t3[a][b] - fd3).abs() < 1.0e-5 * (1.0 + fd3.abs()),
+                        "law={}: t3[{a}][{b}] {} vs fd {fd3}",
+                        grid.is_some(),
+                        t3[a][b]
+                    );
+                    let fd4 = (tp[a][b] - tm[a][b]) / (2.0 * h);
+                    assert!(
+                        (t4[a][b] - fd4).abs() < 1.0e-5 * (1.0 + fd4.abs()),
+                        "law={}: t4[{a}][{b}] {} vs fd {fd4}",
+                        grid.is_some(),
+                        t4[a][b]
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1332,8 +1796,8 @@ mod residual_repair_kernel_tests {
         let cov = MarginalSlopeCovariance::full(sigma).unwrap();
         let (g, beta, s, z, r) = (0.45, [0.3, -0.2], 0.85, 0.2, [1.0, -0.5]);
         let marginal = bernoulli_marginal_link_map(&link, 0.7).unwrap();
-        let (eta, _, _, _) = residual_row_index(&marginal, g, &beta, z, &r, &cov, s).unwrap();
-        let kappa = beta[0] * beta[0] * sigma_rr[0][0]
+        let (eta, _, _, _) = residual_row_index(&marginal, g, &beta, z, &r, &cov, None, s).unwrap();
+        let kappa =beta[0] * beta[0] * sigma_rr[0][0]
             + 2.0 * beta[0] * beta[1] * sigma_rr[0][1]
             + beta[1] * beta[1] * sigma_rr[1][1];
         let c = (1.0 + s * s * (g * g + kappa)).sqrt();
@@ -1407,7 +1871,8 @@ mod residual_repair_kernel_tests {
         let cov = MarginalSlopeCovariance::full(declared).unwrap();
         let (g, s, z) = (0.8, 0.9, 1.3);
         let (eta, _, _, _) =
-            residual_row_index(&marginal, g, &[0.0; 3], z, &[0.5, -0.2, 1.1], &cov, s).unwrap();
+            residual_row_index(&marginal, g, &[0.0; 3], z, &[0.5, -0.2, 1.1], &cov, None, s)
+                .unwrap();
         let rigid = marginal.q * (1.0 + s * s * g * g).sqrt() + s * g * z;
         assert!((eta - rigid).abs() < 1.0e-14, "{eta} vs {rigid}");
     }

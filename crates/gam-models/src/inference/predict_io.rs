@@ -604,7 +604,7 @@ impl BernoulliMarginalSlopePredictor {
                 bandwidth,
                 ..
             } => {
-                let conditioning = input.auxiliary_matrix.as_ref().ok_or_else(|| {
+                let conditioning = self.local_conditioning_view(input).ok_or_else(|| {
                     EstimationError::InvalidInput(
                         "saved BMS ALO with a local empirical latent measure requires the persisted conditioning matrix"
                             .to_string(),
@@ -657,6 +657,10 @@ impl BernoulliMarginalSlopePredictor {
         let anchor_corrections =
             self.build_anchor_correction_matrices(input, slope_design, &affine.latent_z)?;
         let latent_measure = self.saved_alo_latent_measure(input, response.len())?;
+        let residual_features = match self.residual_repair.as_ref() {
+            Some(geometry) => Some(self.residual_feature_view(input, geometry)?.to_owned()),
+            None => None,
+        };
         replay_saved_bernoulli_marginal_slope_alo(BernoulliMarginalSlopeSavedAloReplayInput {
             base_link: &self.base_link,
             marginal_design: &input.design,
@@ -678,17 +682,7 @@ impl BernoulliMarginalSlopePredictor {
             link_deviation_anchor_rows: anchor_corrections.link_dev_anchor_rows.as_ref(),
             residual_geometry: self.residual_repair.as_ref(),
             residual_beta: self.beta_residual.as_ref(),
-            residual_features: if self.residual_repair.is_some() {
-                Some(input.auxiliary_matrix.as_ref().ok_or_else(|| {
-                    EstimationError::InvalidInput(
-                        "saved BMS ALO with a residual repair block requires the rows' residual \
-                         features"
-                            .to_string(),
-                    )
-                })?)
-            } else {
-                None
-            },
+            residual_features: residual_features.as_ref(),
         })
         .map_err(EstimationError::InvalidInput)
     }
@@ -932,7 +926,7 @@ impl BernoulliMarginalSlopePredictor {
                 bandwidth,
                 ..
             } => {
-                let conditioning = input.auxiliary_matrix.as_ref().ok_or_else(|| {
+                let conditioning = self.local_conditioning_view(input).ok_or_else(|| {
                     EstimationError::InvalidInput(
                         "bernoulli marginal-slope local empirical prediction requires auxiliary conditioning matrix"
                             .to_string(),
@@ -965,6 +959,45 @@ impl BernoulliMarginalSlopePredictor {
         internal_grad: Option<Array2<f64>>,
     ) -> Result<(Array1<f64>, Option<Array2<f64>>), EstimationError> {
         Ok((internal_eta, internal_grad))
+    }
+
+    /// The residual repair features of a prediction input: the trailing block of
+    /// `auxiliary_matrix`, after any local-empirical conditioning columns.
+    fn residual_feature_view<'a>(
+        &self,
+        input: &'a PredictInput,
+        geometry: &crate::bms::ResidualRepairGeometry,
+    ) -> Result<ndarray::ArrayView2<'a, f64>, EstimationError> {
+        let matrix = input.auxiliary_matrix.as_ref().ok_or_else(|| {
+            EstimationError::InvalidInput(format!(
+                "bernoulli marginal-slope prediction requires the residual columns {:?}",
+                geometry.columns
+            ))
+        })?;
+        let width = geometry.width();
+        if matrix.ncols() < width {
+            return Err(EstimationError::InvalidInput(format!(
+                "bernoulli marginal-slope prediction auxiliary matrix has {} columns; the residual \
+                 repair block needs {width}",
+                matrix.ncols()
+            )));
+        }
+        Ok(matrix.slice(ndarray::s![.., matrix.ncols() - width..]))
+    }
+
+    /// The local-empirical conditioning columns of `auxiliary_matrix`: its
+    /// leading block, followed by the residual repair features when a block is
+    /// present.
+    fn local_conditioning_view<'a>(
+        &self,
+        input: &'a PredictInput,
+    ) -> Option<ndarray::ArrayView2<'a, f64>> {
+        let matrix = input.auxiliary_matrix.as_ref()?;
+        let residual_width = self
+            .residual_repair
+            .as_ref()
+            .map_or(0, crate::bms::ResidualRepairGeometry::width);
+        Some(matrix.slice(ndarray::s![.., ..matrix.ncols().saturating_sub(residual_width)]))
     }
 
     /// The residual block's slice of a flat coefficient vector: after the
@@ -1010,12 +1043,7 @@ impl BernoulliMarginalSlopePredictor {
     ) -> Result<(Array1<f64>, Option<Array2<f64>>), EstimationError> {
         let n = z.len();
         let width = geometry.width();
-        let features = input.auxiliary_matrix.as_ref().ok_or_else(|| {
-            EstimationError::InvalidInput(format!(
-                "bernoulli marginal-slope prediction requires the residual columns {:?}",
-                geometry.columns
-            ))
-        })?;
+        let features = self.residual_feature_view(input, geometry)?;
         if features.nrows() != n || features.ncols() != width {
             return Err(EstimationError::InvalidInput(format!(
                 "bernoulli marginal-slope residual features are {}x{} but the prediction has {n} rows and the saved block {width} columns",
@@ -1070,6 +1098,7 @@ impl BernoulliMarginalSlopePredictor {
                         "residual feature row is not contiguous".to_string(),
                     )
                 })?;
+                let grid = self.empirical_grid_for_prediction_row(input, i)?;
                 let (eta_i, d_q, d_g, d_beta) = crate::bms::residual_row_index(
                     &marginal,
                     slope_eta[i],
@@ -1077,6 +1106,7 @@ impl BernoulliMarginalSlopePredictor {
                     z[i],
                     r,
                     field.at_row(i),
+                    grid.as_ref(),
                     scale,
                 )
                 .map_err(EstimationError::InvalidInput)?;
@@ -1507,11 +1537,6 @@ impl BernoulliMarginalSlopePredictor {
             && (score_warp_runtime.is_some() || link_deviation_runtime.is_some())
         {
             return Err(crate::bms::ResidualRepairRefusal::FlexBlocksUnsupported.to_string());
-        }
-        if residual_repair.is_some() && latent_measure.is_empirical() {
-            return Err(
-                crate::bms::ResidualRepairRefusal::EmpiricalLatentMeasureUnsupported.to_string(),
-            );
         }
         let expected_blocks = 2
             + usize::from(residual_repair.is_some())

@@ -540,13 +540,31 @@ which is what makes `β` estimable without corrupting `q`.
   the same level, **including the level**. A column that fails is refused
   with a typed reason; the fit never centres a feature for you, because a
   level absorbed into the baseline is a different model.
-- The block is lowered through the rigid standard-normal row kernel with
-  the coefficients as row primaries, so it cannot be combined with
-  `linkwiggle(...)` score-warp / link-deviation blocks, a learned frailty
-  scale, an absorbed CTN influence block, or a score that fell back to the
-  empirical latent measure. Each of those is a typed refusal, not a silent
-  reinterpretation. Spatial length scales are held at their seeded values
-  in the presence of the block; pass `length_scale=` to choose them.
+- The block is lowered through the rigid row kernel with the coefficients
+  as row primaries, so it cannot be combined with `linkwiggle(...)`
+  score-warp / link-deviation blocks, a learned frailty scale, or an
+  absorbed CTN influence block. Each of those is a typed refusal, not a
+  silent reinterpretation. Spatial length scales are held at their seeded
+  values in the presence of the block; pass `length_scale=` to choose them.
+
+### On a declared finite law of the score
+
+When the score's law is declared as a finite law (`latent_measure=
+"global-empirical"`, or the gate's empirical fallback, global or local), the
+residual block keeps its Gaussian law given the score, `r | z, a ~ N(γz,
+Σ_{r·z})`, read off the same persisted joint covariance (its first column and
+Schur complement). Given node `z_k` the drive `s(g z + βᵀr)` is then
+`N(m z_k, v)` with `m = s(g + βᵀγ)` and `v = s²βᵀΣ_{r·z}β` — a finite mixture
+of Gaussians — and the anchor is the finite-law probit anchor on the scaled
+coordinates:
+
+```text
+Σ_k w_k Φ(ã + B·z_k) = Φ(q) ,      α = τ·ã ,   B = m/τ ,   τ = √(1 + v) .
+```
+
+On a Gauss–Hermite law it is the closed form above to quadrature tolerance.
+The fit differentiates the root through fourth order, so the REML/LAML outer
+derivatives read the same anchor the plug-in prediction replays.
 - At most twelve residual columns.
 
 ## Fixed external baseline (slope-only fit)

@@ -1483,13 +1483,19 @@ fn build_predict_input_for_model_inner(
                 .map_err(|error| PredictInputError::InvalidInput {
                     reason: error.to_string(),
                 })?;
+            let local = build_marginal_slope_local_auxiliary_matrix(model, design_input, col_map)?;
             let auxiliary_matrix = match model.residual_repair.as_ref() {
-                Some(geometry) => Some(build_residual_repair_feature_matrix(
-                    geometry,
-                    design_input,
-                    col_map,
-                )?),
-                None => build_marginal_slope_local_auxiliary_matrix(model, design_input, col_map)?,
+                None => local,
+                // Local-empirical conditioning columns first, the residual
+                // features after them; the predictor reads each block by width.
+                Some(geometry) => {
+                    let residual =
+                        build_residual_repair_feature_matrix(geometry, design_input, col_map)?;
+                    Some(match local {
+                        None => residual,
+                        Some(local) => ndarray::concatenate![ndarray::Axis(1), local, residual],
+                    })
+                }
             };
             Ok(PredictInput {
                 design: design.design.clone(),

@@ -2209,9 +2209,6 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
             if sigma_learnable {
                 return Err(ResidualRepairRefusal::LearnedFrailtyUnsupported.to_string());
             }
-            if latent_measure.is_empirical() {
-                return Err(ResidualRepairRefusal::EmpiricalLatentMeasureUnsupported.to_string());
-            }
             let a_block = conditioning_dense
                 .as_ref()
                 .ok_or_else(|| ResidualRepairRefusal::InfluenceAbsorberUnsupported.to_string())?;
