@@ -110,7 +110,7 @@ use ndarray::{
 
 use std::sync::Arc;
 
-pub(crate) use gam_solve::arrow_schur::{ArrowBetaGaugeQuotient, ArrowProximalCorrectionOptions, ArrowRowBlock, ArrowSchurError, ArrowSchurSystem, ArrowSolveOptions, ArrowSolverMode, BetaPenaltyOp, CompositePenaltyOp, CoupledCarrierPenaltyOp, DensePenaltyOp, DeviceSaePcgData, DeviceSaeSmoothBlock, FactoredFrameGBlock, FactoredFrameKroneckerOp, IdentityRightKroneckerPenaltyOp, SparseBlockKroneckerPenaltyOp, SparseGBlock, StreamingArrowSchur, matrix_free_arrow_operator_apply, prepare_sae_resident_frame, row_sub_floor_null_directions, solve_arrow_newton_step_with_proximal_correction, solve_with_lm_escalation_inner};
+pub(crate) use gam_solve::arrow_schur::{ArrowProximalCorrectionOptions, ArrowRowBlock, ArrowSchurError, ArrowSchurSystem, ArrowSolveOptions, BetaPenaltyOp, CompositePenaltyOp, CoupledCarrierPenaltyOp, DensePenaltyOp, DeviceSaePcgData, DeviceSaeSmoothBlock, FactoredFrameGBlock, FactoredFrameKroneckerOp, IdentityRightKroneckerPenaltyOp, SparseBlockKroneckerPenaltyOp, SparseGBlock, StreamingArrowSchur, matrix_free_arrow_operator_apply, prepare_sae_resident_frame, row_sub_floor_null_directions, solve_arrow_newton_step_with_proximal_correction, solve_with_lm_escalation_inner};
 
 pub(crate) use gam_terms::analytic_penalties::{
     AnalyticPenalty, AnalyticPenaltyKind, AnalyticPenaltyRegistry, DecoderIncoherencePenalty,
@@ -523,11 +523,6 @@ mod tests_gauge_frame_roundtrip_2720;
 /// `|gᵀvᵢ|` scalar every prior measurement reports cannot.
 #[cfg(test)]
 mod tests_gauge_posterior_flatness_2720;
-
-/// #2267 — the joint fit's declared chart-gauge quotient must be a null of every
-/// penalized-objective term, swept per kind with coordinate ARD off and on.
-#[cfg(test)]
-mod tests_chart_gauge_structural_null_2267;
 
 /// #2267 — a dense outer evaluation decomposes its state's exact observed information once,
 /// and the block it hands its derivative prices what a fresh decomposition prices.

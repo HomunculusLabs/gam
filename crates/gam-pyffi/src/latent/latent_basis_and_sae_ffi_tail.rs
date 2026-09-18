@@ -34,7 +34,6 @@ fn sae_manifold_fit_minimal<'py>(
     initial_logits: Option<PyReadonlyArray2<'py, f64>>,
     initial_coords: Option<PyReadonlyArray3<'py, f64>>,
     threshold_gate_threshold: f64,
-    native_ard_enabled: bool,
     // WP-D output-Fisher shard (#980). `(n, p, r)` f64 factors; presence activates
     // `RowMetric::OutputFisher`. This is the entry point the high-level Python
     // `sae_manifold_fit` facade routes through, so it carries the explicit shard
@@ -131,7 +130,6 @@ fn sae_manifold_fit_minimal<'py>(
         analytic_penalties,
         top_k,
         threshold_gate_threshold,
-        native_ard_enabled,
         refine_routing,
         random_state,
         // WP-D → fit wiring (#980): the factor shard selects the native
@@ -459,7 +457,6 @@ impl Tier0SaeCore {
     assignment_kind="softmax",
     gumbel_schedule=None,
     isometry_weight=0.0,
-    native_ard_enabled=true,
     decoder_feature_sparsity_groups=None,
     max_iter=50,
     sparsity_strength=None,
@@ -504,7 +501,6 @@ fn sae_manifold_fit_model<'py>(
     assignment_kind: &str,
     gumbel_schedule: Option<&Bound<'py, PyDict>>,
     isometry_weight: f64,
-    native_ard_enabled: bool,
     decoder_feature_sparsity_groups: Option<Vec<Vec<usize>>>,
     max_iter: usize,
     sparsity_strength: Option<f64>,
@@ -630,9 +626,8 @@ fn sae_manifold_fit_model<'py>(
         p_out,
     })
     .map_err(py_value_error)?;
-    if native_ard_enabled {
-        penalties.push("ARDPenalty".to_string());
-    }
+    // #2822 — the coordinate ARD prior is mandatory, so every fit carries it.
+    penalties.push("ARDPenalty".to_string());
 
     // Crossing K>P under hard TopK changes representation before the dense
     // minimal seed is even named. The support driver owns admission, seeding,
@@ -692,11 +687,6 @@ fn sae_manifold_fit_model<'py>(
             return Err(py_value_error(format!(
                 "support-sparse ManifoldSAE does not accept dense-coordinate or coefficient penalties; requested {penalties:?}. Its smoothing term is the LAML-selected final-function seminorm"
             )));
-        }
-        if !native_ard_enabled {
-            return Err(py_value_error(
-                "support-sparse ManifoldSAE requires its coordinate ARD prior".to_string(),
-            ));
         }
         if learnable_alpha || gumbel_schedule.is_some() || threshold_gate_threshold != 0.0 {
             return Err(py_value_error(
@@ -763,7 +753,6 @@ fn sae_manifold_fit_model<'py>(
         initial_logits,
         initial_coords,
         threshold_gate_threshold,
-        native_ard_enabled,
         fisher_factors.clone(),
         fisher_mass_residual,
         fisher_provenance.clone(),

@@ -253,6 +253,12 @@ impl SaeManifoldTerm {
     /// Validate the ARD table against this term's atom geometry and materialize
     /// each physical precision exactly once. This is the structural choke point
     /// shared by assembly, value, traces, exact-Hessian, and IFT channels.
+    ///
+    /// #2822 — every coordinate atom carries a full block. The ARD prior is the
+    /// proper coordinate prior: without it a row's coordinate posterior is improper,
+    /// and the criterion has no lower bound along that coordinate. So an empty block
+    /// is refused here, where every criterion path first reads the table, rather than
+    /// read as a prior that is switched off.
     pub(crate) fn validated_ard_precisions(
         &self,
         rho: &SaeManifoldRho,
@@ -267,10 +273,12 @@ impl SaeManifoldTerm {
         for (atom, coordinate) in self.assignment.coords.iter().enumerate() {
             let stored = rho.log_ard[atom].len();
             let dimension = coordinate.latent_dim();
-            if stored != 0 && stored != dimension {
+            if stored != dimension {
                 return Err(format!(
-                    "ARD rho atom {atom} has {stored} axes; expected 0 (disabled) or \
-                     latent dimension {dimension}"
+                    "ARD rho atom {atom} has {stored} axes but its coordinate has latent \
+                     dimension {dimension}: every coordinate atom carries a full log_ard block, \
+                     because the ARD prior is the proper coordinate prior its rows' posteriors \
+                     need (#2822)"
                 ));
             }
         }

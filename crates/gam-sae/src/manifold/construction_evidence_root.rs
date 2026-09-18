@@ -795,7 +795,6 @@ mod evidence_root_gauge_projection_2822_tests {
             ridge_beta: 1.0e-6,
             top_k: None,
             threshold: 0.0,
-            native_ard_enabled: false,
             seed_refine_routing: minimal.refine_routing,
             seed_refine_random_state: 0,
             fit_config: SaeFitConfig::default(),
@@ -809,10 +808,18 @@ mod evidence_root_gauge_projection_2822_tests {
         let flat = initial_rho
             .to_flat(&term.assignment)
             .expect("the seed rho is bound to the term's assignment");
-        assert_eq!(flat.len(), 1, "the small-N circle's outer layout is the one smoothing coordinate");
+        assert_eq!(
+            flat.len(),
+            2,
+            "the small-N circle's outer layout is its smoothing coordinate and its ARD log-precision"
+        );
+        // #2822 — the coordinate ARD prior is mandatory. log α = −22 keeps each row's phase
+        // curvature (α plus the data's ≈ 7e-9 at θ = 15) under the gauge qualification bar, so
+        // the phase gauges stay unit-pinned, the configuration the crawl read. The premise
+        // assertion below checks that at run time.
         let mut rho = initial_rho
-            .from_flat(Array1::from_vec(vec![15.0]).view())
-            .expect("the pinned coordinate rebuilds a rho on the seed's layout");
+            .from_flat(Array1::from_vec(vec![15.0, -22.0]).view())
+            .expect("the pinned coordinates rebuild a rho on the seed's layout");
         let fitted = term
             .run_joint_fit_arrow_schur_for_quasi_laplace(z.view(), &mut rho, None, 200, 1.0, 1.0e-6, 1.0e-6)
             .expect("the evidence joint fit runs at the pinned coordinate");

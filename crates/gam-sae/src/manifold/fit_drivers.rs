@@ -7045,66 +7045,6 @@ impl SaeManifoldTerm {
                 .admitted_or_error(self.n_obs(), self.output_dim(), self.k_atoms())
                 .map_err(|err| format!("SaeManifoldTerm::run_joint_fit_arrow_schur: {err}"))?;
             let mut solve_options = plan.solve_options().with_gpu_policy(self.gpu_policy);
-            // #2228 — gauge-fix the inner Newton STEP on the reduced β border.
-            //
-            // The closed-form chart gauge (circle/torus phase, patch
-            // translation+scale) is an exact reconstruction symmetry whose β
-            // component is a null direction of the reduced β-Schur `S_β`. Left
-            // un-deflated, the dense Direct/SqrtBA step solves an exactly-singular
-            // `S_β`, so the orbit component of Δβ is arbitrary: it drifts the state
-            // along the orbit (walking `t` off the circle over the outer ρ-walk,
-            // fit_drivers.rs' second-root note) and starves the identifiable
-            // descent, so the fit crawls at ~0.997 contraction and eventually
-            // reports a non-stationary plateau (#2228 repro A / #2253). Installing
-            // the closed-form gauge as an [`ArrowBetaGaugeQuotient`] makes the dense
-            // step solve the Faddeev–Popov quotient `P S_β P + Q Qᵀ`, projecting Δβ
-            // onto the identifiable complement. The criterion evaluation and the
-            // outer-ρ gradient assemble their own systems and are untouched, and
-            // the loss/criterion are gauge-invariant, so this only changes the
-            // convergence path, converging to a gauge-fixed representative.
-            //
-            // Installed on the dense Direct/SqrtBA modes AND the wide-`p`
-            // InexactPCG lane: the matrix-free reduced-Schur matvec applies the
-            // same Faddeev–Popov pin `P S_β P + Q Qᵀ` (`ReducedSchurOperator`), and
-            // the CPU `steihaug_pcg_auto` lane projects the RHS onto the
-            // identifiable complement. The device `solve_sae_matrix_free_pcg`
-            // kernel does NOT yet apply the pin, so it is gated off to the CPU path
-            // whenever a quotient is present (a follow-up will project in-kernel).
-            //
-            // #2267 — that null holds only where every term is invariant along the
-            // generator, so only those generators are declared
-            // (`closed_form_beta_gauge_directions`). Where a prior moves the orbit,
-            // the step takes the direction with its real slope and curvature.
-            if sys.k > 0
-                && matches!(
-                    solve_options.mode,
-                    ArrowSolverMode::Direct | ArrowSolverMode::SqrtBA | ArrowSolverMode::InexactPCG
-                )
-            {
-                match self.closed_form_beta_gauge_directions(rho, analytic_penalties) {
-                    Ok(dirs) if !dirs.is_empty() => {
-                        let quotient = ArrowBetaGaugeQuotient::new(dirs).map_err(|err| {
-                            format!(
-                                "SaeManifoldTerm::run_joint_fit_arrow_schur: invalid closed-form \
-                                 beta-gauge quotient: {err}"
-                            )
-                        })?;
-                        sys.set_beta_gauge_quotient(quotient).map_err(|err| {
-                            format!(
-                                "SaeManifoldTerm::run_joint_fit_arrow_schur: closed-form \
-                                 beta-gauge quotient does not match the assembled border: {err}"
-                            )
-                        })?;
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        return Err(format!(
-                            "SaeManifoldTerm::run_joint_fit_arrow_schur: closed-form gauge \
-                             directions: {err}"
-                        ));
-                    }
-                }
-            }
             // #1017 allocation residency across ACCEPTED nonlinear iterates.
             // The retained handle owns device allocations only; `prepare_*`
             // overwrites every ridge-independent operand from this freshly

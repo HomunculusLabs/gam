@@ -2910,20 +2910,15 @@ impl SaeManifoldTerm {
     /// `Self::validate_analytic_penalty_registry` otherwise produces during
     /// `assemble_arrow_schur`).
     ///
-    /// Native ARD rides the separate `native_ard_enabled` FFI flag rather than a
-    /// registry descriptor, but because it composes it is admitted on a mixed
-    /// dictionary; only a NON-composing REGISTRY penalty triggers the refusal.
+    /// The coordinate ARD prior is on every atom (#2822) and composes over a mixed
+    /// dictionary, so it never triggers the refusal; only a NON-composing REGISTRY
+    /// penalty does.
     ///
     /// Homogeneous coord dims (including `K == 1`) always pass, as does a
     /// heterogeneous dictionary that carries only composing penalties.
     pub fn validate_heterogeneous_atom_compatibility(
         &self,
         registry: Option<&AnalyticPenaltyRegistry>,
-        // Retained for FFI signature stability and self-documentation. Post-F6 it
-        // no longer gates: native ARD composes over heterogeneous coord dims
-        // (`ard_value` is a per-atom sum over `d_k`), so it is admitted whether or
-        // not it is enabled — only a NON-composing registry penalty refuses.
-        native_ard_enabled: bool,
     ) -> Result<(), String> {
         // Per-atom coord latent dims via the same accessor the registry
         // validator uses, so the two cannot disagree on "heterogeneous".
@@ -2935,7 +2930,7 @@ impl SaeManifoldTerm {
             // Homogeneous coord dims: every row-block penalty dispatches cleanly.
             return Ok(());
         };
-        // Native ARD (the `native_ard_enabled` flag) composes over heterogeneous
+        // The coordinate ARD prior composes over heterogeneous
         // coord dims: `ard_value` sums per atom over `d_k` axes with a per-atom
         // `log_ard[k]` of length `d_k`, so a mixed dictionary is its native shape
         // and it never forces a uniform `atom_dim`. Only the fixed-`d` structural
@@ -2959,9 +2954,8 @@ impl SaeManifoldTerm {
              coordinate dims cannot be dispatched (they would silently truncate or pad axes). \
              Either configure a uniform atom_dim for all atoms, or drop this penalty. The \
              dim-adaptive row-block penalties — SCAD-MCP, sparsity, native ARD, isometry — \
-             compose on a mixed dictionary and are admitted (native ARD enabled here: {}).",
-            offender.name(),
-            native_ard_enabled
+             compose on a mixed dictionary and are admitted.",
+            offender.name()
         ))
     }
 

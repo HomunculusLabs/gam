@@ -2872,12 +2872,22 @@ fn duplicate_atom(
     let child = SaeManifoldTerm::new(atoms, assignment)?;
 
     let mut child_rho = rho.clone();
-    if parent < child_rho.log_ard.len() {
-        let inherited = child_rho.log_ard[parent].clone();
-        child_rho.log_ard.push(inherited);
-    } else {
-        child_rho.log_ard.push(Array1::<f64>::zeros(0));
-    }
+    // #2822 — the child inherits the parent's proper coordinate prior. A parent with
+    // no block, or an empty one, has no prior to inherit, and the fission refuses
+    // instead of manufacturing an atom whose coordinate posterior is improper.
+    let inherited = match child_rho.log_ard.get(parent) {
+        Some(block) if !block.is_empty() => block.clone(),
+        other => {
+            return Err(format!(
+                "duplicate_atom: parent {parent} carries {} ARD axes (rho has {} blocks for K={k} \
+                 atoms), so there is no proper coordinate prior for the child to inherit; every \
+                 coordinate atom carries a full log_ard block",
+                other.map_or(0, |block| block.len()),
+                child_rho.log_ard.len()
+            ));
+        }
+    };
+    child_rho.log_ard.push(inherited);
     // The fissioned child inherits the PARENT atom's per-atom smoothness strength
     // (#1556). As with `log_ard`, failing to grow `log_lambda_smooth` in step with
     // `k_atoms()` makes the next `assemble_arrow_schur` panic on the per-atom

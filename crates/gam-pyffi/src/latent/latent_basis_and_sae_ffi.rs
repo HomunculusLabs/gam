@@ -1724,7 +1724,6 @@ fn sae_manifold_fit_inner<'py>(
     analytic_penalties: Option<String>,
     top_k: Option<usize>,
     threshold_gate_threshold: f64,
-    native_ard_enabled: bool,
     seed_refine_routing: bool,
     seed_refine_random_state: u64,
     // WP-D output-Fisher shard (#980). Magic-by-default: the *presence* of
@@ -1832,7 +1831,6 @@ fn sae_manifold_fit_inner<'py>(
         ridge_beta,
         top_k,
         threshold: threshold_gate_threshold,
-        native_ard_enabled,
         seed_refine_routing,
         seed_refine_random_state,
         fit_config: gam::terms::sae::manifold::SaeFitConfig {

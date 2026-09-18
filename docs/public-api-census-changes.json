@@ -4391,5 +4391,13 @@
     },
     "reason": "#2946 T2 (Stage A census): rename with no value change. rho_posterior_certificate computes the Tier-0 PSIS tail-shape adequacy diagnostic. Its k_hat has a standard error of about 0.27 at the default M = 64, so it certifies nothing, and it becomes rho_posterior_adequacy.",
     "evidence": "At origin/main fe8a7a4ffe, git grep on lane sw2c finds rho_posterior_certificate only in gam-inference rho_posterior.rs (the pub fn, its escalator impl and tests), the gam-problem escalator trait and gam-solve reml/eval.rs. All are renamed in this commit. Gates: pre-gate gx6 job 1251077 and landing gate direct lane dy4 tag fr-census-t2."
+  },
+  {
+    "base": "1a7cb1008b8575f2b5d13df9c975d1ffa1b654bc",
+    "removed": {
+      "crates/gam-sae/src/manifold/chart_gauges.rs::closed_form_beta_gauge_directions": 1
+    },
+    "reason": "#2822 commit A: closed_form_beta_gauge_directions emitted a harmonic atom's chart generators as structural nulls of the penalized objective only when the atom's ARD block was empty (atom_step_gauge_is_structural_null). Commit A makes the coordinate ARD prior mandatory and refuses an empty block at criterion entry. A centered coordinate prior moves under every generator on its axes, so no chart phase direction is a null of the penalized objective (#2720), the declaration is unreachable, and its producer, its one install site (fit_drivers.rs run_joint_fit_arrow_schur) and its pin tests_chart_gauge_structural_null_2267 are deleted.",
+    "evidence": "Gate job 1245170 (base f58b6715be, tree 292c4eec): public_api_census.py refuses exactly this removal before this entry. git grep -n -w closed_form_beta_gauge_directions at eead230646b20751308a3a660796cd440f70e6bd finds it only in chart_gauges.rs (declaration and a doc link), the fit_drivers.rs install branch and the deleted test."
   }
 ]

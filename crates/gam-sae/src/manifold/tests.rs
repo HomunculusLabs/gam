@@ -6015,7 +6015,7 @@ pub(crate) fn validate_heterogeneous_atom_compatibility_covers_registry_and_nati
         .unwrap(),
     )));
     let err = hetero
-        .validate_heterogeneous_atom_compatibility(Some(&structural_registry), false)
+        .validate_heterogeneous_atom_compatibility(Some(&structural_registry))
         .expect_err("heterogeneous dims + a fixed-d structural penalty must be refused");
     assert!(
         err.contains("heterogeneous atom coordinate dims"),
@@ -6037,7 +6037,7 @@ pub(crate) fn validate_heterogeneous_atom_compatibility_covers_registry_and_nati
         IsometryPenalty::new_euclidean(PsiSlice::full(4 * 2, Some(2)), 2),
     )));
     hetero
-        .validate_heterogeneous_atom_compatibility(Some(&iso_registry), false)
+        .validate_heterogeneous_atom_compatibility(Some(&iso_registry))
         .expect("isometry gauge composes per atom on a heterogeneous dictionary");
 
     let mut scad_registry = AnalyticPenaltyRegistry::new();
@@ -6054,36 +6054,25 @@ pub(crate) fn validate_heterogeneous_atom_compatibility_covers_registry_and_nati
         .unwrap(),
     )));
     hetero
-        .validate_heterogeneous_atom_compatibility(Some(&scad_registry), false)
+        .validate_heterogeneous_atom_compatibility(Some(&scad_registry))
         .expect("element-wise SCAD-MCP composes on a heterogeneous dictionary");
 
-    // (c) native ARD (the FFI flag) composes per atom over `d_k` ⇒ Ok on
-    // heterogeneous dims, with or without a registry. This is the change from the
-    // pre-F6 blanket refusal: `ard_value` is already a per-atom sum over `d_k`.
+    // (c) the coordinate ARD prior is on every atom (#2822) and composes per atom over
+    // `d_k` (`ard_value` is a per-atom sum), so heterogeneous dims with no row-block
+    // penalty are admitted, with or without a registry. ARD with the isometry gauge is
+    // (b)'s isometry case, since every atom carries the prior.
     hetero
-        .validate_heterogeneous_atom_compatibility(Some(&empty_registry), true)
+        .validate_heterogeneous_atom_compatibility(Some(&empty_registry))
         .expect("native ARD composes per atom on a heterogeneous dictionary");
     hetero
-        .validate_heterogeneous_atom_compatibility(None, true)
+        .validate_heterogeneous_atom_compatibility(None)
         .expect("native ARD (no registry) composes per atom on a heterogeneous dictionary");
-    // ARD + isometry gauge together — the flagship combination — on mixed dims.
-    hetero
-        .validate_heterogeneous_atom_compatibility(Some(&iso_registry), true)
-        .expect("ARD + isometry gauge compose together on a heterogeneous dictionary");
 
     // (d) a structural penalty is fine on HOMOGENEOUS dims (nothing to dispatch
     // ambiguously) — the refusal is specifically about mixed `d_k`.
     let homo = hetero_compat_term(2, 2);
-    homo.validate_heterogeneous_atom_compatibility(Some(&structural_registry), true)
+    homo.validate_heterogeneous_atom_compatibility(Some(&structural_registry))
         .expect("homogeneous coord dims dispatch every row-block penalty cleanly");
-
-    // (e) heterogeneous dims, no penalty, no ARD ⇒ Ok.
-    hetero
-        .validate_heterogeneous_atom_compatibility(Some(&empty_registry), false)
-        .expect("heterogeneous dims with no row-block penalty and no ARD is admitted");
-    hetero
-        .validate_heterogeneous_atom_compatibility(None, false)
-        .expect("heterogeneous dims with no registry and no ARD is admitted");
 }
 
 /// Build a single-block SAE term over `(manifold, coords)` with an arbitrary

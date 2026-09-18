@@ -3217,3 +3217,99 @@ fn collapsed_arcs_earn_no_glue_2280() {
         "collapsed coordinates must yield no glue or fusion proposal, got {merging} of {total}"
     );
 }
+
+/// #2822 — a fission child inherits the parent's proper coordinate prior. So a parent
+/// whose ARD block is empty, or missing from ρ, refuses (`duplicate_atom`). It does
+/// not append a child with no coordinate prior. The intact ρ is the positive control:
+/// the same fission succeeds and the child carries the parent's full block.
+#[test]
+fn fission_refuses_a_parent_without_a_proper_coordinate_prior_2822() {
+    let (term, mut rho) = tiled_circle_term(16, 3, &[1.0; 3]);
+    // A block no other atom carries, so inheriting from the wrong atom cannot pass.
+    rho.log_ard[1] = Array1::from_vec(vec![0.75]);
+    match duplicate_atom(&term, &rho, 1) {
+        Ok((child, child_rho)) => {
+            assert_eq!(child.k_atoms(), 4, "the fission appends one atom");
+            assert_eq!(
+                child_rho.log_ard[3],
+                Array1::from_vec(vec![0.75]),
+                "the child inherits the parent's ARD block"
+            );
+        }
+        Err(err) => panic!("a parent with a full ARD block must fission: {err}"),
+    }
+
+    let mut empty_parent = rho.clone();
+    empty_parent.log_ard[1] = Array1::<f64>::zeros(0);
+    match duplicate_atom(&term, &empty_parent, 1) {
+        Ok(_) => panic!("a parent with an empty ARD block must not fission"),
+        Err(err) => assert!(
+            err.contains("no proper coordinate prior"),
+            "unexpected error: {err}"
+        ),
+    }
+
+    let mut missing_parent = rho.clone();
+    missing_parent.log_ard.truncate(2);
+    match duplicate_atom(&term, &missing_parent, 2) {
+        Ok(_) => panic!("a parent with no ARD block in ρ must not fission"),
+        Err(err) => assert!(
+            err.contains("no proper coordinate prior"),
+            "unexpected error: {err}"
+        ),
+    }
+}
+
+/// #2822 — every coordinate atom carries a full ARD block. A ρ built through the
+/// public constructor with one atom's block empty is refused by the first evaluation
+/// that reads the ARD table. Both the system assembly and the penalized criterion
+/// cross `validated_ard_precisions` (construction_ard.rs), and the refusal names the
+/// missing proper coordinate prior. The fixture's full-block ρ assembling is the
+/// positive control.
+#[test]
+fn an_empty_ard_block_is_refused_at_criterion_entry_2822() {
+    let (mut term, rho) = tiled_circle_term(16, 3, &[1.0; 3]);
+    let target = Array2::<f64>::zeros((16, 4));
+    if let Err(err) = term.assemble_arrow_schur(target.view(), &rho, None) {
+        panic!("the fixture's full-block rho must assemble: {err:?}");
+    }
+
+    let empty = SaeManifoldRho::new(
+        0.0,
+        0.0,
+        vec![
+            Array1::<f64>::zeros(1),
+            Array1::<f64>::zeros(0),
+            Array1::<f64>::zeros(1),
+        ],
+    );
+    match term.assemble_arrow_schur(target.view(), &empty, None) {
+        Ok(_) => panic!("an empty ARD block must not assemble"),
+        Err(err) => {
+            let message = format!("{err:?}");
+            assert!(
+                message.contains("proper coordinate prior"),
+                "unexpected assembly error: {message}"
+            );
+        }
+    }
+    match term.penalized_quasi_laplace_criterion_with_cache_refine_policy(
+        target.view(),
+        &empty,
+        None,
+        4,
+        1.0,
+        1.0e-6,
+        1.0e-6,
+        false,
+    ) {
+        Ok(_) => panic!("an empty ARD block must not price a criterion"),
+        Err(err) => {
+            let message = format!("{err:?}");
+            assert!(
+                message.contains("proper coordinate prior"),
+                "unexpected criterion error: {message}"
+            );
+        }
+    }
+}
