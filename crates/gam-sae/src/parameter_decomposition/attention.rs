@@ -649,6 +649,33 @@ impl NativeAttention {
         })
     }
 
+    /// The source block's dimensions.
+    pub fn geometry(&self) -> AttentionGeometry {
+        self.attention.geometry
+    }
+
+    /// The source's rotary embedding.
+    pub fn rotary(&self) -> &RotaryEmbedding {
+        &self.attention.rotary
+    }
+
+    /// The source's query projection.
+    pub fn query(&self) -> &AffineProjection {
+        &self.query
+    }
+
+    /// The source's key projection.
+    pub fn key(&self) -> &AffineProjection {
+        &self.key
+    }
+
+    /// Whether the source normalizes each head's queries and keys before the rotary embedding
+    /// ([`NativeAttention::with_query_key_norm`]). With a norm, a map that preserves every score
+    /// must also commute with that norm, and a caller that projects rows itself would skip it.
+    pub fn has_query_key_norm(&self) -> bool {
+        self.query_key_norm.is_some()
+    }
+
     /// The source's per-head query/key RMS norm between the projections and the
     /// rotary embedding (Qwen3 `q_norm`, `k_norm`): `w ⊙ h (mean(h²) + ε)^{-1/2}` on
     /// each head's rows, with the source's declared `ε` and gains.
@@ -1801,6 +1828,36 @@ mod tests {
         assert!(
             unnormalized_worst > 1.0,
             "the kernel without the normalizers must leave the executed scores, got {unnormalized_worst}"
+        );
+    }
+
+    /// The read accessors return the parts the block was built from, and `has_query_key_norm`
+    /// follows `with_query_key_norm`. Positive control: an edited query tensor compares unequal to
+    /// the accessor's.
+    #[test]
+    fn accessors_return_the_source_parts() {
+        let fixture = Fixture::new(RotaryPairing::HalfSplit).biased();
+        let native = fixture.edited(&all_on());
+        assert_eq!(native.geometry(), fixture.geometry, "geometry");
+        assert_eq!(native.rotary(), &fixture.rotary, "rotary embedding");
+        assert_eq!(native.query().bias, fixture.query_bias, "query bias");
+        assert_eq!(native.key().bias, fixture.key_bias, "key bias");
+        let source_query = masked_product(&fixture.query_outputs, &all_on().query, &fixture.query_readins);
+        assert_eq!(native.query().weight, source_query, "query weight");
+        assert!(
+            !native.has_query_key_norm(),
+            "a block built without q_norm/k_norm has no query/key norm"
+        );
+        let normalized = Fixture::new(RotaryPairing::HalfSplit).normalized().edited(&all_on());
+        assert!(
+            normalized.has_query_key_norm(),
+            "with_query_key_norm must set the query/key norm"
+        );
+        let edited_query = masked_product(&fixture.query_outputs, &continuous_masks().query, &fixture.query_readins);
+        assert_ne!(
+            native.query().weight,
+            edited_query,
+            "the accessor must return the source query tensor, not an edited one"
         );
     }
 }
