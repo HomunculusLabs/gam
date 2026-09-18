@@ -1322,34 +1322,42 @@ fn log_survival_peak_z(mu: f64, sigma: f64) -> f64 {
     let residual = |z: f64| log_sigma + mu + sigma * z - (-z).ln();
     let mut hi = -f64::MIN_POSITIVE;
     let mut lo = -1.0;
-    let mut widen = 0;
-    while residual(lo) > 0.0 && widen < 4096 {
+    // Doubling a finite `lo` leaves the exponent range within its 1024 binades,
+    // so the finiteness check ends this search (#2469).
+    while residual(lo) > 0.0 {
         lo *= 2.0;
-        widen += 1;
         if !lo.is_finite() {
             return f64::MIN;
         }
     }
-    let mut z = if lo > -1.0e6 { 0.5 * (lo + hi) } else { lo };
-    for _ in 0..200 {
+    // Safeguarded Newton on the bracket. A Newton step is taken only when it lands
+    // strictly inside the bracket and the bracket halved on the previous update;
+    // otherwise the step bisects. So the bracket halves at least every second
+    // step, and the loop ends at the bracket's own resolution: no double lies
+    // strictly inside it, or the step no longer moves `z` (#2469).
+    let mut z = 0.5 * (lo + hi);
+    let mut width = hi - lo;
+    loop {
         let r = residual(z);
         if r > 0.0 {
             hi = z;
         } else {
             lo = z;
         }
-        // d/dz [ln σ + μ + σz − ln(−z)] = σ + 1/(−z) > 0.
-        let slope = sigma + 1.0 / (-z);
-        let mut next = z - r / slope;
-        if !(next > lo && next < hi) {
-            next = 0.5 * (lo + hi);
+        let midpoint = 0.5 * (lo + hi);
+        if !(midpoint > lo && midpoint < hi) {
+            return z;
         }
-        if (next - z).abs() <= f64::EPSILON * (1.0 + z.abs()) {
+        let halved = hi - lo <= 0.5 * width;
+        width = hi - lo;
+        // d/dz [ln σ + μ + σz − ln(−z)] = σ + 1/(−z) > 0.
+        let newton = z - r / (sigma + 1.0 / (-z));
+        let next = if halved && newton > lo && newton < hi { newton } else { midpoint };
+        if next == z {
             return next;
         }
         z = next;
     }
-    z
 }
 
 /// Maximizer of the complement branch's log-integrand: the unique root of
@@ -1365,15 +1373,17 @@ fn log_complement_peak_z(mu: f64, sigma: f64) -> f64 {
     if branch.log_integrand_slope(mu, sigma, hi) > 0.0 {
         return hi;
     }
-    for _ in 0..200 {
+    // Bisect until no double lies strictly inside the bracket, so the peak is
+    // located to the last bit at any scale of `σ` (#2469).
+    loop {
         let mid = 0.5 * (lo + hi);
+        if !(mid > lo && mid < hi) {
+            break;
+        }
         if branch.log_integrand_slope(mu, sigma, mid) > 0.0 {
             lo = mid;
         } else {
             hi = mid;
-        }
-        if hi - lo <= f64::EPSILON * (1.0 + hi.abs()) {
-            break;
         }
     }
     0.5 * (lo + hi)
@@ -1398,12 +1408,12 @@ fn log_survival_panel_edge(
     let mut step = 1.0_f64;
     let mut inner = z_peak;
     let mut outer = z_peak + direction * step;
-    let mut widen = 0;
-    while !fallen(outer) && widen < 4096 {
+    // Doubling a finite step leaves the exponent range within its 1024 binades,
+    // so the finiteness check ends this search (#2469).
+    while !fallen(outer) {
         inner = outer;
         step *= 2.0;
         outer = z_peak + direction * step;
-        widen += 1;
         if !outer.is_finite() {
             return inner;
         }
@@ -1413,15 +1423,16 @@ fn log_survival_panel_edge(
     } else {
         (outer, inner)
     };
-    for _ in 0..200 {
+    // Bisect until no double lies strictly inside the bracket (#2469).
+    loop {
         let mid = 0.5 * (lo + hi);
+        if !(mid > lo && mid < hi) {
+            break;
+        }
         if fallen(mid) == (direction > 0.0) {
             hi = mid;
         } else {
             lo = mid;
-        }
-        if hi - lo <= f64::EPSILON * (1.0 + mid.abs()) {
-            break;
         }
     }
     if direction > 0.0 { hi } else { lo }
@@ -6184,8 +6195,48 @@ mod log_survival_panel_2714_tests {
     use super::{
         LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER, LOG_SURVIVAL_PANEL_MAX_NODES,
         LOG_SURVIVAL_PANEL_MIN_NODES, LOG_SURVIVAL_TOWER_MAX_LOG_CANCELLATION, LogSurvivalBranch,
-        QuadratureContext, log_survival_jet, log_survival_panel,
+        QuadratureContext, log_complement_peak_z, log_survival_jet, log_survival_panel,
+        log_survival_panel_edge,
     };
+
+    /// #2469: the log-survival root brackets stop at their own floating-point
+    /// resolution, not after 200 steps.
+    /// - With `σ = 1e60` the complement peak sits near `5e-60` inside `(0, 1e60]`.
+    ///   Bisection needs about 450 halvings to reach adjacent doubles. The replaced
+    ///   cap returned a point about `0.3` away, where the slope is long negative. The
+    ///   returned peak brackets the slope's sign change to one ulp.
+    /// - Each panel edge is the first double past the peak at which the drop is
+    ///   reached.
+    #[test]
+    fn log_survival_roots_stop_at_their_brackets_resolution_2469() {
+        let complement = LogSurvivalBranch::Complement;
+        let (mu, sigma) = (0.0_f64, 1.0e60_f64);
+        let peak = log_complement_peak_z(mu, sigma);
+        assert!(peak > 0.0 && peak.is_finite(), "peak {peak:e}");
+        assert!(
+            complement.log_integrand_slope(mu, sigma, peak.next_down()) > 0.0
+                && complement.log_integrand_slope(mu, sigma, peak.next_up()) <= 0.0,
+            "the slope changes sign within one ulp of {peak:e}"
+        );
+
+        for (branch, mu, sigma) in [
+            (LogSurvivalBranch::Survival, 3.2_f64, 0.15_f64),
+            (LogSurvivalBranch::Complement, -30.0, 0.05),
+            (LogSurvivalBranch::Survival, 12.0, 0.002),
+        ] {
+            let peak = match branch {
+                LogSurvivalBranch::Survival => super::log_survival_peak_z(mu, sigma),
+                LogSurvivalBranch::Complement => log_complement_peak_z(mu, sigma),
+            };
+            let peak_log = branch.log_integrand(mu, sigma, peak);
+            let drop = 40.0;
+            let fallen = |z: f64| peak_log - branch.log_integrand(mu, sigma, z) >= drop;
+            let upper = log_survival_panel_edge(branch, mu, sigma, peak, drop, 1.0);
+            let lower = log_survival_panel_edge(branch, mu, sigma, peak, drop, -1.0);
+            assert!(fallen(upper) && !fallen(upper.next_down()), "upper edge {upper:e}");
+            assert!(fallen(lower) && !fallen(lower.next_up()), "lower edge {lower:e}");
+        }
+    }
 
     /// `(mu, sigma, ln S)` — 60-digit mpmath reference for
     /// `S(mu,sigma) = E[exp(-e^eta)]`, `eta ~ N(mu, sigma^2)`.
