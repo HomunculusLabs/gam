@@ -86,15 +86,20 @@
 //!
 //! for the half-width system over the signed box `[-1, 1]^C`. So the cell's gap and radius are
 //! that system's Frank-Wolfe gap and radius at mask 0, and
-//! `sup_K F <= F(m0) + G_K + (L / 2) R_K^2`. The search is depth-first:
+//! `sup_K F <= F(m0) + G_K + (L / 2) R_K^2`. The computed center `m0` is the midpoint rounded,
+//! so each half-width is the larger distance from `m0` to an endpoint, rounded up: the signed
+//! box then covers the cell exactly, whether or not the midpoint was representable. The search
+//! is depth-first:
 //! * a cell is pruned when its bound is at most epsilon;
 //! * otherwise it splits on the control with the largest first-order decrease of that bound,
 //!   `h_c (|g . v_c| + L R_K |v_c|_2)`, since `dU/dh_c = |g . v_c| + L R_K |v_c|_2`;
 //! * a cell whose split midpoint rounds to an endpoint while its bound still exceeds epsilon is
 //!   unresolved.
 //!
-//! A certified counterexample at a center returns at once. Memory is one interval vector and the
-//! split stack, and the covering is finite through the resolution floor.
+//! A certified counterexample at a center returns at once. Every center also lies in each cell
+//! the search split to reach it, so a certified center value above an enclosing cell's bound
+//! refutes the stated constant. Memory is one interval vector and the split stack, and the
+//! covering is finite through the resolution floor.
 
 use super::moments::{
     GeneratorPart, MaskDomain, MaskMomentSystem, MomentGeometryError, MomentVector, WitnessEndpoint,
@@ -897,24 +902,36 @@ pub struct CoveringReport {
     pub status: SeparationStatus,
 }
 
-/// One pending split on the depth-first stack.
+/// One pending split on the depth-first stack. The frames on the stack are the cells enclosing
+/// the current one.
 struct SplitFrame {
     control: usize,
     parent: (f64, f64),
     midpoint: f64,
     right_visited: bool,
+    /// The smallest bound over this split's cell and every cell enclosing it.
+    enclosing_bound: f64,
 }
 
-/// The half-width system of a cell over the signed unit box.
+/// The half-width system of a cell around its computed center, over the signed unit box.
+///
+/// A half-width is `max(m0_c - a_c, b_c - m0_c)`, rounded up past the subtraction, so
+/// `[m0_c - h_c, m0_c + h_c]` contains `[a_c, b_c]` for the center as computed. The midpoint
+/// `a + (b - a) / 2` can round away from the exact midpoint by an absolute `u |m0|`, which a
+/// relative band on `(b - a) / 2` does not cover once the cell is narrow. A degenerate cell
+/// (a kept control) keeps half-width zero.
 fn half_width_system(
     system: &MaskMomentSystem,
     cell: &[(f64, f64)],
+    center: &[f64],
 ) -> Result<(MaskMomentSystem, MaskDomain), AdversaryError> {
     let generators: Vec<Vec<GeneratorPart>> = cell
         .iter()
+        .zip(center)
         .enumerate()
-        .map(|(control, &(lower, upper))| {
-            let half_width = 0.5 * (upper - lower);
+        .map(|(control, (&(lower, upper), &middle))| {
+            let reach = (middle - lower).max(upper - middle);
+            let half_width = if reach > 0.0 { reach.next_up() } else { 0.0 };
             system
                 .generator(control)
                 .unwrap_or(&[])
@@ -1018,6 +1035,17 @@ where
                 value_roundoff: jet.value_roundoff,
             };
         }
+        // The center lies in every cell on the stack, and each of their bounds holds over its
+        // whole cell if the stated constant is true. Its own cell's bound adds nonnegative terms
+        // to F(m0), so only an enclosing cell can refute.
+        if let Some(frame) = stack.last() {
+            if witness_lower > frame.enclosing_bound {
+                return Err(AdversaryError::CertificateRefuted {
+                    witness_lower,
+                    bound: frame.enclosing_bound,
+                });
+            }
+        }
         if witness_lower > epsilon {
             let status = SeparationStatus::counterexample(
                 jet.value,
@@ -1038,24 +1066,19 @@ where
                 status,
             });
         }
-        let (scaled, signed) = half_width_system(system, &cell)?;
+        let (scaled, signed) = half_width_system(system, &cell, &center)?;
         let scales = ControlScales::new(&scaled, &signed, kept)?;
         let origin = vec![0.0; controls];
         let mut geometry = scales.geometry(&scaled, &signed, kept, &origin, &jet)?;
-        // The support band covers the stored half-width generators. Forming w_c rounds b - a once
-        // and the product once (the halving is exact), |fl(w) - w| <= gamma_2 |w| per entry, so the
-        // exact cell gap can differ by gamma_2 sum_j |g_j| sum_c |w_cj|: half the pairing magnitude,
-        // which was taken at reach 2. The radius takes the same growth.
-        geometry.gap_roundoff += accumulation_band(2, 0.5 * geometry.pairing_magnitude);
-        geometry.radius *= 1.0 + accumulation_growth(2);
+        // The support band covers the stored half-width generators. The half-width is rounded up,
+        // so it covers the cell exactly, and only the product w_c = h_c v_c rounds:
+        // |fl(w) - w| <= gamma_1 |w| per entry, so the exact cell gap can differ by
+        // gamma_1 sum_j |g_j| sum_c |w_cj|: half the pairing magnitude, which was taken at reach 2.
+        // The radius takes the same growth.
+        geometry.gap_roundoff += accumulation_band(1, 0.5 * geometry.pairing_magnitude);
+        geometry.radius *= 1.0 + accumulation_growth(1);
         let (bound, numerical_error) =
             smoothness_upper_bound(&jet, &geometry, stated.gradient_lipschitz);
-        if witness_lower > bound {
-            return Err(AdversaryError::CertificateRefuted {
-                witness_lower,
-                bound,
-            });
-        }
         if bound <= epsilon {
             pruned_cells += 1;
             pruned_upper = pruned_upper.max(bound);
@@ -1088,11 +1111,15 @@ where
                 Some(control) => {
                     let (lower, upper) = cell[control];
                     let midpoint = lower + 0.5 * (upper - lower);
+                    let enclosing_bound = stack
+                        .last()
+                        .map_or(bound, |frame| frame.enclosing_bound.min(bound));
                     stack.push(SplitFrame {
                         control,
                         parent: (lower, upper),
                         midpoint,
                         right_visited: false,
+                        enclosing_bound,
                     });
                     cell[control] = (lower, midpoint);
                     continue;
@@ -1694,5 +1721,131 @@ mod tests {
         // Positive control: the certified one-control peak is accepted.
         let single = system_from_rows(&array![[1.0]]);
         assert!(certify_by_covering(&single, &unit_domain(1), &[false], 1.02, &CertifiedPeak).is_ok());
+    }
+
+    /// `F(q) = q / ε + 3` on one control, `q = 1 - m`: affine, so `L = 0` is exact. Over masks
+    /// `m = 1 + k ε` every operation is exact, and in general the final sum rounds once.
+    struct UlpRamp;
+
+    impl SeparationObjective for UlpRamp {
+        fn evaluate(&self, mask: &[f64]) -> Result<ObjectiveJet, String> {
+            let scaled = (1.0 - mask[0]) / f64::EPSILON;
+            Ok(ObjectiveJet {
+                value: scaled + 3.0,
+                value_roundoff: accumulation_band(1, scaled.abs() + 3.0),
+                moment_gradient: MomentVector {
+                    blocks: vec![array![1.0 / f64::EPSILON]],
+                },
+                gradient_roundoff: 0.0,
+            })
+        }
+
+        fn smoothness(&self) -> Option<SmoothnessCertificate> {
+            Some(SmoothnessCertificate {
+                gradient_lipschitz: 0.0,
+                derivation: "F is affine in q".to_string(),
+            })
+        }
+    }
+
+    /// mpd-verify batch 31 NOTE 1. On the declared box `[1, 1 + 3ε]` the midpoint `1 + 1.5ε`
+    /// is a tie that rounds to `1 + 2ε`, so the lower endpoint sits `2ε` from the center while
+    /// `(b - a) / 2 = 1.5ε`. A half-width of `(b - a) / 2` leaves a third of it uncovered, far
+    /// past any relative band, and the covering certified `sup F <= 2.5 + O(u)` below the exact
+    /// supremum `F(1) = 3`.
+    #[test]
+    fn covering_half_widths_cover_the_cell_around_a_rounded_center_2951() {
+        let (lower, upper) = (1.0, 1.0 + 3.0 * f64::EPSILON);
+        // The fixture exercises a rounded center: the computed midpoint is not the exact one.
+        let center = lower + 0.5 * (upper - lower);
+        assert_eq!(center, 1.0 + 2.0 * f64::EPSILON);
+        assert!(center - lower > 0.5 * (upper - lower));
+        let system = system_from_rows(&array![[1.0]]);
+        let domain = MaskDomain::new(vec![(lower, upper)]).expect("the box contains all-on");
+        let supremum = UlpRamp.evaluate(&[lower]).expect("the ramp evaluates").value;
+        assert_eq!(supremum, 3.0);
+        let epsilon = 2.75;
+        let report = certify_by_covering(&system, &domain, &[false], epsilon, &UlpRamp).expect("covering");
+        assert!(
+            !report.status.certifies_at_most(epsilon),
+            "the covering certified {:?} below the exact supremum {supremum}",
+            report.status.upper_bound()
+        );
+        if let Some(upper_bound) = report.status.upper_bound() {
+            assert!(upper_bound >= supremum, "bound {upper_bound} below the exact supremum");
+        }
+    }
+
+    /// `F(q) = q^2` on one control, `q = 1 - m`, with a stated constant: the true `L = 2`, or a
+    /// false `L = 0`.
+    struct Square {
+        gradient_lipschitz: f64,
+    }
+
+    impl SeparationObjective for Square {
+        fn evaluate(&self, mask: &[f64]) -> Result<ObjectiveJet, String> {
+            let deletion = 1.0 - mask[0];
+            Ok(ObjectiveJet {
+                value: deletion * deletion,
+                value_roundoff: accumulation_band(2, deletion * deletion),
+                moment_gradient: MomentVector {
+                    blocks: vec![array![2.0 * deletion]],
+                },
+                gradient_roundoff: accumulation_band(1, 2.0 * deletion.abs()),
+            })
+        }
+
+        fn smoothness(&self) -> Option<SmoothnessCertificate> {
+            Some(SmoothnessCertificate {
+                gradient_lipschitz: self.gradient_lipschitz,
+                derivation: format!("stated {}; the exact constant is |F''| = 2", self.gradient_lipschitz),
+            })
+        }
+    }
+
+    /// mpd-verify batch 31 NOTE 2. A center is compared with the cells enclosing it. With the
+    /// false `L = 0` the root cell `[0, 1]` (center `1/2`, `F = 1/4`, `|g| h = 1/2`) is bounded
+    /// by `3/4`, and the center `1/8` of its descendant `[0, 1/4]` has `F = 49/64 > 3/4`, so the
+    /// constant is refuted. Comparing a center only with its own cell's bound can never refute,
+    /// since that bound is `F(m0)` plus nonnegative terms.
+    #[test]
+    fn covering_refutes_a_false_constant_at_a_center_inside_an_enclosing_cell_2951() {
+        let system = system_from_rows(&array![[1.0]]);
+        let domain = unit_domain(1);
+        let epsilon = 0.7;
+        let refused = certify_by_covering(
+            &system,
+            &domain,
+            &[false],
+            epsilon,
+            &Square {
+                gradient_lipschitz: 0.0,
+            },
+        );
+        assert!(
+            matches!(refused, Err(AdversaryError::CertificateRefuted { .. })),
+            "the false constant was not refuted: {refused:?}"
+        );
+        if let Err(AdversaryError::CertificateRefuted {
+            witness_lower,
+            bound,
+        }) = refused
+        {
+            assert!(witness_lower > bound);
+            assert!(bound < 49.0 / 64.0);
+        }
+        // Positive control: the true constant is not refuted, and the same descendant center
+        // refutes epsilon instead.
+        let report = certify_by_covering(
+            &system,
+            &domain,
+            &[false],
+            epsilon,
+            &Square {
+                gradient_lipschitz: 2.0,
+            },
+        )
+        .expect("the true constant is not refuted");
+        assert!(report.status.refutes_at_most(epsilon));
     }
 }
