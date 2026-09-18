@@ -251,3 +251,43 @@ fn an_in_band_orbit_solve_certifies_on_a_wide_metric_spectrum_2234() {
          cannot see the pairing"
     );
 }
+
+/// The certificate still refuses a step that does not solve `A`. After the decomposition, the block's
+/// operator gains `c·(Φw)(Φw)ᵀ` along a retained direction `w`, so the eliminated step's physical
+/// residual gains `c·Φw·(wᵀΦx)` along a direction the band does not hold out. The same block
+/// without the plant certifies.
+#[test]
+fn a_residual_off_the_held_out_band_is_still_refused_2234() {
+    let metric = fixture_metric();
+    let tangent = fixture_tangent();
+    let operator = fixture_operator(&metric, &tangent);
+    let rhs = Array1::<f64>::from_vec(vec![0.9, -0.4, 1.3, 0.05, -0.8, 0.6]);
+
+    let clean = stiffened_block(&operator, &metric, &tangent, true);
+    let solve = clean.solve_stationarity(&border(&rhs)).expect("the unplanted solve certifies");
+    assert_eq!(solve.retained_rank, DIM, "the fixture resolves every direction");
+
+    let mut planted = stiffened_block(&operator, &metric, &tangent, true);
+    let retained = (0..DIM)
+        .find(|&index| planted.eigenvalues[index].abs() > planted.rank_floor(index) && (planted.eigenvalues[index] - 1.0).abs() > 0.5)
+        .expect("a retained complement direction away from the orbit's unit curvature");
+    let image = metric.dot(&planted.eigenvectors.column(retained));
+    let operator_norm = operator.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let strength = 1.0e-1 * operator_norm / image.dot(&image);
+    for row in 0..DIM {
+        for col in 0..DIM {
+            planted.operator[[row, col]] += strength * image[row] * image[col];
+        }
+    }
+    let step = solve.step.beta.clone();
+    let planted_residual = image.dot(&step).abs() * strength * image.dot(&image).sqrt();
+    let bar = f64::EPSILON.sqrt() * (operator_norm * step.dot(&step).sqrt() + rhs.dot(&rhs).sqrt());
+    eprintln!("[#2234 orbit elimination] planted residual {planted_residual:e} against bar {bar:e}");
+    assert!(planted_residual > 1.0e3 * bar, "the plant must sit far above the bar ({planted_residual} vs {bar})");
+    let refused = planted.solve_stationarity(&border(&rhs));
+    assert!(
+        matches!(&refused, Err(message) if message.contains("failed certification")),
+        "a step with a residual off the held-out band must be refused, got {:?}",
+        refused.map(|solve| solve.retained_rank)
+    );
+}
