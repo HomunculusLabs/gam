@@ -3733,7 +3733,6 @@ impl LocationScaleFamilyBuilder for GaussianLocationScaleWiggleTermBuilder {
             wiggle_knots: self.wiggle_knots.clone(),
             wiggle_degree: self.wiggle_degree,
             policy: gam_runtime::resource::ResourcePolicy::default_library(),
-            cached_row_scalars: std::sync::RwLock::new(None),
             jeffreys_armed: true,
         }
     }

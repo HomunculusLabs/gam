@@ -2378,7 +2378,6 @@ pub(crate) fn gaussian_location_scale_joint_hessian_is_observed_and_psi_layers_m
                 wiggle_knots: family.wiggle_knots.clone(),
                 wiggle_degree: family.wiggle_degree,
                 policy: gam_runtime::resource::ResourcePolicy::default_library(),
-                cached_row_scalars: std::sync::RwLock::new(None),
                 jeffreys_armed: true,
             };
             let eta_mu_t = xmu_t.dot(&states[0].beta);

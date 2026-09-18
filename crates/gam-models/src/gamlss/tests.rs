@@ -4314,7 +4314,6 @@ pub(crate) fn gls_wiggle_workspace_fixture() -> (
         wiggle_knots: knots,
         wiggle_degree: 2,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
-        cached_row_scalars: std::sync::RwLock::new(None),
         jeffreys_armed: true,
     };
     // The wiggle block has dynamic geometry (q0-dependent basis): the
