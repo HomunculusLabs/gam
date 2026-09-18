@@ -6371,9 +6371,10 @@ impl SaeManifoldTerm {
 
     /// Why this state's learned frames cannot be integrated, or `None` when they
     /// can: the unframed `(t, vec B)` observed information must be admitted on the
-    /// same dense route the criterion prices, every framed atom's `(M_k·p)²`
-    /// covariance must fit the payload budget, and every framed decoder must have
-    /// the frame's rank, where the fixed-rank manifold has a tangent space.
+    /// same dense route the criterion prices, the framed atoms' `(M_k·p)²`
+    /// covariances must fit the memory governor's single-materialization cap
+    /// together, and every framed decoder must have the frame's rank, where the
+    /// fixed-rank manifold has a tangent space.
     pub(crate) fn frame_marginal_admission(
         &self,
     ) -> Result<Option<SaeFrameMarginalUnavailable>, String> {
@@ -6404,16 +6405,15 @@ impl SaeManifoldTerm {
                 SaeFrameMarginalUnavailable::UnframedObservedInformationNotAdmitted,
             ));
         }
+        if !self.framed_decoder_covariance_admitted() {
+            return Ok(Some(
+                SaeFrameMarginalUnavailable::DecoderCovariancesExceedMaterializationCap,
+            ));
+        }
         for (atom_idx, atom) in self.atoms.iter().enumerate() {
             let Some(frame) = atom.decoder_frame.as_ref() else {
                 continue;
             };
-            let width = atom.basis_size() * p;
-            if width.saturating_mul(width) > SAE_DECODER_COV_PAYLOAD_MAX_ENTRIES {
-                return Ok(Some(
-                    SaeFrameMarginalUnavailable::DecoderCovarianceExceedsPayload { atom: atom_idx },
-                ));
-            }
             if atom.decoder_numerical_rank()? < frame.rank() {
                 return Ok(Some(
                     SaeFrameMarginalUnavailable::FrameCoordinatesRankDeficient { atom: atom_idx },

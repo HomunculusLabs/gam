@@ -2048,9 +2048,9 @@ fn sae_fit_report_into_dict<'py>(
         // Schur factor. Streaming-unavailable bands remain absent; no alternate
         // per-atom covariance is substituted.
         if let Some(unc) = shape_uncertainty.atoms.get(atom_idx) {
-            // Omitted (not set) above the SAE_DECODER_COV_PAYLOAD_MAX_ENTRIES
-            // budget — the python reader treats the key as optional and the band
-            // quantities below remain exact.
+            // Omitted (not set) when the framed atoms' dense covariances do not fit
+            // the memory governor's single-materialization cap — the python reader
+            // treats the key as optional and the band quantities below remain exact.
             if let Some(cov) = &unc.decoder_covariance {
                 // #2135 — the emitted decoder is the FULL-width `M × p` block, so
                 // its covariance must live in the same `M`-frame. For a #1117
@@ -2281,6 +2281,13 @@ fn sae_fit_report_into_dict<'py>(
     out.set_item(
         "shape_covariance_operator",
         shape_uncertainty.operator.as_str(),
+    )?;
+    // #2900 — why the learned frames are held fixed (`None` unless they are). The
+    // integrated covariance is admitted on host memory, so a result names its
+    // conditioning and the reason instead of silently reporting the smaller one.
+    out.set_item(
+        "shape_covariance_frame_conditioning_reason",
+        shape_uncertainty.operator.frame_conditioning_reason(),
     )?;
     // Provenance of the per-row inner product the fit installed (#980). Object 4
     // reads this to certify which metric the gauge pulled back through:

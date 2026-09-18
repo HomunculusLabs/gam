@@ -1,7 +1,7 @@
 //! Rust-owned serde schema for the fitted `ManifoldSAE` model artifact (#2091).
 //!
 //! The fitted SAE-manifold model is serialized to a JSON payload tagged
-//! `"gamfit.ManifoldSAE/v8"` schema. Version 6 was deliberately breaking: it
+//! `"gamfit.ManifoldSAE/v9"` schema. Version 6 was deliberately breaking: it
 //! persists each atom's constructor-validated geometry plan as the sole source
 //! of topology, chart dimension, analytic resolution, basis width, center set,
 //! and reference metric. Version 7 adds each atom's row-sandwich robust band
@@ -10,6 +10,9 @@
 //! chart transport of an atom the accepted-iterate affine gauge re-charted, so a
 //! reloaded plan rebuilds the Gram saved beside its decoder (#2935, #2947). A v7
 //! reader cannot parse that plan, so the version moves with it.
+//! Version 9 adds the operator the shape covariances invert and why learned frames
+//! are held fixed, because admission to the integrated covariance depends on host
+//! memory (#2900).
 //! Historically the schema lived only in the Python dataclass
 //! `gamfit/_sae_manifold.py::ManifoldSAE`
 //! (`to_dict` / `from_dict`), so a field-name / default / None-handling change
@@ -39,10 +42,10 @@ use gam::terms::sae::manifold::SaeAtomGeometryPlan;
 
 /// The on-disk schema tag. `from_json` refuses any other value with a
 /// [`SchemaRefusal`], matching the Python `from_dict` guard.
-pub(crate) const SCHEMA_TAG: &str = "gamfit.ManifoldSAE/v8";
+pub(crate) const SCHEMA_TAG: &str = "gamfit.ManifoldSAE/v9";
 
 /// The version [`SCHEMA_TAG`] names, which a refusal compares a payload's version with.
-const SCHEMA_VERSION: u32 = 8;
+const SCHEMA_VERSION: u32 = 9;
 
 /// Prefix every dense `ManifoldSAE` schema tag carries before its version number.
 const SCHEMA_VERSION_PREFIX: &str = "gamfit.ManifoldSAE/v";
@@ -232,6 +235,14 @@ pub(crate) struct ManifoldSaePayload {
     pub(crate) fisher_factor_kind: Option<String>,
     pub(crate) metric_provenance: String,
     pub(crate) fisher_mass_residual: Option<Vec<f64>>,
+
+    // --- shape covariance provenance (v7, #2900) ---------------------------
+    /// Wire name of the operator the shape covariances invert
+    /// (`SaeShapeCovarianceOperator::as_str`).
+    pub(crate) shape_covariance_operator: String,
+    /// Why every learned frame is held at its fitted value, or null when it is
+    /// not (`SaeShapeCovarianceOperator::frame_conditioning_reason`).
+    pub(crate) shape_covariance_frame_conditioning_reason: Option<String>,
     pub(crate) selected_log_lambda_sparse: Option<f64>,
     pub(crate) selected_log_lambda_smooth: Option<Vec<f64>>,
     pub(crate) selected_log_ard: Option<Vec<Vec<f64>>>,
@@ -294,6 +305,8 @@ impl ManifoldSaePayload {
         "fisher_factor_kind",
         "metric_provenance",
         "fisher_mass_residual",
+        "shape_covariance_operator",
+        "shape_covariance_frame_conditioning_reason",
         "selected_log_lambda_sparse",
         "selected_log_lambda_smooth",
         "selected_log_ard",
@@ -678,11 +691,12 @@ mod manifold_sae_payload_serde_tests {
                 version: 7,
             })
         );
+        let newer = format!("{SCHEMA_VERSION_PREFIX}{}", SCHEMA_VERSION + 1);
         assert_eq!(
-            SchemaRefusal::check(Some("gamfit.ManifoldSAE/v9")),
+            SchemaRefusal::check(Some(newer.as_str())),
             Err(SchemaRefusal::Newer {
-                found: "gamfit.ManifoldSAE/v9".to_string(),
-                version: 9,
+                found: newer.clone(),
+                version: SCHEMA_VERSION + 1,
             })
         );
         assert_eq!(

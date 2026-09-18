@@ -1254,7 +1254,7 @@ def model_from_dict(payload: Any) -> Any:
     it in a pickle, a npz, or over a wire -- need the same tag dispatch without
     the sniff, and this is it. Reaching past this into a concrete class is what
     #2567 filed: an overcomplete (``K > P``) fit serializes under the support
-    tag, so ``ManifoldSAE.from_dict``, which is pinned to ``/v6``, rejects it.
+    tag, so ``ManifoldSAE.from_dict``, which is pinned to ``/v9``, rejects it.
 
     Parameters
     ----------

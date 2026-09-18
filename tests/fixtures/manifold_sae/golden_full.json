@@ -888,7 +888,7 @@
     "generators": [],
     "group_signature": "SO(2)"
   },
-  "schema": "gamfit.ManifoldSAE/v8",
+  "schema": "gamfit.ManifoldSAE/v9",
   "selected_log_ard": [
     [
       0.1
@@ -908,6 +908,8 @@
     1.1
   ],
   "selected_log_lambda_sparse": -0.6,
+  "shape_covariance_frame_conditioning_reason": "unframed_observed_information_not_admitted",
+  "shape_covariance_operator": "observed_information_conditional_on_fitted_frames",
   "smoothness": 0.9,
   "solver_plan": {
     "max_outer": 3,

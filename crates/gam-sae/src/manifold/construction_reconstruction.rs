@@ -470,9 +470,27 @@ impl SaeManifoldTerm {
                 self.k_atoms()
             ));
         }
+        // A framed atom's dense `(M_k·p)²` lift exists only to export the full decoder
+        // covariance: its band variances are exact from the factored covariance either
+        // way. The lifts are exported when every framed atom's covariance together fits
+        // the memory governor's single-materialization cap, and they are charged on the
+        // ledger while they are built. A refusal is an error (#2900).
+        let export_framed_lift = factored_layout && self.framed_decoder_covariance_admitted();
+        let lift_charge = match self.framed_decoder_covariance_bytes() {
+            Some(bytes) if export_framed_lift => Some(
+                gam_runtime::resource::MemoryGovernor::global()
+                    .try_reserve(bytes, "SaeManifoldTerm framed decoder covariance export")
+                    .map_err(|error| {
+                        format!(
+                            "assemble_shape_uncertainty: refusing the {bytes}-byte framed decoder \
+                             covariance export: {error}"
+                        )
+                    })?,
+            ),
+            _ => None,
+        };
         let mut atoms = Vec::with_capacity(self.k_atoms());
         for (k, atom) in self.atoms.iter().enumerate() {
-            let m = atom.basis_size();
             let width = block_ranges[k].len();
             if covariance.blocks[k].dim() != (width, width) {
                 return Err(format!(
@@ -504,12 +522,11 @@ impl SaeManifoldTerm {
             }
 
             let framed = factored_layout && atom.decoder_frame.is_some();
-            let dense_entries = (m * p).saturating_mul(m * p);
-            let cov = if framed && dense_entries > SAE_DECODER_COV_PAYLOAD_MAX_ENTRIES {
-                // LLM-scale ambient `p`: the dense `(M_k·p)²` lift would be
-                // gigabytes per atom and exists only to export the full
-                // covariance. Compute the band variance EXACTLY from the
-                // factored frame covariance instead: with `B_k = C_k·U_kᵀ`,
+            let cov = if framed && !export_framed_lift {
+                // The dense `(M_k·p)²` lifts do not fit the governor's cap, and
+                // they exist only to export the full covariance. Compute the band
+                // variance EXACTLY from the factored frame covariance instead:
+                // with `B_k = C_k·U_kᵀ`,
                 //   Var_c(t) = (φ ⊗ u_c)ᵀ Cov(vec C_k) (φ ⊗ u_c)
                 // which is the r×r quadratic form `u_cᵀ Y u_c` with
                 //   Y = Σ_{b1,b2} φ[b1] φ[b2] Cov(C)[(b1,·),(b2,·)].
@@ -581,6 +598,7 @@ impl SaeManifoldTerm {
                 band_sd_robust: Ok(band_sd_robust),
             });
         }
+        drop(lift_charge);
         Ok(SaeShapeUncertainty {
             dispersion,
             operator: SaeShapeCovarianceOperator::ObservedInformation {
@@ -670,6 +688,30 @@ impl SaeManifoldTerm {
         self.assemble_shape_uncertainty(&information, dispersion)
     }
 
+    /// Bytes of every framed atom's dense `(M_k·p)²` decoder covariance together,
+    /// or `None` when the count overflows.
+    pub(crate) fn framed_decoder_covariance_bytes(&self) -> Option<usize> {
+        let p = self.output_dim();
+        self.atoms
+            .iter()
+            .filter(|atom| atom.decoder_frame.is_some())
+            .try_fold(0_usize, |total, atom| {
+                let width = atom.basis_size().checked_mul(p)?;
+                total.checked_add(gam_runtime::resource::dense_f64_bytes(width, width)?)
+            })
+    }
+
+    /// Whether every framed atom's dense `(M_k·p)²` decoder covariance can be held
+    /// at once: their total against the memory governor's stationary
+    /// single-materialization cap (#2900).
+    pub(crate) fn framed_decoder_covariance_admitted(&self) -> bool {
+        self.framed_decoder_covariance_bytes().is_some_and(|bytes| {
+            bytes
+                <= gam_runtime::resource::MemoryGovernor::global()
+                    .single_materialization_cap_bytes()
+        })
+    }
+
     /// Explicitly unavailable joint shape uncertainty, carrying why no covariance
     /// exists: an execution plan that cannot materialize the dense observed
     /// information, or a state whose observed information has resolved negative
@@ -744,6 +786,127 @@ mod persisted_reconstruct_tests {
                     (out[[i, j]] - expected).abs() < 1.0e-9,
                     "row {i} col {j}: got {} expected {expected}",
                     out[[i, j]]
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod framed_decoder_covariance_export_2900_tests {
+    use super::*;
+    use ndarray::{Array3, array};
+
+    /// #2900 — a framed atom's dense `(M_k·p)²` decoder covariance used to be
+    /// exported only up to 2^24 entries, an entry-count literal outside the memory
+    /// governor. The export is admitted on the governor's cap now. One atom with
+    /// `M = 2` and `p = 2049` has 16,793,604 entries, just past the old window. Held
+    /// at its fitted frame `U`, its factored covariance `Cov(vec C)` must export the
+    /// lift `φ·(I ⊗ U)·Cov(vec C)·(I ⊗ U)ᵀ`, and the band read from the export must
+    /// equal the factored closed form `φ·u_c²·φ(t)ᵀ Cov(vec C) φ(t)`.
+    #[test]
+    fn framed_decoder_covariance_is_exported_past_the_old_entry_window_2900() {
+        let (n, m, p) = (4, 2, 2049);
+        assert!((m * p) * (m * p) > 1 << 24, "the fixture must sit past the old window");
+        let coords = Array2::from_shape_fn((n, 1), |(i, _)| 0.25 * i as f64);
+        let basis = Array2::from_shape_fn((n, m), |(i, b)| if b == 0 { 1.0 } else { coords[[i, 0]] });
+        let jet = Array3::from_shape_fn((n, m, 1), |(_, b, _)| if b == 0 { 0.0 } else { 1.0 });
+        let raw_frame = Array2::from_shape_fn((p, 1), |(c, _)| (c % 7) as f64 - 3.0);
+        let frame_norm = raw_frame.mapv(|v| v * v).sum().sqrt();
+        let unit_frame = raw_frame.mapv(|v| v / frame_norm);
+        let decoder = Array2::from_shape_fn((m, p), |(b, c)| [1.5, -0.5][b] * unit_frame[[c, 0]]);
+        let atom = SaeManifoldAtom::new_with_provided_function_gram(
+            "framed_line_2900",
+            SaeAtomBasisKind::Linear,
+            1,
+            basis.clone(),
+            jet,
+            decoder,
+            Array2::<f64>::eye(m),
+        )
+        .expect("atom shapes agree");
+        let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+            Array2::<f64>::zeros((n, 1)),
+            vec![coords],
+            vec![LatentManifold::Euclidean],
+            AssignmentMode::softmax(1.0),
+        )
+        .expect("assignment shapes agree");
+        let mut term = SaeManifoldTerm::new(vec![atom], assignment).expect("term");
+        term.atoms[0].decoder_frame = Some(GrassmannFrame::from_oriented(unit_frame, array![1.0]));
+        let u = term.atoms[0]
+            .decoder_frame
+            .as_ref()
+            .expect("framed atom")
+            .frame()
+            .to_owned();
+        assert_eq!(
+            term.framed_decoder_covariance_bytes(),
+            Some(8 * (m * p) * (m * p)),
+            "the export is priced as one dense (M·p)² f64 block"
+        );
+        assert!(term.framed_decoder_covariance_admitted());
+
+        let factored = array![[0.3, 0.1], [0.1, 0.2]];
+        let information = SaeShapeInformation::ObservedInformation(SaeObservedInformationCovariance {
+            blocks: vec![factored.clone()],
+            robust_blocks: vec![factored.clone()],
+            identified_rank: n + m,
+            ambient_dim: n + m,
+            frame_conditioning: SaeFrameConditioning::ConditionalOnFittedFrames(
+                SaeFrameMarginalUnavailable::UnframedObservedInformationNotAdmitted,
+            ),
+        });
+        let scale = 0.25;
+        let dispersion = SaeReconstructionDispersion {
+            raw_output_noise_variance: scale,
+            likelihood_dispersion: scale,
+            likelihood_frame: SaeLikelihoodFrame::RawOutput,
+            selection_conditioning: SaeSelectionConditioning::ConditionalOnFittedRouting,
+        };
+        let shape = term
+            .assemble_shape_uncertainty(&information, dispersion)
+            .expect("shape uncertainty held at the fitted frame");
+        assert_eq!(
+            shape.operator.as_str(),
+            "observed_information_conditional_on_fitted_frames",
+            "the result must name the covariance it holds"
+        );
+        assert_eq!(
+            shape.operator.frame_conditioning_reason(),
+            Some("unframed_observed_information_not_admitted"),
+            "the result must name why the frame is held fixed"
+        );
+        let cov = shape.atoms[0]
+            .decoder_covariance
+            .as_ref()
+            .expect("the lift must be exported past the old 2^24-entry window");
+        assert_eq!(cov.dim(), (m * p, m * p));
+        let largest = factored.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs())) * scale;
+        for b1 in 0..m {
+            for b2 in 0..m {
+                for c1 in 0..p {
+                    for c2 in 0..p {
+                        let expected = scale * u[[c1, 0]] * factored[[b1, b2]] * u[[c2, 0]];
+                        let got = cov[[b1 * p + c1, b2 * p + c2]];
+                        assert!(
+                            (got - expected).abs() <= 1.0e-12 * largest,
+                            "Cov[({b1},{c1}),({b2},{c2})] = {got:.6e}, lift {expected:.6e}"
+                        );
+                    }
+                }
+            }
+        }
+        let band = shape.atoms[0].band_sd.as_ref().expect("model-based band");
+        for row in 0..n {
+            let phi = basis.row(row);
+            let quadratic = phi.dot(&factored.dot(&phi));
+            for c in 0..p {
+                let expected = scale * u[[c, 0]] * u[[c, 0]] * quadratic;
+                let got = band[[row, c]] * band[[row, c]];
+                assert!(
+                    (got - expected).abs() <= 1.0e-10 * expected.abs() + 1.0e-15,
+                    "row {row}, channel {c}: band variance {got:.6e}, factored {expected:.6e}"
                 );
             }
         }

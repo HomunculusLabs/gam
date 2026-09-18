@@ -1010,5 +1010,13 @@
     "reason": "Pure move for line-count headroom (build.rs MAX_TRACKED_FILE_LINES = 10000; latent/survival/mod.rs was 9712 lines): main :1777-4125, the latent row kernel's jet machinery (the primary-coordinate constants, LatentExactExpansion and its certified cumulants, the A-basis term kernels, the LatentRowJet backends, the primary direction maps and their inline tests_* modules), moves verbatim into row_kernel_jets.rs, which mod.rs include!s at the same position, so every item keeps its module, path, visibility and textual order.",
     "evidence": "Pure move: every removed identity is declared again, with the same body, in the new sibling file of this landing (the sorted line multiset of the old file equals the two new files' lines plus only the added include and comment lines); gated in Slurm job 1270437, which re-runs this instrument with the entry and checks the workspace.",
     "base": "776bd1ad6664690f4b75a51b9ad0e55eb5478006"
+  },
+  {
+    "base": "db93bc81d483b17191bc68f08c6f3577e8450b57",
+    "items": [
+      "crates/gam-sae/src/manifold/shape_uncertainty.rs:const:SAE_DECODER_COV_PAYLOAD_MAX_ENTRIES"
+    ],
+    "reason": "#2900 row 10.5 (SPEC rule 10: materializations are admitted on the memory governor). SAE_DECODER_COV_PAYLOAD_MAX_ENTRIES = 1 << 24 admitted a framed atom's dense (M_k*p)^2 decoder covariance by entry count: assemble_shape_uncertainty lifted and exported it only below 2^24 entries, and frame_marginal_admission refused to integrate the learned frames when any framed atom's covariance passed the same count. Both read one predicate now, framed_decoder_covariance_admitted: the total bytes of every framed atom's dense covariance (framed_decoder_covariance_bytes) against the governor's stationary single-materialization cap. The export is charged on the ledger while it is built, and a refusal is an error. SaeFrameMarginalUnavailable::DecoderCovarianceExceedsPayload { atom } becomes DecoderCovariancesExceedMaterializationCap, because the admission prices the atoms together.",
+    "evidence": "git grep -n -w at c7b453c3ec finds SAE_DECODER_COV_PAYLOAD_MAX_ENTRIES only at its declaration (crates/gam-sae/src/manifold/shape_uncertainty.rs:14), two doc links in the same file (:40, :213), the export check in assemble_shape_uncertainty (construction_reconstruction.rs:502), the frame-marginal check in frame_marginal_admission (construction_quasi_laplace.rs:8152), and one comment in crates/gam-pyffi/src/latent/latent_basis_and_sae_ffi.rs:2051. This commit rewrites every one of them. No test, bench, example, Python or docs source names it. The 10.5 code first gated green in pool job 1217755 (guard, census, golden regeneration, workspace and gam-pyffi checks, gam-sae tests)."
   }
 ]

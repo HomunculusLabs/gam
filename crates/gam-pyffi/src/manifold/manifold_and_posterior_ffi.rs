@@ -6117,6 +6117,14 @@ impl ManifoldSaeCore {
         self.inner.metric_provenance.clone()
     }
     #[getter]
+    fn shape_covariance_operator(&self) -> String {
+        self.inner.shape_covariance_operator.clone()
+    }
+    #[getter]
+    fn shape_covariance_frame_conditioning_reason(&self) -> Option<String> {
+        self.inner.shape_covariance_frame_conditioning_reason.clone()
+    }
+    #[getter]
     fn fisher_provenance(&self) -> Option<String> {
         self.inner.fisher_provenance.clone()
     }
