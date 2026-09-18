@@ -890,7 +890,11 @@ fn at_an_inner_fixed_point_the_chart_orbit_slope_is_within_the_kkt_tolerance_272
     );
     if matches!(
         outcome.termination,
-        JointFitTermination::Heuristic | JointFitTermination::NoStrictDecrease
+        JointFitTermination::Stationary { .. }
+            | JointFitTermination::NonFinitePreStep
+            | JointFitTermination::ObjectiveStall
+            | JointFitTermination::ProximalCorrectionFailed
+            | JointFitTermination::NoStrictDecrease
     ) {
         assert!(
             worst <= tolerance,

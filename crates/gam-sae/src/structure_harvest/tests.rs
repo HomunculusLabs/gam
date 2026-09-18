@@ -1957,6 +1957,64 @@ fn round_driver_ledger_is_byte_deterministic() {
     assert_eq!(a.term.k_atoms(), b.term.k_atoms());
 }
 
+/// #2899 O20: the production structure search refits every candidate, null and
+/// adopted state through the inner joint fit. A refit whose window ends without a
+/// settled exit has not converged, so the search refuses instead of scoring or
+/// returning that state. On this duplicated-activity fixture the fusion
+/// candidate's refit needs more than one iteration.
+#[test]
+fn production_structure_search_refuses_a_refit_that_runs_out_of_iterations_2899() {
+    let n = 24usize;
+    let active: Vec<Vec<bool>> = (0..n)
+        .map(|row| {
+            let dup = row % 3 == 0;
+            vec![dup, dup, row % 2 == 0]
+        })
+        .collect();
+    let (term, rho) = planted_term(&active);
+    let target = term
+        .try_fitted()
+        .expect("a freshly built fixture term carries a fitted state");
+    let mut ledger = gam_terms::inference::structure_evidence::StructureLedger::new();
+    let config = RoundDriverConfig {
+        n_shards: 3,
+        budget: MoveBudget {
+            max_moves: 4,
+            alpha: 0.05,
+        },
+        harvest_params: HarvestParams {
+            max_fusions: 4,
+            max_fissions: 0,
+            max_births: 0,
+        },
+        curl: None,
+    };
+    let one_iteration = ProductionRefitParams {
+        inner_max_iter: 1,
+        learning_rate: 1.0,
+        ridge_ext_coord: 1e-6,
+        ridge_beta: 1e-6,
+    };
+    let error = match run_production_structure_search(
+        term,
+        rho,
+        target.view(),
+        config,
+        one_iteration,
+        &mut ledger,
+    ) {
+        Ok(result) => panic!(
+            "a one-iteration refit window returned a search result over {} round(s)",
+            result.rounds.len()
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("certifies no convergence"),
+        "the refusal must name the unconverged refit: {error}"
+    );
+}
+
 /// Estimation/eval split oracle: the split reserves estimation rows and
 /// partitions the remainder into held-out shards that do NOT overlap the
 /// estimation set (the universal-inference contract the gates rely on).

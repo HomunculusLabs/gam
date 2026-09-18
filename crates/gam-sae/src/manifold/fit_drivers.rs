@@ -74,14 +74,44 @@ impl InnerGlobalizationHint {
     }
 }
 
-/// Why one bounded joint-fit chunk returned. Ordinary fits may use the two
-/// heuristic exits; evidence is certified only by [`Self::NoStrictDecrease`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Why one bounded joint-fit chunk returned. A converged ordinary fit is
+/// certified by [`Self::Stationary`] or [`Self::NoStrictDecrease`]; evidence is
+/// certified only by [`Self::NoStrictDecrease`]. The ordinary fit's other exits
+/// certify nothing (#2899).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum JointFitTermination {
     Frozen,
-    Heuristic,
+    /// The raw-chart or quotient gradient norm reached the KKT tolerance.
+    Stationary {
+        grad_norm: f64,
+        quotient_grad_norm: f64,
+        tol: f64,
+    },
+    /// The pre-step objective was not finite.
+    NonFinitePreStep,
+    /// The documented objective-stall approximation, reached after the
+    /// gauge-orbit block recovered nothing: small strict decreases, not a KKT
+    /// certificate.
+    ObjectiveStall,
+    /// The proximal correction errored and the pre-step state was restored.
+    ProximalCorrectionFailed,
     NoStrictDecrease,
     IterationGrantExhausted,
+}
+
+impl JointFitTermination {
+    /// Whether this exit certifies a converged fit: stationarity, or no strict
+    /// decrease left. The match names every exit, so a new one must be decided here.
+    pub(crate) fn certifies_convergence(self) -> bool {
+        match self {
+            Self::Stationary { .. } | Self::NoStrictDecrease => true,
+            Self::Frozen
+            | Self::NonFinitePreStep
+            | Self::ObjectiveStall
+            | Self::ProximalCorrectionFailed
+            | Self::IterationGrantExhausted => false,
+        }
+    }
 }
 
 pub(crate) struct JointFitOutcome {
@@ -6187,6 +6217,44 @@ impl SaeManifoldTerm {
         .map(|outcome| outcome.loss)
     }
 
+    /// The joint fit as a converged solve, for a caller that scores or returns the
+    /// state it fitted. It runs the ordinary termination policy and returns the
+    /// loss only from an exit that certifies convergence
+    /// ([`JointFitTermination::certifies_convergence`]). It refuses every other
+    /// exit: the uncertified ordinary exits, the zero-iteration freeze and an
+    /// exhausted window. [`Self::run_joint_fit_arrow_schur`] reports the loss of
+    /// whatever state the window ended at.
+    pub(crate) fn run_joint_fit_arrow_schur_to_convergence(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        rho: &mut SaeManifoldRho,
+        analytic_penalties: Option<&AnalyticPenaltyRegistry>,
+        max_iter: usize,
+        step_size: f64,
+        ridge_ext_coord: f64,
+        ridge_beta: f64,
+    ) -> Result<SaeManifoldLoss, String> {
+        let outcome = self.run_joint_fit_arrow_schur_with_termination_policy(
+            target,
+            rho,
+            analytic_penalties,
+            max_iter,
+            step_size,
+            ridge_ext_coord,
+            ridge_beta,
+            true,
+        )?;
+        if outcome.termination.certifies_convergence() {
+            return Ok(outcome.loss);
+        }
+        Err(format!(
+            "SaeManifoldTerm::run_joint_fit_arrow_schur_to_convergence: the joint fit's \
+             {max_iter}-iteration window ended at {:?}, which certifies no convergence, so its \
+             state is not a converged fit",
+            outcome.termination
+        ))
+    }
+
     /// Evidence-gradient inner polish. The ordinary fit accepts the documented
     /// coarse KKT band immediately; a Laplace value paired with an implicit
     /// derivative cannot do that, because the resulting warm-start map is flat
@@ -6228,7 +6296,13 @@ impl SaeManifoldTerm {
             ridge_beta,
             false,
         )?;
-        if matches!(outcome.termination, JointFitTermination::Heuristic) {
+        if matches!(
+            outcome.termination,
+            JointFitTermination::Stationary { .. }
+                | JointFitTermination::NonFinitePreStep
+                | JointFitTermination::ObjectiveStall
+                | JointFitTermination::ProximalCorrectionFailed
+        ) {
             return Err(
                 "SaeManifoldTerm::run_joint_fit_arrow_schur_for_quasi_laplace: heuristic \
                  termination escaped the evidence policy"
@@ -7252,7 +7326,11 @@ impl SaeManifoldTerm {
             if allow_heuristic_termination
                 && (grad_norm <= grad_tolerance || quotient_grad_norm <= grad_tolerance)
             {
-                termination = JointFitTermination::Heuristic;
+                termination = JointFitTermination::Stationary {
+                    grad_norm,
+                    quotient_grad_norm,
+                    tol: grad_tolerance,
+                };
                 self.reclaim_arrow_assembly_workspace(&mut sys);
                 break;
             }
@@ -7351,7 +7429,7 @@ impl SaeManifoldTerm {
                             .to_string(),
                     );
                 }
-                termination = JointFitTermination::Heuristic;
+                termination = JointFitTermination::NonFinitePreStep;
                 break;
             }
             // #2100/#1117 ordinary-fit objective-stagnation shortcut (see the
@@ -7440,7 +7518,7 @@ impl SaeManifoldTerm {
                         // pre-step state is unperturbed (the snapshot was taken
                         // from it, and a descent that commits nothing restores
                         // it), so no restore is needed.
-                        termination = JointFitTermination::Heuristic;
+                        termination = JointFitTermination::ObjectiveStall;
                         self.reclaim_arrow_assembly_workspace(&mut sys);
                         break;
                     }
@@ -7709,7 +7787,7 @@ impl SaeManifoldTerm {
                                  proximal correction failed before a no-descent certificate: {err}"
                             ));
                         }
-                        termination = JointFitTermination::Heuristic;
+                        termination = JointFitTermination::ProximalCorrectionFailed;
                         break;
                     }
                 };
@@ -9136,6 +9214,40 @@ mod projection_policy_tests {
     use crate::basis::{AmbientSphereHarmonicEvaluator, SaeBasisEvaluator};
     use ndarray::array;
     use std::sync::Arc;
+
+    /// #2899 — only stationarity and no strict decrease certify a joint fit. The
+    /// objective-stall approximation, a non-finite pre-step objective, a failed
+    /// proximal correction, the freeze and an exhausted window certify nothing.
+    #[test]
+    fn only_stationarity_and_no_strict_decrease_certify_a_joint_fit_2899() {
+        let cases = [
+            (JointFitTermination::Frozen, false),
+            (
+                JointFitTermination::Stationary {
+                    grad_norm: 1.0e-9,
+                    quotient_grad_norm: 2.0e-9,
+                    tol: 1.0e-8,
+                },
+                true,
+            ),
+            (JointFitTermination::NonFinitePreStep, false),
+            (JointFitTermination::ObjectiveStall, false),
+            (JointFitTermination::ProximalCorrectionFailed, false),
+            (JointFitTermination::NoStrictDecrease, true),
+            (JointFitTermination::IterationGrantExhausted, false),
+        ];
+        for (exit, certifies) in cases {
+            // A new exit fails to compile here until it is listed in `cases`.
+            let (JointFitTermination::Frozen
+            | JointFitTermination::Stationary { .. }
+            | JointFitTermination::NonFinitePreStep
+            | JointFitTermination::ObjectiveStall
+            | JointFitTermination::ProximalCorrectionFailed
+            | JointFitTermination::NoStrictDecrease
+            | JointFitTermination::IterationGrantExhausted) = exit;
+            assert_eq!(exit.certifies_convergence(), certifies, "{exit:?}");
+        }
+    }
 
     #[test]
     fn multivariate_compact_projection_skips_without_mutation() {
