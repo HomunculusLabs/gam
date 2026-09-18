@@ -34,6 +34,15 @@
   gains `search_inner_refusal`, the search's most recent uncertified inner
   solve, which the fit boundary names even when finite trials ran after it;
   `last_refusal` stays the last evaluation's refusal, which Jeffreys arming reads.
+- **The raw REML/LAML score-table ratio is no longer called a Bayes factor** (#2946).
+  `compare_models`'s `score_table` key `bayes_factor_best_over_model` is now
+  `reml_criterion_ratio_best_over_model`. It is `exp(delta_reml)`, the exp of the raw
+  criterion gap: a restricted-evidence ratio only at plug-in λ with normalized evidence
+  over a fixed-effect space the candidates share, and never a prior-integrated Bayes
+  factor. **Migration:** read `reml_criterion_ratio_best_over_model`.
+- Rust: `ScoreRow.bayes_factor_best_over_model` is renamed to match, and
+  `evidence::log_bayes_factor(a, b)` is now `criterion_gap(a, b)` (`b − a`). The same gap
+  measures the conditional-AIC ranking delta, where "Bayes" was wrong as well.
 
 ## gamfit 0.1.268 (2026-09-11)
 

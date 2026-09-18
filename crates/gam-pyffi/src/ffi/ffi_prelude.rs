@@ -94,7 +94,7 @@ pub(crate) use gam::terms::smooth::{
 pub(crate) use gam::families::fit_orchestration::descriptors::build_analytic_penalty_registry_from_descriptors as build_analytic_penalty_registry_from_json;
 
 pub(crate) use gam::solver::evidence::{
-    RemlCandidate, compare_reml_fits as compare_reml_fits_core, log_bayes_factor,
+    RemlCandidate, compare_reml_fits as compare_reml_fits_core, criterion_gap,
 };
 
 pub(crate) use gam::terms::basis::{

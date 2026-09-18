@@ -4,7 +4,7 @@ pure-noise smooth added — it cannot tell a useful predictor from noise.
 ``compare_models`` ranks fits on the REML/LAML marginal-likelihood evidence
 headline (the per-fit ``reml_score``, which numerically equals the model's own
 ``Model.evidence`` property; the score table the API returns carries only
-``reml_score`` / ``delta_reml`` / ``bayes_factor_best_over_model`` /
+``reml_score`` / ``delta_reml`` / ``reml_criterion_ratio_best_over_model`` /
 ``effective_dof``).  The module behind it
 (``src/inference/model_comparison.rs``) advertises "honest, calibrated model
 comparison" aimed squarely at the "random-effect-vs-null, is-a-wiggle-real"
@@ -92,10 +92,13 @@ def _big_selection_rate(z_relevant: bool, n_seeds: int) -> tuple[float, list[flo
         result = gamfit.compare_models([small, big], names=["small", "big"])
         if result["winner"] == "big":
             big_wins += 1
-            # Bayes factor of the winner (big) over small, for diagnostics.
+            # Raw REML/LAML criterion ratio of the winner (big) over small, for
+            # diagnostics.
             for row in result["score_table"]:
                 if row["name"] == "small":
-                    bayes_factors.append(float(row["bayes_factor_best_over_model"]))
+                    bayes_factors.append(
+                        float(row["reml_criterion_ratio_best_over_model"])
+                    )
     return big_wins / n_seeds, bayes_factors
 
 

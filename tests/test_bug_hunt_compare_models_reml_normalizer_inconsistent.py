@@ -16,7 +16,7 @@ the raw score with ``with_tierney_kadane_normalizer_from_view``) ranks fits on a
 
 while ``Model.evidence`` / ``Summary.reml_score`` (``model_evidence``,
 ``crates/gam-pyffi/src/lib.rs``) and ``Model.bayes_factor_vs``
-(``bayes_factor_log_diff`` -> ``log_bayes_factor``) use the *raw* minimized
+(``bayes_factor_log_diff`` -> ``criterion_gap``) use the *raw* minimized
 ``reml_score`` with no normalizer.
 
 The normalizer term cancels in a delta only when both models share the same

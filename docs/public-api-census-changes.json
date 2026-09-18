@@ -4213,5 +4213,14 @@
     },
     "reason": "#2946 T5 (Stage A census): renames with no value change. StructuredResidualModel::log_evidence returns the Gaussian log-likelihood minus the Schwarz penalty (-BIC/2) and becomes bic_penalized_log_likelihood. identifiable_factor_log_evidence returns a penalized profile likelihood with no log-determinant or Occam term and becomes identifiable_factor_profile_log_likelihood.",
     "evidence": "At origin/main ff77e70e78, git grep on lane sw2c finds StructuredResidualModel::log_evidence called only in residual_factor.rs and crates/gam-sae/src/manifold/fit_entry.rs:1782. identifiable_factor_log_evidence occurs only in identifiability.rs, crates/gam-pyffi/src/manifold/geometry_ffi.rs and gamfit/identifiability.py:723. Every caller is renamed in this commit."
+  },
+  {
+    "base": "2f2b68715adeb37cee18a57aca611d07cd9ee5f5",
+    "removed": {
+      "crates/gam-solve/src/evidence.rs::format_bayes_factor": 1,
+      "crates/gam-solve/src/evidence.rs::log_bayes_factor": 1
+    },
+    "reason": "#2946 T3 (Stage A census): renames with no value change. log_bayes_factor(a, b) returns b - a, the gap between two minimised criterion costs, used by both the raw REML/LAML score table and the conditional-AIC ranking delta. It is a Bayes factor on neither, and becomes criterion_gap. The crate-private formatter format_bayes_factor formats exp() of its argument and becomes format_exp_ratio.",
+    "evidence": "At origin/main 96c3427cca, git grep on lane sw2c finds log_bayes_factor only in crates/gam-solve/src/evidence.rs, crates/gam-pyffi/src/ffi/ffi_prelude.rs:97 and crates/gam-pyffi/src/model/model_ffi.rs:1418, plus two Python test docstrings; format_bayes_factor occurs only in evidence.rs (the definition, one call, one comment). Every occurrence is renamed in this commit. The removed map is the census's own identity set: direct gate dy4 fr-census-t3 (tree fc0cb2ff) refused the entry that listed log_bayes_factor alone, because the census counts pub(crate) fns too."
   }
 ]

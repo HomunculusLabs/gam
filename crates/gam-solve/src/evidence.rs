@@ -3015,14 +3015,21 @@ pub struct ScoreRow {
     pub name: String,
     pub reml_score: Option<f64>,
     pub delta_reml: Option<f64>,
-    pub bayes_factor_best_over_model: Option<f64>,
+    /// `exp(delta_reml)`, the exp of this row's raw criterion gap to the
+    /// minimum. It is a restricted-evidence ratio only at plug-in λ, with
+    /// normalized evidence over a fixed-effect space the candidates share, and
+    /// never a prior-integrated Bayes factor.
+    pub reml_criterion_ratio_best_over_model: Option<f64>,
     pub effective_dof: f64,
 }
 
-/// Log Bayes factor of model `a` over model `b` from minimised REML/LAML costs.
+/// Gap `cost_b − cost_a` between two minimised criterion costs (lower is
+/// better), positive when `a` is better. The raw REML/LAML score table and the
+/// conditional-AIC ranking both use it. It is a Bayes factor on neither, and an
+/// AIC gap must be halved before it is a log evidence ratio.
 #[inline]
-pub fn log_bayes_factor(reml_score_a: f64, reml_score_b: f64) -> f64 {
-    reml_score_b - reml_score_a
+pub fn criterion_gap(cost_a: f64, cost_b: f64) -> f64 {
+    cost_b - cost_a
 }
 
 /// Compare fitted models by the single evidence ordering contract used by
@@ -3115,7 +3122,7 @@ pub fn compare_reml_fits(mut candidates: Vec<RemlCandidate>) -> Result<RemlCompa
     let mut ranking = Vec::with_capacity(candidates.len());
     let mut score_table = Vec::with_capacity(candidates.len());
     for row in &candidates {
-        let delta = log_bayes_factor(best_ranking_score, row.ranking_score()?);
+        let delta = criterion_gap(best_ranking_score, row.ranking_score()?);
         // `ranking_score` is the conditional AIC (`−2·loglik + 2·edf`), a −2·log /
         // deviance-scale cost, so `delta` is a full ΔAIC gap. The Akaike evidence
         // ratio for an AIC gap Δ is `exp(−½Δ)` (Burnham & Anderson evidence ratio),
@@ -3125,7 +3132,7 @@ pub fn compare_reml_fits(mut candidates: Vec<RemlCandidate>) -> Result<RemlCompa
         let evidence_ratio = (0.5 * delta).exp();
         let delta_reml = best_raw_score
             .zip(row.score)
-            .map(|(best, score)| log_bayes_factor(best, score));
+            .map(|(best, score)| criterion_gap(best, score));
         ranking.push(RankedRow {
             name: row.name.clone(),
             score: row.score,
@@ -3137,24 +3144,24 @@ pub fn compare_reml_fits(mut candidates: Vec<RemlCandidate>) -> Result<RemlCompa
             name: row.name.clone(),
             reml_score: row.score,
             delta_reml,
-            bayes_factor_best_over_model: delta_reml.map(f64::exp),
+            reml_criterion_ratio_best_over_model: delta_reml.map(f64::exp),
             effective_dof: row.edf,
         });
     }
     // The winner is decided by `ranking_score` (the Occam-penalised conditional
     // AIC, issue #1362), which can disagree in sign with the raw
-    // evidence Bayes factor for a noise-augmented model. Summarise the actual
+    // REML/LAML criterion gap for a noise-augmented model. Summarise the actual
     // decision margin so the headline never contradicts the chosen winner.
     let evidence_summary = if let Some(runner_up) = candidates.get(1) {
         let margin = runner_up.ranking_score()? - candidates[0].ranking_score()?;
         // `margin` is a conditional-AIC gap (−2·log scale), so the Akaike evidence
-        // ratio is `exp(−½·margin)`; `format_bayes_factor` formats `exp()` of its
+        // ratio is `exp(−½·margin)`; `format_exp_ratio` formats `exp()` of its
         // argument, so pass the halved margin to headline `exp(½·margin)` rather
         // than the squared `exp(margin)` (issue #2124).
         format!(
             "{} wins by evidence ratio {} over {}",
             winner,
-            format_bayes_factor(0.5 * margin),
+            format_exp_ratio(0.5 * margin),
             runner_up.name
         )
     } else {
@@ -3168,14 +3175,14 @@ pub fn compare_reml_fits(mut candidates: Vec<RemlCandidate>) -> Result<RemlCompa
     })
 }
 
-pub(crate) fn format_bayes_factor(log_bf: f64) -> String {
-    if !log_bf.is_finite() {
+pub(crate) fn format_exp_ratio(log_ratio: f64) -> String {
+    if !log_ratio.is_finite() {
         return "inf".to_string();
     }
-    if log_bf.abs() >= std::f64::consts::LN_10 * 3.0 {
-        return format!("1e{:+.1}", log_bf / std::f64::consts::LN_10);
+    if log_ratio.abs() >= std::f64::consts::LN_10 * 3.0 {
+        return format!("1e{:+.1}", log_ratio / std::f64::consts::LN_10);
     }
-    format_three_significant(log_bf.exp())
+    format_three_significant(log_ratio.exp())
 }
 
 pub(crate) fn format_three_significant(value: f64) -> String {
@@ -3849,11 +3856,11 @@ mod tests {
                 row.delta_reml
             );
             assert!(
-                row.bayes_factor_best_over_model
+                row.reml_criterion_ratio_best_over_model
                     .is_some_and(|factor| factor >= 1.0 - 1e-12),
-                "score-table bayes_factor for {} must be >= 1, got {:?}",
+                "score-table reml_criterion_ratio_best_over_model for {} must be >= 1, got {:?}",
                 row.name,
-                row.bayes_factor_best_over_model
+                row.reml_criterion_ratio_best_over_model
             );
         }
         // m2 carries the minimum raw REML, so its raw delta is exactly 0.
@@ -4936,13 +4943,13 @@ mod tests {
             .iter()
             .find(|r| r.name == "loser")
             .expect("loser score row");
-        let expected_reml_bf = 10.0_f64.exp();
+        let expected_reml_ratio = 10.0_f64.exp();
         assert!(
             loser_score_row
-                .bayes_factor_best_over_model
-                .is_some_and(|factor| (factor / expected_reml_bf - 1.0).abs() < 1e-9),
-            "raw-REML bayes_factor_best_over_model must stay exp(Δreml)=exp(10), got {:?}",
-            loser_score_row.bayes_factor_best_over_model
+                .reml_criterion_ratio_best_over_model
+                .is_some_and(|factor| (factor / expected_reml_ratio - 1.0).abs() < 1e-9),
+            "raw-REML reml_criterion_ratio_best_over_model must stay exp(Δreml)=exp(10), got {:?}",
+            loser_score_row.reml_criterion_ratio_best_over_model
         );
     }
 
@@ -5023,7 +5030,7 @@ mod tests {
             .expect("scan row");
         assert_eq!(scan_row.reml_score, None);
         assert_eq!(scan_row.delta_reml, None);
-        assert_eq!(scan_row.bayes_factor_best_over_model, None);
+        assert_eq!(scan_row.reml_criterion_ratio_best_over_model, None);
         let scan_ranked = cmp
             .ranking
             .iter()

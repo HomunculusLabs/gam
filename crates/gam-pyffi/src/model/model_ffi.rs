@@ -1415,7 +1415,7 @@ fn log_evidence_ratio(model_a_bytes: Vec<u8>, model_b_bytes: Vec<u8>) -> PyResul
     // directly; returning the un-halved gap made it report `exp(ΔAIC)`, the SQUARE
     // of the intended ratio (issue #2124). Halve here, at the AIC-scale site, so
     // no raw-REML consumer is affected.
-    Ok(0.5 * log_bayes_factor(score_a, score_b))
+    Ok(0.5 * criterion_gap(score_a, score_b))
 }
 
 #[pyfunction]
@@ -4289,8 +4289,8 @@ fn compare_reml_fits(
         table_row.set_item("reml_score", row.reml_score)?;
         table_row.set_item("delta_reml", row.delta_reml)?;
         table_row.set_item(
-            "bayes_factor_best_over_model",
-            row.bayes_factor_best_over_model,
+            "reml_criterion_ratio_best_over_model",
+            row.reml_criterion_ratio_best_over_model,
         )?;
         table_row.set_item("effective_dof", row.effective_dof)?;
         score_table.append(table_row)?;
