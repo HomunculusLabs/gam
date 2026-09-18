@@ -80,6 +80,17 @@
   is a cost on the −2·log scale, not a marginal likelihood or evidence. No alias is kept.
   **Migration:** read `Model.conditional_aic`. `Model.evidence_ratio_vs` keeps its name,
   since it is the Akaike evidence ratio of that cost.
+- **The Tier-0 ρ-posterior diagnostic is an adequacy grade, not a certificate** (#2946).
+  Its PSIS tail shape `k̂` is fitted to `⌈√M⌉` excesses. At the default `M = 64` it has a
+  standard error of about `0.27` at the `0.7` cutoff, so the grade certifies nothing.
+  Rust: `RhoCertificate` is now `RhoProposalAdequacy` (`PlugInCertified` → `PlugInAdequate`),
+  `RhoPosteriorCertificate` is now `RhoPosteriorAdequacy` (field `certificate` → `adequacy`),
+  `RhoPosteriorOutcome::Certified` is now `Assessed`, `PLUG_IN_CERTIFIED_K_HAT` is now
+  `PLUG_IN_ADEQUATE_K_HAT`, and `rho_posterior_certificate` is now `rho_posterior_adequacy`.
+  New `gam_solve::psis::shape_standard_error` and
+  `inference::rho_posterior::k_hat_standard_error` give the grade's resolution.
+  **Saved models:** new payloads write only the new tokens. A payload written earlier still
+  reads, because the old tokens are accepted as read-only aliases.
 
 ## gamfit 0.1.268 (2026-09-11)
 

@@ -3696,22 +3696,22 @@ where
             }
         }
 
-        // Tier-0 marginal-smoothing certificate (#938): while the REML objective
+        // Tier-0 marginal-smoothing adequacy diagnostic (#938): while the REML objective
         // is still live, sample the outer criterion around the converged ρ̂ to
         // read the PSIS k̂ that says whether the plug-in + first-order V_ρ
         // correction is adequate. This is the objective-lifecycle seam — the
-        // certificate runs against the SAME objective the fit converged on, so
+        // diagnostic runs against the SAME objective the fit converged on, so
         // its criterion is the fit's own bit-for-bit (no retain/rebuild). Absent
         // when there are no smoothing parameters or the outer Hessian is
         // unavailable; never fatal.
         //
-        // The Tier-0 certificate is CHEAP (a handful of outer-criterion
+        // The Tier-0 diagnostic is CHEAP (a handful of outer-criterion
         // evaluations) so it is emitted regardless of `skip_rho_posterior_inference`
         // whenever it is available (#1810) — the standard formula/CLI fit surfaces
-        // its ρ-posterior certificate by default. Only the EXPENSIVE escalation
+        // its ρ-posterior adequacy grade by default. Only the EXPENSIVE escalation
         // tiers (Tier-1 quadrature / Tier-2 NUTS over ρ) are gated by the flag:
         // interactive formula/CLI fits keep `skip_rho_posterior_inference = true`
-        // so a fit that fails to certify plug-in never turns into a sampler
+        // so a fit whose plug-in grades `Escalate` never turns into a sampler
         // benchmark, while lower-level callers that opt in (`skip = false`) get
         // the auto-selected escalation tier (quadrature for K≤4, NUTS over ρ for
         // K≤16, honest Unavailable beyond) at this same live seam.

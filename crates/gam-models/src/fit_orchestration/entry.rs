@@ -59,7 +59,7 @@ pub fn canonical_standard_fit_options(
         compute_inference: true,
         // Formula/CLI fits are the interactive/default path: keep coefficient
         // covariance and the smoothing correction, and emit the CHEAP Tier-0
-        // live-rho posterior certificate (a handful of outer-criterion
+        // live-rho posterior adequacy diagnostic (a handful of outer-criterion
         // evaluations), which the optimizer surfaces regardless of this flag
         // whenever it is cheaply available (#1810). This flag only suppresses the
         // EXPENSIVE escalation tiers (Tier-1 quadrature / Tier-2 NUTS over rho),

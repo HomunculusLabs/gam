@@ -1766,7 +1766,7 @@ pub struct FitOptions {
     pub compute_inference: bool,
     /// Internal lifecycle knob for fits whose result will be immediately
     /// superseded. Keeps ordinary inference work but skips the live-objective
-    /// rho posterior certificate/escalation until the returned model is known.
+    /// rho posterior adequacy diagnostic/escalation until the returned model is known.
     pub skip_rho_posterior_inference: bool,
     pub max_iter: usize,
     pub tol: f64,
@@ -2323,8 +2323,8 @@ pub struct FitArtifacts {
     /// gradient-free or an audit probe could not evaluate.
     #[serde(default)]
     pub criterion_certificate: Option<OuterCriterionCertificate>,
-    /// What the Tier-0 marginal-smoothing (`ρ`-uncertainty) PSIS certificate seam
-    /// concluded (#938, #2627): the Pareto-`k̂` certificate that says whether the
+    /// What the Tier-0 marginal-smoothing (`ρ`-uncertainty) PSIS adequacy seam
+    /// concluded (#938, #2627): the Pareto-`k̂` grade that says whether the
     /// plug-in + first-order `V_ρ` correction is adequate, or the typed reason it
     /// was not formed or was refused. Computed against the live REML objective at
     /// the converged `ρ̂` (see `RemlState::rho_posterior_inference`); a route that
@@ -2332,11 +2332,11 @@ pub struct FitArtifacts {
     /// fit run without inference `NotComputed(InferenceNotRequested)`. It persists
     /// with the fit, so a reloaded model carries the same outcome.
     pub rho_posterior: gam_problem::rho_posterior::RhoPosteriorOutcome,
-    /// Escalation outcome (#938) when the Tier-0 certificate read `Escalate`:
+    /// Escalation outcome (#938) when the Tier-0 grade read `Escalate`:
     /// the Tier-1 quadrature mixture (`K ≤ 4`), the Tier-2 NUTS draws
     /// (`K ≤ 16`), or an honest `Unavailable` report. `None` whenever the
-    /// certificate did not escalate (or was not formed). Computed at the same
-    /// live-objective seam as the certificate; re-derivable, not serialized.
+    /// grade did not escalate (or was not formed). Computed at the same
+    /// live-objective seam as the grade; re-derivable, not serialized.
     #[serde(default, skip_serializing, skip_deserializing)]
     pub rho_posterior_escalation: Option<gam_problem::rho_posterior::RhoPosteriorEscalation>,
     /// Regularized inverse REML/LAML outer Hessian over `rho = log(lambda)`,

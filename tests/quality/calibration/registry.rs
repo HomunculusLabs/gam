@@ -260,14 +260,14 @@ pub fn uq_surface_registry() -> Vec<CalibrationTarget> {
                          (multinomial_smooth_significance_pvalue_is_not_oversized_under_the_null)",
         },
         // ---- Posterior surfaces ------------------------------------------
-        // The ρ-posterior (smoothing-hyperparameter) certificate is a posterior
+        // The ρ-posterior (smoothing-hyperparameter) adequacy diagnostic is a posterior
         // surface; SBC rank uniformity is its ideal audit. Today it is gated by
         // its consumed form — the ρ-quadrature MIXTURE must move a truth-known
         // smooth band's coverage toward nominal (the #938 tier-1 gate) — which
         // is why the mode is CoverageSweep, not SBC. A bespoke ρ|data SBC
         // rank-uniformity gate is the noted stronger form (see report).
         CalibrationTarget {
-            name: "rho_posterior_certificate",
+            name: "rho_posterior_adequacy",
             kind: SurfaceKind::PosteriorSample,
             mode: AuditMode::CoverageSweep,
             guards: &[1810, 938],

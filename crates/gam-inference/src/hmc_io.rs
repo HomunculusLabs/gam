@@ -4953,7 +4953,7 @@ fn run_conjugate_gaussian_sampling(
 /// feasible region around `ρ̂` instead of a `-inf` cliff.
 const RHO_NUTS_INFEASIBLE_LOGP_PENALTY: f64 = 1.0e8;
 
-/// Tier-2 of the exact marginal-smoothing inference stack (#938): the whitened
+/// Tier-2 of the marginal-smoothing inference stack (#938): the whitened
 /// `ρ`-criterion Hamiltonian target.
 ///
 /// This reuses the module's β-level whitening design ONE LEVEL UP: the target

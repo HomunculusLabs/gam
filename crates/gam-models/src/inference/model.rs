@@ -79,10 +79,19 @@ use std::path::Path;
 // `[0, rank]` is published unclamped, and the status says so. The field carries a
 // serde default, and a v19 or v18 payload, which predates it, loads with an empty
 // list, which reads as "none recorded".
-pub const MODEL_PAYLOAD_VERSION: u32 = 20;
+// v21 renames the Tier-0 rho-posterior diagnostic's saved tokens (#2946 T2): the outcome
+// tag `Certified` is now `Assessed`, the grade key `certificate` is now `adequacy`, and the
+// grade `PlugInCertified` is now `PlugInAdequate`. The old tokens are read-only serde
+// aliases, so a v20, v19 or v18 payload still loads, and a v20 binary refuses a v21
+// payload by version instead of failing on an unknown variant.
+pub const MODEL_PAYLOAD_VERSION: u32 = 21;
 
-/// The schema before the EDF rank-bound status (#2901), whose only difference is
-/// that field's absence.
+/// The schema before the rho-posterior adequacy tokens (#2946 T2), whose only
+/// difference is the old tokens, which this binary reads as aliases.
+const RHO_CERTIFICATE_TOKENS_PAYLOAD_VERSION: u32 = 20;
+
+/// The schema before the EDF rank-bound status (#2901), whose only difference from
+/// [`RHO_CERTIFICATE_TOKENS_PAYLOAD_VERSION`] is that field's absence.
 const EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION: u32 = 19;
 
 /// The schema whose only difference from [`EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION`]
@@ -92,6 +101,7 @@ const COVARIANCE_COPIES_PAYLOAD_VERSION: u32 = 18;
 /// Whether this binary reads a payload written at `version`.
 fn payload_version_is_readable(version: u32) -> bool {
     version == MODEL_PAYLOAD_VERSION
+        || version == RHO_CERTIFICATE_TOKENS_PAYLOAD_VERSION
         || version == EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION
         || version == COVARIANCE_COPIES_PAYLOAD_VERSION
 }
@@ -7335,6 +7345,8 @@ mod tests {
     /// #2901: a payload written before the EDF rank-bound status, at v19 or at the
     /// covariance-copies v18, passes the version gate. The field it lacks,
     /// `FitInference::edf_rank_bound`, carries `#[serde(default)]`, so it reads as empty.
+    /// The v20 schema before the rho-posterior adequacy tokens (#2946 T2) passes too;
+    /// its old tokens read as aliases.
     #[test]
     fn the_payload_before_the_edf_rank_bound_status_is_readable_2901() {
         let blocks = || {
@@ -7347,6 +7359,7 @@ mod tests {
         };
         for version in [
             MODEL_PAYLOAD_VERSION,
+            RHO_CERTIFICATE_TOKENS_PAYLOAD_VERSION,
             EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION,
             COVARIANCE_COPIES_PAYLOAD_VERSION,
         ] {
@@ -7355,7 +7368,8 @@ mod tests {
                 .validate_payload_version()
                 .unwrap_or_else(|error| panic!("payload version {version} is readable: {error}"));
         }
-        assert_eq!(EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION, MODEL_PAYLOAD_VERSION - 1);
+        assert_eq!(RHO_CERTIFICATE_TOKENS_PAYLOAD_VERSION, MODEL_PAYLOAD_VERSION - 1);
+        assert_eq!(EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION, RHO_CERTIFICATE_TOKENS_PAYLOAD_VERSION - 1);
         assert_eq!(COVARIANCE_COPIES_PAYLOAD_VERSION, EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION - 1);
     }
 

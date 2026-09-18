@@ -4383,5 +4383,13 @@
     "reason": "Pure move for line-count headroom (build.rs MAX_TRACKED_FILE_LINES = 10000; latent/survival/mod.rs was 9712 lines): main :1777-4125, the latent row kernel's jet machinery (the primary-coordinate constants, LatentExactExpansion and its certified cumulants, the A-basis term kernels, the LatentRowJet backends, the primary direction maps and their inline tests_* modules), moves verbatim into row_kernel_jets.rs, which mod.rs include!s at the same position, so every item keeps its module, path, visibility and textual order.",
     "evidence": "Pure move: every removed identity is declared again, with the same body, in the new sibling file of this landing (the sorted line multiset of the old file equals the two new files' lines plus only the added include and comment lines); gated in Slurm job 1270437, which re-runs this instrument with the entry and checks the workspace.",
     "base": "776bd1ad6664690f4b75a51b9ad0e55eb5478006"
+  },
+  {
+    "base": "5890931cf86ea4de6f978659c6bf2e29328a4187",
+    "removed": {
+      "crates/gam-inference/src/rho_posterior.rs::rho_posterior_certificate": 1
+    },
+    "reason": "#2946 T2 (Stage A census): rename with no value change. rho_posterior_certificate computes the Tier-0 PSIS tail-shape adequacy diagnostic. Its k_hat has a standard error of about 0.27 at the default M = 64, so it certifies nothing, and it becomes rho_posterior_adequacy.",
+    "evidence": "At origin/main fe8a7a4ffe, git grep on lane sw2c finds rho_posterior_certificate only in gam-inference rho_posterior.rs (the pub fn, its escalator impl and tests), the gam-problem escalator trait and gam-solve reml/eval.rs. All are renamed in this commit. Gates: pre-gate gx6 job 1251077 and landing gate direct lane dy4 tag fr-census-t2."
   }
 ]

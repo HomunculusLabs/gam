@@ -1027,5 +1027,24 @@
     ],
     "reason": "#2900 row 6.11 (SPEC rule 6: a strategy chosen by predicted work, not a size window). DEVICE_ROW_THRESHOLD = 100_000 sent the rigid survival V/G/H row jet to the device at a literal row count; the selector now admits it at the dispatch policy's calibrated fused-kernel crossover (resolve_if_fused_batch_exceeds_floor, then the probed runtime's fused_kernel_min_n), the admission the Polya-Gamma batch already takes. The test fused_admission_accepts_dense_arrow_workloads pinned the retired Sum p^3 >= 1e5 || R >= 16 heuristic's accepted shapes; it becomes fused_admission_accepts_every_shape_the_kernel_supports_2900, which also pins the 128-flop R = 4 shape the heuristic refused, since fused_path_admitted now admits every shape the kernel supports (p <= MAX_FUSED_P).",
     "evidence": "git grep -n -w at 38c2680c12 finds DEVICE_ROW_THRESHOLD only at its declaration and its one comparison in survival_rowjet.rs (:45, :55), both rewritten here, and fused_admission_accepts_dense_arrow_workloads only at its own declaration (arrow_schur_nvrtc.rs:838). Direct gate dy6 i2900-611-g1 (base 18e7ce6254) named exactly these two guarded removals."
+  },
+  {
+    "base": "5890931cf86ea4de6f978659c6bf2e29328a4187",
+    "items": [
+      "crates/gam-inference/src/rho_posterior.rs:const:CERTIFICATE_SEED",
+      "crates/gam-inference/src/rho_posterior.rs:fn:exact_gaussian_target_certifies_plug_in",
+      "crates/gam-inference/src/rho_posterior.rs:fn:heavy_tailed_target_refuses_to_certify",
+      "crates/gam-inference/src/rho_posterior.rs:fn:rho_posterior_certificate",
+      "crates/gam-problem/src/rho_posterior.rs:const:PLUG_IN_CERTIFIED_K_HAT",
+      "crates/gam-problem/src/rho_posterior.rs:enum:RhoCertificate",
+      "crates/gam-problem/src/rho_posterior.rs:fn:from_k_hat_below_half_is_plug_in_certified",
+      "crates/gam-problem/src/rho_posterior.rs:fn:rho_posterior_certificate",
+      "crates/gam-problem/src/rho_posterior.rs:struct:RhoPosteriorCertificate",
+      "tests/perf_scale/misc/rho_posterior_tier0_real_fit.rs:fn:fit_and_take_certificate",
+      "tests/perf_scale/misc/rho_posterior_tier0_real_fit.rs:fn:real_gaussian_fit_carries_a_sound_tier0_certificate",
+      "tests/perf_scale/misc/rho_posterior_tier0_real_fit.rs:fn:tier0_certificate_is_deterministic_across_identical_fits"
+    ],
+    "reason": "#2946 T2 (Stage A census): renames with no value change. The Tier-0 rho-posterior 'certificate' is a PSIS tail-shape diagnostic: k_hat is fitted to ceil(sqrt(M)) tail excesses and at the default M = 64 has a standard error of about 0.27 at the 0.7 cutoff, so its grade certifies nothing. RhoCertificate becomes RhoProposalAdequacy (PlugInCertified -> PlugInAdequate), RhoPosteriorCertificate becomes RhoPosteriorAdequacy (field certificate -> adequacy), PLUG_IN_CERTIFIED_K_HAT becomes PLUG_IN_ADEQUATE_K_HAT, the escalator trait method and the gam-inference producer rho_posterior_certificate become rho_posterior_adequacy, the private CERTIFICATE_SEED becomes ADEQUACY_SEED, and six tests and helpers are renamed to match.",
+    "evidence": "A git grep of the whole tree at origin/main fe8a7a4ffe on lane sw2c finds these names only in crates/gam-problem/src/rho_posterior.rs, crates/gam-inference/src/rho_posterior.rs, crates/gam-solve/src/reml/eval.rs (the seam that calls the escalator and matches RhoPosteriorOutcome) and tests/perf_scale/misc/rho_posterior_tier0_real_fit.rs. No gamfit, gam-pyffi, gam-cli, docs or fixture file holds them. Every occurrence is renamed in this commit. Gates: pre-gate gx6 job 1251077 (workspace --all-targets, gam-pyffi, both ledger scripts, the gam-problem, gam-solve psis and gam-inference rho_posterior unit tests, and a mutant deleting the Certified alias that made the legacy-read pin fail); landing gate direct lane dy4 tag fr-census-t2 (workspace, gam-pyffi, both ledger scripts and the gam-models payload-version tests on the exact landing tree)."
   }
 ]

@@ -882,7 +882,7 @@ pub fn survival_fit_from_parts(
             survival_link_wiggle_degree: link_wiggle_degree,
             criterion_certificate,
             // The survival location-scale fit never passes the REML evaluator's
-            // post-fit certificate seam.
+            // post-fit adequacy seam.
             rho_posterior: gam_problem::rho_posterior::RhoPosteriorOutcome::NotComputed(
                 gam_problem::rho_posterior::RhoPosteriorNotComputed::NotFormedOnThisRoute,
             ),

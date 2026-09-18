@@ -76,7 +76,7 @@ pub struct ExternalOptimOptions {
     pub compute_inference: bool,
     /// Internal lifecycle knob for fits whose result will be immediately
     /// superseded. Keeps ordinary inference work but skips the live-objective
-    /// rho posterior certificate/escalation until the returned model is known.
+    /// rho posterior adequacy diagnostic/escalation until the returned model is known.
     pub skip_rho_posterior_inference: bool,
     pub max_iter: usize,
     pub tol: f64,
