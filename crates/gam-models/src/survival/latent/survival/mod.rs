@@ -24,6 +24,7 @@ use crate::custom_family::{
     fit_custom_family_fixed_log_lambdas,
 };
 use crate::fit_orchestration::drivers::freeze_term_collection_from_design;
+use crate::fit_orchestration::FitFailure;
 use crate::gamlss::{FamilyMetadata, ParameterLink};
 use crate::model_types::UnifiedFitResult;
 use crate::probability::{
@@ -92,6 +93,25 @@ impl_reason_error_boilerplate! {
         NumericalFailure,
         DerivativeAccuracyUnresolved,
         UnsupportedConfiguration,
+    }
+}
+
+impl LatentSurvivalError {
+    /// The fixed category of this refusal, so a fit that stops on it raises the
+    /// class that names what failed (#2937).
+    #[must_use]
+    pub fn failure_category(&self) -> gam_problem::FailureCategory {
+        use gam_problem::FailureCategory;
+        match self {
+            Self::InvalidFrailty { .. }
+            | Self::InvalidDataset { .. }
+            | Self::UnsupportedConfiguration { .. } => FailureCategory::Input,
+            // The fit's own block states and etas disagreeing in length.
+            Self::BlockMismatch { .. } => FailureCategory::Invariant,
+            Self::NumericalFailure { .. } | Self::DerivativeAccuracyUnresolved { .. } => {
+                FailureCategory::Numerical
+            }
+        }
     }
 }
 
@@ -628,26 +648,26 @@ pub(crate) fn fit_latent_survival_terms(
     mut spec: LatentSurvivalTermSpec,
     frailty: FrailtySpec,
     options: &BlockwiseFitOptions,
-) -> Result<LatentSurvivalTermFitResult, String> {
+) -> Result<LatentSurvivalTermFitResult, FitFailure> {
     let frailty_scale = validate_latent_survival_inputs(data, &spec, &frailty)?;
     // Cover the monotone I-spline baseline's unpenalized affine null direction
     // with a REML-selected function-space shrinkage ridge, so the interval
     // warm-start surrogates (whose likelihood has no curvature along that
     // direction) have a unique MAP instead of refusing. No-op on blocks whose
     // penalties already span their column space. See the installer's doc.
-    install_latent_time_nullspace_shrinkage_penalty(&mut spec.time_block)?;
+    install_latent_time_nullspace_shrinkage_penalty(&mut spec.time_block)
+        .map_err(FitFailure::invariant)?;
     let (latent_sd, learned_initial_sigma) = match frailty_scale {
         FrailtyScale::Fixed { sigma } => (Some(sigma), None),
         FrailtyScale::Learned { initial_sigma } => (None, Some(initial_sigma)),
     };
-    let hazard_loading = latent_hazard_loading(&frailty, "latent-survival")?;
-    let mean_design =
-        build_term_collection_design(data, &spec.meanspec).map_err(|e| e.to_string())?;
-    let mean_offset = mean_design
-        .compose_offset(spec.mean_offset.view(), "latent-survival mean block")
-        .map_err(|e| e.to_string())?;
-    let resolvedspec = freeze_term_collection_from_design(&spec.meanspec, &mean_design)
-        .map_err(|e| e.to_string())?;
+    // The frailty spec is the caller's (#2937).
+    let hazard_loading =
+        latent_hazard_loading(&frailty, "latent-survival").map_err(FitFailure::input)?;
+    let mean_design = build_term_collection_design(data, &spec.meanspec)?;
+    let mean_offset =
+        mean_design.compose_offset(spec.mean_offset.view(), "latent-survival mean block")?;
+    let resolvedspec = freeze_term_collection_from_design(&spec.meanspec, &mean_design)?;
     let time_prepared = prepare_latent_time_block(
         &spec.time_block,
         spec.time_design_right.as_ref(),
@@ -658,10 +678,10 @@ pub(crate) fn fit_latent_survival_terms(
     let time_offset_right = match spec.time_offset_right.as_ref() {
         Some(offset) => {
             if offset.len() != n {
-                return Err(format!(
+                return Err(FitFailure::input(format!(
                     "latent survival interval right time offset must have length {n}, got {}",
                     offset.len()
-                ));
+                )));
             }
             offset.clone()
         }
@@ -671,10 +691,10 @@ pub(crate) fn fit_latent_survival_terms(
         Array1::zeros(n)
     } else {
         if spec.unloaded_mass_right.len() != n {
-            return Err(format!(
+            return Err(FitFailure::input(format!(
                 "latent survival interval right unloaded mass must have length {n}, got {}",
                 spec.unloaded_mass_right.len()
-            ));
+            )));
         }
         spec.unloaded_mass_right.clone()
     };
@@ -766,11 +786,12 @@ pub(crate) fn fit_latent_survival_terms(
                 let has_finite_event_in_censored_surrogate =
                     warm_family.event_target.iter().any(|&code| code != 0);
                 if has_finite_event_in_censored_surrogate {
-                    return Err(format!(
+                    // The surrogate's solver error, carried whole (#2937).
+                    return Err(FitFailure::from(censored_error).context(
                         "latent interval warm start: right-censored-at-L surrogate fit failed \
                          (so the interval fit cannot be safely warm-started; this surrogate is \
                          log-concave and should converge — investigate the surrogate, not the \
-                         interval kernel): {censored_error}"
+                         interval kernel)",
                     ));
                 }
 
@@ -798,11 +819,11 @@ pub(crate) fn fit_latent_survival_terms(
                     None,
                 )
                 .map_err(|event_error| {
-                    format!(
+                    FitFailure::from(event_error).context(format!(
                         "latent interval warm start failed: the right-censored-at-L surrogate \
                          has no finite failures and refused its boundary optimum ({censored_error}); \
-                         the finite lower-endpoint event surrogate also failed ({event_error})"
-                    )
+                         the finite lower-endpoint event surrogate also failed"
+                    ))
                 })?
             }
         };
@@ -811,14 +832,13 @@ pub(crate) fn fit_latent_survival_terms(
             .iter()
             .any(|s| s.beta.iter().all(|v| v.is_finite()) && s.beta.iter().any(|&v| v != 0.0));
         if !warm_beta_usable {
-            return Err(
+            return Err(FitFailure::numerical(
                 "latent interval warm start: right-censored-at-L surrogate returned a \
                  degenerate (non-finite or all-zero) β across every block; the warm start \
                  cannot seed the interval fit. This indicates the surrogate's time-block \
                  design is rank-deficient or the inner solve stalled at the seed — \
-                 investigate the surrogate before retrying the interval fit."
-                    .to_string(),
-            );
+                 investigate the surrogate before retrying the interval fit.",
+            ));
         }
         for (block, state) in blocks.iter_mut().zip(warm_fit.block_states.iter()) {
             if state.beta.iter().all(|v| v.is_finite()) {
@@ -839,7 +859,8 @@ pub(crate) fn fit_latent_survival_terms(
         &spec.time_block.offset_exit,
         &spec.time_block.derivative_offset_exit,
         &family.time_offset_right,
-    )?;
+    )
+    .map_err(FitFailure::invariant)?;
     let (fit, family, baseline_config) = match chart {
         Some(chart) => fit_latent_baseline_axes(
             data,
@@ -852,7 +873,7 @@ pub(crate) fn fit_latent_survival_terms(
             options,
         )?,
         None => {
-            let fit = fit_custom_family_arming_on_evidence(&family, &blocks, options).map_err(|e| e.to_string())?;
+            let fit = fit_custom_family_arming_on_evidence(&family, &blocks, options)?;
             (fit, family, spec.baseline_config.clone())
         }
     };
@@ -960,10 +981,10 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
     derivative_guard: f64,
     chart: &crate::survival::construction::LatentSurvivalFrozenOffsetChart,
     options: &BlockwiseFitOptions,
-) -> Result<(UnifiedFitResult, F, SurvivalBaselineConfig), String> {
+) -> Result<(UnifiedFitResult, F, SurvivalBaselineConfig), FitFailure> {
     use crate::fit_orchestration::drivers::{
         ExactJointEfsEvaluation, ExactJointEvaluation, ExactJointHyperSetup, SpatialFitProvenance,
-        optimize_spatial_length_scale_exact_joint,
+        optimize_spatial_length_scale_exact_joint_typed,
     };
     let penalty_counts: Vec<usize> = seed_blocks
         .iter()
@@ -1079,7 +1100,7 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
         enabled: false,
         ..Default::default()
     };
-    let solved = optimize_spatial_length_scale_exact_joint(
+    let solved = optimize_spatial_length_scale_exact_joint_typed(
         data,
         std::slice::from_ref(meanspec),
         &[Vec::new()],
@@ -1091,12 +1112,15 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
         true,
         None,
         outer_policy,
+        // The final fit: the solver's error is carried whole (#2937). The family
+        // and blocks are realized at a theta the driver produced on the chart
+        // built above, so failing to realize them is an engine defect.
         |theta, specs: &[TermCollectionSpec], designs: &[TermCollectionDesign], provenance| {
-            check_designs(specs, designs)?;
-            let (family, blocks) = realize(theta)?;
+            check_designs(specs, designs).map_err(FitFailure::invariant)?;
+            let (family, blocks) = realize(theta).map_err(FitFailure::invariant)?;
             let fit = match provenance {
                 SpatialFitProvenance::NoOuterOptimization => {
-                    fit_custom_family_arming_on_evidence(&family, &blocks, options).map_err(|error| error.to_string())?
+                    fit_custom_family_arming_on_evidence(&family, &blocks, options)?
                 }
                 SpatialFitProvenance::Certified { outer, mode } => {
                     let exact_options = crate::outer_subsample::exact_outer_options(options);
@@ -1107,8 +1131,7 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
                         mode,
                         theta,
                         outer,
-                    )
-                    .map_err(|error| error.to_string())?
+                    )?
                 }
             };
             Ok((fit, family))
@@ -1183,7 +1206,7 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
     let baseline_config = family
         .chart_point()
         .map(|geometry| geometry.baseline_config.clone())
-        .ok_or_else(|| "latent baseline-axes fit lost its chart point".to_string())?;
+        .ok_or_else(|| FitFailure::invariant("latent baseline-axes fit lost its chart point"))?;
     Ok((fit, family, baseline_config))
 }
 
@@ -1192,16 +1215,15 @@ pub(crate) fn fit_latent_binary_terms(
     spec: LatentBinaryTermSpec,
     frailty: FrailtySpec,
     options: &BlockwiseFitOptions,
-) -> Result<LatentBinaryTermFitResult, String> {
+) -> Result<LatentBinaryTermFitResult, FitFailure> {
     let latent_sd = validate_latent_binary_inputs(data, &spec, &frailty)?;
-    let (_, hazard_loading) = fixed_latent_hazard_frailty(&frailty, "latent-binary")?;
-    let mean_design =
-        build_term_collection_design(data, &spec.meanspec).map_err(|e| e.to_string())?;
-    let mean_offset = mean_design
-        .compose_offset(spec.mean_offset.view(), "latent-binary mean block")
-        .map_err(|e| e.to_string())?;
-    let resolvedspec = freeze_term_collection_from_design(&spec.meanspec, &mean_design)
-        .map_err(|e| e.to_string())?;
+    // The frailty spec is the caller's (#2937).
+    let (_, hazard_loading) =
+        fixed_latent_hazard_frailty(&frailty, "latent-binary").map_err(FitFailure::input)?;
+    let mean_design = build_term_collection_design(data, &spec.meanspec)?;
+    let mean_offset =
+        mean_design.compose_offset(spec.mean_offset.view(), "latent-binary mean block")?;
+    let resolvedspec = freeze_term_collection_from_design(&spec.meanspec, &mean_design)?;
     let time_prepared = prepare_latent_time_block(&spec.time_block, None, spec.derivative_guard)?;
 
     let family = LatentBinaryFamily {
@@ -1236,7 +1258,8 @@ pub(crate) fn fit_latent_binary_terms(
         &spec.time_block.offset_exit,
         &spec.time_block.derivative_offset_exit,
         &Array1::zeros(spec.event_target.len()),
-    )?;
+    )
+    .map_err(FitFailure::invariant)?;
     let (fit, baseline_config) = match chart {
         Some(chart) => {
             let solved = fit_latent_baseline_axes(
@@ -1252,8 +1275,7 @@ pub(crate) fn fit_latent_binary_terms(
             (solved.0, solved.2)
         }
         None => {
-            let fit = fit_custom_family_arming_on_evidence(&family, &blocks, options)
-                .map_err(|e| e.to_string())?;
+            let fit = fit_custom_family_arming_on_evidence(&family, &blocks, options)?;
             (fit, spec.baseline_config.clone())
         }
     };
@@ -9633,3 +9655,40 @@ mod tests;
 
 #[cfg(test)]
 mod tests_third_information_2677;
+
+#[cfg(test)]
+mod tests_failure_category_2937 {
+    use super::LatentSurvivalError;
+    use crate::fit_orchestration::FitFailure;
+    use gam_problem::FailureCategory;
+
+    /// #2937: a latent fit that stops on a `LatentSurvivalError` raises the class
+    /// of its variant's category, with the refusal's own text.
+    #[test]
+    fn latent_survival_error_failure_categories_2937() {
+        let reason = || "row 3".to_string();
+        let cases = [
+            (LatentSurvivalError::InvalidFrailty { reason: reason() }, FailureCategory::Input),
+            (LatentSurvivalError::InvalidDataset { reason: reason() }, FailureCategory::Input),
+            (
+                LatentSurvivalError::UnsupportedConfiguration { reason: reason() },
+                FailureCategory::Input,
+            ),
+            (LatentSurvivalError::BlockMismatch { reason: reason() }, FailureCategory::Invariant),
+            (
+                LatentSurvivalError::NumericalFailure { reason: reason() },
+                FailureCategory::Numerical,
+            ),
+            (
+                LatentSurvivalError::DerivativeAccuracyUnresolved { reason: reason() },
+                FailureCategory::Numerical,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.failure_category(), expected, "{error}");
+            let failure = FitFailure::from(error.clone());
+            assert_eq!(failure.category(), expected, "{failure}");
+            assert_eq!(failure.to_string(), error.to_string());
+        }
+    }
+}

@@ -3811,7 +3811,6 @@ pub(crate) fn fit_survival_marginal_slope_model(
         &request.options,
         &request.kappa_options,
     )
-    .map_err(FitFailure::from)
 }
 
 pub(crate) fn fit_latent_survival_model(
@@ -3823,7 +3822,6 @@ pub(crate) fn fit_latent_survival_model(
         request.frailty,
         &request.options,
     )
-    .map_err(FitFailure::from)
 }
 
 pub(crate) fn fit_latent_binary_model(
@@ -3835,7 +3833,6 @@ pub(crate) fn fit_latent_binary_model(
         request.frailty,
         &request.options,
     )
-    .map_err(FitFailure::from)
 }
 
 pub(crate) fn fit_transformation_normal_model(

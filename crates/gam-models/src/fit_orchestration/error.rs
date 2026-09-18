@@ -362,6 +362,37 @@ impl FitFailure {
         }
     }
 
+    /// The caller's configuration, data or problem size was refused.
+    #[must_use]
+    pub fn input(reason: impl Into<String>) -> Self {
+        Self::raised(FailureCategory::Input, reason)
+    }
+
+    /// State the engine built from validated input disagreed with itself.
+    #[must_use]
+    pub fn invariant(reason: impl Into<String>) -> Self {
+        Self::raised(FailureCategory::Invariant, reason)
+    }
+
+    /// A numerical step failed on the fit's own iterates.
+    #[must_use]
+    pub fn numerical(reason: impl Into<String>) -> Self {
+        Self::raised(FailureCategory::Numerical, reason)
+    }
+
+    /// A quadrature or compression did not reach its tolerance.
+    #[must_use]
+    pub fn integration(reason: impl Into<String>) -> Self {
+        Self::raised(FailureCategory::Integration, reason)
+    }
+
+    /// Text from a helper whose failures span categories. Each call site is
+    /// named, so what is left untyped stays countable (#2937).
+    #[must_use]
+    pub fn unclassified(reason: impl Into<String>) -> Self {
+        Self::raised(FailureCategory::Unclassified, reason)
+    }
+
     /// Put `context` in front of this failure without changing what it is.
     #[must_use]
     pub fn context(self, context: impl Into<String>) -> Self {
@@ -670,6 +701,14 @@ impl From<gam_problem::BasisError> for FitFailure {
 /// own text.
 impl From<crate::survival::location_scale::SurvivalLocationScaleError> for FitFailure {
     fn from(err: crate::survival::location_scale::SurvivalLocationScaleError) -> Self {
+        Self::raised(err.failure_category(), err.to_string())
+    }
+}
+
+/// A latent survival or binary refusal, under its variant's category, with its
+/// own text.
+impl From<crate::survival::latent::LatentSurvivalError> for FitFailure {
+    fn from(err: crate::survival::latent::LatentSurvivalError) -> Self {
         Self::raised(err.failure_category(), err.to_string())
     }
 }

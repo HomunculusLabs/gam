@@ -174,13 +174,14 @@ pub(crate) fn build_marginal_blockspec(
     }
 }
 
+/// The inner coefficient fit. The solver's error is returned whole, so the fit
+/// that stops on it raises its category (#2937).
 pub(crate) fn inner_fit(
     family: &SurvivalMarginalSlopeFamily,
     blocks: &[ParameterBlockSpec],
     options: &BlockwiseFitOptions,
-) -> Result<UnifiedFitResult, String> {
+) -> Result<UnifiedFitResult, crate::custom_family::CustomFamilyError> {
     crate::custom_family::fit_custom_family_arming_on_evidence(family, blocks, options)
-        .map_err(|e| e.to_string())
 }
 
 pub(crate) fn inner_fit_from_certified_outer(
@@ -190,12 +191,11 @@ pub(crate) fn inner_fit_from_certified_outer(
     mode: CustomFamilyJointHyperModeSelection,
     theta: &Array1<f64>,
     outer: &gam_solve::rho_optimizer::CertifiedOuterResult,
-) -> Result<UnifiedFitResult, String> {
+) -> Result<UnifiedFitResult, crate::custom_family::CustomFamilyError> {
     let options = crate::outer_subsample::exact_outer_options(options);
     fit_custom_family_fixed_log_lambdas_from_mode_selection(
         family, blocks, &options, mode, theta, outer,
     )
-    .map_err(|error| error.to_string())
 }
 
 /// Marginal-slope guard policy: the guard is required to be strictly positive
