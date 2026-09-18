@@ -845,72 +845,6 @@ pub fn decode_support_packet(
     Ok(support)
 }
 
-/// A decoded artifact's score over one declared finite input family.
-///
-/// Superseded by [`code_saving_at_proven_fidelity`], which reads precision.rs's proven verdict.
-/// This type and [`code_saving_at_declared_fidelity`] are deleted once their last consumers
-/// (fit.rs, families.rs, teacher_tests.rs) have migrated (#2951).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DecodedArtifactScore {
-    /// The exact artifact length ([`LibraryPacketArtifact::total_bits`]).
-    pub code_bits: u64,
-    /// The largest distortion over the input family, evaluated on the outputs of the
-    /// program decoded from the artifact.
-    pub decoded_distortion: f64,
-    /// A derived bound on the floating-point error in `decoded_distortion`.
-    pub distortion_roundoff: f64,
-}
-
-/// `reference − candidate` in bits between two decoded artifacts that both meet the
-/// declared fidelity tolerance (positive means the candidate is shorter).
-///
-/// An artifact meets the tolerance when its decoded distortion plus its roundoff
-/// bound is at most `tolerance`, so a pass holds for the exact distortion. A
-/// comparison where either artifact misses the tolerance is refused: lengths at
-/// different fidelities are not a model comparison. The tolerance is an experiment
-/// declaration with no default. The verdict is exhaustive over the declared input
-/// family and says nothing about inputs outside it.
-///
-/// Superseded by [`code_saving_at_proven_fidelity`]: this predicate has no rounding band,
-/// so a figure within its band of the tolerance reads as a miss here and as `Unresolved`
-/// in precision.rs. Deleted once its last consumers have migrated.
-pub fn code_saving_at_declared_fidelity(
-    tolerance: f64,
-    reference: &DecodedArtifactScore,
-    candidate: &DecodedArtifactScore,
-) -> Result<i128, String> {
-    if !tolerance.is_finite() || tolerance < 0.0 {
-        return Err(format!(
-            "fidelity tolerance must be finite and nonnegative, got {tolerance}"
-        ));
-    }
-    for (role, score) in [("reference", reference), ("candidate", candidate)] {
-        let DecodedArtifactScore {
-            decoded_distortion,
-            distortion_roundoff,
-            ..
-        } = *score;
-        if !(decoded_distortion.is_finite()
-            && decoded_distortion >= 0.0
-            && distortion_roundoff.is_finite()
-            && distortion_roundoff >= 0.0)
-        {
-            return Err(format!(
-                "{role} decoded distortion {decoded_distortion} and roundoff \
-                 {distortion_roundoff} must be finite and nonnegative"
-            ));
-        }
-        if decoded_distortion + distortion_roundoff > tolerance {
-            return Err(format!(
-                "code comparison refused: the {role} artifact's decoded distortion \
-                 {decoded_distortion} (roundoff {distortion_roundoff}) misses the declared \
-                 tolerance {tolerance}"
-            ));
-        }
-    }
-    Ok(i128::from(reference.code_bits) - i128::from(candidate.code_bits))
-}
-
 /// `reference − candidate` in bits between two decoded artifacts, each given with its exact
 /// code length ([`LibraryPacketArtifact::total_bits`]) and the fidelity evidence of its decoded
 /// outputs (positive means the candidate is shorter).
@@ -1579,21 +1513,6 @@ mod tests {
             union_support_library(&[vec![9, 3]]),
             Err(CodecError::InvalidInput(_))
         ));
-    }
-
-    #[test]
-    fn code_comparison_refuses_an_artifact_that_misses_the_tolerance() {
-        let short = DecodedArtifactScore { code_bits: 10, decoded_distortion: 0.0, distortion_roundoff: 0.0 };
-        let long = DecodedArtifactScore { code_bits: 300, decoded_distortion: 0.2, distortion_roundoff: 1e-15 };
-        assert_eq!(code_saving_at_declared_fidelity(0.25, &long, &short), Ok(290));
-        let unfaithful = DecodedArtifactScore { decoded_distortion: 0.3, ..short };
-        assert!(code_saving_at_declared_fidelity(0.25, &long, &unfaithful).is_err());
-        // The roundoff bound counts against the tolerance.
-        let boundary = DecodedArtifactScore { decoded_distortion: 0.25, distortion_roundoff: 1e-16, ..short };
-        assert!(code_saving_at_declared_fidelity(0.25, &long, &boundary).is_err());
-        assert!(code_saving_at_declared_fidelity(f64::NAN, &long, &short).is_err());
-        let undefined = DecodedArtifactScore { decoded_distortion: f64::NAN, ..short };
-        assert!(code_saving_at_declared_fidelity(0.25, &undefined, &short).is_err());
     }
 
     /// A test artifact whose decoder returns a stored figure, so each fidelity fixture states its

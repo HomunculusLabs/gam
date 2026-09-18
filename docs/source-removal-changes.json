@@ -387,5 +387,17 @@
     ],
     "reason": "#2469: CS_SERIES_TERMS = 18 and T_SERIES_TERMS = 48 were chosen term counts for the constant-curvature C/S and T series on their small-argument branches. cs_stacks3, cs_val, t_stacks3 and t0 already stopped at the first term that no longer moved the sum, so the counts were caps that never bound there. cs_stacks summed a fixed 18 terms and now takes the same per-channel stop. Every loop runs until that stop, which terminates because the ratio of consecutive terms has magnitude at most 0.25 (C/S) or below 0.54 (T) on the series branch. The switch points CS_SERIES_U_MAX and T_SERIES_W_MAX are kept.",
     "evidence": "At base 8b1c9f5c24af432c393ee18d7d6817e56f12a9b1, git grep -n -w finds both names only in crates/gam-geometry/src/manifolds/constant_curvature.rs: CS_SERIES_TERMS at its declaration :89, a doc link :83, loop bounds :119, :239, :331, :342 and a comment :236; T_SERIES_TERMS at its declaration :98, loop bounds :174, :302 and a comment :181. This commit removes every one. Gate job 1253615 on sw5g (base 8b1c9f5c24, exact tree 3bdb0cf6d5, patch md5 c2405078): workspace --all-targets check RC 0, cargo check -p gam-pyffi --all-targets RC 0, cargo test -p gam-geometry 283 + 1 passed including the new series_fast_paths_are_bitwise_slices_of_the_full_stacks, public_api_census.py RC 0, and source_removal_guard.py listed exactly these two identities (test_scoped false, production_occurrences 7 and 4, all in this file)."
+  },
+  {
+    "base": "07dee4dc09ce52dbc32fa97ccab89a2de82e9e13",
+    "items": [
+      "crates/gam-sae/src/parameter_decomposition/codec.rs:fn:code_comparison_refuses_an_artifact_that_misses_the_tolerance",
+      "crates/gam-sae/src/parameter_decomposition/codec.rs:fn:code_saving_at_declared_fidelity",
+      "crates/gam-sae/src/parameter_decomposition/codec.rs:struct:DecodedArtifactScore",
+      "crates/gam-sae/src/parameter_decomposition/controls_tests.rs:fn:exact_figure",
+      "crates/gam-sae/src/parameter_decomposition/families.rs:fn:score_and_verdict"
+    ],
+    "reason": "#2951 P11, P18, MPD one-owner rule for decoded fidelity (mpd-spec NOTE 12): codec step 3 of 3. DecodedArtifactScore and code_saving_at_declared_fidelity decided fidelity with an unrounded predicate (distortion + roundoff <= tolerance, no rounding band), duplicating precision.rs's DecodedFidelity::verdict(). Their replacement code_saving_at_proven_fidelity((bits, &DecodedFidelity), (bits, &DecodedFidelity)) landed in step 1 (91473e08eb) and fit.rs migrated in d0b3432912. This commit migrates the last consumers (families.rs, teacher_tests.rs, controls_tests.rs) and deletes the pair. The old comparison's test goes with it; step 1's proven-comparison test covers Meets, Violates, Unresolved and a one-ulp tolerance mismatch. The test helpers score_and_verdict (families) and exact_figure (controls_tests) only unpacked the old score; score() now carries the DecodedFidelity whose verdict() the asserts read.",
+    "evidence": "source_removal_guard.py without this entry, on probe commits main+wave2 (ae25b88872) -> +step3 (994084a376) at fe8a7a4ffe (Slurm 1246008), names exactly these five items, each with production_occurrences 0; the three test functions are test_scoped. A no-write grep at main's tip found DecodedArtifactScore / code_saving_at_declared_fidelity only in the four files this commit changes. The landing refuses unless source_removal_guard.py and public_api_census.py both return RC 0 on a probe commit of the landing patch at the parent."
   }
 ]

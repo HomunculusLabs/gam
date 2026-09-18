@@ -40,10 +40,9 @@ use ndarray::{Array1, Array2, ArrayView1, array};
 
 use super::bounds::{LogitGapNorm, kl_bound_from_logit_gap, softmax_kl_oscillation_bound};
 use super::codec::{
-    BitString, DagNode, DecodedArtifactScore, LibraryPacketArtifact, code_saving_at_declared_fidelity,
-    decode_fixed_index, decode_ordered_dag, decode_prefix_integer, decode_support_packet, encode_fixed_index,
-    encode_ordered_dag, encode_prefix_integer, encode_support_packets, prefix_integer_len_bits,
-    subset_code_len_bits, union_support_library,
+    BitString, DagNode, LibraryPacketArtifact, code_saving_at_proven_fidelity, decode_fixed_index, decode_ordered_dag,
+    decode_prefix_integer, decode_support_packet, encode_fixed_index, encode_ordered_dag, encode_prefix_integer,
+    encode_support_packets, prefix_integer_len_bits, subset_code_len_bits, union_support_library,
 };
 use super::families::{FamilyError, principal_field};
 use super::moments::{GeneratorPart, MaskDomain, MaskMomentSystem, MomentBlock, MomentVector, WitnessEndpoint};
@@ -751,6 +750,24 @@ fn decode_family_labels(library: &BitString, quotient: PeriodicQuotient) -> Quot
     QuotientCode::from_indices(quotient, resolution_bits, indices).expect("decoded label cells")
 }
 
+/// A packetless program as transmitted: its graph is the whole library, and it decodes to the
+/// graph's nodes.
+struct PacketlessProgram<'a>(&'a LibraryPacketArtifact);
+
+impl DecodableArtifact for PacketlessProgram<'_> {
+    type Decoded = Vec<DagNode>;
+
+    fn decode(&self) -> Result<Vec<DagNode>, String> {
+        let mut reader = self.0.library.reader();
+        let nodes = decode_ordered_dag(&mut reader, LABELS).map_err(|error| error.to_string())?;
+        reader.finish().map_err(|error| error.to_string())?;
+        if self.0.packets.iter().any(|packet| !packet.is_empty()) {
+            return Err("a packetless program reads no packet".to_string());
+        }
+        Ok(nodes)
+    }
+}
+
 #[test]
 fn identity_is_shorter_than_a_projector_family_whose_labels_are_shipped_and_decoded_2951() {
     let instances = 16usize;
@@ -779,13 +796,8 @@ fn identity_is_shorter_than_a_projector_family_whose_labels_are_shipped_and_deco
         packets: vec![BitString::new(); inputs.len()],
     };
     let mut reader = identity.library.reader();
-    assert_eq!(decode_ordered_dag(&mut reader, LABELS), Ok(identity_nodes));
+    assert_eq!(decode_ordered_dag(&mut reader, LABELS), Ok(identity_nodes.clone()));
     assert_eq!(reader.finish(), Ok(()));
-    let identity_score = DecodedArtifactScore {
-        code_bits: identity.total_bits(),
-        decoded_distortion: 0.0,
-        distortion_roundoff: 0.0,
-    };
 
     // Projector family: the graph, and the labels at 4 bits on RP1, whose 16 cells are the
     // family's own grid, so the decoded labels are the labels.
@@ -860,17 +872,22 @@ fn identity_is_shorter_than_a_projector_family_whose_labels_are_shipped_and_deco
         )
         .map_err(|error| error.to_string())
     };
-    // The figure a code comparison reads: an exact value and its numerical error.
-    fn exact_figure(status: &EvidenceStatus<(), &'static str>) -> Option<(f64, f64)> {
-        match status {
-            EvidenceStatus::Exact {
-                value,
-                numerical_error,
-                ..
-            } => Some((*value, *numerical_error)),
-            _ => None,
-        }
-    }
+    // Fidelity on the decoded identity: decode its graph, check it is the identity, execute.
+    let identity_fidelity = decode_then_evaluate(
+        &PacketlessProgram(&identity),
+        |nodes: &Vec<DagNode>| {
+            if *nodes == identity_nodes {
+                Ok(inputs.clone())
+            } else {
+                Err("the decoded graph is not the identity program".to_string())
+            }
+        },
+        &inputs,
+        distortion_status,
+        tolerance,
+    )
+    .expect("the decoded identity executes");
+    assert_eq!(identity_fidelity.verdict(), super::precision::FidelityVerdict::Meets);
 
     // Fidelity on the decoded artifact: decode the labels, decode each packet, execute.
     let fidelity = decode_then_evaluate(
@@ -882,27 +899,24 @@ fn identity_is_shorter_than_a_projector_family_whose_labels_are_shipped_and_deco
     )
     .expect("the decoded family executes");
     assert_eq!(fidelity.verdict(), super::precision::FidelityVerdict::Meets);
-    let (decoded_distortion, decoded_roundoff) = exact_figure(fidelity.status()).expect("an exact figure");
-    let family_score = DecodedArtifactScore {
-        code_bits: family.total_bits(),
-        decoded_distortion,
-        distortion_roundoff: decoded_roundoff,
-    };
-    let saving = code_saving_at_declared_fidelity(tolerance, &family_score, &identity_score)
-        .expect("both artifacts meet the declared tolerance");
+    let saving = code_saving_at_proven_fidelity(
+        (family.total_bits(), &fidelity),
+        (identity.total_bits(), &identity_fidelity),
+    )
+    .expect("both artifacts are proven within the declared tolerance");
     assert!(
         saving > 0,
         "identity ({} bits) must be shorter than the projector family ({} bits)",
-        identity_score.code_bits,
-        family_score.code_bits
+        identity.total_bits(),
+        family.total_bits()
     );
     let least_packet = (minimum_cardinality..=instances)
         .map(|cardinality| subset_code_len_bits(instances, cardinality).expect("length"))
         .min()
         .expect("admissible cardinalities");
     let family_floor = family.library.len_bits() + inputs.len() as u64 * least_packet;
-    assert!(family_score.code_bits >= family_floor);
-    assert!(identity_score.code_bits < family_floor);
+    assert!(family.total_bits() >= family_floor);
+    assert!(identity.total_bits() < family_floor);
 
     // A 0-bit label code carries no coordinate, and precision refuses it.
     assert!(QuotientCode::encode(&labels, quotient, 0).is_err());
@@ -944,14 +958,13 @@ fn identity_is_shorter_than_a_projector_family_whose_labels_are_shipped_and_deco
         "the collapsed artifact's distortion {:?}",
         collapsed_fidelity.status()
     );
-    let (collapsed_distortion, collapsed_roundoff) =
-        exact_figure(collapsed_fidelity.status()).expect("an exact figure");
-    let collapsed_score = DecodedArtifactScore {
-        code_bits: collapsed_family.total_bits(),
-        decoded_distortion: collapsed_distortion,
-        distortion_roundoff: collapsed_roundoff,
-    };
-    assert!(code_saving_at_declared_fidelity(tolerance, &collapsed_score, &identity_score).is_err());
+    assert!(
+        code_saving_at_proven_fidelity(
+            (collapsed_family.total_bits(), &collapsed_fidelity),
+            (identity.total_bits(), &identity_fidelity),
+        )
+        .is_err()
+    );
 }
 
 #[test]

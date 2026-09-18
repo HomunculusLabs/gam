@@ -9,7 +9,7 @@
 //! What separates a planted rotation is code length at equal decoded fidelity (P11, P18). A
 //! plane rotation sends one plane and one angle on `ℝ/2πℤ`; a generic operator sends `d²`
 //! reals. Lengths are compared only between artifacts whose decoded distortion meets the
-//! declared tolerance ([`code_saving_at_declared_fidelity`]).
+//! declared tolerance ([`code_saving_at_proven_fidelity`]).
 //!
 //! The declared inputs are the lattice precision, the angle resolution and the fidelity
 //! tolerance. The regime `p > d`, where random states admit no linear realizer, needs a
@@ -24,11 +24,11 @@
 //! mean of the same pairing is zero: a stochastic average is reported beside the counterexample
 //! and never as a bound.
 
-use super::codec::{BitString, DecodedArtifactScore, code_saving_at_declared_fidelity};
+use super::codec::{BitString, code_saving_at_proven_fidelity};
 use super::moments::{GeneratorPart, MaskDomain, MaskMomentSystem, MomentBlock, MomentVector};
 use super::precision::{
-    DecodableArtifact, DeclaredPrecision, LatticeCode, PeriodicQuotient, QuotientCode,
-    decode_then_evaluate,
+    DecodableArtifact, DeclaredPrecision, DecodedFidelity, FidelityVerdict, LatticeCode,
+    PeriodicQuotient, QuotientCode, decode_then_evaluate,
 };
 use super::rewrite::{ComponentMask, ComponentMlp, ComponentRead, MlpMask, NativeMlp};
 use super::supports::{EvidenceStatus, ExactBasis};
@@ -139,7 +139,8 @@ fn least_squares_realizer(states: &Array2<f64>, shifted: &Array2<f64>) -> Array2
 
 /// Decodes the artifact, applies the decoded operator to every state, and measures the largest
 /// `|image − reference|` entry. Each entry is one rounded subtraction of two floats, so the
-/// exact distortion exceeds the measured one by at most `u·distortion`, rounded up.
+/// exact distortion exceeds the measured one by at most `u·distortion`, rounded up. Returns the
+/// artifact's code length with its decoded fidelity, for [`code_saving_at_proven_fidelity`].
 fn score<A: DecodableArtifact>(
     artifact: &A,
     code_bits: u64,
@@ -147,7 +148,7 @@ fn score<A: DecodableArtifact>(
     states: &Array2<f64>,
     reference: &Array2<f64>,
     tolerance: f64,
-) -> DecodedArtifactScore {
+) -> (u64, DecodedFidelity<(), &'static str>) {
     let fidelity = decode_then_evaluate(
         artifact,
         |decoded| Ok(states.dot(&operator(decoded).t())),
@@ -171,19 +172,7 @@ fn score<A: DecodableArtifact>(
         tolerance,
     )
     .expect("the artifact decodes and evaluates");
-    let EvidenceStatus::Exact {
-        value,
-        numerical_error,
-        ..
-    } = fidelity.status()
-    else {
-        panic!("an exhaustive distortion over the declared states is an exact figure");
-    };
-    DecodedArtifactScore {
-        code_bits,
-        decoded_distortion: *value,
-        distortion_roundoff: *numerical_error,
-    }
+    (code_bits, fidelity)
 }
 
 /// On planted cycle states, a plane rotation and its dense generic realizer both meet the
@@ -221,7 +210,7 @@ fn a_planted_rotation_wins_on_code_where_fidelity_alone_accepts_a_random_connect
         .expect("the dense operator encodes");
 
     let (planted, planted_shifted) = planted_cycle_states();
-    let planted_rotation = score(
+    let (planted_rotation_bits, planted_rotation) = score(
         &rotation,
         rotation_bits,
         |operator| operator.clone(),
@@ -229,7 +218,7 @@ fn a_planted_rotation_wins_on_code_where_fidelity_alone_accepts_a_random_connect
         &planted_shifted,
         tolerance,
     );
-    let planted_generic = score(
+    let (planted_generic_bits, planted_generic) = score(
         &generic,
         lattice_bits(&generic),
         as_operator,
@@ -237,8 +226,11 @@ fn a_planted_rotation_wins_on_code_where_fidelity_alone_accepts_a_random_connect
         &planted_shifted,
         tolerance,
     );
-    let saving = code_saving_at_declared_fidelity(tolerance, &planted_generic, &planted_rotation)
-        .expect("both planted artifacts meet the declared tolerance");
+    let saving = code_saving_at_proven_fidelity(
+        (planted_generic_bits, &planted_generic),
+        (planted_rotation_bits, &planted_rotation),
+    )
+    .expect("both planted artifacts meet the declared tolerance");
     assert!(
         saving > 0,
         "the plane rotation must be shorter: {planted_rotation:?} against {planted_generic:?}"
@@ -248,7 +240,7 @@ fn a_planted_rotation_wins_on_code_where_fidelity_alone_accepts_a_random_connect
     let realizer = least_squares_realizer(&random, &random_shifted);
     let random_code = LatticeCode::encode(realizer.as_slice().expect("standard layout"), precision)
         .expect("the realizer encodes");
-    let random_generic = score(
+    let (random_generic_bits, random_generic) = score(
         &random_code,
         lattice_bits(&random_code),
         as_operator,
@@ -256,12 +248,13 @@ fn a_planted_rotation_wins_on_code_where_fidelity_alone_accepts_a_random_connect
         &random_shifted,
         tolerance,
     );
-    assert!(
-        random_generic.decoded_distortion + random_generic.distortion_roundoff <= tolerance,
+    assert_eq!(
+        random_generic.verdict(),
+        FidelityVerdict::Meets,
         "a random connection's generic realizer must meet the tolerance: {random_generic:?}"
     );
 
-    let random_rotation = score(
+    let (random_rotation_bits, random_rotation) = score(
         &rotation,
         rotation_bits,
         |operator| operator.clone(),
@@ -270,7 +263,11 @@ fn a_planted_rotation_wins_on_code_where_fidelity_alone_accepts_a_random_connect
         tolerance,
     );
     assert!(
-        code_saving_at_declared_fidelity(tolerance, &random_generic, &random_rotation).is_err(),
+        code_saving_at_proven_fidelity(
+            (random_generic_bits, &random_generic),
+            (random_rotation_bits, &random_rotation),
+        )
+        .is_err(),
         "the planted rotation does not realize a random connection, so no code comparison stands: \
          {random_rotation:?}"
     );
