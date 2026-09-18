@@ -767,6 +767,31 @@ impl SaeManifoldAtom {
                     .map(f64::to_bits)
     }
 
+    /// #2935 — carry the affine re-chart a canonicalization just installed on
+    /// this atom into the atom's geometry plan, so the next curvature trial
+    /// re-prices the declared metric in the live chart (basis congruence)
+    /// instead of re-assembling it from the old chart's reference rows.
+    ///
+    /// Only a plan that declares a constant-curvature metric takes the
+    /// carrier: a flat plan's Gram is never rebuilt from its rows after the
+    /// gauge (only `prepare_constant_curvature` rebuilds from a plan, and it
+    /// exists only for the κ coordinate), so for those atoms the transported
+    /// Gram the gauge installed is already final.
+    pub(crate) fn install_plan_chart_affine(
+        &mut self,
+        shift: &[f64],
+        scale: &[f64],
+    ) -> Result<(), String> {
+        let Some(plan) = self.geometry_plan.as_mut() else {
+            return Ok(());
+        };
+        if plan.constant_curvature().is_none() {
+            return Ok(());
+        }
+        plan.install_chart_affine(shift.to_vec(), scale.to_vec())
+            .map_err(|error| format!("SaeManifoldAtom::install_plan_chart_affine: {error}"))
+    }
+
     pub fn geometry_plan(&self) -> Option<&SaeAtomGeometryPlan> {
         self.geometry_plan.as_ref()
     }

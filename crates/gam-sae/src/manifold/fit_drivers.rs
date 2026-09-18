@@ -1138,6 +1138,12 @@ impl SaeManifoldTerm {
             transported_penalty,
             transported_kappa_derivative,
         )?;
+        // #2935 — the atom's geometry plan must know its chart moved: the next
+        // curvature trial re-prices the declared metric (whose reference rows
+        // and curvature rails stay in the declared chart) through the plan's
+        // congruence, not by re-assembly at the old rows. The carrier composes
+        // if a later accept fires the gauge again.
+        atom.install_plan_chart_affine(&shift, &scale)?;
         Ok(())
     }
 

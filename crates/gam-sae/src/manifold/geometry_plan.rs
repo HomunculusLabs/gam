@@ -163,6 +163,36 @@ pub struct SaeAtomGeometryPlan {
     latent_dim: usize,
     resolution: SaeBasisResolution,
     reference_metric: SaeReferenceMetricPlan,
+    /// #2935 — the affine re-chart a canonicalization installed on the atom this
+    /// plan declares. The reference metric (and its κ, and its curvature rails)
+    /// stays declared in the original chart; the field carries only the chart
+    /// re-expression, so every Gram this plan builds lands in the live chart by
+    /// the basis congruence instead of being re-assembled from moved rows —
+    /// which would declare a different metric, not re-express this one.
+    ///
+    /// Runtime state, not wire format: a persisted plan re-validates from its
+    /// declared metric alone (the carrier is re-established by the next gauge
+    /// pass on a live atom).
+    #[serde(skip)]
+    chart_affine: Option<Arc<SaePlanChartAffine>>,
+}
+
+/// The affine re-chart carried by a [`SaeAtomGeometryPlan`] whose atom was
+/// gauged after attachment: the live chart is `t' = (t − shift) / scale`
+/// per axis (#2935).
+#[derive(Debug, Clone, PartialEq)]
+struct SaePlanChartAffine {
+    shift: Vec<f64>,
+    scale: Vec<f64>,
+}
+
+impl SaePlanChartAffine {
+    /// The declared-chart rows re-expressed in the live chart.
+    fn apply(&self, coords: ArrayView2<'_, f64>) -> Array2<f64> {
+        Array2::from_shape_fn(coords.dim(), |(row, axis)| {
+            (coords[[row, axis]] - self.shift[axis]) / self.scale[axis]
+        })
+    }
 }
 
 /// Deserialization proxy for [`SaeAtomGeometryPlan`]. The persisted wire carries
@@ -332,6 +362,9 @@ impl SaeAtomGeometryPlan {
             latent_dim,
             resolution,
             reference_metric,
+            // A fresh declaration carries no live-chart re-expression; the
+            // gauge installs the carrier when it re-charts the atom (#2935).
+            chart_affine: None,
         };
         plan.basis_size()?;
         Ok(plan)
@@ -473,12 +506,116 @@ impl SaeAtomGeometryPlan {
                 ));
             }
         };
-        Self::new(
-            self.kind.clone(),
-            self.latent_dim,
-            self.resolution.clone(),
+        let plan = Self {
+            kind: self.kind.clone(),
+            latent_dim: self.latent_dim,
+            resolution: self.resolution.clone(),
             reference_metric,
+            // #2935 — the live-chart re-expression survives a curvature trial:
+            // the trial re-prices the SAME declared metric (whose reference
+            // rows and curvature rails stay in the original chart) at a new κ,
+            // still expressed in the live chart.
+            chart_affine: self.chart_affine.clone(),
+        };
+        plan.basis_size()?;
+        Ok(plan)
+    }
+
+    /// #2935 — install or compose the affine re-chart a canonicalization
+    /// applied to the atom this plan declares.
+    ///
+    /// The gauge can fire again on a later accept (the inner iterations move
+    /// the coordinates off canonical between accepts), so the carrier is not
+    /// one-shot: it accumulates the cumulative map from the DECLARED chart to
+    /// the live chart. If the plan already carries `t' = (t − s₁)/c₁` and the
+    /// gauge computes `t'' = (t' − s₂)/c₂` on the re-charted coordinates, the
+    /// composition is exact and per-axis closed form:
+    ///
+    /// ```text
+    ///   t'' = (t − (s₁ + c₁∘s₂)) / (c₁∘c₂)
+    /// ```
+    pub(crate) fn install_chart_affine(
+        &mut self,
+        shift: Vec<f64>,
+        scale: Vec<f64>,
+    ) -> Result<(), String> {
+        if shift.len() != self.latent_dim || scale.len() != self.latent_dim {
+            return Err(format!(
+                "SaeAtomGeometryPlan::install_chart_affine: re-chart width {} != plan latent_dim {}",
+                shift.len(),
+                self.latent_dim
+            ));
+        }
+        if shift
+            .iter()
+            .chain(scale.iter())
+            .any(|value| !value.is_finite())
+        {
+            return Err(
+                "SaeAtomGeometryPlan::install_chart_affine: re-chart must be finite".to_string(),
+            );
+        }
+        if scale.iter().any(|value| value.abs() <= 1.0e-12) {
+            return Err(
+                "SaeAtomGeometryPlan::install_chart_affine: re-chart scale must be non-degenerate"
+                    .to_string(),
+            );
+        }
+        let composed = match self.chart_affine.take() {
+            None => SaePlanChartAffine { shift, scale },
+            Some(existing) => SaePlanChartAffine {
+                shift: existing
+                    .shift
+                    .iter()
+                    .zip(shift.iter())
+                    .zip(scale.iter())
+                    .map(|((s_one, s_two), c_one)| s_one + c_one * s_two)
+                    .collect(),
+                scale: existing
+                    .scale
+                    .iter()
+                    .zip(scale.iter())
+                    .map(|(c_one, c_two)| c_one * c_two)
+                    .collect(),
+            },
+        };
+        self.chart_affine = Some(Arc::new(composed));
+        Ok(())
+    }
+
+    /// The full-width Gram congruence that carries a Gram declared in the
+    /// original chart into the live chart: `(T⁻¹)ᵀ M T⁻¹` with `T` the basis
+    /// transport of the re-chart, solved from the plan's own evaluator on its
+    /// own declared reference rows (#2935).
+    fn chart_congruence(
+        &self,
+        gram: Array2<f64>,
+        evaluator: &dyn SaeBasisSecondJet,
+    ) -> Result<Array2<f64>, String> {
+        let Some(affine) = self.chart_affine.as_ref() else {
+            return Ok(gram);
+        };
+        let SaeReferenceMetricPlan::ConstantCurvatureChart {
+            reference_coords, ..
+        } = &self.reference_metric
+        else {
+            return Err(
+                "SaeAtomGeometryPlan::chart_congruence: a re-charted plan must declare a constant-curvature metric"
+                    .to_string(),
+            );
+        };
+        let (declared_phi, _) = evaluator.evaluate(reference_coords.view())?;
+        let live_rows = affine.apply(reference_coords.view());
+        let (live_phi, _) = evaluator.evaluate(live_rows.view())?;
+        let transport = crate::manifold::outer_objective::solve_basis_transport(
+            live_phi.view(),
+            declared_phi.view(),
+        )?;
+        crate::manifold::outer_objective::transport_smooth_penalty_for_decoder(
+            transport.view(),
+            gram.view(),
         )
+        .map_err(|error| format!("SaeAtomGeometryPlan::chart_congruence: {error}"))
     }
 
     /// Numerically resolved raw-curvature search interval for this plan.
@@ -617,9 +754,13 @@ impl SaeAtomGeometryPlan {
     /// Materialize the declared reference-function Gram without evaluating a
     /// caller coordinate block. Used when a plan is attached to an atom so the
     /// persisted metric and the atom's already-installed Gram cannot disagree.
+    /// #2935 — when a canonicalization has re-charted the atom, the Gram is
+    /// carried into the live chart by the basis congruence, not re-assembled
+    /// from moved rows (a different quadrature of a different metric).
     pub(crate) fn build_reference_penalty(&self) -> Result<Array2<f64>, String> {
         let evaluator = self.build_evaluator()?;
-        self.reference_penalty(evaluator.as_ref())
+        let gram = self.reference_penalty(evaluator.as_ref())?;
+        self.chart_congruence(gram, evaluator.as_ref())
     }
 
     /// `dS/dkappa` for this plan's constant-curvature Dirichlet Gram.
@@ -637,17 +778,20 @@ impl SaeAtomGeometryPlan {
         };
         let evaluator = self.build_evaluator()?;
         let (_, reference_jacobian) = evaluator.evaluate(reference_coords.view())?;
-        gam_geometry::constant_curvature_dirichlet_penalty_kappa_derivative(
+        let derivative = gam_geometry::constant_curvature_dirichlet_penalty_kappa_derivative(
             reference_coords.view(),
             reference_jacobian.view(),
             *kappa,
         )
-        .map(Some)
         .map_err(|error| {
-            format!(
+            format!("SaeAtomGeometryPlan::build_reference_penalty_kappa_derivative: {error}")
+        })?;
+        match self.chart_congruence(derivative, evaluator.as_ref()) {
+            Ok(transported) => Ok(Some(transported)),
+            Err(error) => Err(format!(
                 "SaeAtomGeometryPlan::build_reference_penalty_kappa_derivative: {error}"
-            )
-        })
+            )),
+        }
     }
 
     /// Evaluate the plan's analytic basis and materialize the one declared
