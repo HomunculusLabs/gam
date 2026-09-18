@@ -44,7 +44,8 @@
 //!
 //!   A per-head norm between the projection and the rotation (Qwen3's
 //!   `q_norm`/`k_norm`) does not execute this program, so this family does not apply
-//!   to it.
+//!   to it. The family is read from a native block, and `RotaryQueryKey::new`
+//!   refuses such a block.
 //! * **Residual-stream basis.** `h ↦ Q h` acts on every write (embedding columns,
 //!   block writes and their biases) and `W ↦ W Q⁻¹` on every read.
 //!   - A stream read only linearly admits `GL(d)`.
@@ -88,6 +89,28 @@
 //!   [`quotient_intervention_set`] merges the settings it does not prove distinct,
 //!   and reports the certified gap of each class.
 //!
+//! # Masks (P1)
+//!
+//! A detected family is declared to P1's owner as the group with its commutant
+//! ([`GaugeFamily::declared_gauge`], [`RotaryQueryKey::declared_gauge`]).
+//! `operators::classify_under` then says whether a fixed internal mask is an intrinsic
+//! intervention under that implementation gauge. Every witness it returns lies in the
+//! declared group, and this module's `apply` admits it.
+//! * `GL(r)` and `O(r)` act irreducibly, so their commutant is the scalars. A
+//!   pass-through and an RMSNorm stream are declared as `Blocks([r])`.
+//! * Scales with unit relabellings have commutant `cI`, declared as `ScaledPermutations`.
+//!   This covers ReLU's positive scales and the SwiGLU up/down nonzero scales; the
+//!   witnesses (scale 2, a transposition) lie in both groups.
+//! * Coordinate scales alone (norm gains) have the diagonal commutant: `Blocks([1; d])`.
+//! * Relabellings alone (GELU, SiLU) have commutant `span{I, 1 1ᵀ}`, declared as
+//!   `UnitPermutations`.
+//! * The LayerNorm stream group `O(1) × O(d − 1)` is also declared as `UnitPermutations`.
+//!   It preserves `span{1}` and its complement and acts irreducibly on the complement,
+//!   so its commutant is `span{1 1ᵀ/d, I − 1 1ᵀ/d} = span{I, 1 1ᵀ}`. Every permutation
+//!   witness is orthogonal and fixes `1`, so it lies in the group.
+//! * The rotary commutant is `RotaryCommutant`, built from the plane groups of equal
+//!   frequency.
+//!
 //! Every operator acts through its factors or matrix-free. Nothing here forms a
 //! `d_out × d_in` product or a `d × d` stream basis change.
 
@@ -96,7 +119,8 @@ use gam_linalg::roundoff::{accumulation_growth, factor_singular_band};
 use gam_math::gaussian_activation::GaussianActivation;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, concatenate, s};
 
-use super::attention::{AttentionGeometry, RotaryEmbedding};
+use super::attention::{AttentionGeometry, NativeAttention, RotaryEmbedding};
+use super::operators::{DeclaredGauge, GaugeBlocks, OperatorRefusal, RotaryGroups};
 use super::supports::{EvidenceStatus, EvidenceStatusError, ExactBasis};
 
 /// Why a gauge detection, gauge change or comparison was declined.
@@ -139,11 +163,24 @@ pub enum GaugeRefusal {
     /// A zero or non-finite `attention_scaling` scales every score by zero or by
     /// nothing finite, so it determines no query/key gauge.
     ZeroRotaryScaling,
+    /// A native attention block with a per-head query/key norm between its projections
+    /// and its rotation. That norm commutes only with orthogonal maps that respect its
+    /// gain, so the block's gauge is a proper subgroup of the rotary commutant, and this
+    /// family is not detected for it.
+    QueryKeyNorm,
+    /// The P1 owner refused a declared gauge.
+    Operator(OperatorRefusal),
 }
 
 impl From<EvidenceStatusError> for GaugeRefusal {
     fn from(error: EvidenceStatusError) -> Self {
         Self::Evidence(error)
+    }
+}
+
+impl From<OperatorRefusal> for GaugeRefusal {
+    fn from(error: OperatorRefusal) -> Self {
+        Self::Operator(error)
     }
 }
 
@@ -239,6 +276,39 @@ impl GaugeFamily {
     pub fn real_coordinates_at_most(&self) -> usize {
         self.parameter_coordinates - self.orbit_dimension.resolved - self.null_coordinates
     }
+
+    /// This family's gauge as declared to `operators::classify_under`, or `None` when no
+    /// declared group has its commutant (see the module's Masks section).
+    pub fn declared_gauge(&self) -> Result<Option<DeclaredGauge>, GaugeRefusal> {
+        declared_gauge(self.continuous, self.discrete)
+    }
+}
+
+/// The declared P1 group with this gauge's commutant.
+///
+/// Positive coordinate scales with no relabelling have the diagonal commutant, but their
+/// classifier witness (the reflection) is not a positive scale. No detector here produces
+/// that group, so it is left undeclared rather than declared with a witness outside it.
+/// The rotary commutant needs its plane groups and is declared by
+/// [`RotaryQueryKey::declared_gauge`].
+fn declared_gauge(continuous: ContinuousGauge, discrete: DiscreteGauge) -> Result<Option<DeclaredGauge>, GaugeRefusal> {
+    Ok(match (continuous, discrete) {
+        (ContinuousGauge::GeneralLinear { order }, _) | (ContinuousGauge::Orthogonal { order }, _) => {
+            Some(DeclaredGauge::Blocks(GaugeBlocks::new(&[order])?))
+        }
+        (ContinuousGauge::PositiveDiagonal { order }, DiscreteGauge::UnitPermutations { .. })
+        | (ContinuousGauge::NonzeroDiagonal { order }, DiscreteGauge::UnitPermutations { .. }) => {
+            Some(DeclaredGauge::ScaledPermutations { units: order })
+        }
+        (ContinuousGauge::NonzeroDiagonal { order }, DiscreteGauge::None) => {
+            Some(DeclaredGauge::Blocks(GaugeBlocks::new(&vec![1; order])?))
+        }
+        (ContinuousGauge::Trivial, DiscreteGauge::UnitPermutations { units }) => Some(DeclaredGauge::UnitPermutations { units }),
+        (ContinuousGauge::OrthogonalFixingOnes { order }, _) => Some(DeclaredGauge::UnitPermutations { units: order }),
+        (ContinuousGauge::PositiveDiagonal { .. }, DiscreteGauge::None)
+        | (ContinuousGauge::RotaryCommutant { .. }, _)
+        | (ContinuousGauge::Trivial, DiscreteGauge::None) => None,
+    })
 }
 
 /// The region of every nonzero input of a `width`-dimensional map. Over it an
@@ -955,28 +1025,29 @@ pub struct RotaryQueryKey {
 }
 
 impl RotaryQueryKey {
-    /// A bias-free source passes zero biases, as the attention owner's projections do.
-    pub fn new(
-        geometry: AttentionGeometry,
-        rotary: RotaryEmbedding,
-        query_weight: Array2<f64>,
-        query_bias: Array1<f64>,
-        key_weight: Array2<f64>,
-        key_bias: Array1<f64>,
-    ) -> Result<Self, GaugeRefusal> {
-        if geometry.n_kv_heads == 0 || geometry.head_dim == 0 || geometry.n_heads % geometry.n_kv_heads != 0 {
+    /// The query/key gauge of a native attention block, read through the attention owner's
+    /// accessors. The owner's constructor has already checked the head grouping and every
+    /// projection shape. A bias-free source carries zero biases.
+    ///
+    /// It refuses a block with a per-head query/key norm (Qwen3's `q_norm`/`k_norm`)
+    /// between the projections and the rotation. That norm commutes only with orthogonal
+    /// maps that respect its gain, so charging the full commutant would overclaim the
+    /// orbit.
+    pub fn new(native: &NativeAttention) -> Result<Self, GaugeRefusal> {
+        if native.has_query_key_norm() {
+            return Err(GaugeRefusal::QueryKeyNorm);
+        }
+        let geometry = native.geometry();
+        let rotary = native.rotary().clone();
+        let (query_weight, query_bias) = (native.query().weight.clone(), native.query().bias.clone());
+        let (key_weight, key_bias) = (native.key().weight.clone(), native.key().bias.clone());
+        if geometry.head_dim == 0 {
             return Err(GaugeRefusal::DimensionMismatch {
-                what: "key/value heads dividing query heads",
-                expected: geometry.n_heads,
-                found: geometry.n_kv_heads,
+                what: "a nonempty attention head",
+                expected: 1,
+                found: 0,
             });
         }
-        check_len("query rows", geometry.query_dim(), query_weight.nrows())?;
-        check_len("query columns", geometry.model_dim, query_weight.ncols())?;
-        check_len("query bias length", geometry.query_dim(), query_bias.len())?;
-        check_len("key rows", geometry.key_value_dim(), key_weight.nrows())?;
-        check_len("key columns", geometry.model_dim, key_weight.ncols())?;
-        check_len("key bias length", geometry.key_value_dim(), key_bias.len())?;
         require_finite_matrix("query weight", query_weight.view())?;
         require_finite_vector("query bias", query_bias.view())?;
         require_finite_matrix("key weight", key_weight.view())?;
@@ -1106,6 +1177,20 @@ impl RotaryQueryKey {
         }
         Ok(carried)
     }
+
+    /// The rotary commutant of one key/value head's coordinates, declared to
+    /// `operators::classify_under`. Each group lists the coordinate pairs of the planes
+    /// sharing one frequency, and the pass-through range follows the rotary dimension.
+    pub fn declared_gauge(&self) -> Result<DeclaredGauge, GaugeRefusal> {
+        let mut plane_groups = Vec::new();
+        for block in rotary_commutant(&self.rotary, self.geometry.head_dim)? {
+            if let RotaryBlock::Planes { planes, .. } = block {
+                plane_groups.push(planes.iter().map(|&plane| self.rotary.plane(plane)).collect());
+            }
+        }
+        let pass_through = self.rotary.rotary_dim()..self.geometry.head_dim;
+        Ok(DeclaredGauge::RotaryCommutant(RotaryGroups::new(plane_groups, pass_through)?))
+    }
 }
 
 /// How one read site reads the residual stream.
@@ -1161,6 +1246,11 @@ impl ResidualStreamGauge {
 
     pub fn continuous(&self) -> ContinuousGauge {
         self.continuous
+    }
+
+    /// The stream's gauge as declared to `operators::classify_under`.
+    pub fn declared_gauge(&self) -> Result<Option<DeclaredGauge>, GaugeRefusal> {
+        declared_gauge(self.continuous, DiscreteGauge::None)
     }
 }
 
@@ -1361,7 +1451,8 @@ fn invert_gauge_change(gauge_change: ArrayView2<'_, f64>) -> Result<Array2<f64>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parameter_decomposition::attention::{AffineProjection, NativeAttention, RotaryPairing};
+    use crate::parameter_decomposition::attention::{AffineProjection, RotaryPairing};
+    use crate::parameter_decomposition::operators::{MaskGaugeVerdict, classify_under};
     use crate::parameter_decomposition::rewrite::NativeMlp;
     use rand::rngs::StdRng;
     use rand::seq::SliceRandom;
@@ -2097,6 +2188,53 @@ mod tests {
         }
     }
 
+    /// A native attention block with the given query and key projections, plus random
+    /// value and output projections.
+    fn native_block(
+        geometry: AttentionGeometry,
+        rotary: RotaryEmbedding,
+        query_weight: Array2<f64>,
+        query_bias: Array1<f64>,
+        key_weight: Array2<f64>,
+        key_bias: Array1<f64>,
+    ) -> NativeAttention {
+        let mut rng = StdRng::seed_from_u64(295_416);
+        NativeAttention::new(
+            geometry,
+            rotary,
+            1.0 / (geometry.head_dim as f64).sqrt(),
+            AffineProjection {
+                weight: query_weight,
+                bias: query_bias,
+            },
+            AffineProjection {
+                weight: key_weight,
+                bias: key_bias,
+            },
+            AffineProjection {
+                weight: uniform_matrix(&mut rng, geometry.key_value_dim(), geometry.model_dim),
+                bias: uniform_vector(&mut rng, geometry.key_value_dim()),
+            },
+            AffineProjection {
+                weight: uniform_matrix(&mut rng, geometry.model_dim, geometry.query_dim()),
+                bias: uniform_vector(&mut rng, geometry.model_dim),
+            },
+        )
+        .expect("the fixture's shapes compose")
+    }
+
+    /// The rotary family of a native block built from these projections.
+    fn rotary_block(
+        geometry: AttentionGeometry,
+        rotary: RotaryEmbedding,
+        query_weight: Array2<f64>,
+        query_bias: Array1<f64>,
+        key_weight: Array2<f64>,
+        key_bias: Array1<f64>,
+    ) -> Result<RotaryQueryKey, GaugeRefusal> {
+        RotaryQueryKey::new(&native_block(geometry, rotary, query_weight, query_bias, key_weight, key_bias))
+    }
+
     /// `A + iB` on the complex coordinates `x_a + i x_b` of every rotated plane (rows
     /// `a`: `A` on `a`, `−B` on `b`; rows `b`: `B` on `a`, `A` on `b`), and a random
     /// `GL(n_pass)` block on the pass-through coordinates. Every entry is a copy or a
@@ -2215,7 +2353,7 @@ mod tests {
         let hd = geometry.head_dim;
         for (frequencies, shared) in [([0.7, 0.7], true), ([1.0, 0.3], false)] {
             let rotary = half_split_rotary(frequencies);
-            let teacher = RotaryQueryKey::new(
+            let teacher = rotary_block(
                 geometry,
                 rotary.clone(),
                 query_weight.clone(),
@@ -2294,7 +2432,7 @@ mod tests {
         let mut key_weight = uniform_matrix(&mut rng, geometry.key_value_dim(), geometry.model_dim);
         let mut key_bias = uniform_vector(&mut rng, geometry.key_value_dim());
         let block = |rotary: RotaryEmbedding, qw: &Array2<f64>, qb: &Array1<f64>, kw: &Array2<f64>, kb: &Array1<f64>| {
-            RotaryQueryKey::new(geometry, rotary, qw.clone(), qb.clone(), kw.clone(), kb.clone())
+            rotary_block(geometry, rotary, qw.clone(), qb.clone(), kw.clone(), kb.clone())
         };
         for (frequencies, per_copy) in [([0.7, 0.7], 12), ([1.0, 0.3], 8)] {
             let family = block(half_split_rotary(frequencies), &query_weight, &query_bias, &key_weight, &key_bias)
@@ -2318,6 +2456,295 @@ mod tests {
             assert!(matches!(
                 block(half_split_rotary([0.7, frequency]), &query_weight, &query_bias, &key_weight, &key_bias),
                 Err(GaugeRefusal::FrequencyOutsideHalfTurn { plane: 1, .. })
+            ));
+        }
+    }
+
+    /// A native block without a query/key norm yields the rotary family. The positive
+    /// control is the same block after `with_query_key_norm`, which is refused with
+    /// `QueryKeyNorm`, because behind that norm the commutant overclaims the gauge.
+    /// `ε = 10⁻⁶` is Qwen3's declared `rms_norm_eps`.
+    #[test]
+    fn a_native_block_with_a_query_key_norm_is_refused() {
+        let mut rng = StdRng::seed_from_u64(295_417);
+        let geometry = AttentionGeometry {
+            model_dim: 8,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 6,
+        };
+        let native = native_block(
+            geometry,
+            half_split_rotary([0.7, 0.7]),
+            uniform_matrix(&mut rng, geometry.query_dim(), geometry.model_dim),
+            uniform_vector(&mut rng, geometry.query_dim()),
+            uniform_matrix(&mut rng, geometry.key_value_dim(), geometry.model_dim),
+            uniform_vector(&mut rng, geometry.key_value_dim()),
+        );
+        assert!(RotaryQueryKey::new(&native).is_ok());
+        let normed = native
+            .with_query_key_norm(1e-6, Array1::ones(geometry.head_dim), Array1::ones(geometry.head_dim))
+            .expect("gains of head width");
+        assert_eq!(RotaryQueryKey::new(&normed).err(), Some(GaugeRefusal::QueryKeyNorm));
+    }
+
+    /// `W₂ M σ(W₁ x + b₁)` for each row: a fixed internal mask `M` on the hidden units.
+    fn masked_hidden_write(units: &HiddenUnits, mask: &Array2<f64>, inputs: &Array2<f64>) -> Array2<f64> {
+        let native = native_mlp(units, &Array1::zeros(units.write_out.nrows()));
+        let summed = native.summed_input(inputs.view()).expect("shape");
+        let hidden = native.activate(summed.view()).expect("activation");
+        hidden.dot(&mask.t()).dot(&units.write_out.t())
+    }
+
+    /// Entrywise band of comparing `W₂ M σ(W₁ x + b₁)` before and after a ReLU unit change
+    /// whose scale ratio is `kappa = max s / min s`.
+    ///
+    /// Each execution rounds:
+    /// - the `d`-term summed input and its bias add;
+    /// - the `H`-term mask product and the `H`-term write;
+    /// - the change's three scalings.
+    ///
+    /// So each is within `γ_{d + 2H + 4}` of its exact value, relative to its absolute
+    /// majorant. The teacher's majorant is `A = |W₂| |M| (|W₁| |x| + |b₁|)`, using
+    /// `|σ(z)| ≤ |z|`. The changed units meet `M` through `s_i` and `1/s_j`, so their
+    /// majorant is at most `kappa · A`. The band is `γ_{d + 2H + 4} (1 + kappa) A`.
+    fn masked_band(units: &HiddenUnits, mask: &Array2<f64>, inputs: &Array2<f64>, kappa: f64) -> Array2<f64> {
+        let (hidden, width) = units.read_in.dim();
+        let pre = inputs.mapv(f64::abs).dot(&units.read_in.mapv(f64::abs).t()) + &units.bias_in.mapv(f64::abs);
+        let majorant = pre.dot(&mask.mapv(f64::abs).t()).dot(&units.write_out.mapv(f64::abs).t());
+        majorant * (accumulation_growth(width + 2 * hidden + 4) * (1.0 + kappa))
+    }
+
+    fn scale_ratio(scales: &Array1<f64>) -> f64 {
+        scales.fold(0.0_f64, |largest, &scale| largest.max(scale)) / scales.fold(f64::INFINITY, |smallest, &scale| smallest.min(scale))
+    }
+
+    /// A witness in a scaled-permutation group as a unit change.
+    ///
+    /// P1's gauge change is `U → U S`, `V → V S⁻ᵀ` with the mask held fixed. For hidden
+    /// units that means `W₂ → W₂ S` and `h → S⁻¹ h`, so the relabelled write is
+    /// `W₂ S M S⁻¹ h`. A scaled permutation with column `j` nonzero at row `τ(j)`, value
+    /// `σ_j`, has `S⁻¹` sending `e_{τ(j)}` to `e_j / σ_j`. The new unit `j` is therefore old
+    /// unit `τ(j)` scaled by `1/σ_j`, which is [`HiddenUnits::apply`]'s convention.
+    fn unit_change_from_witness(witness: &Array2<f64>) -> UnitGaugeChange {
+        let units = witness.nrows();
+        let mut permutation = Vec::with_capacity(units);
+        let mut scales = Array1::<f64>::zeros(units);
+        for column in 0..units {
+            let old = (0..units)
+                .position(|row| witness[[row, column]] != 0.0)
+                .expect("a scaled permutation has one nonzero per column");
+            permutation.push(old);
+            scales[column] = 1.0 / witness[[old, column]];
+        }
+        UnitGaugeChange { permutation, scales }
+    }
+
+    fn basis_dependent_witness(mask: &Array2<f64>, gauge: &DeclaredGauge) -> Array2<f64> {
+        match classify_under(mask.view(), gauge).expect("finite mask") {
+            MaskGaugeVerdict::BasisDependent { gauge_change, .. } => gauge_change,
+            other => panic!("the fixture mask is basis dependent, got {other:?}"),
+        }
+    }
+
+    /// Each family declares the P1 group with its commutant:
+    /// - ReLU and SwiGLU scaled relabellings: `ScaledPermutations`;
+    /// - GELU relabellings: `UnitPermutations`;
+    /// - norm gains: `Blocks([1; d])`;
+    /// - pass-through, and the linear or RMSNorm stream: `Blocks([r])`;
+    /// - the LayerNorm stream: `UnitPermutations`;
+    /// - rotary: the plane groups of equal frequency with the pass-through range.
+    #[test]
+    fn families_declare_the_group_with_their_commutant() {
+        let mut rng = StdRng::seed_from_u64(295_413);
+        let (width, hidden) = (4, 5);
+        let blocks = |sizes: &[usize]| Some(DeclaredGauge::Blocks(GaugeBlocks::new(sizes).expect("nonempty blocks")));
+        let relu = HiddenUnits::new(
+            uniform_matrix(&mut rng, hidden, width),
+            uniform_vector(&mut rng, hidden),
+            uniform_matrix(&mut rng, width, hidden),
+            GaussianActivation::Relu,
+        )
+        .expect("finite tensors");
+        assert_eq!(relu.family().declared_gauge(), Ok(Some(DeclaredGauge::ScaledPermutations { units: hidden })));
+        let gelu = HiddenUnits {
+            activation: GaussianActivation::ExactGelu,
+            ..relu.clone()
+        };
+        assert_eq!(gelu.family().declared_gauge(), Ok(Some(DeclaredGauge::UnitPermutations { units: hidden })));
+        let swiglu = SwigluUnits::new(
+            uniform_matrix(&mut rng, hidden, width),
+            uniform_matrix(&mut rng, hidden, width),
+            uniform_matrix(&mut rng, width, hidden),
+        )
+        .expect("finite tensors");
+        assert_eq!(swiglu.family().declared_gauge(), Ok(Some(DeclaredGauge::ScaledPermutations { units: hidden })));
+        let norm = NormGain::new(random_scales(&mut rng, width, true), None, vec![uniform_matrix(&mut rng, 3, width)])
+            .expect("finite tensors");
+        assert_eq!(norm.family().declared_gauge(), Ok(blocks(&vec![1; width])));
+        let passthrough = LinearPassthrough::new(uniform_matrix(&mut rng, 3, width), uniform_matrix(&mut rng, width, 3))
+            .expect("finite factors");
+        assert_eq!(passthrough.family().expect("svd").declared_gauge(), Ok(blocks(&[3])));
+        for (read, expected) in [
+            (ResidualRead::Linear, blocks(&[width])),
+            (ResidualRead::RmsNorm, blocks(&[width])),
+            (ResidualRead::LayerNorm, Some(DeclaredGauge::UnitPermutations { units: width })),
+        ] {
+            assert_eq!(ResidualStreamGauge::new(width, &[read]).expect("reads").declared_gauge(), Ok(expected));
+        }
+        let geometry = AttentionGeometry {
+            model_dim: 8,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 6,
+        };
+        for (frequencies, groups) in [([0.7, 0.7], vec![vec![(0, 2), (1, 3)]]), ([1.0, 0.3], vec![vec![(0, 2)], vec![(1, 3)]])] {
+            let block = rotary_block(
+                geometry,
+                half_split_rotary(frequencies),
+                uniform_matrix(&mut rng, geometry.query_dim(), geometry.model_dim),
+                uniform_vector(&mut rng, geometry.query_dim()),
+                uniform_matrix(&mut rng, geometry.key_value_dim(), geometry.model_dim),
+                uniform_vector(&mut rng, geometry.key_value_dim()),
+            )
+            .expect("shapes");
+            assert_eq!(
+                block.declared_gauge(),
+                Ok(DeclaredGauge::RotaryCommutant(RotaryGroups::new(groups, 4..6).expect("groups")))
+            );
+        }
+    }
+
+    /// The executed transfer under ReLU's `ScaledPermutations`.
+    ///
+    /// The declared scalar mask `cI` is `Intrinsic` with controls `[c]`, and its write stays
+    /// within the band under a random positive relabelling. The owner's witness for a
+    /// diagonal mask with one unequal entry (a transposition) and for an off-diagonal mask
+    /// (scale 2) are both admitted by `HiddenUnits::apply`, so they lie in ReLU's group.
+    /// Each moves the fixed mask's write past the band, which is the positive control for
+    /// the invariance bar.
+    ///
+    /// A witness moves `W₂ (S M S⁻¹ − M) σ(W₁ x + b₁)`, which reads only the units in the
+    /// columns it changes. A unit that is off on every row would hide that change, and the
+    /// positive control would pass or fail on the draw. So unit `j` also reads its own
+    /// direction on one row, `x_j = c_j w_j` with `c_j = (1 + |b_j|)/‖w_j‖²`, where
+    /// `w_j · x_j + b_j = 1 + |b_j| + b_j ≥ 1`. The random rows still cross the kink.
+    #[test]
+    fn declared_witnesses_are_admitted_by_the_family_and_move_a_fixed_mask() {
+        let mut rng = StdRng::seed_from_u64(295_414);
+        let (width, hidden, rows) = (4, 5, 4);
+        let relu = HiddenUnits::new(
+            uniform_matrix(&mut rng, hidden, width),
+            uniform_vector(&mut rng, hidden),
+            uniform_matrix(&mut rng, width, hidden),
+            GaussianActivation::Relu,
+        )
+        .expect("finite tensors");
+        let declared = relu
+            .family()
+            .declared_gauge()
+            .expect("declaration")
+            .expect("ReLU units are declared");
+        let firing = Array2::from_shape_fn((hidden, width), |(unit, column)| {
+            let read = relu.read_in.row(unit);
+            read[column] * (1.0 + relu.bias_in[unit].abs()) / read.dot(&read)
+        });
+        let inputs = concatenate(Axis(0), &[uniform_matrix(&mut rng, rows, width).view(), firing.view()])
+            .expect("equal widths");
+        let summed = inputs.dot(&relu.read_in.t()) + &relu.bias_in;
+        for unit in 0..hidden {
+            assert!(summed.column(unit).iter().any(|&z| z > 0.0), "unit {unit} must fire on its own row");
+        }
+
+        let scalar = Array2::<f64>::eye(hidden) * 0.6;
+        assert_eq!(
+            classify_under(scalar.view(), &declared),
+            Ok(MaskGaugeVerdict::Intrinsic { controls: vec![0.6] })
+        );
+        let change = UnitGaugeChange {
+            permutation: random_permutation(&mut rng, hidden),
+            scales: random_scales(&mut rng, hidden, false),
+        };
+        let relabelled = relu.apply(&change).expect("positive scales are in ReLU's group");
+        let band = masked_band(&relu, &scalar, &inputs, scale_ratio(&change.scales));
+        let before = masked_hidden_write(&relu, &scalar, &inputs);
+        let after = masked_hidden_write(&relabelled, &scalar, &inputs);
+        for ((&b, &a), &limit) in before.iter().zip(after.iter()).zip(band.iter()) {
+            assert!((a - b).abs() <= limit, "a relabelling moved a cI-masked write by {:.3e}, band {limit:.3e}", (a - b).abs());
+        }
+
+        let mut diagonal = Array2::<f64>::eye(hidden);
+        diagonal[[1, 1]] = 0.25;
+        let mut off_diagonal = Array2::<f64>::eye(hidden);
+        off_diagonal[[0, 1]] = 0.3;
+        for (kind, mask) in [("diagonal", diagonal), ("off-diagonal", off_diagonal)] {
+            let witness_change = unit_change_from_witness(&basis_dependent_witness(&mask, &declared));
+            let moved_units = relu
+                .apply(&witness_change)
+                .expect("the owner's witness lies in ReLU's group");
+            let band = masked_band(&relu, &mask, &inputs, scale_ratio(&witness_change.scales));
+            let moved = masked_hidden_write(&relu, &mask, &inputs)
+                .iter()
+                .zip(masked_hidden_write(&moved_units, &mask, &inputs).iter())
+                .zip(band.iter())
+                .filter(|((b, a), limit)| (**a - **b).abs() > **limit)
+                .count();
+            assert!(moved > 0, "the owner's witness must move the fixed {kind} mask's write past the band");
+        }
+    }
+
+    /// Group membership agrees across the two modules. For masks that are:
+    /// - not complex-linear on a plane,
+    /// - coupling two planes,
+    /// - or off-diagonal on the pass-through,
+    ///
+    /// the owner returns a `RotaryCommutant` witness, and `RotaryQueryKey::apply` admits
+    /// it, at equal and at distinct frequencies. The positive control is the plain
+    /// `Blocks([head_dim])` witness for the not-complex-linear mask, a reflection that
+    /// breaks the plane's complex structure. `apply` refuses it.
+    #[test]
+    fn every_rotary_witness_is_admitted_by_the_family_and_a_foreign_witness_is_refused() {
+        let mut rng = StdRng::seed_from_u64(295_415);
+        let geometry = AttentionGeometry {
+            model_dim: 8,
+            n_heads: 4,
+            n_kv_heads: 2,
+            head_dim: 6,
+        };
+        let identity = Array2::<f64>::eye(geometry.head_dim);
+        let foreign_gauge = DeclaredGauge::Blocks(GaugeBlocks::new(&[geometry.head_dim]).expect("one block"));
+        for frequencies in [[0.7, 0.7], [1.0, 0.3]] {
+            let teacher = rotary_block(
+                geometry,
+                half_split_rotary(frequencies),
+                uniform_matrix(&mut rng, geometry.query_dim(), geometry.model_dim),
+                uniform_vector(&mut rng, geometry.query_dim()),
+                uniform_matrix(&mut rng, geometry.key_value_dim(), geometry.model_dim),
+                uniform_vector(&mut rng, geometry.key_value_dim()),
+            )
+            .expect("shapes");
+            let declared = teacher.declared_gauge().expect("a valid rotary declaration");
+            let (a0, b0) = teacher.rotary.plane(0);
+            let (a1, b1) = teacher.rotary.plane(1);
+            let mut not_complex = identity.clone();
+            not_complex[[b0, a0]] = 0.4;
+            not_complex[[a0, b0]] = 0.4;
+            let mut coupling = identity.clone();
+            coupling[[a0, a1]] = 0.3;
+            coupling[[b0, b1]] = 0.3;
+            let mut pass_through = identity.clone();
+            pass_through[[4, 5]] = 0.2;
+            for mask in [&not_complex, &coupling, &pass_through] {
+                let witness = basis_dependent_witness(mask, &declared);
+                assert!(
+                    teacher.apply(&[witness, identity.clone()]).is_ok(),
+                    "frequencies {frequencies:?}: the owner's witness must lie in the rotary commutant"
+                );
+            }
+            let foreign = basis_dependent_witness(&not_complex, &foreign_gauge);
+            assert!(matches!(
+                teacher.apply(&[foreign, identity.clone()]),
+                Err(GaugeRefusal::NotInGroup { .. })
             ));
         }
     }
