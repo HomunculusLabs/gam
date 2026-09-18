@@ -34,6 +34,14 @@
 //! number of five-primary jets, so a biobank block score with `26` or more block
 //! columns costs what the rigid kernel costs plus `O(nK²)` assembly. There is no
 //! width ceiling.
+//!
+//! # One curvature under the pooled law
+//!
+//! When the declared joint covariance is the same at every row, `2Σ_rr` and
+//! each `μ_d` are row-invariant. Every term above that carries them is then a
+//! row sum of scalars or coefficient vectors times one fixed block, so the
+//! assemblies accumulate those sums and apply `2Σ_rr` and the rank-two updates
+//! once per sweep instead of once per row.
 
 use super::family::*;
 use super::hessian_paths::BlockSlices;
@@ -92,6 +100,96 @@ pub(super) trait ResidualDriveRows: RowKernel<5> {
 
     /// `target[res, res] += scale·2Σ_rr(a_i)`.
     fn add_curvature(&self, row: usize, scale: f64, target: &mut Array2<f64>);
+
+    /// `2Σ_rr` as a dense row-major `K×K` block when the declared joint
+    /// covariance is the same at every row, so an assembly can apply it once
+    /// from row sums; `None` when it varies by row.
+    fn row_invariant_curvature(&self) -> Option<&[f64]> {
+        None
+    }
+}
+
+/// `2Σ_rr` of a joint covariance over `(z, r)` as a dense row-major `K×K` block:
+/// the residual rows and columns, read once through the covariance's own
+/// representation.
+fn doubled_residual_block(covariance: &MarginalSlopeCovariance) -> Vec<f64> {
+    let k = covariance.dim() - 1;
+    let mut block = vec![0.0_f64; k * k];
+    match covariance.representation() {
+        MarginalSlopeCovarianceRef::Diagonal(diagonal) => {
+            for j in 0..k {
+                block[j * k + j] = 2.0 * diagonal[j + 1];
+            }
+        }
+        MarginalSlopeCovarianceRef::Full(matrix) => {
+            for (j, row) in block.chunks_exact_mut(k).enumerate() {
+                for (entry, &value) in row.iter_mut().zip(matrix.row(j + 1).iter().skip(1)) {
+                    *entry = 2.0 * value;
+                }
+            }
+        }
+        MarginalSlopeCovarianceRef::LowRank(factor) => {
+            for (j, row) in block.chunks_exact_mut(k).enumerate() {
+                let left = factor.row(j + 1);
+                for (l, entry) in row.iter_mut().enumerate() {
+                    let right = factor.row(l + 1);
+                    *entry = 2.0 * left.iter().zip(right.iter()).map(|(a, b)| a * b).sum::<f64>();
+                }
+            }
+        }
+    }
+    block
+}
+
+/// `2Σ_rr·d_r` from the dense row-major block `curvature = 2Σ_rr`.
+fn invariant_curvature_action(curvature: &[f64], d_r: &[f64]) -> Vec<f64> {
+    curvature.chunks_exact(d_r.len()).map(|row| dot(row, d_r)).collect()
+}
+
+/// `target[res, res] += scale·curvature` for the dense row-major block `curvature`.
+fn add_invariant_curvature(target: &mut Array2<f64>, residual: &Range<usize>, curvature: &[f64], scale: f64) {
+    if scale == 0.0 {
+        return;
+    }
+    let mut block = target.slice_mut(s![residual.clone(), residual.clone()]);
+    for (mut row, source) in block.rows_mut().into_iter().zip(curvature.chunks_exact(residual.len())) {
+        for (entry, &value) in row.iter_mut().zip(source) {
+            *entry += scale * value;
+        }
+    }
+}
+
+/// `target[res, res] += scale·(μ_d ⊗ μ_e + μ_e ⊗ μ_d)`.
+fn add_symmetric_outer(target: &mut Array2<f64>, residual: &Range<usize>, mu_d: &[f64], mu_e: &[f64], scale: f64) {
+    if scale == 0.0 {
+        return;
+    }
+    for (j, (&dj, &ej)) in mu_d.iter().zip(mu_e).enumerate() {
+        for (l, (&dl, &el)) in mu_d.iter().zip(mu_e).enumerate() {
+            target[[residual.start + j, residual.start + l]] += scale * (dj * el + ej * dl);
+        }
+    }
+}
+
+/// `out += scale·J_iᵀ·v`.
+fn add_transpose_vector(
+    kern: &(impl ResidualDriveRows + ?Sized),
+    row: usize,
+    v: &[f64; 5],
+    scale: f64,
+    out: &mut [f64],
+) {
+    let scaled_v: [f64; 5] = std::array::from_fn(|a| scale * v[a]);
+    kern.jacobian_transpose_action(row, &scaled_v, out);
+}
+
+/// Elementwise `a + b` for two row-sum vectors of one length, either possibly
+/// empty because the sweep did not need it.
+fn add_row_sums(mut a: Vec<f64>, b: Vec<f64>) -> Vec<f64> {
+    for (x, y) in a.iter_mut().zip(&b) {
+        *x += y;
+    }
+    a
 }
 
 #[inline]
@@ -187,16 +285,27 @@ pub(super) fn residual_hessian_dense(
 ) -> Result<Array2<f64>, String> {
     let n = kern.n_rows();
     let p = kern.n_coefficients();
-    RowSet::All.par_try_reduce_fold(
+    let residual = kern.residual_range();
+    let invariant = kern.row_invariant_curvature();
+    let (mut hessian, curvature_weight) = RowSet::All.par_try_reduce_fold(
         n,
-        || Array2::<f64>::zeros((p, p)),
-        |mut acc, row, w| -> Result<_, String> {
+        || (Array2::<f64>::zeros((p, p)), 0.0_f64),
+        |(mut acc, mut curvature_weight), row, w| -> Result<_, String> {
             kern.add_pullback_hessian(row, &scaled(&cache.hessians[row], w), &mut acc);
-            kern.add_curvature(row, w * cache.gradients[row][V], &mut acc);
-            Ok(acc)
+            let scale = w * cache.gradients[row][V];
+            if invariant.is_some() {
+                curvature_weight += scale;
+            } else {
+                kern.add_curvature(row, scale, &mut acc);
+            }
+            Ok((acc, curvature_weight))
         },
-        |a, b| Ok(a + b),
-    )
+        |(a, wa), (b, wb)| Ok((a + b, wa + wb)),
+    )?;
+    if let Some(curvature) = invariant {
+        add_invariant_curvature(&mut hessian, &residual, curvature, curvature_weight);
+    }
+    Ok(hessian)
 }
 
 /// `H′[d] = ∂H/∂θ[d]` in coefficient space (see the module docs).
@@ -213,22 +322,36 @@ pub(super) fn residual_hessian_directional_derivative(
         ));
     }
     let residual = kern.residual_range();
-    RowSet::All.par_try_reduce_fold(
+    let invariant = kern.row_invariant_curvature();
+    let invariant_mu_d = invariant.map(|curvature| invariant_curvature_action(curvature, &d_beta[residual.clone()]));
+    let sums_len = if invariant.is_some() { p } else { 0 };
+    let (mut derivative, h_v_sum, curvature_weight) = RowSet::All.par_try_reduce_fold(
         n,
-        || Array2::<f64>::zeros((p, p)),
-        |mut acc, row, w| -> Result<_, String> {
+        || (Array2::<f64>::zeros((p, p)), vec![0.0_f64; sums_len], 0.0_f64),
+        |(mut acc, mut h_v_sum, mut curvature_weight), row, w| -> Result<_, String> {
             let jd = kern.jacobian_action(row, d_beta);
             let (_, _, h) = kern.row_kernel(row)?;
             let third = kern.row_third_contracted(row, &jd)?;
             kern.add_pullback_hessian(row, &scaled(&third, w), &mut acc);
-            let mu_d = kern.curvature_action(row, &d_beta[residual.clone()]);
-            let h_v = transpose_vector(kern, row, &h[V]);
-            add_rank_two(&mut acc, residual.start, &mu_d, &h_v, w);
-            kern.add_curvature(row, w * dot(&h[V], &jd), &mut acc);
-            Ok(acc)
+            let scale = w * dot(&h[V], &jd);
+            if invariant.is_some() {
+                add_transpose_vector(kern, row, &h[V], w, &mut h_v_sum);
+                curvature_weight += scale;
+            } else {
+                let mu_d = kern.curvature_action(row, &d_beta[residual.clone()]);
+                let h_v = transpose_vector(kern, row, &h[V]);
+                add_rank_two(&mut acc, residual.start, &mu_d, &h_v, w);
+                kern.add_curvature(row, scale, &mut acc);
+            }
+            Ok((acc, h_v_sum, curvature_weight))
         },
-        |a, b| Ok(a + b),
-    )
+        |(a, ha, wa), (b, hb, wb)| Ok((a + b, add_row_sums(ha, hb), wa + wb)),
+    )?;
+    if let (Some(curvature), Some(mu_d)) = (invariant, invariant_mu_d.as_deref()) {
+        add_rank_two(&mut derivative, residual.start, mu_d, &h_v_sum, 1.0);
+        add_invariant_curvature(&mut derivative, &residual, curvature, curvature_weight);
+    }
+    Ok(derivative)
 }
 
 /// `H″[d, e] = ∂²H/∂θ²[d, e]` in coefficient space (see the module docs).
@@ -249,10 +372,29 @@ pub(super) fn residual_hessian_second_directional_derivative(
     }
     let residual = kern.residual_range();
     let unit_v: [f64; 5] = std::array::from_fn(|a| if a == V { 1.0 } else { 0.0 });
-    RowSet::All.par_try_reduce_fold(
+    let invariant = kern.row_invariant_curvature();
+    let invariant_mu = invariant.map(|curvature| {
+        (
+            invariant_curvature_action(curvature, &d_beta[residual.clone()]),
+            invariant_curvature_action(curvature, &e_beta[residual.clone()]),
+        )
+    });
+    let sums_len = if invariant.is_some() { p } else { 0 };
+    // Under a row-invariant covariance the fold carries, besides the matrix,
+    // `Σ w·J_iᵀT³[Je][v,·]`, `Σ w·J_iᵀT³[Jd][v,·]`, the curvature weight of
+    // `2Σ_rr` and `Σ w·h_vv`.
+    let (mut derivative, third_e_sum, third_d_sum, curvature_weight, h_vv_sum) = RowSet::All.par_try_reduce_fold(
         n,
-        || Array2::<f64>::zeros((p, p)),
-        |mut acc, row, w| -> Result<_, String> {
+        || {
+            (
+                Array2::<f64>::zeros((p, p)),
+                vec![0.0_f64; sums_len],
+                vec![0.0_f64; sums_len],
+                0.0_f64,
+                0.0_f64,
+            )
+        },
+        |(mut acc, mut third_e_sum, mut third_d_sum, mut curvature_weight, mut h_vv_sum), row, w| -> Result<_, String> {
             let jd = kern.jacobian_action(row, d_beta);
             let je = kern.jacobian_action(row, e_beta);
             let (_, _, h) = kern.row_kernel(row)?;
@@ -260,28 +402,44 @@ pub(super) fn residual_hessian_second_directional_derivative(
             kern.add_pullback_hessian(row, &scaled(&fourth, w), &mut acc);
             let third_d = kern.row_third_contracted(row, &jd)?;
             let third_e = kern.row_third_contracted(row, &je)?;
-            let mu_d = kern.curvature_action(row, &d_beta[residual.clone()]);
-            let mu_e = kern.curvature_action(row, &e_beta[residual.clone()]);
+            let (mu_d, mu_e) = match &invariant_mu {
+                Some((mu_d, mu_e)) => (Cow::Borrowed(mu_d), Cow::Borrowed(mu_e)),
+                None => (
+                    Cow::Owned(kern.curvature_action(row, &d_beta[residual.clone()])),
+                    Cow::Owned(kern.curvature_action(row, &e_beta[residual.clone()])),
+                ),
+            };
             let kappa = dot(&d_beta[residual.clone()], &mu_e);
             if kappa != 0.0 {
                 let third_v = kern.row_third_contracted(row, &unit_v)?;
                 kern.add_pullback_hessian(row, &scaled(&third_v, w * kappa), &mut acc);
             }
-            add_rank_two(&mut acc, residual.start, &mu_d, &transpose_vector(kern, row, &third_e[V]), w);
-            add_rank_two(&mut acc, residual.start, &mu_e, &transpose_vector(kern, row, &third_d[V]), w);
-            kern.add_curvature(row, w * (dot(&third_d[V], &je) + kappa * h[V][V]), &mut acc);
+            let scale = w * (dot(&third_d[V], &je) + kappa * h[V][V]);
             let h_vv = w * h[V][V];
-            if h_vv != 0.0 {
-                for (j, (&dj, &ej)) in mu_d.iter().zip(&mu_e).enumerate() {
-                    for (l, (&dl, &el)) in mu_d.iter().zip(&mu_e).enumerate() {
-                        acc[[residual.start + j, residual.start + l]] += h_vv * (dj * el + ej * dl);
-                    }
-                }
+            if invariant.is_some() {
+                add_transpose_vector(kern, row, &third_e[V], w, &mut third_e_sum);
+                add_transpose_vector(kern, row, &third_d[V], w, &mut third_d_sum);
+                curvature_weight += scale;
+                h_vv_sum += h_vv;
+            } else {
+                add_rank_two(&mut acc, residual.start, &mu_d, &transpose_vector(kern, row, &third_e[V]), w);
+                add_rank_two(&mut acc, residual.start, &mu_e, &transpose_vector(kern, row, &third_d[V]), w);
+                kern.add_curvature(row, scale, &mut acc);
+                add_symmetric_outer(&mut acc, &residual, &mu_d, &mu_e, h_vv);
             }
-            Ok(acc)
+            Ok((acc, third_e_sum, third_d_sum, curvature_weight, h_vv_sum))
         },
-        |a, b| Ok(a + b),
-    )
+        |(a, ea, da, wa, va), (b, eb, db, wb, vb)| {
+            Ok((a + b, add_row_sums(ea, eb), add_row_sums(da, db), wa + wb, va + vb))
+        },
+    )?;
+    if let (Some(curvature), Some((mu_d, mu_e))) = (invariant, invariant_mu.as_ref()) {
+        add_rank_two(&mut derivative, residual.start, mu_d, &third_e_sum, 1.0);
+        add_rank_two(&mut derivative, residual.start, mu_e, &third_d_sum, 1.0);
+        add_invariant_curvature(&mut derivative, &residual, curvature, curvature_weight);
+        add_symmetric_outer(&mut derivative, &residual, mu_d, mu_e, h_vv_sum);
+    }
+    Ok(derivative)
 }
 
 /// `{H′[e_a]}_{a=0..p}`: one independent full-data sweep per coefficient axis.
@@ -370,6 +528,9 @@ pub(super) struct ResidualDriveKernel {
     /// The drive moments of the pooled law, computed once; `None` when the
     /// joint covariance varies by row.
     pooled: Option<DriveMoments>,
+    /// `2Σ_rr` of the pooled law as a dense row-major `K×K` block, computed
+    /// once; `None` when the joint covariance varies by row.
+    pooled_curvature: Option<Vec<f64>>,
 }
 
 impl ResidualDriveKernel {
@@ -406,6 +567,9 @@ impl ResidualDriveKernel {
                 .ok_or("residual beta not contiguous")?;
             Some(DriveMoments::at(runtime.field.at_row(0), beta))
         };
+        let pooled_curvature = pooled
+            .is_some()
+            .then(|| doubled_residual_block(runtime.field.at_row(0)));
         Ok(Self {
             family,
             block_states,
@@ -413,6 +577,7 @@ impl ResidualDriveKernel {
             residual,
             runtime,
             pooled,
+            pooled_curvature,
         })
     }
 
@@ -628,26 +793,29 @@ impl ResidualDriveRows for ResidualDriveKernel {
     }
 
     fn curvature_action(&self, row: usize, d_r: &[f64]) -> Vec<f64> {
-        let covariance = self.runtime.field.at_row(row);
-        let mut lifted = vec![0.0_f64; d_r.len() + 1];
-        lifted[1..].copy_from_slice(d_r);
-        let mut image = vec![0.0_f64; d_r.len() + 1];
-        covariance.multiply(&lifted, &mut image);
-        image[1..].iter().map(|x| 2.0 * x).collect()
+        match &self.pooled_curvature {
+            Some(curvature) => invariant_curvature_action(curvature, d_r),
+            None => invariant_curvature_action(&doubled_residual_block(self.runtime.field.at_row(row)), d_r),
+        }
     }
 
     fn add_curvature(&self, row: usize, scale: f64, target: &mut Array2<f64>) {
         if scale == 0.0 {
             return;
         }
-        let covariance = self.runtime.field.at_row(row);
-        let residual = self.residual.clone();
-        for j in 0..residual.len() {
-            for l in 0..residual.len() {
-                target[[residual.start + j, residual.start + l]] +=
-                    2.0 * scale * covariance.coefficient(j + 1, l + 1);
-            }
+        match &self.pooled_curvature {
+            Some(curvature) => add_invariant_curvature(target, &self.residual, curvature, scale),
+            None => add_invariant_curvature(
+                target,
+                &self.residual,
+                &doubled_residual_block(self.runtime.field.at_row(row)),
+                scale,
+            ),
         }
+    }
+
+    fn row_invariant_curvature(&self) -> Option<&[f64]> {
+        self.pooled_curvature.as_deref()
     }
 }
 
@@ -703,37 +871,55 @@ mod residual_drive_kernel_tests {
         }
     }
 
-    /// The five-primary kernel on one row with unit surface designs:
-    /// `θ = (η_m, g, β)`.
+    /// The five-primary kernel on rows that share one covariance and law, with
+    /// unit surface designs: `θ = (η_m, g, β)`.
     struct DriveRow<'a> {
-        fixture: &'a RowFixture,
+        rows: Vec<&'a RowFixture>,
         theta: Vec<f64>,
+        /// `2Σ_rr` when the rows report their covariance as row-invariant, so
+        /// the assemblies take their pooled-law path.
+        invariant: Option<Vec<f64>>,
+    }
+
+    impl<'a> DriveRow<'a> {
+        fn new(fixture: &'a RowFixture, theta: Vec<f64>, invariant: bool) -> Self {
+            Self::over(vec![fixture], theta, invariant)
+        }
+
+        /// Rows that must share the first row's covariance.
+        fn over(rows: Vec<&'a RowFixture>, theta: Vec<f64>, invariant: bool) -> Self {
+            assert!(rows.iter().all(|row| row.cov == rows[0].cov), "rows share one covariance");
+            let invariant = invariant.then(|| doubled_residual_block(&rows[0].cov));
+            Self { rows, theta, invariant }
+        }
     }
 
     impl DriveRow<'_> {
+        fn cov(&self) -> &MarginalSlopeCovariance {
+            &self.rows[0].cov
+        }
+
         fn moments(&self) -> DriveMoments {
-            DriveMoments::at(&self.fixture.cov, &self.theta[2..])
+            DriveMoments::at(self.cov(), &self.theta[2..])
         }
     }
 
     impl RowProgram<5> for DriveRow<'_> {
         fn n_rows(&self) -> usize {
-            1
+            self.rows.len()
         }
         fn primaries(&self, row: usize) -> Result<[f64; 5], String> {
-            assert_eq!(row, 0, "one-row fixture");
             let m = self.moments();
             Ok([
                 self.theta[0],
                 self.theta[1],
-                dot(&self.fixture.r, &self.theta[2..]),
+                dot(&self.rows[row].r, &self.theta[2..]),
                 m.u,
                 m.v,
             ])
         }
         fn eval<S: JetScalar<5>>(&self, row: usize, p: &[S; 5]) -> Result<S, String> {
-            assert_eq!(row, 0, "one-row fixture");
-            let state = self.fixture.state(self.theta[0]);
+            let state = self.rows[row].state(self.theta[0]);
             let drive = ResidualDrive {
                 t: p[2],
                 u: p[3],
@@ -785,28 +971,28 @@ mod residual_drive_kernel_tests {
             2..self.theta.len()
         }
         fn residual_jacobian_rows(&self, row: usize) -> [Vec<f64>; 3] {
-            assert_eq!(row, 0, "one-row fixture");
             let m = self.moments();
             [
-                self.fixture.r.clone(),
+                self.rows[row].r.clone(),
                 m.gamma,
                 m.sigma_beta.iter().map(|x| 2.0 * x).collect(),
             ]
         }
         fn curvature_action(&self, row: usize, d_r: &[f64]) -> Vec<f64> {
-            assert_eq!(row, 0, "one-row fixture");
             let mut out = vec![0.0; d_r.len()];
-            ResidualBlock(&self.fixture.cov).multiply(d_r, &mut out);
+            ResidualBlock(&self.rows[row].cov).multiply(d_r, &mut out);
             out.iter().map(|x| 2.0 * x).collect()
         }
         fn add_curvature(&self, row: usize, scale: f64, target: &mut Array2<f64>) {
-            assert_eq!(row, 0, "one-row fixture");
             let k = self.theta.len() - 2;
             for j in 0..k {
                 for l in 0..k {
-                    target[[2 + j, 2 + l]] += 2.0 * scale * self.fixture.cov.coefficient(j + 1, l + 1);
+                    target[[2 + j, 2 + l]] += 2.0 * scale * self.rows[row].cov.coefficient(j + 1, l + 1);
                 }
             }
+        }
+        fn row_invariant_curvature(&self) -> Option<&[f64]> {
+            self.invariant.as_deref()
         }
     }
 
@@ -862,19 +1048,19 @@ mod residual_drive_kernel_tests {
         crate::row_kernel::build_row_kernel_cache(row, &RowSet::All).unwrap()
     }
 
-    fn equivalence<const P: usize>(law: Option<EmpiricalZGrid>) {
+    /// `invariant` selects the assemblies' pooled-law path, which applies `2Σ_rr`
+    /// once from row sums, instead of the per-row path.
+    fn equivalence<const P: usize>(law: Option<EmpiricalZGrid>, invariant: bool) {
         let k = P - 2;
         let fixture = RowFixture::new(k, law, 17 + k as u64);
         let base = theta(k);
-        let drive = DriveRow {
-            fixture: &fixture,
-            theta: base.clone(),
-        };
+        let drive = DriveRow::new(&fixture, base.clone(), invariant);
         let reference = CoefficientRow::<P> {
             fixture: &fixture,
             theta: std::array::from_fn(|a| base[a]),
         };
-        let label = if fixture.grid.is_some() { "declared law" } else { "normal law" };
+        let law_label = if fixture.grid.is_some() { "declared law" } else { "normal law" };
+        let label = format!("{law_label}, {} path", if invariant { "pooled" } else { "per-row" });
         let (nll_ref, grad_ref, hess_ref) = gam_math::jet_tower::program_row_kernel(&reference, 0).unwrap();
         let cache = cache_of(&drive);
         close(&format!("{label} K={k} value"), cache.nll[0], nll_ref, 1e-12);
@@ -905,22 +1091,21 @@ mod residual_drive_kernel_tests {
     #[test]
     fn drive_kernel_equals_the_coefficient_primary_program_through_order_four() {
         for law in [None, Some(skewed_grid())] {
-            equivalence::<3>(law.clone());
-            equivalence::<5>(law.clone());
-            equivalence::<14>(law);
+            for invariant in [false, true] {
+                equivalence::<3>(law.clone(), invariant);
+                equivalence::<5>(law.clone(), invariant);
+                equivalence::<14>(law.clone(), invariant);
+            }
         }
     }
 
-    fn finite_difference_gate(k: usize, law: Option<EmpiricalZGrid>) {
+    fn finite_difference_gate(k: usize, law: Option<EmpiricalZGrid>, invariant: bool) {
         let fixture = RowFixture::new(k, law, 101 + k as u64);
         let base = theta(k);
         let p = base.len();
         let d = direction(p, 0.8);
         let e = direction(p, 2.6);
-        let at = |theta: &[f64]| DriveRow {
-            fixture: &fixture,
-            theta: theta.to_vec(),
-        };
+        let at = |theta: &[f64]| DriveRow::new(&fixture, theta.to_vec(), invariant);
         let displaced = |dir: &[f64], scale: f64| -> Vec<f64> {
             base.iter().zip(dir).map(|(x, v)| x + scale * v).collect()
         };
@@ -934,7 +1119,8 @@ mod residual_drive_kernel_tests {
             residual_hessian_dense(&row, &cache_of(&row)).unwrap()
         };
         let h = 1.0e-5;
-        let label = if fixture.grid.is_some() { "declared law" } else { "normal law" };
+        let law_label = if fixture.grid.is_some() { "declared law" } else { "normal law" };
+        let label = format!("{law_label}, {} path", if invariant { "pooled" } else { "per-row" });
         let hess = hessian(&base);
         let third = residual_hessian_directional_derivative(&at(&base), &d).unwrap();
         let fourth = residual_hessian_second_directional_derivative(&at(&base), &d, &e).unwrap();
@@ -965,8 +1151,225 @@ mod residual_drive_kernel_tests {
     #[test]
     fn drive_kernel_is_finite_difference_tight_at_block_widths_26_and_32() {
         for law in [None, Some(skewed_grid())] {
-            finite_difference_gate(26, law.clone());
-            finite_difference_gate(32, law);
+            for invariant in [false, true] {
+                finite_difference_gate(26, law.clone(), invariant);
+                finite_difference_gate(32, law.clone(), invariant);
+            }
+        }
+    }
+
+    /// `γ_m = m·u/(1 − m·u)` with `u = ε/2`: the relative forward-error bound of
+    /// `m` rounded operations (Higham, *Accuracy and Stability of Numerical
+    /// Algorithms*, §3.1).
+    fn gamma(m: usize) -> f64 {
+        let mu = m as f64 * f64::EPSILON / 2.0;
+        mu / (1.0 - mu)
+    }
+
+    /// `n` rows that share `fixture`'s covariance and law and differ in `y`,
+    /// `w`, `z` and `r`.
+    fn row_variants(fixture: &RowFixture, n: usize) -> Vec<RowFixture> {
+        (0..n)
+            .map(|i| {
+                let phase = 0.61 * i as f64;
+                RowFixture {
+                    y: if i % 3 == 0 { 0.0 } else { 1.0 },
+                    w: 0.6 + 0.1 * (i % 7) as f64,
+                    z: 1.4 * (phase + 0.3).sin(),
+                    s: fixture.s,
+                    r: (0..fixture.r.len()).map(|j| ((j as f64) * 0.37 + phase).sin()).collect(),
+                    cov: fixture.cov.clone(),
+                    grid: fixture.grid.clone(),
+                }
+            })
+            .collect()
+    }
+
+    /// Entrywise Neumaier-compensated sum.
+    fn compensated_sum(parts: &[Array2<f64>]) -> Array2<f64> {
+        let mut sum = Array2::<f64>::zeros(parts[0].raw_dim());
+        let mut carry = Array2::<f64>::zeros(parts[0].raw_dim());
+        for part in parts {
+            ndarray::Zip::from(&mut sum).and(&mut carry).and(part).for_each(|s, c, &x| {
+                let t = *s + x;
+                *c += if s.abs() >= x.abs() { (*s - t) + x } else { (x - t) + *s };
+                *s = t;
+            });
+        }
+        sum + carry
+    }
+
+    /// Adds `|one row's pullback of h|` to `target`.
+    fn pullback_magnitude(target: &mut Array2<f64>, one: &DriveRow<'_>, h: &[[f64; 5]; 5]) {
+        let mut piece = Array2::<f64>::zeros(target.raw_dim());
+        one.add_pullback_hessian(0, h, &mut piece);
+        *target += &piece.mapv(f64::abs);
+    }
+
+    /// Adds the magnitudes of the rank-two term `μ ⊗ v + v ⊗ μ`.
+    fn rank_two_magnitude(target: &mut Array2<f64>, mu: &[f64], v: &[f64]) {
+        for (j, &m) in mu.iter().enumerate() {
+            for (c, &g) in v.iter().enumerate() {
+                target[[2 + j, c]] += (m * g).abs();
+                target[[c, 2 + j]] += (m * g).abs();
+            }
+        }
+    }
+
+    /// Adds `|scale·2Σ_rr|` on the residual block.
+    fn curvature_magnitude(target: &mut Array2<f64>, curvature: &[f64], scale: f64) {
+        let k = target.nrows() - 2;
+        for j in 0..k {
+            for l in 0..k {
+                target[[2 + j, 2 + l]] += (scale * curvature[j * k + l]).abs();
+            }
+        }
+    }
+
+    /// Adds `|scale·μ_d ⊗ μ_e| + |scale·μ_e ⊗ μ_d|` on the residual block.
+    fn outer_magnitude(target: &mut Array2<f64>, mu_d: &[f64], mu_e: &[f64], scale: f64) {
+        for (j, (&dj, &ej)) in mu_d.iter().zip(mu_e).enumerate() {
+            for (l, (&dl, &el)) in mu_d.iter().zip(mu_e).enumerate() {
+                target[[2 + j, 2 + l]] += (scale * dj * el).abs() + (scale * ej * dl).abs();
+            }
+        }
+    }
+
+    /// The pooled path reorders the per-row path's sums: it adds up the row
+    /// scalars and coefficient vectors that multiply `2Σ_rr` and each `μ`, and
+    /// applies them once. Any evaluation order of a sum of `N` terms, each a
+    /// product of at most `c` rounded factors, lies within `γ_{N+c}·Σ|terms|` of
+    /// the exact sum (Higham §3.1 and §4.2). So the two paths agree within
+    /// `2γ_{N+c}·Σ|terms|` entrywise, with `Σ|terms|` accumulated here from each
+    /// row's own terms.
+    ///
+    /// The accuracy reference is the compensated sum of the rows' single-row
+    /// assemblies. Those carry the same within-row rounding in both paths, so
+    /// the reference resolves either path's error to `γ_c·Σ|terms| + u·|H|`,
+    /// and the pooled path must be no less accurate than the per-row path to
+    /// within twice that resolution.
+    fn reordering_gate(k: usize, law: Option<EmpiricalZGrid>) {
+        let n = 48;
+        let fixture = RowFixture::new(k, law, 211 + k as u64);
+        let variants = row_variants(&fixture, n);
+        let rows: Vec<&RowFixture> = variants.iter().collect();
+        let base = theta(k);
+        let p = base.len();
+        let d = direction(p, 0.8);
+        let e = direction(p, 2.6);
+        let per_row = DriveRow::over(rows.clone(), base.clone(), false);
+        let pooled = DriveRow::over(rows.clone(), base.clone(), true);
+        let curvature = pooled.invariant.clone().expect("the pooled rows report their curvature");
+        let mu_e = invariant_curvature_action(&curvature, &e[2..]);
+        let kappa = dot(&d[2..], &mu_e);
+        // Magnitudes of the curvature actions as the per-row path forms them, a
+        // K-term product each: |2Σ_rr|·|d_r| and |d_r|ᵀ|2Σ_rr||e_r|.
+        let abs_of = |v: &[f64]| -> Vec<f64> { v.iter().map(|x| x.abs()).collect() };
+        let abs_curvature = abs_of(&curvature);
+        let mu_d_abs = invariant_curvature_action(&abs_curvature, &abs_of(&d[2..]));
+        let mu_e_abs = invariant_curvature_action(&abs_curvature, &abs_of(&e[2..]));
+        let kappa_abs = dot(&abs_of(&d[2..]), &mu_e_abs);
+        let unit_v: [f64; 5] = std::array::from_fn(|a| if a == V { 1.0 } else { 0.0 });
+        let mut parts: [Vec<Array2<f64>>; 3] = Default::default();
+        let mut magnitude: [Array2<f64>; 3] = std::array::from_fn(|_| Array2::<f64>::zeros((p, p)));
+        for &row in &rows {
+            let one = DriveRow::new(row, base.clone(), false);
+            parts[0].push(residual_hessian_dense(&one, &cache_of(&one)).unwrap());
+            parts[1].push(residual_hessian_directional_derivative(&one, &d).unwrap());
+            parts[2].push(residual_hessian_second_directional_derivative(&one, &d, &e).unwrap());
+            let (_, g, h) = one.row_kernel(0).unwrap();
+            let jd = one.jacobian_action(0, &d);
+            let je = one.jacobian_action(0, &e);
+            let third_d = one.row_third_contracted(0, &jd).unwrap();
+            let third_e = one.row_third_contracted(0, &je).unwrap();
+            pullback_magnitude(&mut magnitude[0], &one, &h);
+            curvature_magnitude(&mut magnitude[0], &curvature, g[V]);
+            pullback_magnitude(&mut magnitude[1], &one, &third_d);
+            rank_two_magnitude(&mut magnitude[1], &mu_d_abs, &transpose_vector(&one, 0, &h[V]));
+            curvature_magnitude(&mut magnitude[1], &curvature, dot(&h[V], &jd));
+            pullback_magnitude(&mut magnitude[2], &one, &one.row_fourth_contracted(0, &jd, &je).unwrap());
+            if kappa != 0.0 {
+                let third_v = one.row_third_contracted(0, &unit_v).unwrap();
+                pullback_magnitude(&mut magnitude[2], &one, &scaled(&third_v, kappa_abs));
+            }
+            rank_two_magnitude(&mut magnitude[2], &mu_d_abs, &transpose_vector(&one, 0, &third_e[V]));
+            rank_two_magnitude(&mut magnitude[2], &mu_e_abs, &transpose_vector(&one, 0, &third_d[V]));
+            curvature_magnitude(
+                &mut magnitude[2],
+                &curvature,
+                dot(&third_d[V], &je).abs() + kappa_abs * h[V][V].abs(),
+            );
+            outer_magnitude(&mut magnitude[2], &mu_d_abs, &mu_e_abs, h[V][V]);
+        }
+        let assembled = [
+            (
+                residual_hessian_dense(&per_row, &cache_of(&per_row)).unwrap(),
+                residual_hessian_dense(&pooled, &cache_of(&pooled)).unwrap(),
+            ),
+            (
+                residual_hessian_directional_derivative(&per_row, &d).unwrap(),
+                residual_hessian_directional_derivative(&pooled, &d).unwrap(),
+            ),
+            (
+                residual_hessian_second_directional_derivative(&per_row, &d, &e).unwrap(),
+                residual_hessian_second_directional_derivative(&pooled, &d, &e).unwrap(),
+            ),
+        ];
+        // An H″ residual entry takes the most terms per row: two pullbacks, four
+        // rank-two halves, the curvature and the outer product. No term takes
+        // more than a K-term curvature action and six further rounded operations.
+        let (terms_per_row, factors) = (8, k + 6);
+        let sweep = gamma(n * terms_per_row + factors);
+        let resolution = gamma(terms_per_row + factors);
+        let law_label = if fixture.grid.is_some() { "declared law" } else { "normal law" };
+        for (c, name) in ["H", "H'", "H''"].iter().enumerate() {
+            let reference = compensated_sum(&parts[c]);
+            let (per_row_value, pooled_value) = &assembled[c];
+            let mut worst = [0.0_f64; 3];
+            let mut squared_error = [0.0_f64; 2];
+            for ((idx, &a), &b) in per_row_value.indexed_iter().zip(pooled_value.iter()) {
+                let m = magnitude[c][idx];
+                let exact = reference[idx];
+                let (error_a, error_b) = ((a - exact).abs(), (b - exact).abs());
+                squared_error[0] += error_a * error_a;
+                squared_error[1] += error_b * error_b;
+                assert!(
+                    (a - b).abs() <= 2.0 * sweep * m,
+                    "{law_label} K={k} {name}{idx:?}: per-row {a:e} and pooled {b:e} differ by {:e}, above \
+                     the reordering bound 2γ_N·Σ|terms| = {:e}",
+                    (a - b).abs(),
+                    2.0 * sweep * m
+                );
+                let slack = 2.0 * (resolution * m + f64::EPSILON / 2.0 * exact.abs());
+                assert!(
+                    error_b <= error_a + slack,
+                    "{law_label} K={k} {name}{idx:?}: pooled error {error_b:e} exceeds per-row error \
+                     {error_a:e} by more than the reference resolution {slack:e}"
+                );
+                if m > 0.0 {
+                    worst[0] = worst[0].max((a - b).abs() / m);
+                    worst[1] = worst[1].max(error_a / m);
+                    worst[2] = worst[2].max(error_b / m);
+                }
+            }
+            eprintln!(
+                "[reorder] {law_label} K={k} {name}: max |per-row - pooled|/Σ|terms| = {:.2e} (bound {:.2e}); \
+                 max error/Σ|terms| per-row {:.2e}, pooled {:.2e}; Frobenius error per-row {:.3e}, pooled {:.3e}",
+                worst[0],
+                2.0 * sweep,
+                worst[1],
+                worst[2],
+                squared_error[0].sqrt(),
+                squared_error[1].sqrt()
+            );
+        }
+    }
+
+    #[test]
+    fn pooled_assembly_agrees_with_the_per_row_assembly_within_its_reordering_bound() {
+        for law in [None, Some(skewed_grid())] {
+            reordering_gate(26, law.clone());
+            reordering_gate(32, law);
         }
     }
 }
