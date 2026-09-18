@@ -575,3 +575,43 @@ fn a_rounding_scale_frame_defect_is_projected_and_a_stretched_frame_is_refused()
         "a stretched frame must be refused, got {refusal:?}",
     );
 }
+
+#[test]
+fn a_signed_sum_carries_its_operand_bands_and_the_rounding_of_its_additions() {
+    use super::{BandedEnergy, signed_sum};
+    use gam_linalg::roundoff::accumulation_growth;
+    // Dyadic operands, so the value is exact and the expected band is rebuilt in the implementation's own order.
+    let added = [
+        BandedEnergy {
+            value: 3.0,
+            band: 1.0e-12,
+        },
+        BandedEnergy {
+            value: -0.5,
+            band: 2.0e-12,
+        },
+    ];
+    let subtracted = [BandedEnergy {
+        value: 1.25,
+        band: 0.0,
+    }];
+    let sum = signed_sum(&added, &subtracted);
+    assert_eq!(sum.value, 1.25);
+    let operand_bands = 0.0 + 1.0e-12 + 2.0e-12 + 0.0;
+    assert_eq!(sum.band, operand_bands + accumulation_growth(2) * 4.75);
+    assert!(sum.resolved_positive());
+    assert!(!BandedEnergy::ZERO.resolved_positive());
+    // Equal values cancel exactly and do not clear a positive band: the difference is unresolved.
+    let unresolved = signed_sum(
+        &[BandedEnergy {
+            value: 2.0,
+            band: 1.0e-15,
+        }],
+        &[BandedEnergy {
+            value: 2.0,
+            band: 0.0,
+        }],
+    );
+    assert_eq!(unresolved.value, 0.0);
+    assert!(!unresolved.resolved_positive());
+}

@@ -170,6 +170,52 @@ pub struct FrameGradient {
     pub horizontal_gradient: Array2<f64>,
 }
 
+/// An energy together with a bound on its absolute error: the vocabulary every producer of a variance in `response/`
+/// reports in, so a consumer decides "resolved from zero" against a derived band instead of a hand threshold.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BandedEnergy {
+    /// The computed value.
+    pub value: f64,
+    /// A bound on `|computed − exact|`: the arithmetic's rounding plus the producer's accuracy contract.
+    pub band: f64,
+}
+
+impl BandedEnergy {
+    /// The exact zero, `V(∅)`.
+    pub const ZERO: BandedEnergy = BandedEnergy {
+        value: 0.0,
+        band: 0.0,
+    };
+
+    /// Whether the exact value is resolved as positive: the computed value clears its band.
+    pub fn resolved_positive(&self) -> bool {
+        self.value > self.band
+    }
+}
+
+/// `Σ added − Σ subtracted` with its band: the operands' bands plus `γ_{n−1} Σ|operand|`, the rounding of `n − 1`
+/// additions of pre-formed terms (Higham, ASNA §3.1), to first order in `u`.
+pub fn signed_sum(added: &[BandedEnergy], subtracted: &[BandedEnergy]) -> BandedEnergy {
+    let mut value = 0.0;
+    let mut absolute = 0.0;
+    let mut band = 0.0;
+    for term in added {
+        value += term.value;
+        absolute += term.value.abs();
+        band += term.band;
+    }
+    for term in subtracted {
+        value -= term.value;
+        absolute += term.value.abs();
+        band += term.band;
+    }
+    let operations = (added.len() + subtracted.len()).saturating_sub(1);
+    BandedEnergy {
+        value,
+        band: band + accumulation_growth(operations) * absolute,
+    }
+}
+
 /// How a computed covariance `r̂ = fl(Σ_a left_a right_a)` was formed, for [`covariance_rounding_band`]. Every field is
 /// an absolute bound in the covariance's own units.
 #[derive(Debug, Clone, Copy, PartialEq)]
