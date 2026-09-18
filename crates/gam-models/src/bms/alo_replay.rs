@@ -452,39 +452,38 @@ pub(crate) fn replay_saved_bernoulli_marginal_slope_alo(
     family.validate_exact_block_state_shapes(&block_states)?;
 
     if residual_dimension > 0 {
-        // gam#2924: the residual kernel's primary space is (q, slope, β_1..β_K)
-        // and its channels come from the canonical jet lowering, so the saved
-        // row geometry is the kernel's own `(nll, ∇, H)` at the fitted point.
+        // gam#2924: the saved row geometry lives in the coordinates
+        // (q, slope, β_1..β_K), pulled back from the five-primary residual
+        // kernel with the curvature of its quadratic primary.
         let width = 2 + residual_dimension;
-        let rows = super::residual_repair::with_residual_kernel!(family, block_states, |kern| {
-            let mut rows = Vec::with_capacity(n);
-            for row in 0..n {
-                let (negative_log_likelihood, score, hessian) =
-                    crate::row_kernel::RowKernel::row_kernel(&kern, row)?;
-                let nll_score = Array1::from_iter(score.iter().copied());
-                let observed_hessian = Array2::from_shape_fn((width, width), |(a, b)| hessian[a][b]);
-                if !negative_log_likelihood.is_finite()
-                    || nll_score.iter().any(|value| !value.is_finite())
-                    || observed_hessian.iter().any(|value| !value.is_finite())
-                {
-                    return Err(format!(
-                        "saved BMS ALO residual row {row} returned invalid local geometry: nll={negative_log_likelihood}"
-                    ));
-                }
-                let mut coordinate_values = Array1::<f64>::zeros(width);
-                coordinate_values[0] = input.marginal_eta[row];
-                coordinate_values[1] = input.slope[row];
-                if let Some(beta) = input.residual_beta {
-                    coordinate_values.slice_mut(ndarray::s![2..]).assign(beta);
-                }
-                rows.push(BernoulliMarginalSlopeSavedAloRowGeometry {
-                    nll_score,
-                    observed_hessian,
-                    coordinate_values,
-                });
+        let kern = super::residual_repair_kernel::ResidualDriveKernel::new(
+            family.clone(),
+            block_states.to_vec(),
+        )?;
+        let mut rows = Vec::with_capacity(n);
+        for row in 0..n {
+            let (negative_log_likelihood, nll_score, observed_hessian) =
+                super::residual_repair_kernel::residual_row_geometry(&kern, row)?;
+            if !negative_log_likelihood.is_finite()
+                || nll_score.iter().any(|value| !value.is_finite())
+                || observed_hessian.iter().any(|value| !value.is_finite())
+            {
+                return Err(format!(
+                    "saved BMS ALO residual row {row} returned invalid local geometry: nll={negative_log_likelihood}"
+                ));
             }
-            Ok::<_, String>(rows)
-        })?;
+            let mut coordinate_values = Array1::<f64>::zeros(width);
+            coordinate_values[0] = input.marginal_eta[row];
+            coordinate_values[1] = input.slope[row];
+            if let Some(beta) = input.residual_beta {
+                coordinate_values.slice_mut(ndarray::s![2..]).assign(beta);
+            }
+            rows.push(BernoulliMarginalSlopeSavedAloRowGeometry {
+                nll_score,
+                observed_hessian,
+                coordinate_values,
+            });
+        }
         return Ok(BernoulliMarginalSlopeSavedAloReplay {
             rows,
             residual_dimension,

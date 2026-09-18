@@ -565,7 +565,10 @@ coordinates:
 On a Gauss–Hermite law it is the closed form above to quadrature tolerance.
 The fit differentiates the root through fourth order, so the REML/LAML outer
 derivatives read the same anchor the plug-in prediction replays.
-- At most twelve residual columns.
+- There is no width ceiling. The row likelihood reads `β` only through
+  `t = βᵀr`, `u = βᵀγ` and `v = βᵀΣ_rrβ`, so the row program has five
+  primaries whatever the width, and the Hessian channels add the constant
+  curvature `2Σ_rr` of `v` to the design pullback: `O(nK²)` assembly.
 
 ## Fixed external baseline (slope-only fit)
 

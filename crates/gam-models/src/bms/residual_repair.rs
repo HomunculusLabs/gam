@@ -32,16 +32,15 @@
 //! # Where the block lives in the row program
 //!
 //! The rigid marginal-slope kernel is a `RowKernel<2>` over the primaries
-//! `(q, g)`, each a row-linear predictor of its block. The residual block cannot
-//! be a third row-linear primary: `c(a)` depends on `β` through the quadratic
-//! form `βᵀΣ_rr β`, which no per-row scalar `r_iᵀβ` carries. So the residual
-//! COEFFICIENTS are the primaries — `RowKernel<2+K>` over `(q, g, β_1, …, β_K)`
-//! with a unit design on the last `K` — exactly the survival multi-score
-//! structure with an intercept-only slope surface per residual feature. Every
-//! derivative channel (value, gradient, Hessian, the third- and fourth-order
-//! contractions the REML/LAML outer objective reads) is then derived by the
-//! canonical jet lowering of the ONE row program below; nothing here is a hand
-//! schedule that could disagree with it.
+//! `(q, g)`, each a row-linear predictor of its block. The anchor reads `β`
+//! beyond the row-linear read `t = r_iᵀβ`: through `u = βᵀγ` and the quadratic
+//! form `v = βᵀΣ_rrβ`. Those three are the only way `β` enters the row, so the
+//! residual kernel (`residual_repair_kernel`) is a `RowKernel<5>` over
+//! `(η_m, g, t, u, v)` whatever the width, with every primary-space channel
+//! derived by the canonical jet lowering of the ONE row program
+//! [`residual_row_nll`]. The coefficient-space channels are the chain rule
+//! through the one quadratic map `β ↦ v`, whose constant curvature `2Σ_rr` is the
+//! only term the generic pullback does not carry.
 //!
 //! # The centring contract
 //!
@@ -60,7 +59,6 @@
 use super::conditional_score_covariance::ConditionalScoreCovariance;
 use super::family::*;
 use super::gradient_paths::*;
-use super::hessian_paths::BlockSlices;
 use super::*;
 use gam_math::jet_scalar::{JetScalar, SymmetricQuadraticCoefficients};
 use gam_math::jet_tower::Tower4;
@@ -70,11 +68,6 @@ use ndarray::Zip;
 /// Name of the residual block in the parameter-block list and in the
 /// identifiability audit.
 pub const RESIDUAL_BLOCK_NAME: &str = "residual_repair";
-
-/// The widest residual block the const-generic row kernel is instantiated for.
-/// The kernel's primary count is `2 + K`; each width is a separate monomorphic
-/// instantiation of the generic row-kernel assembly, so the ladder is finite.
-pub const MAX_RESIDUAL_COLUMNS: usize = 12;
 
 /// Gauge priority of the residual block: below the parametric surfaces (a
 /// shared direction is demoted out of the residual block, never out of the
@@ -95,8 +88,6 @@ pub enum ResidualRepairRefusal {
     ColumnNonFinite { column: String, row: usize },
     /// A feature column has no weighted variation, so it carries no direction.
     ColumnConstant { column: String },
-    /// The block is wider than the instantiated kernel ladder.
-    WidthUnsupported { width: usize, max: usize },
     /// No residual columns were named.
     Empty,
     /// The feature matrix does not have one row per fitted observation.
@@ -137,11 +128,6 @@ impl std::fmt::Display for ResidualRepairRefusal {
                 f,
                 "residual column '{column}' has zero weighted variance on the fit data and carries no \
                  direction"
-            ),
-            Self::WidthUnsupported { width, max } => write!(
-                f,
-                "residual block has {width} columns; at most {max} are supported by the residual \
-                 row kernel"
             ),
             Self::Empty => write!(f, "residual_columns is empty"),
             Self::RowCountMismatch { rows, expected } => write!(
@@ -188,7 +174,6 @@ impl From<ResidualRepairRefusal> for crate::fit_orchestration::FitFailure {
             ResidualRepairRefusal::ColumnNotCentred { .. }
             | ResidualRepairRefusal::ColumnNonFinite { .. }
             | ResidualRepairRefusal::ColumnConstant { .. }
-            | ResidualRepairRefusal::WidthUnsupported { .. }
             | ResidualRepairRefusal::Empty
             | ResidualRepairRefusal::RowCountMismatch { .. }
             | ResidualRepairRefusal::FlexBlocksUnsupported
@@ -321,12 +306,6 @@ impl ResidualBlockRuntime {
             return Err(ResidualRepairRefusal::RowCountMismatch {
                 rows: spec.columns.len(),
                 expected: k,
-            });
-        }
-        if k > MAX_RESIDUAL_COLUMNS {
-            return Err(ResidualRepairRefusal::WidthUnsupported {
-                width: k,
-                max: MAX_RESIDUAL_COLUMNS,
             });
         }
         if spec.features.nrows() != n || weights.len() != n || a_block.nrows() != n {
@@ -549,7 +528,7 @@ fn centring_gate_basis(a_block: ArrayView2<'_, f64>, weights: ArrayView1<'_, f64
 ///
 /// A Schur complement of a PSD matrix plus a rank-one PSD term, so the result
 /// is PSD whenever the sample is.
-fn declare_unit_score_variance(sample: &Array2<f64>) -> Result<Array2<f64>, String> {
+pub(super) fn declare_unit_score_variance(sample: &Array2<f64>) -> Result<Array2<f64>, String> {
     let dim = sample.nrows();
     let score_variance = sample[[0, 0]];
     if !(score_variance.is_finite() && score_variance > 0.0) {
@@ -729,74 +708,74 @@ fn compose_bivariate_tower<const K: usize, S: JetScalar<K>>(f: &Tower4<2>, q: &S
     S::linear_combination(&monomials, &coefficients).add_constant(f.v)
 }
 
-/// One row of the residual-augmented marginal-slope likelihood, as every
-/// consumer reads it: the kernel's jet lowering, the finite-difference gates
-/// and the plain-`f64` index all go through [`residual_row_nll`] or its first-
-/// order transcription [`residual_row_index`].
+/// One row's data as the residual row likelihood reads it.
 pub(super) struct ResidualRowState<'a> {
     pub(super) marginal: BernoulliMarginalLinkMap,
     pub(super) z: f64,
     pub(super) y: f64,
     pub(super) w: f64,
     pub(super) probit_scale: f64,
-    pub(super) r: &'a [f64],
-    /// The declared joint covariance of `(z, r)` at this row.
-    pub(super) covariance: &'a MarginalSlopeCovariance,
     /// `None`: the standard-normal law of the score. `Some`: its declared
     /// finite law at this row (global, or this row's local mixture).
     pub(super) grid: Option<&'a EmpiricalZGrid>,
 }
 
-/// The row negative log-likelihood over primaries `(q_eta, g, β_1, …, β_K)`.
+/// The residual drive of a row as the likelihood reads it: the linear read
+/// `t = βᵀr` and the anchor's drive moments `u = βᵀγ`, `v = βᵀΣ_rrβ` under the
+/// declared joint covariance (`Σ₀₀ = 1`, `γ = Σ_r0`).
+pub(super) struct ResidualDrive<S> {
+    pub(super) t: S,
+    pub(super) u: S,
+    pub(super) v: S,
+}
+
+/// The row negative log-likelihood from the marginal predictor `η_m`, the slope
+/// `g` and the residual drive: the ONE statement of the joint anchor that the
+/// five-primary kernel (`residual_repair_kernel`), the finite-difference gates
+/// and the plain-`f64` index [`residual_row_index`] all read.
 ///
-/// Standard-normal score: `η = c·q + s(g z + βᵀr)`, `c = √(1 + s²·b̃ᵀΣb̃)`.
-/// Declared finite law: `η = τ·ã(q, B) + s(g z + βᵀr)` from
-/// [`mixture_anchor_tower`], with `m = (Σ·s b̃)₀ = s(g + βᵀγ)` and
-/// `v = s²·b̃ᵀΣb̃ − m²`, because `Σ₀₀ = 1` makes `b̃ᵀΣb̃ = (g + βᵀγ)² + βᵀΣ_{r·z}β`.
-/// On a standard-normal grid the two branches agree to quadrature tolerance.
-pub(super) fn residual_row_nll<const K: usize, S: JetScalar<K>>(
+/// Standard-normal score: `η = c·q + s(g z + t)`, `c = √(1 + s²(g² + 2g·u + v))`,
+/// which is `√(1 + s²·b̃ᵀΣb̃)` because `Σ₀₀ = 1`. Declared finite law:
+/// `η = τ·ã(q, B) + s(g z + t)` from [`mixture_anchor_tower`], with
+/// `m = s(g + u)` and `τ² = 1 + s²(v − u²)`, because
+/// `b̃ᵀΣb̃ = (g + βᵀγ)² + βᵀΣ_{r·z}β`. On a standard-normal grid the two branches
+/// agree to quadrature tolerance.
+pub(super) fn residual_row_nll<const N: usize, S: JetScalar<N>>(
     state: &ResidualRowState<'_>,
-    p: &[S; K],
+    eta_m: &S,
+    g: &S,
+    drive: &ResidualDrive<S>,
 ) -> Result<S, String> {
     let s = state.probit_scale;
     let marginal = state.marginal;
     // q = Φ⁻¹(Φ(η_m)) through the supplied link stack.
-    let q = p[0].compose_unary([
+    let q = eta_m.compose_unary([
         marginal.q,
         marginal.q1,
         marginal.q2,
         marginal.q3,
         marginal.q4,
     ]);
-    // Observed drive coefficients b̃ = s·(g, β).
-    let mut drive = [S::constant(0.0); K];
-    for k in 1..K {
-        drive[k - 1] = p[k].scale(s);
-    }
-    let drive = &drive[..K - 1];
-    let quad = S::symmetric_quadratic_form(drive, state.covariance);
+    let quad = g
+        .mul(g)
+        .add(&g.mul(&drive.u).scale(2.0))
+        .add(&drive.v)
+        .scale(s * s);
     let quad_value = quad.value();
     if !(quad_value.is_finite() && quad_value >= -f64::EPSILON * (1.0 + quad_value.abs())) {
         return Err(format!(
             "residual repair row: the anchor quadratic form b̃ᵀΣb̃ = {quad_value} is not admissible"
         ));
     }
-    let mut linear_weights = [0.0_f64; K];
-    linear_weights[0] = state.z;
-    linear_weights[1..K - 1].copy_from_slice(state.r);
-    let linear = S::linear_combination(drive, &linear_weights[..K - 1]);
+    let linear = g.scale(s * state.z).add(&drive.t.scale(s));
     let eta = match state.grid {
         None => {
             let c = quad.compose_unary(sqrt1p_stack((1.0 + quad_value.max(0.0)).sqrt()));
             q.multiply_add(&c, &linear)
         }
         Some(grid) => {
-            let mut first_column = [0.0_f64; K];
-            for (j, entry) in first_column[..K - 1].iter_mut().enumerate() {
-                *entry = state.covariance.coefficient(0, j);
-            }
-            let m = S::linear_combination(drive, &first_column[..K - 1]);
-            let v = quad.sub(&m.mul(&m));
+            let m = g.add(&drive.u).scale(s);
+            let v = drive.v.sub(&drive.u.mul(&drive.u)).scale(s * s);
             let v_value = v.value();
             if !(v_value.is_finite() && v_value >= -f64::EPSILON * (1.0 + quad_value.abs())) {
                 return Err(format!(
@@ -936,376 +915,7 @@ pub(super) fn residual_row_neglog_only(
     Ok(stack[0])
 }
 
-// ── The row kernel ────────────────────────────────────────────────────
-
-/// The residual-augmented rigid Bernoulli marginal-slope row kernel:
-/// `RowKernel<K>` with `K = 2 + width`, primaries `(q_eta, g, β_1, …, β_width)`.
-pub(super) struct BernoulliResidualRowKernel<const K: usize> {
-    pub(super) family: BernoulliMarginalSlopeFamily,
-    pub(super) block_states: Vec<ParameterBlockState>,
-    pub(super) slices: BlockSlices,
-    pub(super) runtime: Arc<ResidualBlockRuntime>,
-}
-
-impl<const K: usize> BernoulliResidualRowKernel<K> {
-    pub(super) fn new(
-        family: BernoulliMarginalSlopeFamily,
-        block_states: Vec<ParameterBlockState>,
-    ) -> Result<Self, String> {
-        let runtime = family.residual.clone().ok_or_else(|| {
-            "residual row kernel constructed on a family without a residual block".to_string()
-        })?;
-        if runtime.width() + 2 != K {
-            return Err(format!(
-                "residual row kernel width mismatch: block has {} columns, kernel is K={K}",
-                runtime.width()
-            ));
-        }
-        if family.flex_active() {
-            return Err(ResidualRepairRefusal::FlexBlocksUnsupported.to_string());
-        }
-        family.validate_exact_block_state_shapes(&block_states)?;
-        let slices = super::hessian_paths::block_slices(&family);
-        if slices.residual.as_ref().map(|r| r.len()) != Some(K - 2) {
-            return Err("residual row kernel: block slices carry no residual range".to_string());
-        }
-        Ok(Self {
-            family,
-            block_states,
-            slices,
-            runtime,
-        })
-    }
-
-    #[inline]
-    fn residual_range(&self) -> std::ops::Range<usize> {
-        self.slices
-            .residual
-            .clone()
-            .expect("residual kernel is constructed with a residual range")
-    }
-}
-
-impl<const K: usize> gam_math::jet_tower::RowProgram<K> for BernoulliResidualRowKernel<K> {
-    fn n_rows(&self) -> usize {
-        self.family.y.len()
-    }
-
-    fn primaries(&self, row: usize) -> Result<[f64; K], String> {
-        if row >= self.family.y.len() {
-            return Err(format!("BernoulliResidualRowKernel: row {row} out of range"));
-        }
-        let mut p = [0.0_f64; K];
-        p[0] = self.block_states[0].eta[row];
-        p[1] = self.block_states[1].eta[row];
-        let beta = &self.block_states[2].beta;
-        for k in 0..K - 2 {
-            p[2 + k] = beta[k];
-        }
-        Ok(p)
-    }
-
-    fn eval<S: JetScalar<K>>(&self, row: usize, p: &[S; K]) -> Result<S, String> {
-        if row >= self.family.y.len() {
-            return Err(format!("BernoulliResidualRowKernel: row {row} out of range"));
-        }
-        let marginal = self
-            .family
-            .marginal_link_map(self.block_states[0].eta[row])?;
-        let grid = self
-            .family
-            .latent_measure
-            .empirical_grid_for_training_row(row)?;
-        let r = self.runtime.features.row(row);
-        let state = ResidualRowState {
-            marginal,
-            z: self.family.z[row],
-            y: self.family.y[row],
-            w: self.family.weights[row],
-            probit_scale: self.family.probit_frailty_scale(),
-            r: r.as_slice().ok_or("residual feature row not contiguous")?,
-            covariance: self.runtime.field.at_row(row),
-            grid: grid.as_deref(),
-        };
-        residual_row_nll(&state, p).map_err(|e| format!("row {row}: {e}"))
-    }
-}
-
-impl<const K: usize> crate::row_kernel::RowKernel<K> for BernoulliResidualRowKernel<K> {
-    fn n_coefficients(&self) -> usize {
-        self.slices.total
-    }
-
-    fn jacobian_action(&self, row: usize, d_beta: &[f64]) -> [f64; K] {
-        let d_beta = ndarray::ArrayView1::from(d_beta);
-        let mut out = [0.0_f64; K];
-        out[0] = self
-            .family
-            .marginal_design
-            .dot_row_view(row, d_beta.slice(s![self.slices.marginal.clone()]));
-        out[1] = self
-            .family
-            .slope_design
-            .dot_row_view(row, d_beta.slice(s![self.slices.slope.clone()]));
-        let residual = self.residual_range();
-        for k in 0..K - 2 {
-            out[2 + k] = d_beta[residual.start + k];
-        }
-        out
-    }
-
-    fn jacobian_transpose_action(&self, row: usize, v: &[f64; K], out: &mut [f64]) {
-        {
-            let mut m = ndarray::ArrayViewMut1::from(&mut out[self.slices.marginal.clone()]);
-            self.family
-                .marginal_design
-                .axpy_row_into(row, v[0], &mut m)
-                .expect("marginal axpy dim mismatch");
-        }
-        {
-            let mut g = ndarray::ArrayViewMut1::from(&mut out[self.slices.slope.clone()]);
-            self.family
-                .slope_design
-                .axpy_row_into(row, v[1], &mut g)
-                .expect("slope axpy dim mismatch");
-        }
-        let residual = self.residual_range();
-        for k in 0..K - 2 {
-            out[residual.start + k] += v[2 + k];
-        }
-    }
-
-    fn add_pullback_hessian(&self, row: usize, h: &[[f64; K]; K], target: &mut Array2<f64>) {
-        let marginal = self.slices.marginal.clone();
-        let slope = self.slices.slope.clone();
-        let residual = self.residual_range();
-        self.family
-            .marginal_design
-            .syr_row_into_view(
-                row,
-                h[0][0],
-                target.slice_mut(s![marginal.clone(), marginal.clone()]),
-            )
-            .expect("marginal syr dim mismatch");
-        if h[0][1] != 0.0 {
-            self.family
-                .marginal_design
-                .row_outer_into_view(
-                    row,
-                    &self.family.slope_design,
-                    h[0][1],
-                    target.slice_mut(s![marginal.clone(), slope.clone()]),
-                )
-                .expect("marginal-slope outer dim mismatch");
-            self.family
-                .slope_design
-                .row_outer_into_view(
-                    row,
-                    &self.family.marginal_design,
-                    h[0][1],
-                    target.slice_mut(s![slope.clone(), marginal.clone()]),
-                )
-                .expect("slope-marginal outer dim mismatch");
-        }
-        self.family
-            .slope_design
-            .syr_row_into_view(row, h[1][1], target.slice_mut(s![slope.clone(), slope.clone()]))
-            .expect("slope syr dim mismatch");
-        // Cross terms with the unit-design residual primaries: one design row
-        // scaled into a column (and its transpose) per residual coefficient.
-        for k in 0..K - 2 {
-            let col = residual.start + k;
-            if h[0][2 + k] != 0.0 {
-                self.family
-                    .marginal_design
-                    .axpy_row_into(row, h[0][2 + k], &mut target.slice_mut(s![marginal.clone(), col]))
-                    .expect("marginal-residual axpy dim mismatch");
-                self.family
-                    .marginal_design
-                    .axpy_row_into(row, h[0][2 + k], &mut target.slice_mut(s![col, marginal.clone()]))
-                    .expect("residual-marginal axpy dim mismatch");
-            }
-            if h[1][2 + k] != 0.0 {
-                self.family
-                    .slope_design
-                    .axpy_row_into(row, h[1][2 + k], &mut target.slice_mut(s![slope.clone(), col]))
-                    .expect("slope-residual axpy dim mismatch");
-                self.family
-                    .slope_design
-                    .axpy_row_into(row, h[1][2 + k], &mut target.slice_mut(s![col, slope.clone()]))
-                    .expect("residual-slope axpy dim mismatch");
-            }
-        }
-        for j in 0..K - 2 {
-            for k in 0..K - 2 {
-                target[[residual.start + j, residual.start + k]] += h[2 + j][2 + k];
-            }
-        }
-    }
-
-    fn add_diagonal_quadratic(&self, row: usize, h: &[[f64; K]; K], diag: &mut [f64]) {
-        {
-            let mut md = ndarray::ArrayViewMut1::from(&mut diag[self.slices.marginal.clone()]);
-            self.family
-                .marginal_design
-                .squared_axpy_row_into(row, h[0][0], &mut md)
-                .expect("marginal squared_axpy dim mismatch");
-        }
-        {
-            let mut gd = ndarray::ArrayViewMut1::from(&mut diag[self.slices.slope.clone()]);
-            self.family
-                .slope_design
-                .squared_axpy_row_into(row, h[1][1], &mut gd)
-                .expect("slope squared_axpy dim mismatch");
-        }
-        let residual = self.residual_range();
-        for k in 0..K - 2 {
-            diag[residual.start + k] += h[2 + k][2 + k];
-        }
-    }
-
-    /// `J·F` in one pass: two design GEMMs for the marginal and slope axes, and
-    /// a broadcast of the residual rows of `F` for the unit-design axes.
-    fn jacobian_action_matrix(&self, factor: ArrayView2<'_, f64>) -> Option<Array2<f64>> {
-        let p_total = self.slices.total;
-        if factor.nrows() != p_total {
-            return None;
-        }
-        let n_rows = self.family.y.len();
-        let rank = factor.ncols();
-        let f_marg = factor
-            .slice(s![self.slices.marginal.clone(), ..])
-            .as_standard_layout()
-            .into_owned();
-        let f_slope = factor
-            .slice(s![self.slices.slope.clone(), ..])
-            .as_standard_layout()
-            .into_owned();
-        let jf_marg =
-            crate::row_kernel::row_kernel_design_jf(&self.family.marginal_design, f_marg.view(), n_rows);
-        let jf_slope =
-            crate::row_kernel::row_kernel_design_jf(&self.family.slope_design, f_slope.view(), n_rows);
-        let residual = self.residual_range();
-        let mut axes = vec![(0usize, jf_marg), (1usize, jf_slope)];
-        for k in 0..K - 2 {
-            let mut broadcast = Array2::<f64>::zeros((n_rows, rank));
-            let source = factor.row(residual.start + k);
-            for mut out_row in broadcast.rows_mut() {
-                out_row.assign(&source);
-            }
-            axes.push((2 + k, broadcast));
-        }
-        Some(crate::row_kernel::row_kernel_pack_jf_axes::<K>(n_rows, rank, axes))
-    }
-}
-
-/// Dispatch a rigid-path consumer over the family's residual width. Each arm
-/// instantiates the generic body with a different kernel type; a width above
-/// [`MAX_RESIDUAL_COLUMNS`] is refused at construction, never here.
-macro_rules! with_residual_kernel {
-    ($family:expr, $states:expr, |$kern:ident| $body:expr) => {{
-        match $family.residual_dim() {
-            1 => {
-                let $kern = $crate::bms::residual_repair::BernoulliResidualRowKernel::<3>::new(
-                    $family.clone(),
-                    $states.to_vec(),
-                )?;
-                $body
-            }
-            2 => {
-                let $kern = $crate::bms::residual_repair::BernoulliResidualRowKernel::<4>::new(
-                    $family.clone(),
-                    $states.to_vec(),
-                )?;
-                $body
-            }
-            3 => {
-                let $kern = $crate::bms::residual_repair::BernoulliResidualRowKernel::<5>::new(
-                    $family.clone(),
-                    $states.to_vec(),
-                )?;
-                $body
-            }
-            4 => {
-                let $kern = $crate::bms::residual_repair::BernoulliResidualRowKernel::<6>::new(
-                    $family.clone(),
-                    $states.to_vec(),
-                )?;
-                $body
-            }
-            5 => {
-                let $kern = $crate::bms::residual_repair::BernoulliResidualRowKernel::<7>::new(
-                    $family.clone(),
-                    $states.to_vec(),
-                )?;
-                $body
-            }
-            6 => {
-                let $kern = $crate::bms::residual_repair::BernoulliResidualRowKernel::<8>::new(
-                    $family.clone(),
-                    $states.to_vec(),
-                )?;
-                $body
-            }
-            7 => {
-                let $kern = $crate::bms::residual_repair::BernoulliResidualRowKernel::<9>::new(
-                    $family.clone(),
-                    $states.to_vec(),
-                )?;
-                $body
-            }
-            8 => {
-                let $kern = $crate::bms::residual_repair::BernoulliResidualRowKernel::<10>::new(
-                    $family.clone(),
-                    $states.to_vec(),
-                )?;
-                $body
-            }
-            9 => {
-                let $kern = $crate::bms::residual_repair::BernoulliResidualRowKernel::<11>::new(
-                    $family.clone(),
-                    $states.to_vec(),
-                )?;
-                $body
-            }
-            10 => {
-                let $kern = $crate::bms::residual_repair::BernoulliResidualRowKernel::<12>::new(
-                    $family.clone(),
-                    $states.to_vec(),
-                )?;
-                $body
-            }
-            11 => {
-                let $kern = $crate::bms::residual_repair::BernoulliResidualRowKernel::<13>::new(
-                    $family.clone(),
-                    $states.to_vec(),
-                )?;
-                $body
-            }
-            12 => {
-                let $kern = $crate::bms::residual_repair::BernoulliResidualRowKernel::<14>::new(
-                    $family.clone(),
-                    $states.to_vec(),
-                )?;
-                $body
-            }
-            width => Err(format!(
-                "residual repair block width {width} is outside the instantiated kernel ladder \
-                 1..={}",
-                $crate::bms::residual_repair::MAX_RESIDUAL_COLUMNS
-            )),
-        }
-    }};
-}
-pub(super) use with_residual_kernel;
-
 impl BernoulliMarginalSlopeFamily {
-    /// `K`, the residual block width; `0` without a block.
-    #[inline]
-    pub(super) fn residual_dim(&self) -> usize {
-        self.residual.as_ref().map_or(0, |r| r.width())
-    }
-
     /// Whether the family carries a residual block.
     #[inline]
     pub(super) fn residual_active(&self) -> bool {
@@ -1324,14 +934,15 @@ impl BernoulliMarginalSlopeFamily {
         &self,
         block_states: &[ParameterBlockState],
     ) -> Result<FamilyEvaluation, String> {
-        let (log_likelihood, gradient, hessian) = with_residual_kernel!(self, block_states, |kern| {
-            let rows = crate::row_kernel::RowSet::All;
-            let cache = crate::row_kernel::build_row_kernel_cache(&kern, &rows)?;
-            let ll = crate::row_kernel::row_kernel_log_likelihood(&cache, &rows);
-            let gradient = crate::row_kernel::row_kernel_gradient(&kern, &cache, &rows);
-            let hessian = crate::row_kernel::row_kernel_hessian_dense(&kern, &cache, &rows)?;
-            Ok::<_, String>((ll, gradient, hessian))
-        })?;
+        let kern = super::residual_repair_kernel::ResidualDriveKernel::new(
+            self.clone(),
+            block_states.to_vec(),
+        )?;
+        let rows = crate::row_kernel::RowSet::All;
+        let cache = crate::row_kernel::build_row_kernel_cache(&kern, &rows)?;
+        let log_likelihood = crate::row_kernel::row_kernel_log_likelihood(&cache, &rows);
+        let gradient = crate::row_kernel::row_kernel_gradient(&kern, &cache, &rows);
+        let hessian = super::residual_repair_kernel::residual_hessian_dense(&kern, &cache)?;
         let slices = super::hessian_paths::block_slices(self);
         let residual = slices
             .residual
@@ -1362,32 +973,10 @@ mod residual_repair_kernel_tests {
     //! same program. These pin the ONE statement of the anchor that the fit,
     //! the value-only line search and the prediction replay all read.
 
+    use super::super::tests_residual_repair_laws::{ResidualBlock, covariance, hermite_grid, skewed_grid};
     use super::*;
     use gam_math::jet_scalar::Order2;
     use gam_math::jet_tower::RowProgram;
-    use gam_math::nested_dual::JetField;
-
-    fn covariance(k: usize, seed: u64) -> MarginalSlopeCovariance {
-        // A random SPD matrix with unit (0,0) entry, the score's variance.
-        let mut state = seed;
-        let mut next = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            (state % 10_000) as f64 / 10_000.0 - 0.5
-        };
-        let dim = k + 1;
-        let mut l = Array2::<f64>::zeros((dim, dim));
-        for i in 0..dim {
-            for j in 0..=i {
-                l[[i, j]] = if i == j { 0.6 + 0.4 * next().abs() } else { 0.5 * next() };
-            }
-        }
-        let mut sigma = l.dot(&l.t());
-        let scale = sigma[[0, 0]].sqrt();
-        sigma.mapv_inplace(|v| v / (scale * scale));
-        MarginalSlopeCovariance::full(sigma).expect("SPD covariance")
-    }
 
     #[test]
     fn refusals_reach_the_fit_boundary_under_their_category() {
@@ -1410,47 +999,6 @@ mod residual_repair_kernel_tests {
             reason: "not SPD".to_string(),
         });
         assert_eq!(unevaluated.category(), FailureCategory::Unclassified);
-    }
-
-    /// A skewed finite law of the score: a discretised `exp(0.7·u)`,
-    /// standardised to mean 0 and variance 1, on 41 ascending nodes.
-    fn skewed_grid() -> EmpiricalZGrid {
-        let u: Vec<f64> = (0..41).map(|i| -3.0 + 0.15 * i as f64).collect();
-        let raw_weights: Vec<f64> = u.iter().map(|&v| (-0.5 * v * v).exp()).collect();
-        let total: f64 = raw_weights.iter().sum();
-        let weights: Vec<f64> = raw_weights.iter().map(|w| w / total).collect();
-        let raw_nodes: Vec<f64> = u.iter().map(|&v| (0.7 * v).exp()).collect();
-        let mean: f64 = raw_nodes.iter().zip(&weights).map(|(x, w)| x * w).sum();
-        let variance: f64 = raw_nodes
-            .iter()
-            .zip(&weights)
-            .map(|(x, w)| w * (x - mean) * (x - mean))
-            .sum();
-        let nodes = raw_nodes
-            .iter()
-            .map(|x| (x - mean) / variance.sqrt())
-            .collect();
-        EmpiricalZGrid::new(nodes, weights, "residual repair test law").unwrap()
-    }
-
-    /// The probabilists' Gauss–Hermite law: the finite law on which the mixture
-    /// anchor is the Gaussian closed form to quadrature tolerance.
-    fn hermite_grid(m: usize) -> EmpiricalZGrid {
-        let rule = gam_math::quadrature::gauss_hermite_rule(m).unwrap();
-        let mut pairs: Vec<(f64, f64)> = rule
-            .nodes
-            .iter()
-            .zip(&rule.weights)
-            .map(|(&x, &w)| (std::f64::consts::SQRT_2 * x, w / std::f64::consts::PI.sqrt()))
-            .collect();
-        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let total: f64 = pairs.iter().map(|p| p.1).sum();
-        EmpiricalZGrid::new(
-            pairs.iter().map(|p| p.0).collect(),
-            pairs.iter().map(|p| p.1 / total).collect(),
-            "hermite test law",
-        )
-        .unwrap()
     }
 
     #[test]
@@ -1650,11 +1198,18 @@ mod residual_repair_kernel_tests {
                 y: self.y,
                 w: self.w,
                 probit_scale: self.s,
-                r: &self.r,
-                covariance: &self.cov,
                 grid: self.grid.as_ref(),
             };
-            residual_row_nll(&state, p)
+            // The coefficients are the primaries here: the drive is composed
+            // from their jets, exactly as the coefficient-primary kernel did.
+            let gamma: Vec<f64> = (0..K - 2).map(|j| self.cov.coefficient(0, j + 1)).collect();
+            let beta = &p[2..];
+            let drive = ResidualDrive {
+                t: S::linear_combination(beta, &self.r),
+                u: S::linear_combination(beta, &gamma),
+                v: S::symmetric_quadratic_form(beta, &ResidualBlock(&self.cov)),
+            };
+            residual_row_nll(&state, &p[0], &p[1], &drive)
         }
     }
 

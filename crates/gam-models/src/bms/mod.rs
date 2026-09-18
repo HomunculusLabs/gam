@@ -2655,7 +2655,10 @@ pub(crate) mod hessian_paths;
 mod information_third;
 pub(crate) mod install_flex;
 pub mod residual_repair;
+mod residual_repair_kernel;
 pub(crate) mod row_kernel;
+#[cfg(test)]
+mod tests_residual_repair_laws;
 #[cfg(test)]
 mod tests {
     include!("../../../../tests/src_modules/misc/families_bms_identifiability_rigid_tests.rs");
@@ -2884,7 +2887,7 @@ pub use conditional_score_covariance::{
     ConditionalScoreCoordinate, ConditionalScoreCovariance, ScoreCovarianceField,
 };
 pub use residual_repair::{
-    MAX_RESIDUAL_COLUMNS, RESIDUAL_BLOCK_NAME, ResidualBlockRuntime, ResidualRepairGeometry,
+    RESIDUAL_BLOCK_NAME, ResidualBlockRuntime, ResidualRepairGeometry,
     ResidualRepairRefusal, ResidualRepairSpec,
 };
 pub(crate) use residual_repair::residual_row_index;
