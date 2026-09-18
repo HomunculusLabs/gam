@@ -55,10 +55,13 @@ use super::attention::{
 use super::precision::{DecodableArtifact, DeclaredPrecision, LatticeCode};
 use super::supports::{EvidenceStatus, EvidenceStatusError, ExactBasis};
 use super::apply::{ApplyError, native_linear};
-use super::lift::{LiftError, TensorId, TensorRegistry, TieOrientation, UseMap, UseSiteId};
+use super::lift::{
+    AnchorMask, LiftError, ResidualAnchor, StorageTensor, TensorId, TensorRegistry, TieOrientation, UseMap,
+    UseSiteId,
+};
 use gam_linalg::roundoff::accumulation_growth;
 use gam_runtime::resource::{Governed, MemoryGovernor, MemoryReservationError};
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -346,7 +349,8 @@ pub struct Body {
 
 /// A formal parameter and the controls of its component anchor. A parameter with
 /// controls is affine in them (the anchor `m_Delta Theta_* + B sum_c (m_c -
-/// m_Delta) v_c`); the binding applies it.
+/// m_Delta) v_c`); the binding applies it. [`LiftSource`] reads them in the order
+/// `[m_Delta, m_1, ..., m_C]`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ParameterDecl {
@@ -2604,6 +2608,248 @@ impl Program {
     }
 }
 
+/// Binds a program's formal parameters to the teacher's registered tensors at the
+/// use sites [`Program::bind_use_sites`] binds: a linear read applies its storage's
+/// residual anchor at the controls of that use, and a stored read returns the
+/// storage's registered values.
+///
+/// A parameter with anchor controls declares them as `[m_Delta, m_1, ..., m_C]`, the
+/// order of [`AnchorMask`]'s residual and components, so its reads execute
+/// `Theta(m) = m_Delta Theta_* + B sum_c (m_c - m_Delta) v_c` without forming it. A
+/// parameter with no controls executes the teacher's tensor at every use. Only bound
+/// reads execute, so the reads a global edit of a storage reaches are exactly the ones
+/// this source runs; a mechanism body's read is not on the teacher's path and is refused.
+/// Each anchor must have been built against the same registry: [`ResidualAnchor::new`]
+/// is where its values are checked against the registered fingerprint.
+pub struct LiftSource<'a> {
+    storage: Vec<TensorId>,
+    reads: BTreeMap<(ParameterSlot, BodyId, NodeId, Vec<CallSite>), BoundRead>,
+    anchors: BTreeMap<TensorId, &'a ResidualAnchor<'a>>,
+    stored: BTreeMap<TensorId, ArrayView1<'a, f64>>,
+}
+
+/// A refused [`LiftSource`] binding or read.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LiftSourceError {
+    /// The program's reads do not bind to the registry.
+    Binding(BindingError),
+    /// A declared name, or the name of a value vector, that the registry refuses.
+    Registry { name: TensorId, error: LiftError },
+    /// Two anchors, or two value vectors, for one storage tensor.
+    Duplicate { storage: TensorId },
+    /// A storage tensor the program reads linearly has no anchor.
+    MissingAnchor { storage: TensorId },
+    /// A storage tensor the program reads as stored values has no values.
+    MissingValues { storage: TensorId },
+    /// An anchor, or values, for a storage tensor no bound read uses that way.
+    UnreadStorage { storage: TensorId },
+    /// The values are not the registered ones: another shape or another fingerprint.
+    ValuesMismatch { storage: TensorId, registered: StorageTensor, found: StorageTensor },
+    /// A parameter's control count is neither zero nor one residual plus one per
+    /// component of its storage's anchor.
+    ControlCount { parameter: ParameterSlot, controls: usize, components: usize },
+    /// A stored read of a parameter with anchor controls, whose mask no stored read
+    /// carries.
+    ControlledStoredRead { parameter: ParameterSlot, controls: usize },
+    /// A read the teacher's path does not reach, such as a mechanism body's.
+    UnboundRead { parameter: ParameterSlot, body: BodyId, node: NodeId },
+    /// The read applies another map than its bound site registers.
+    MapMismatch { site: UseSiteId, registered: UseMap, applied: UseMap },
+    /// The anchor refused the read.
+    Lift { site: UseSiteId, error: LiftError },
+}
+
+impl fmt::Display for LiftSourceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Binding(error) => write!(formatter, "{error}"),
+            Self::Registry { name, error } => write!(formatter, "{}: {error}", name.0),
+            Self::Duplicate { storage } => write!(formatter, "storage {} is bound twice", storage.0),
+            Self::MissingAnchor { storage } => {
+                write!(formatter, "storage {} is read linearly but has no anchor", storage.0)
+            }
+            Self::MissingValues { storage } => {
+                write!(formatter, "storage {} is read as stored values but has none", storage.0)
+            }
+            Self::UnreadStorage { storage } => {
+                write!(formatter, "storage {} is bound, but no bound read uses it that way", storage.0)
+            }
+            Self::ValuesMismatch { storage, registered, found } => write!(
+                formatter,
+                "the values of storage {} have shape {:?} and fingerprint {:#x}, not the registered {:?} and {:#x}",
+                storage.0, found.shape, found.fingerprint, registered.shape, registered.fingerprint
+            ),
+            Self::ControlCount { parameter, controls, components } => write!(
+                formatter,
+                "formal parameter {} declares {controls} controls; its anchor takes none or {}",
+                parameter.0,
+                components + 1
+            ),
+            Self::ControlledStoredRead { parameter, controls } => write!(
+                formatter,
+                "formal parameter {} has {controls} anchor controls and a stored read, which carries no mask",
+                parameter.0
+            ),
+            Self::UnboundRead { parameter, body, node } => write!(
+                formatter,
+                "formal parameter {} read at node {} of body {} is not on the teacher's path",
+                parameter.0, node.0, body.0
+            ),
+            Self::MapMismatch { site, registered, applied } => write!(
+                formatter,
+                "use site {} is registered as {registered:?}, but the read applies {applied:?}",
+                site.0
+            ),
+            Self::Lift { site, error } => write!(formatter, "use site {}: {error}", site.0),
+        }
+    }
+}
+
+impl std::error::Error for LiftSourceError {}
+
+impl<'a> LiftSource<'a> {
+    /// Binds `program`'s reads to `registry`, each linearly read storage to its anchor
+    /// and each storage read as stored values to its values. Refuses values that are not
+    /// the registered ones, a read without a tensor and a tensor without a read.
+    pub fn new(
+        program: &Program,
+        registry: &TensorRegistry,
+        anchors: Vec<&'a ResidualAnchor<'a>>,
+        stored: Vec<(TensorId, ArrayView1<'a, f64>)>,
+    ) -> Result<Self, LiftSourceError> {
+        let bound = program.bind_use_sites(registry).map_err(LiftSourceError::Binding)?;
+        let storage = program
+            .parts
+            .parameters
+            .iter()
+            .map(|decl| {
+                let name = TensorId(decl.name.clone());
+                registry
+                    .storage_of(&name)
+                    .cloned()
+                    .map_err(|error| LiftSourceError::Registry { name, error })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut anchor_map = BTreeMap::new();
+        for anchor in anchors {
+            if anchor_map.insert(anchor.storage().clone(), anchor).is_some() {
+                return Err(LiftSourceError::Duplicate { storage: anchor.storage().clone() });
+            }
+        }
+        let mut stored_map = BTreeMap::new();
+        for (id, values) in stored {
+            // The owner's shape and fingerprint of the values, from a registry holding only them.
+            let mut probe = TensorRegistry::default();
+            probe
+                .register_storage(id.clone(), values.view().into_dyn())
+                .map_err(|error| LiftSourceError::Registry { name: id.clone(), error })?;
+            match (registry.storage(&id), probe.storage(&id)) {
+                (Some(registered), Some(found)) if registered == found => {}
+                (Some(registered), Some(found)) => {
+                    return Err(LiftSourceError::ValuesMismatch {
+                        storage: id,
+                        registered: registered.clone(),
+                        found: found.clone(),
+                    });
+                }
+                _ => return Err(LiftSourceError::UnreadStorage { storage: id }),
+            }
+            if stored_map.insert(id.clone(), values).is_some() {
+                return Err(LiftSourceError::Duplicate { storage: id });
+            }
+        }
+        let mut linear = BTreeSet::new();
+        let mut plain = BTreeSet::new();
+        for read in &bound {
+            let parameter = read.parameter;
+            let read_storage = &storage[parameter.index()];
+            let controls = program.parts.parameters[parameter.index()].controls.len();
+            match read.map {
+                UseMap::Linear(..) => {
+                    let anchor = anchor_map
+                        .get(read_storage)
+                        .ok_or_else(|| LiftSourceError::MissingAnchor { storage: read_storage.clone() })?;
+                    let components = anchor.component_count();
+                    if controls != 0 && controls != components + 1 {
+                        return Err(LiftSourceError::ControlCount { parameter, controls, components });
+                    }
+                    linear.insert(read_storage.clone());
+                }
+                UseMap::Stored => {
+                    if controls != 0 {
+                        return Err(LiftSourceError::ControlledStoredRead { parameter, controls });
+                    }
+                    if !stored_map.contains_key(read_storage) {
+                        return Err(LiftSourceError::MissingValues { storage: read_storage.clone() });
+                    }
+                    plain.insert(read_storage.clone());
+                }
+            }
+        }
+        if let Some(unread) = anchor_map.keys().find(|id| !linear.contains(*id)) {
+            return Err(LiftSourceError::UnreadStorage { storage: unread.clone() });
+        }
+        if let Some(unread) = stored_map.keys().find(|id| !plain.contains(*id)) {
+            return Err(LiftSourceError::UnreadStorage { storage: unread.clone() });
+        }
+        let reads = bound
+            .into_iter()
+            .map(|read| ((read.parameter, read.body, read.node, read.invocation.clone()), read))
+            .collect();
+        Ok(Self { storage, reads, anchors: anchor_map, stored: stored_map })
+    }
+
+    /// The bound read at this use, which must apply the map its site registers.
+    fn bound_read(&self, parameter: &ParameterUse<'_>, applied: UseMap) -> Result<&BoundRead, LiftSourceError> {
+        let key = (parameter.parameter, parameter.body, parameter.node, parameter.invocation.to_vec());
+        let read = self.reads.get(&key).ok_or(LiftSourceError::UnboundRead {
+            parameter: parameter.parameter,
+            body: parameter.body,
+            node: parameter.node,
+        })?;
+        if read.map != applied {
+            return Err(LiftSourceError::MapMismatch { site: read.site.clone(), registered: read.map, applied });
+        }
+        Ok(read)
+    }
+}
+
+impl ParameterSource for LiftSource<'_> {
+    type Error = LiftSourceError;
+
+    fn apply_linear(
+        &self,
+        parameter: ParameterUse<'_>,
+        orientation: TieOrientation,
+        rows: ArrayView2<'_, f64>,
+    ) -> Result<Governed<Array2<f64>>, Self::Error> {
+        let read = self.bound_read(&parameter, UseMap::Linear(orientation))?;
+        let storage = &self.storage[parameter.parameter.index()];
+        let anchor = self
+            .anchors
+            .get(storage)
+            .ok_or_else(|| LiftSourceError::MissingAnchor { storage: storage.clone() })?;
+        match parameter.controls {
+            [] => anchor.native_apply(rows, orientation),
+            [residual, components @ ..] => anchor.apply(
+                &AnchorMask { residual: *residual, components: components.to_vec() },
+                rows,
+                orientation,
+            ),
+        }
+        .map_err(|error| LiftSourceError::Lift { site: read.site.clone(), error })
+    }
+
+    fn vector(&self, parameter: ParameterUse<'_>) -> Result<Array1<f64>, Self::Error> {
+        self.bound_read(&parameter, UseMap::Stored)?;
+        let storage = &self.storage[parameter.parameter.index()];
+        self.stored
+            .get(storage)
+            .map(|values| values.to_owned())
+            .ok_or_else(|| LiftSourceError::MissingValues { storage: storage.clone() })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Fixtures whose entries and mask values are dyadic rationals with small
@@ -2611,6 +2857,8 @@ mod tests {
     //! operation rounds and the comparisons are exact.
 
     use super::*;
+    use crate::parameter_decomposition::apply::FactoredEdit;
+    use crate::parameter_decomposition::lift::ComponentCoefficients;
     use ndarray::array;
 
     fn controls(indices: &[u32]) -> Vec<ControlId> {
@@ -2673,7 +2921,7 @@ mod tests {
         (0..rows.nrows() as i64).collect()
     }
 
-    fn run(program: &Program, source: &DenseParameters, masks: &MaskAssignment, x: &Array2<f64>) -> Array2<f64> {
+    fn run<S: ParameterSource>(program: &Program, source: &S, masks: &MaskAssignment, x: &Array2<f64>) -> Array2<f64> {
         program
             .execute(source, masks, vec![x.clone()], Vec::new(), &row_positions(x))
             .expect("execution of a valid program")
@@ -3789,5 +4037,265 @@ mod tests {
             named_program(&["embed", "bias", "decoder"], tied_nodes(2)).bind_use_sites(&registry),
             Err(BindingError::Registry { parameter: ParameterSlot(2), error: LiftError::UnknownTensor(..) })
         ));
+    }
+
+    /// The teacher of the lift-source fixtures: `w` (2, 3) read as `x w^T`, a bias (2) added, then `w` read
+    /// again as `x w`, with a two-component anchor on `w` whose basis matrices are `u_c r_c^T`.
+    struct LiftFixture {
+        w: Array2<f64>,
+        bias: Array1<f64>,
+        left: Array2<f64>,
+        right: Array2<f64>,
+        registry: TensorRegistry,
+    }
+
+    impl LiftFixture {
+        fn new() -> Self {
+            let w = array![[1.0, -0.5, 0.25], [0.5, 2.0, -1.0]];
+            let bias = array![0.25, -0.5];
+            let mut registry = TensorRegistry::default();
+            for (name, values) in [("w", w.view().into_dyn()), ("bias", bias.view().into_dyn())] {
+                registry.register_storage(TensorId(name.to_string()), values).expect("a new storage name");
+            }
+            registry
+                .register_storage(TensorId("unread".to_string()), Array1::<f64>::zeros(2).view().into_dyn())
+                .expect("a new storage name");
+            for (storage, ordinal, map) in [
+                ("w", 0, UseMap::Linear(TieOrientation::Identity)),
+                ("bias", 0, UseMap::Stored),
+                ("w", 1, UseMap::Linear(TieOrientation::Transpose)),
+            ] {
+                let storage = TensorId(storage.to_string());
+                registry
+                    .register_use_site(UseSiteId::read(&storage, ordinal), storage, map)
+                    .expect("a new use site of registered storage");
+            }
+            Self {
+                w,
+                bias,
+                left: array![[1.0, 0.5], [-0.5, 1.0]],
+                right: array![[0.5, 0.0], [0.0, 1.0], [0.25, -0.5]],
+                registry,
+            }
+        }
+
+        fn anchor(&self) -> ResidualAnchor<'_> {
+            ResidualAnchor::new(
+                &self.registry,
+                TensorId("w".to_string()),
+                self.w.view(),
+                FactoredEdit::new(self.left.clone(), self.right.clone()).expect("finite factors of equal rank"),
+                vec![1, 1],
+                ComponentCoefficients::Basis,
+            )
+            .expect("the registered teacher anchors")
+        }
+
+        /// `Theta(m) = m_Delta w + sum_c (m_c - m_Delta) u_c r_c^T`, formed densely for the reference.
+        fn edited(&self, masks: [f64; 3]) -> Array2<f64> {
+            let mut theta = &self.w * masks[0];
+            for c in 0..2 {
+                let left = self.left.column(c).insert_axis(ndarray::Axis(1));
+                let basis = left.dot(&self.right.column(c).insert_axis(ndarray::Axis(0)));
+                theta = theta + basis * (masks[c + 1] - masks[0]);
+            }
+            theta
+        }
+    }
+
+    /// The tied program over the fixture: `w` declares the controls `w_controls`, the bias declares `bias_controls`.
+    fn lift_program(w_controls: &[u32], bias_controls: &[u32], control_count: u32) -> Program {
+        Program::new(ProgramParts {
+            parameters: vec![
+                ParameterDecl { name: "w".to_string(), controls: controls(w_controls) },
+                ParameterDecl { name: "bias".to_string(), controls: controls(bias_controls) },
+            ],
+            slots: Vec::new(),
+            controls: named_controls(control_count),
+            mask_groups: singleton_groups(control_count),
+            bodies: vec![body(
+                "entry",
+                1,
+                vec![
+                    Node::Input { port: 0 },
+                    oriented(0, TieOrientation::Identity, 0),
+                    native(NativePrimitive::AddBias { bias: ParameterSlot(1) }, &[1]),
+                    oriented(0, TieOrientation::Transpose, 2),
+                ],
+            )],
+            entry: BodyId(0),
+        })
+        .expect("a valid program")
+    }
+
+    #[test]
+    fn a_lift_source_executes_the_residual_anchor_at_every_bound_read() {
+        let fixture = LiftFixture::new();
+        let anchor = fixture.anchor();
+        let program = lift_program(&[0, 1, 2], &[], 3);
+        let source = LiftSource::new(
+            &program,
+            &fixture.registry,
+            vec![&anchor],
+            vec![(TensorId("bias".to_string()), fixture.bias.view())],
+        )
+        .expect("every read has a tensor and every tensor a read");
+        let x = array![[1.0, -2.0, 0.5], [0.5, 4.0, -1.0]];
+        let expected = |masks: [f64; 3]| {
+            let theta = fixture.edited(masks);
+            (x.dot(&theta.t()) + &fixture.bias).dot(&theta)
+        };
+
+        // All on, the source executes the teacher: the dense binding of the same tensors, which takes
+        // no anchor controls, runs the same program without them bit for bit.
+        let all_on = run(&program, &source, &MaskAssignment::all_on(), &x);
+        let teacher = DenseParameters::new(vec![
+            DenseTensor::Matrix(fixture.w.clone()),
+            DenseTensor::Vector(fixture.bias.clone()),
+        ]);
+        assert_eq!(all_on, run(&lift_program(&[], &[], 0), &teacher, &MaskAssignment::all_on(), &x));
+        assert_eq!(all_on, expected([1.0, 1.0, 1.0]));
+
+        // A global edit: both tied reads of `w` execute `Theta(m)`, the residual scaled by `m_Delta`.
+        let masked = run(&program, &source, &global(&[(0, 0.5), (1, 0.25), (2, -1.0)]), &x);
+        assert_eq!(masked, expected([0.5, 0.25, -1.0]));
+        // Positive controls: the mask moved the output, and the residual control is not ignored.
+        assert_ne!(masked, all_on);
+        assert_ne!(masked, expected([1.0, 0.25, -1.0]));
+    }
+
+    #[test]
+    fn a_lift_source_refuses_a_read_without_a_tensor_and_a_tensor_without_a_read() {
+        let fixture = LiftFixture::new();
+        let anchor = fixture.anchor();
+        let program = lift_program(&[0, 1, 2], &[], 3);
+        let id = |name: &str| TensorId(name.to_string());
+        let bias = || vec![(id("bias"), fixture.bias.view())];
+        assert!(LiftSource::new(&program, &fixture.registry, vec![&anchor], bias()).is_ok());
+        assert_eq!(
+            LiftSource::new(&program, &fixture.registry, Vec::new(), bias()).err(),
+            Some(LiftSourceError::MissingAnchor { storage: id("w") })
+        );
+        assert_eq!(
+            LiftSource::new(&program, &fixture.registry, vec![&anchor], Vec::new()).err(),
+            Some(LiftSourceError::MissingValues { storage: id("bias") })
+        );
+        assert_eq!(
+            LiftSource::new(&program, &fixture.registry, vec![&anchor, &anchor], bias()).err(),
+            Some(LiftSourceError::Duplicate { storage: id("w") })
+        );
+        let unread = Array1::<f64>::zeros(2);
+        let mut extra = bias();
+        extra.push((id("unread"), unread.view()));
+        assert_eq!(
+            LiftSource::new(&program, &fixture.registry, vec![&anchor], extra).err(),
+            Some(LiftSourceError::UnreadStorage { storage: id("unread") })
+        );
+        // Values other than the registered ones: one entry changed.
+        let other = array![0.25, 0.5];
+        assert!(matches!(
+            LiftSource::new(&program, &fixture.registry, vec![&anchor], vec![(id("bias"), other.view())]),
+            Err(LiftSourceError::ValuesMismatch { storage, .. }) if storage == id("bias")
+        ));
+        // Two controls on a two-component anchor, which takes a residual control too.
+        assert_eq!(
+            LiftSource::new(&lift_program(&[0, 1], &[], 2), &fixture.registry, vec![&anchor], bias()).err(),
+            Some(LiftSourceError::ControlCount { parameter: ParameterSlot(0), controls: 2, components: 2 })
+        );
+        assert_eq!(
+            LiftSource::new(&lift_program(&[0, 1, 2], &[3], 4), &fixture.registry, vec![&anchor], bias()).err(),
+            Some(LiftSourceError::ControlledStoredRead { parameter: ParameterSlot(1), controls: 1 })
+        );
+    }
+
+    #[test]
+    fn a_lift_source_refuses_a_read_off_the_teachers_path_and_a_map_its_site_does_not_register() {
+        let fixture = LiftFixture::new();
+        let anchor = fixture.anchor();
+        let x = array![[1.0, -2.0, 0.5], [0.5, 4.0, -1.0]];
+        // A refinement whose mechanism reads `w` too; only the native body is on the teacher's path.
+        let mut registry = TensorRegistry::default();
+        registry
+            .register_storage(TensorId("w".to_string()), fixture.w.view().into_dyn())
+            .expect("a new storage name");
+        let w = TensorId("w".to_string());
+        registry
+            .register_use_site(UseSiteId::read(&w, 0), w.clone(), UseMap::Linear(TieOrientation::Identity))
+            .expect("a new use site of registered storage");
+        let refined = Program::new(ProgramParts {
+            parameters: vec![ParameterDecl { name: "w".to_string(), controls: Vec::new() }],
+            slots: Vec::new(),
+            controls: named_controls(2),
+            mask_groups: singleton_groups(2),
+            bodies: vec![
+                body(
+                    "entry",
+                    1,
+                    vec![
+                        Node::Input { port: 0 },
+                        Node::Refine { native: BodyId(1), mechanism: BodyId(2), arguments: vec![NodeId(0)] },
+                    ],
+                ),
+                body("native", 1, vec![Node::Input { port: 0 }, linear(0, 0)]),
+                body("mechanism", 1, vec![Node::Input { port: 0 }, linear(0, 0), mask(&[0, 1], 1)]),
+            ],
+            entry: BodyId(0),
+        })
+        .expect("a valid program");
+        let refined_anchor = ResidualAnchor::new(
+            &registry,
+            w.clone(),
+            fixture.w.view(),
+            FactoredEdit::new(fixture.left.clone(), fixture.right.clone()).expect("finite factors of equal rank"),
+            vec![1, 1],
+            ComponentCoefficients::Basis,
+        )
+        .expect("the registered teacher anchors");
+        let source = LiftSource::new(&refined, &registry, vec![&refined_anchor], Vec::new())
+            .expect("the native body's read binds");
+        assert_eq!(run(&refined, &source, &MaskAssignment::all_on(), &x), x.dot(&fixture.w.t()));
+        assert!(matches!(
+            refined.execute(&source, &global(&[(0, 0.5)]), vec![x.clone()], Vec::new(), &row_positions(&x)),
+            Err(ExecutionError::Source {
+                error: LiftSourceError::UnboundRead { parameter: ParameterSlot(0), body: BodyId(2), node: NodeId(1) },
+                ..
+            })
+        ));
+
+        // A direct read in the other orientation, or as stored values, of the identity site `w#0`.
+        let program = lift_program(&[0, 1, 2], &[], 3);
+        let tied = LiftSource::new(
+            &program,
+            &fixture.registry,
+            vec![&anchor],
+            vec![(TensorId("bias".to_string()), fixture.bias.view())],
+        )
+        .expect("every read has a tensor and every tensor a read");
+        let first = ParameterUse {
+            parameter: ParameterSlot(0),
+            body: BodyId(0),
+            node: NodeId(1),
+            invocation: &[],
+            controls: &[1.0, 1.0, 1.0],
+        };
+        let site = UseSiteId::read(&w, 0);
+        let identity = UseMap::Linear(TieOrientation::Identity);
+        assert_eq!(
+            tied.apply_linear(first, TieOrientation::Transpose, x.slice(ndarray::s![.., ..2])).err(),
+            Some(LiftSourceError::MapMismatch {
+                site: site.clone(),
+                registered: identity,
+                applied: UseMap::Linear(TieOrientation::Transpose),
+            })
+        );
+        assert_eq!(
+            tied.vector(first).err(),
+            Some(LiftSourceError::MapMismatch { site, registered: identity, applied: UseMap::Stored })
+        );
+        // Positive control: the registered orientation reads the teacher.
+        assert_eq!(
+            tied.apply_linear(first, TieOrientation::Identity, x.view()).expect("the bound read").to_owned(),
+            x.dot(&fixture.w.t())
+        );
     }
 }
