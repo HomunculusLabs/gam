@@ -40,7 +40,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 /// Canonical inner-cache `beta_seed` validator passed to the generic
-/// outer-engine (`optimize_spatial_length_scale_exact_joint`).
+/// outer-engine (`optimize_spatial_length_scale_exact_joint_typed`).
 ///
 /// The outer solver hands back the converged inner `beta` at each accepted
 /// ρ-step so the next inner solve can warm-start from it. This guards that

@@ -1004,8 +1004,7 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
     // ρ is searched on the #2812 domain `fit_custom_family` gives these same seed
     // blocks, over every block that owns a ρ coordinate (#2902 item 15).
     let (rho_lower, rho_upper) =
-        crate::fit_orchestration::drivers::realized_blocks_rho_domain(seed_blocks, options, rho_dim)
-            .map_err(|failure| failure.to_string())?;
+        crate::fit_orchestration::drivers::realized_blocks_rho_domain(seed_blocks, options, rho_dim)?;
     let setup = ExactJointHyperSetup::new(
         rho0,
         rho_lower,

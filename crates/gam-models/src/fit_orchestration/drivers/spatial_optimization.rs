@@ -5557,75 +5557,6 @@ pub(crate) fn exact_joint_multistart_outer_problem(
     Ok(problem)
 }
 
-/// [`optimize_spatial_length_scale_exact_joint_typed`] for callers whose final
-/// coefficient fit still reports text. Their fit failures cross as prose, which
-/// the typed driver records as unclassified; its own failures are rendered to
-/// the text these callers used to receive (#2937).
-pub fn optimize_spatial_length_scale_exact_joint<FitOut, Mode, FitFn, ExactFn, ExactEfsFn, SeedFn>(
-    data: ArrayView2<'_, f64>,
-    block_specs: &[TermCollectionSpec],
-    block_term_indices: &[Vec<usize>],
-    kappa_options: &SpatialLengthScaleOptimizationOptions,
-    joint_setup: &ExactJointHyperSetup,
-    seed_risk_profile: gam_problem::SeedRiskProfile,
-    analytic_joint_gradient_available: bool,
-    analytic_joint_hessian_available: bool,
-    disable_fixed_point: bool,
-    screening_cap: Option<Arc<AtomicUsize>>,
-    walk_signals: Option<crate::exact_mode_branch::OuterWalkSignals>,
-    outer_derivative_policy: gam_model_api::families::custom_family::OuterDerivativePolicy,
-    mut fit_fn: FitFn,
-    exact_fn: ExactFn,
-    exact_efs_fn: ExactEfsFn,
-    seed_inner_beta_fn: SeedFn,
-) -> Result<SpatialLengthScaleOptimizationResult<FitOut>, String>
-where
-    FitFn: FnMut(
-        &Array1<f64>,
-        &[TermCollectionSpec],
-        &[TermCollectionDesign],
-        SpatialFitProvenance<'_, Mode>,
-    ) -> Result<FitOut, String>,
-    ExactFn: FnMut(
-        &Array1<f64>,
-        &[TermCollectionSpec],
-        &[TermCollectionDesign],
-        gam_solve::estimate::reml::reml_outer_engine::EvalMode,
-        Option<Mode>,
-    ) -> Result<ExactJointEvaluation<Mode>, String>,
-    ExactEfsFn: FnMut(
-        &Array1<f64>,
-        &[TermCollectionSpec],
-        &[TermCollectionDesign],
-    ) -> Result<ExactJointEfsEvaluation<Mode>, String>,
-    SeedFn: FnMut(&Array1<f64>) -> Result<gam_solve::rho_optimizer::SeedOutcome, EstimationError>,
-{
-    optimize_spatial_length_scale_exact_joint_typed(
-        data,
-        block_specs,
-        block_term_indices,
-        kappa_options,
-        joint_setup,
-        seed_risk_profile,
-        analytic_joint_gradient_available,
-        analytic_joint_hessian_available,
-        disable_fixed_point,
-        screening_cap,
-        walk_signals,
-        outer_derivative_policy,
-        |theta: &Array1<f64>,
-         specs: &[TermCollectionSpec],
-         designs: &[TermCollectionDesign],
-         provenance: SpatialFitProvenance<'_, Mode>| {
-            fit_fn(theta, specs, designs, provenance).map_err(FitFailure::from)
-        },
-        exact_fn,
-        exact_efs_fn,
-        seed_inner_beta_fn,
-    )
-    .map_err(|failure| failure.to_string())
-}
-
 /// The n-block exact-joint spatial driver. Its final coefficient fit and the
 /// outer search's own verdict both reach the caller as a typed [`FitFailure`]
 /// (#2937).
@@ -5710,7 +5641,9 @@ where
             data, block_specs,
         )
         .map_err(|e| {
-            format!("failed to build and freeze joint block designs during exact joint kappa optimization: {e}")
+            FitFailure::from(e).context(
+                "failed to build and freeze joint block designs during exact joint kappa optimization",
+            )
         })?;
         let theta0 = joint_setup.theta0();
 
@@ -5760,8 +5693,8 @@ where
         block_specs,
     )
     .map_err(|e| {
-        format!(
-            "failed to build and freeze joint block designs during exact joint kappa bootstrap: {e}"
+        FitFailure::from(e).context(
+            "failed to build and freeze joint block designs during exact joint kappa bootstrap",
         )
     })?;
     // The ρ half of the θ box is the domain the setup's builder derived over
@@ -5854,7 +5787,9 @@ where
     }
 
     let mut state = NBlockExactJointState {
-        cache: ExactJointDesignCache::new(data, cache_blocks, rho_dim, all_dims.clone())?,
+        // The realizers replay the designs frozen above (#2937).
+        cache: ExactJointDesignCache::new(data, cache_blocks, rho_dim, all_dims.clone())
+            .map_err(FitFailure::invariant)?,
         terminal_mode: None,
     };
 

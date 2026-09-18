@@ -2118,7 +2118,7 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
     // penalty topology matches the topology produced by every other build path
     // in this optimization. The spatial optimizer's own bootstrap
     // (`build_term_collection_designs_and_freeze_joint(data, &[marginalspec_boot,
-    // slopespec_boot])` inside `optimize_spatial_length_scale_exact_joint`)
+    // slopespec_boot])` inside `optimize_spatial_length_scale_exact_joint_typed`)
     // and every subsequent kappa-driven rebuild feed the basis builder the
     // captured `FrozenTransform` identifiability. Applying that captured
     // transform changes the exact coefficient chart of the penalty blocks.

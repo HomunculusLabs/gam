@@ -4309,11 +4309,12 @@ pub(crate) fn select_binomial_mean_link_wiggle_basis_from_pilot(
     pilot_fit: &UnifiedFitResult,
     wiggle_cfg: &WiggleBlockConfig,
     wiggle_penalty_orders: &[usize],
-) -> Result<SelectedWiggleBasis, String> {
+) -> Result<SelectedWiggleBasis, FitFailure> {
     let q_seed = pilot_design
         .apply(pilot_fit.beta.view())
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| assembly_failure(error.to_string()))?;
     select_wiggle_basis_from_seed(q_seed.view(), wiggle_cfg, wiggle_penalty_orders)
+        .map_err(wiggle_basis_failure)
 }
 
 pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(

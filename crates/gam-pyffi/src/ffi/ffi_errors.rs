@@ -1266,7 +1266,7 @@ mod fit_failure_dispatch_tests {
             ));
             assert!(integration.is_instance_of::<IntegrationError>(py));
 
-            let prose = raise(FitFailure::from("a helper's prose".to_string()));
+            let prose = raise(FitFailure::unclassified("a helper's prose"));
             assert!(prose.is_instance_of::<FitError>(py));
             for subclass_check in [
                 prose.is_instance_of::<FitConvergenceError>(py),

@@ -108,8 +108,8 @@ fn resolved_wiggle_inverse_link(
     spec: &LikelihoodSpec,
     fit: &UnifiedFitResult,
     fallback: &InverseLink,
-) -> Result<InverseLink, String> {
-    let resolved = match fit.fitted_link_state(spec).map_err(|e| e.to_string())? {
+) -> Result<InverseLink, FitFailure> {
+    let resolved = match fit.fitted_link_state(spec)? {
         FittedLinkState::Standard(Some(link)) => InverseLink::Standard(link),
         FittedLinkState::Standard(None) => fallback.clone(),
         FittedLinkState::LatentCLogLog { state } => InverseLink::LatentCLogLog(state),
@@ -117,7 +117,8 @@ fn resolved_wiggle_inverse_link(
         FittedLinkState::BetaLogistic { state, .. } => InverseLink::BetaLogistic(state),
         FittedLinkState::Mixture { state, .. } => InverseLink::Mixture(state),
     };
-    require_inverse_link_supports_joint_wiggle(&resolved, "standard link wiggle")?;
+    require_inverse_link_supports_joint_wiggle(&resolved, "standard link wiggle")
+        .map_err(FitFailure::input)?;
     Ok(resolved)
 }
 
@@ -659,7 +660,10 @@ pub(crate) fn fit_standard_model(
         request.family.response.clone(),
         wiggle_link_kind.clone(),
     )
-    .map_err(|error| format!("invalid resolved link-wiggle likelihood: {error}"))?;
+    .map_err(|error| {
+        // The link was resolved from the pilot's own fit (#2937).
+        FitFailure::invariant(format!("invalid resolved link-wiggle likelihood: {error}"))
+    })?;
     let selected_wiggle_basis = select_binomial_mean_link_wiggle_basis_from_pilot(
         &result.design,
         &result.fit,
@@ -2615,9 +2619,9 @@ fn fit_cause_specific_survival_transformation_custom(
     derivative_floor: f64,
     penalty_block_gamma_priors: &[(String, f64, f64)],
     persistent_warm_start_store: Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,
-) -> Result<SurvivalTransformationFitResult, String> {
+) -> Result<SurvivalTransformationFitResult, FitFailure> {
     let cause_count = crate::survival::cause_count_from_event_codes(spec.event_target.view())
-        .into_workflow_result()?;
+        .map_err(|err| FitFailure::raised(err.failure_category(), err.to_string()))?;
     if cause_count == 0 {
         return Err(WorkflowError::MissingDependency {
             reason: "cause-specific custom survival fit requires at least one cause".to_string(),
@@ -2648,23 +2652,23 @@ fn fit_cause_specific_survival_transformation_custom(
     let joint_design_charge = gam_runtime::resource::MemoryGovernor::global()
         .try_reserve_dense_f64_copies(n, p, 3, "cause-specific survival joint designs")
         .map_err(|error| {
-            format!("cause-specific survival: refusing three {n}x{p} joint designs: {error}")
+            FitFailure::input(format!(
+                "cause-specific survival: refusing three {n}x{p} joint designs: {error}"
+            ))
         })?;
-    let x_entry = std::sync::Arc::new(joint_time_covariate_design(
-        &prepared.time_design_entry,
-        Some(dense_cov_design),
-        p,
-    )?);
-    let x_exit = std::sync::Arc::new(joint_time_covariate_design(
-        &prepared.time_design_exit,
-        Some(dense_cov_design),
-        p,
-    )?);
-    let x_derivative = std::sync::Arc::new(joint_time_covariate_design(
-        &prepared.time_design_derivative_exit,
-        None,
-        p,
-    )?);
+    // The joint designs are assembled from the time and covariate designs above.
+    let x_entry = std::sync::Arc::new(
+        joint_time_covariate_design(&prepared.time_design_entry, Some(dense_cov_design), p)
+            .map_err(FitFailure::invariant)?,
+    );
+    let x_exit = std::sync::Arc::new(
+        joint_time_covariate_design(&prepared.time_design_exit, Some(dense_cov_design), p)
+            .map_err(FitFailure::invariant)?,
+    );
+    let x_derivative = std::sync::Arc::new(
+        joint_time_covariate_design(&prepared.time_design_derivative_exit, None, p)
+            .map_err(FitFailure::invariant)?,
+    );
 
     let mut family_blocks = Vec::with_capacity(cause_count);
     let mut block_specs = Vec::with_capacity(cause_count);
@@ -2732,7 +2736,9 @@ fn fit_cause_specific_survival_transformation_custom(
             nullspace_dims.push(block.nullspace_dim);
             initial_log_lambdas[penalty_idx] = gam_problem::checked_log_strength(block.lambda)
                 .map_err(|error| {
-                    format!("cause-specific survival penalty {penalty_idx} strength: {error}")
+                    FitFailure::numerical(format!(
+                        "cause-specific survival penalty {penalty_idx} strength: {error}"
+                    ))
                 })?;
         }
         let beta_start = beta0_flat.slice(s![cause * p..(cause + 1) * p]).to_owned();
@@ -2783,7 +2789,9 @@ fn fit_cause_specific_survival_transformation_custom(
         });
     }
 
-    let family = crate::survival::CauseSpecificRoystonParmarFamily::new(family_blocks)?;
+    // Its endpoint, block and constraint-size refusals are different kinds.
+    let family = crate::survival::CauseSpecificRoystonParmarFamily::new(family_blocks)
+        .map_err(FitFailure::unclassified)?;
     let fit_options = BlockwiseFitOptions {
         // Joint posterior prediction and CIF uncertainty consume the complete
         // cross-cause conditional covariance. Computing it here is part of the
@@ -2798,14 +2806,18 @@ fn fit_cause_specific_survival_transformation_custom(
         cause_count,
         penalty_blocks.len(),
         penalty_block_gamma_priors,
-    )?;
+    )
+    // The Gamma precision hyperpriors are the caller's configuration.
+    .map_err(FitFailure::input)?;
     let mut fit = crate::custom_family::fit_custom_family_arming_on_evidence_with_rho_prior(
         &family,
         &block_specs,
         &fit_options,
         rho_prior,
     )
-        .map_err(|err| format!("cause-specific survival custom-family fit failed: {err}"))?;
+        .map_err(|err| {
+            FitFailure::from(err).context("cause-specific survival custom-family fit failed")
+        })?;
     fit.likelihood_family = Some(LikelihoodSpec::royston_parmar());
     let time_basis = crate::survival::construction::SavedSurvivalTimeBasis::from_build(
         &spec.time_build,
@@ -2832,15 +2844,16 @@ fn fit_cause_specific_survival_transformation_custom(
         && spec.timewiggle.is_none()
     {
         let first_block = fit.blocks.first().ok_or_else(|| {
-            "cause-specific survival fit produced no coefficient blocks".to_string()
+            FitFailure::invariant("cause-specific survival fit produced no coefficient blocks")
         })?;
         let time_beta = first_block
             .beta
             .slice(s![..spec.time_build.x_exit_time.ncols()])
             .to_owned();
         fitted_weibull_baseline_from_linear_time_beta(&time_beta, spec.time_anchor).ok_or_else(|| {
-            "failed to recover fitted Weibull scale/shape from the cause-specific linear time coefficients"
-                .to_string()
+            FitFailure::numerical(
+                "failed to recover fitted Weibull scale/shape from the cause-specific linear time coefficients",
+            )
         })?
     } else {
         baseline_cfg
@@ -3222,7 +3235,9 @@ pub(crate) fn fit_survival_transformation_model(
     let dense_cov_design = std::sync::Arc::new(
         covariate_design
             .design
-            .try_to_dense_by_chunks("survival transformation covariate design")?,
+            // A design the process cannot hold is refused by its size (#2937).
+            .try_to_dense_by_chunks("survival transformation covariate design")
+            .map_err(FitFailure::input)?,
     );
     let p_cov = dense_cov_design.ncols();
     let cause_count = crate::survival::cause_count_from_event_codes(spec.event_target.view())
@@ -3242,7 +3257,10 @@ pub(crate) fn fit_survival_transformation_model(
                 &spec.time_build,
                 spec.timewiggle.as_ref(),
                 None,
-            )?;
+            )
+            // Baseline offsets, the derivative guard and the time wiggle each
+            // refuse for a different reason (#2937).
+            .map_err(FitFailure::unclassified)?;
             let mut eta_offset_entry = prepared.eta_offset_entry.clone();
             let mut eta_offset_exit = prepared.eta_offset_exit.clone();
             eta_offset_entry += &spec.covariate_offset;
@@ -3292,10 +3310,13 @@ pub(crate) fn fit_survival_transformation_model(
                 p_cov,
                 p_time_total,
             ) {
+                // A seed refuses a block with no usable Gram scale, a degenerate
+                // design the caller's data produced (#2937).
                 let log_lambda = crate::survival::marginal_slope::block_log_lambda_seeds(
                     &covariate_design.design,
                     [block.matrix],
-                )?[0];
+                )
+                .map_err(FitFailure::input)?[0];
                 penalty_blocks.push(PenaltyBlock {
                     matrix: block.matrix.clone(),
                     lambda: log_lambda.exp(),
@@ -3322,13 +3343,16 @@ pub(crate) fn fit_survival_transformation_model(
             // to copy each view again on every baseline-search evaluation (#2900).
             let dense_time_entry = prepared
                 .time_design_entry
-                .try_to_dense_by_chunks("survival transformation entry time design")?;
+                .try_to_dense_by_chunks("survival transformation entry time design")
+                .map_err(FitFailure::input)?;
             let dense_time_exit = prepared
                 .time_design_exit
-                .try_to_dense_by_chunks("survival transformation exit time design")?;
+                .try_to_dense_by_chunks("survival transformation exit time design")
+                .map_err(FitFailure::input)?;
             let dense_time_derivative = prepared
                 .time_design_derivative_exit
-                .try_to_dense_by_chunks("survival transformation derivative time design")?;
+                .try_to_dense_by_chunks("survival transformation derivative time design")
+                .map_err(FitFailure::input)?;
             let event_competing = Array1::<u8>::zeros(spec.event_target.len());
             // `spec.event_target` carries *cause labels* (0 = censored, k = cause k).
             // The shared baseline working model is a single-hazard Royston-Parmar
@@ -3522,7 +3546,10 @@ pub(crate) fn fit_survival_transformation_model(
                 })?;
                 Ok((cost, gradient))
             },
-        )?;
+        )
+        // The search returns its own verdict and its candidates' failures as
+        // one text (survival construction), so no category is known here.
+        .map_err(FitFailure::unclassified)?;
     }
 
     let (prepared, mut penalty_blocks, beta0, structural_lower_bounds, mut model) =
@@ -3540,8 +3567,7 @@ pub(crate) fn fit_survival_transformation_model(
             exact_derivative_guard,
             &spec.penalty_block_gamma_priors,
             persistent_warm_start_store.clone(),
-        )
-        .map_err(FitFailure::from);
+        );
     }
     // REML/LAML-select the time-smoothing λ (issue #563). With λ pinned at its
     // seed the monotone I-spline baseline oversmooths toward an affine
@@ -3603,7 +3629,9 @@ pub(crate) fn fit_survival_transformation_model(
         &penalty_blocks,
         &opts,
         expected_beta_len,
-    )?;
+    )
+    // The key hashes state this fit assembled.
+    .map_err(FitFailure::invariant)?;
     let mut opts = opts;
     // The final fixed-λ solve is the inner problem at the selected ρ, which
     // the selector has just solved and certified: start from that mode so the
@@ -3708,7 +3736,9 @@ pub(crate) fn fit_survival_transformation_model(
         survival_outer_certificate,
         survival_outer_hessian,
         survival_outer_gradient,
-    )?;
+    )
+    // Result assembly from the fit's own state (#2937).
+    .map_err(FitFailure::invariant)?;
 
     let time_base_ncols = spec.time_build.x_exit_time.ncols();
     let time_basis = crate::survival::construction::SavedSurvivalTimeBasis::from_build(

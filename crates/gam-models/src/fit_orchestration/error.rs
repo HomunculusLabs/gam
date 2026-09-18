@@ -332,8 +332,9 @@ pub enum FitFailure {
     /// A nested fit through the workflow boundary failed, e.g. a CTN stage fit.
     Workflow(Box<WorkflowError>),
     /// A failure raised in orchestration code, categorized where it is raised.
-    /// A `String` converted without a category lands here as
-    /// [`FailureCategory::Unclassified`], which is what it honestly is.
+    /// There is no conversion from text: a helper's text whose failures span
+    /// categories is raised as [`FailureCategory::Unclassified`] through
+    /// [`Self::unclassified`], at a call site that names it (#2937).
     Raised {
         category: FailureCategory,
         reason: String,
@@ -655,21 +656,6 @@ impl std::error::Error for FitFailure {
     }
 }
 
-/// Legacy `Result<_, String>` helpers inside a fit convert through `?`. A
-/// string names no category, so it is recorded as unclassified rather than
-/// guessed.
-impl From<String> for FitFailure {
-    fn from(reason: String) -> Self {
-        Self::raised(FailureCategory::Unclassified, reason)
-    }
-}
-
-impl From<&str> for FitFailure {
-    fn from(reason: &str) -> Self {
-        Self::raised(FailureCategory::Unclassified, reason)
-    }
-}
-
 impl From<EstimationError> for FitFailure {
     fn from(err: EstimationError) -> Self {
         Self::Estimation(Arc::new(err))
@@ -790,7 +776,7 @@ mod fit_failure_tests {
                 "SurvivalMarginalSlopeError::IntegrationFailed",
             ),
             (
-                FitFailure::from("a helper's prose".to_string()),
+                FitFailure::unclassified("a helper's prose"),
                 FailureCategory::Unclassified,
                 "FitFailure::Unclassified",
             ),

@@ -233,7 +233,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // Rebuild the probe designs from the frozen `joint_specs` so the probe's
     // penalty topology matches the topology produced by every other build path
     // in this optimization. The spatial optimizer's own bootstrap inside
-    // `optimize_spatial_length_scale_exact_joint` and every subsequent
+    // `optimize_spatial_length_scale_exact_joint_typed` and every subsequent
     // kappa-driven rebuild feed the basis builder the captured
     // `FrozenTransform` identifiability. Applying that captured transform
     // changes the coefficient chart in which every penalty is represented.

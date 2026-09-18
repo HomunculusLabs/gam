@@ -2247,7 +2247,7 @@ pub(super) fn run_two_block_exact_joint_optimize(
     let policy = gam_model_api::families::custom_family::OuterDerivativePolicy {
         capability: gam_problem::ExactOuterDerivativeOrder::Second,
     };
-    optimize_spatial_length_scale_exact_joint(
+    optimize_spatial_length_scale_exact_joint_typed(
         data,
         &[meanspec.clone(), noisespec.clone()],
         &[mean_terms, noise_terms],

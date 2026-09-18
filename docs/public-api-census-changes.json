@@ -4332,5 +4332,13 @@
     },
     "reason": "#2469: the pub(crate) normalize_sphere_matrix silently divided every row of the sphere response geometry and of sphere_frechet_mean by its norm, a second entry rule beside SphereManifold's UNIT_TOL. It becomes require_unit_sphere_rows, which refuses a row whose |‖y‖² − 1| exceeds gam_math::roundoff::unit_normalization_band, the band SphereManifold::require_unit now applies too, with the measured defect and the fix in the message.",
     "evidence": "At base be3343133604d5e5374cde0406cc728d847e2d23, git grep -n -w normalize_sphere_matrix finds its declaration at crates/gam-geometry/src/manifolds/sphere.rs:441 and its five callers at :467, :469, :536, :907 and :1017, all inside sphere.rs, all rewritten to require_unit_sphere_rows; nothing outside gam-geometry can name a pub(crate) item. Gate job 1271657 on gx4 (base 880d26d69a, exact tree a548e8bcdc) had public_api_census.py refuse exactly this removal, and source_removal_guard.py verified the three removals this commit's source-removal entry acknowledges."
+  },
+  {
+    "base": "ebc736505ce6241abfa76700f167638e560ae0d3",
+    "removed": {
+      "crates/gam-models/src/fit_orchestration/drivers/spatial_optimization.rs::optimize_spatial_length_scale_exact_joint": 1
+    },
+    "reason": "#2937 final slice: optimize_spatial_length_scale_exact_joint was the text wrapper over optimize_spatial_length_scale_exact_joint_typed. It took a fit closure returning String, converted that text into FitFailure::Unclassified and rendered the typed driver's failure back to text. Every production caller moved to the typed driver in the #2937 slices f554cf4063, e2fb2948a6 and 19143a1511 and in 3b92de22cc and 6fd360fb42, and the one test caller moves in this landing. With From<String> for FitFailure deleted in the same landing, the wrapper has no way to convert text.",
+    "evidence": "git grep -n 'optimize_spatial_length_scale_exact_joint(' at a99ab01898 finds only its test caller, design_assembly_constraint_tests.rs:2250, which this landing switches to optimize_spatial_length_scale_exact_joint_typed. Lane check sw1a job 1272252 at a99ab01898, with the wrapper deleted: the workspace --all-targets check and gam-pyffi --all-targets are RC 0."
   }
 ]
