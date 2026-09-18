@@ -798,7 +798,7 @@ impl ResidualEdit for MaskedOperator<'_> {
 pub enum RotationPath {
     /// `W(t) = I + U (R(tα) − I) Uᵀ`: a structured-edit coordinate that varies the
     /// angles. It is orthogonal up to the basis defect `δ = ‖UᵀU − I‖_F`, which
-    /// [`PlaneRotation::new`] bounds by a derived floor.
+    /// [`PlaneRotation::new`] bounds by its refusal floor.
     ///
     /// With `UᵀU = I + F`, the identity terms of `WᵀW` cancel because
     /// `(Rᵀ − I)(R − I) = 2I − R − Rᵀ`. That leaves `U (Rᵀ − I) F (R − I) Uᵀ`, so
@@ -822,16 +822,21 @@ pub struct PlaneRotation {
 }
 
 impl PlaneRotation {
-    /// Refuses a basis further from orthonormal than a stably orthogonalized
-    /// `d × 2k` basis can be. The floor has two parts.
-    /// - **Orthogonalization.** A backward-stable orthogonalization leaves each Gram
-    ///   entry within `max(d, 2k)·ε`, the convention of [`factor_singular_band`] at
-    ///   `σ = 1`. So `‖UᵀU − I‖_F ≤ 2k·max(d, 2k)·ε`.
+    /// Refuses a basis whose measured defect `δ = ‖UᵀU − I‖_F` exceeds the floor
+    /// `2k·max(d, 2k)·ε + γ_d ‖U‖_F²`. The floor has two parts, and only the second is
+    /// derived.
+    /// - **Orthogonalization, a convention.** `2k·max(d, 2k)·ε` is the `m·n·ε` band of
+    ///   [`factor_singular_band`] at `σ = 1`. It is not derived for this computation.
+    ///   Householder QR's bound `‖Q̂ − Q‖_F ≤ √n·γ̃_{mn}` (Higham, Thm 19.4) carries an
+    ///   unstated constant, so no constant-free floor exists for every stable
+    ///   orthogonalization. The test `householder_qr_bases_stay_under_the_plane_basis_floor`
+    ///   checks FaerQr bases at `d ∈ {8, 64, 512}` and `2k ∈ {2, 8, 32}` from inputs graded
+    ///   down to `1e-12`, and places the refusal at the floor itself.
     /// - **Forming `UᵀU`.** Each entry is an inner product of `d` terms. By
     ///   Cauchy–Schwarz the rounding is at most `γ_d ‖U‖_F²` in Frobenius norm.
     ///
-    /// An accepted basis keeps its measured defect `δ = ‖UᵀU − I‖_F ≤ floor`. Every
-    /// identity of the module holds for this edit up to `δ` (see [`RotationPath::Angle`]).
+    /// An accepted basis keeps its measured defect `δ ≤ floor`. Every identity of the
+    /// module holds for this edit up to `δ` (see [`RotationPath::Angle`]).
     pub fn new(basis: Array2<f64>, angles: Array1<f64>) -> Result<Self, OperatorRefusal> {
         if basis.ncols() % 2 != 0 {
             return Err(OperatorRefusal::OddPlaneBasis {
@@ -2241,5 +2246,88 @@ mod tests {
             mask_gauge_evidence(overflow.view(), &DeclaredGauge::Blocks(GaugeBlocks::new(&[2]).expect("one block"))),
             Err(OperatorRefusal::Evidence(EvidenceStatusError::NonFinite { .. }))
         ));
+    }
+
+    /// mpd-verify's review note: the floor's `m·n·ε` term is factor_singular_band's convention,
+    /// not a bound derived for this computation. This is evidence at the swept dimensions.
+    ///
+    /// - Sweep: Householder-QR bases from uniform draws with columns graded from 1 down to `10^e`,
+    ///   `e ∈ {0, −6, −12}`, at `d ∈ {8, 64, 512}` and `2k ∈ {2, 8, 32}` with `2k <= d`. Every
+    ///   one is accepted, and the largest `defect / floor` ratio is printed.
+    /// - Boundary: the refusal sits at the floor. At 512×32, column 0 is stretched by `s`. With
+    ///   `UᵀU = I + F` and `D = diag(s, 1, …)`, the stretched Gram deviation is
+    ///   `(D² − I) + D F D`, whose true norm lies within `s²‖F‖_F` of `s² − 1`. `‖F‖_F` is at most
+    ///   the measured defect plus `γ_d‖U‖_F²`, and the measured stretched defect is within
+    ///   `γ_d‖U_s‖_F²` of its true norm.
+    ///   - Below, `s² − 1 = floor₀/8`: the derived upper side is under production's floor, and it accepts.
+    ///   - Above, `s² − 1 = 2·floor₀`: the derived lower side is over production's floor, and it refuses.
+    #[test]
+    fn householder_qr_bases_stay_under_the_plane_basis_floor() {
+        let mut rng = StdRng::seed_from_u64(295_112);
+        let graded_qr_basis = |rng: &mut StdRng, dim: usize, internal: usize, exponent: f64| -> Array2<f64> {
+            let mut input = uniform_matrix(rng, dim, internal);
+            for (j, mut column) in input.columns_mut().into_iter().enumerate() {
+                let scale = 10f64.powf(exponent * j as f64 / (internal - 1) as f64);
+                column.mapv_inplace(|entry| entry * scale);
+            }
+            let q = input.qr().expect("Householder QR of a graded draw").0;
+            q.slice(s![.., 0..internal]).to_owned()
+        };
+        let mut largest_ratio = 0.0_f64;
+        for dim in [8, 64, 512] {
+            for internal in [2, 8, 32].into_iter().filter(|&internal| internal <= dim) {
+                for exponent in [0.0, -6.0, -12.0] {
+                    let basis = graded_qr_basis(&mut rng, dim, internal, exponent);
+                    let angles = Array1::from(vec![0.9; internal / 2]);
+                    match PlaneRotation::new(basis, angles) {
+                        Ok(rotation) => {
+                            largest_ratio = largest_ratio.max(rotation.orthonormality_defect() / rotation.orthonormality_floor());
+                        }
+                        Err(refusal) => {
+                            panic!("a Householder-QR basis {dim}×{internal} graded to 1e{exponent} was refused: {refusal:?}")
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("QR_FLOOR_RATIO largest defect/floor over the sweep: {largest_ratio:e}");
+        assert!(largest_ratio <= 1.0);
+
+        let (dim, internal) = (512, 32);
+        let basis = graded_qr_basis(&mut rng, dim, internal, 0.0);
+        let angles = Array1::from(vec![0.9; internal / 2]);
+        let unstretched = PlaneRotation::new(basis.clone(), angles.clone()).expect("the QR basis is accepted");
+        let (defect_0, floor_0) = (unstretched.orthonormality_defect(), unstretched.orthonormality_floor());
+        let gamma = accumulation_growth(dim);
+        let formation_0 = gamma * frobenius(&basis).powi(2);
+        // s = √(1 + excess); (s − 1)(s + 1) measures s² − 1 including the rounding of s.
+        let stretch = |excess: f64| {
+            let s = (1.0 + excess).sqrt();
+            let mut stretched = basis.clone();
+            stretched.column_mut(0).mapv_inplace(|entry| entry * s);
+            let s_sq_minus_1 = (s - 1.0) * (s + 1.0);
+            let deviation = s * s * (defect_0 + formation_0) + gamma * frobenius(&stretched).powi(2);
+            (PlaneRotation::new(stretched, angles.clone()), s_sq_minus_1, deviation)
+        };
+        let floor_of = |outcome: &Result<PlaneRotation, OperatorRefusal>| match outcome {
+            Ok(rotation) => rotation.orthonormality_floor(),
+            Err(OperatorRefusal::NonOrthonormalPlaneBasis { floor, .. }) => *floor,
+            Err(other) => panic!("unexpected refusal {other:?}"),
+        };
+
+        let (below, excess_below, deviation_below) = stretch(floor_0 / 8.0);
+        let floor_below = floor_of(&below);
+        let upper_side = excess_below + deviation_below;
+        assert!(upper_side <= floor_below, "fixture: upper side {upper_side:e} not under the floor {floor_below:e}");
+        assert!(below.is_ok(), "a basis derived under the floor was refused: {:?}", below.as_ref().err());
+
+        let (above, excess_above, deviation_above) = stretch(2.0 * floor_0);
+        let floor_above = floor_of(&above);
+        let lower_side = excess_above - deviation_above;
+        assert!(lower_side > floor_above, "fixture: lower side {lower_side:e} not over the floor {floor_above:e}");
+        assert!(
+            matches!(above, Err(OperatorRefusal::NonOrthonormalPlaneBasis { .. })),
+            "a basis derived over the floor was accepted"
+        );
     }
 }
