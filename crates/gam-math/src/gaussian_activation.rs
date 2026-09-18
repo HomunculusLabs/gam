@@ -455,6 +455,184 @@ pub fn pair_kernel(
     }
 }
 
+/// `∂K/∂v_x` and `∂K/∂v_y` of the pair kernel at fixed means and covariance, each with a first-order bound on its
+/// absolute rounding in [`PairKernel`]'s convention.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PairKernelVariancePartials {
+    /// `∂K/∂v_x = ½·E[σ″(X)·σ(Y)]`.
+    pub variance_x: f64,
+    /// `∂K/∂v_y = ½·E[σ(X)·σ″(Y)]`.
+    pub variance_y: f64,
+    /// A first-order bound on the absolute rounding of `variance_x`.
+    pub variance_x_rounding: f64,
+    /// A first-order bound on the absolute rounding of `variance_y`.
+    pub variance_y_rounding: f64,
+}
+
+/// The pair kernel's variance partials at fixed covariance, the input error a caller's computed law puts on `K`
+/// beyond [`PairKernel::covariance_derivative`]'s (#2946, fr-subspace's V band).
+///
+/// The joint density satisfies `∂p/∂Σ₁₁ = ½·∂²p/∂x²`, and translation gives `∂²/∂x² = ∂²/∂b²`, so
+/// `∂_v K = ½·E[σ″(X)·σ(Y)]` (and `∂_w K` symmetrically). Both closed forms read only one-dimensional smoothings.
+/// - **ReLU**, `σ″ = δ`: `∂_v K = ½·f_X(0)·E[σ(Y) | X = 0]`, with `f_X(0) = φ(b/√v)/√v` and `Y | X = 0 ~ N(m, s²)`,
+///   `m = c − r·b/v`, `s² = (vw − r²)/v` from the exactly carried residual. On a constant `X` (`v = 0`) the partial
+///   is 0 for `b ≠ 0`, and the kink `b = 0` is refused as [`GaussianActivationError::UnsmoothedReluKink`].
+/// - **Exact GELU**, `σ″(x) = (2 − x²)·φ(x)`: tilting by `φ` gives
+///   `φ(x)·N(x; b, v) = N(b; 0, A)·N(x; b/A, v/A)` with `A = 1 + v`, and `Y | X` is unchanged. So under the tilt
+///   `Y′ ~ N(m′, s′²)` with `m′ = c − r·b/A` and `s′² = (w + (vw − r²))/A`, and `Cov(X′, Y′) = r/A`. Stein's lemma
+///   applied twice then gives
+///   `∂_v K = ½·φ(b/√A)/√A·[(2 − b²/A² − v/A)·T − 2(b/A)(r/A)·T′ − (r/A)²·T″]`, where `T^{(k)}` are the exact
+///   GELU's smoothing and its first two mean-derivatives at `(m′, s′²)`. By the same tilt,
+///   `T″ = φ(m′/S)/S·(2 − m′²/S⁴ − s′²/S²)` with `S² = 1 + s′²`.
+/// - **Rounding.** The bounded forms carry their own rounding. `m`'s rounding enters through the sups of the
+///   activation's derivatives, since `|∂_m T^{(k)}| ≤ sup|σ^{(k+1)}|` (see [`exact_gelu_derivative_suprema`]).
+pub fn pair_kernel_variance_partials(
+    activation: GaussianActivation,
+    pair: PreactivationPair,
+) -> Result<PairKernelVariancePartials, GaussianActivationError> {
+    validate_finite(pair.mean_x)?;
+    validate_finite(pair.mean_y)?;
+    let law = project_covariance(
+        pair.variance_x,
+        pair.variance_y,
+        pair.covariance,
+        pair.covariance_rounding,
+    )?;
+    let variance_x = variance_partial(
+        activation,
+        [pair.mean_x, pair.mean_y],
+        [pair.variance_x, pair.variance_y],
+        law,
+    )?;
+    let variance_y = variance_partial(
+        activation,
+        [pair.mean_y, pair.mean_x],
+        [pair.variance_y, pair.variance_x],
+        law,
+    )?;
+    Ok(PairKernelVariancePartials {
+        variance_x: variance_x.value,
+        variance_y: variance_y.value,
+        variance_x_rounding: variance_x.bound,
+        variance_y_rounding: variance_y.bound,
+    })
+}
+
+/// `½·E[σ″(X)·σ(Y)]` for `X ~ N(means[0], variances[0])` and `Y ~ N(means[1], variances[1])` with the projected
+/// covariance (see [`pair_kernel_variance_partials`]).
+fn variance_partial(
+    activation: GaussianActivation,
+    means: [f64; 2],
+    variances: [f64; 2],
+    law: ProjectedCovariance,
+) -> Result<Bounded, GaussianActivationError> {
+    let [mean_x, mean_y] = means;
+    let [variance_x, variance_y] = variances;
+    let half = Bounded::exact(0.5);
+    let location_x = Bounded::exact(mean_x);
+    let location_y = Bounded::exact(mean_y);
+    let covariance = Bounded::exact(law.covariance);
+    match activation {
+        GaussianActivation::Relu => {
+            if variance_x == 0.0 {
+                return if mean_x == 0.0 {
+                    Err(GaussianActivationError::UnsmoothedReluKink { order: 2 })
+                } else {
+                    Ok(Bounded::exact(0.0))
+                };
+            }
+            let spread_x = Bounded::exact(variance_x);
+            let root_x = spread_x.sqrt();
+            let density = bounded_normal_pdf(location_x.div(root_x)).div(root_x);
+            let conditional_mean = location_y.sub(covariance.mul(location_x).div(spread_x));
+            let conditional_variance = bounded_residual(law).div(spread_x);
+            let conditional = if conditional_variance.value == 0.0 {
+                Bounded {
+                    value: conditional_mean.value.max(0.0),
+                    bound: conditional_mean.bound + conditional_variance.bound.sqrt(),
+                }
+            } else {
+                let unit = relu_smoothed_unit(conditional_mean.value, conditional_variance.sqrt());
+                // |∂_m E[σ(m + sE)]| = Φ(m/s) ≤ 1 carries the conditional mean's rounding.
+                Bounded {
+                    value: unit.value.value,
+                    bound: unit.value.bound + conditional_mean.bound,
+                }
+            };
+            Ok(half.mul(density).mul(conditional))
+        }
+        GaussianActivation::ExactGelu => {
+            let one = Bounded::exact(1.0);
+            let spread_x = Bounded::exact(variance_x);
+            let total = one.add(spread_x);
+            let root_total = total.sqrt();
+            let density = bounded_normal_pdf(location_x.div(root_total)).div(root_total);
+            let tilted_mean = location_y.sub(covariance.mul(location_x).div(total));
+            let tilted_variance = Bounded::exact(variance_y).add(bounded_residual(law)).div(total);
+            let (unit, smoothed_total, smoothed_root) =
+                exact_gelu_smoothed_unit(tilted_mean.value, tilted_variance);
+            let reduced = tilted_mean.div(smoothed_total);
+            let curvature = bounded_normal_pdf(tilted_mean.div(smoothed_root))
+                .div(smoothed_root)
+                .mul(
+                    Bounded::exact(2.0)
+                        .sub(reduced.mul(reduced))
+                        .sub(tilted_variance.div(smoothed_total)),
+                );
+            let [slope_sup, curvature_sup, third_sup] = exact_gelu_derivative_suprema();
+            let drift = tilted_mean.bound;
+            let smoothed = Bounded {
+                value: unit.value.value,
+                bound: unit.value.bound + slope_sup * drift,
+            };
+            let slope = Bounded {
+                value: unit.slope.value,
+                bound: unit.slope.bound + curvature_sup * drift,
+            };
+            let curvature = Bounded {
+                value: curvature.value,
+                bound: curvature.bound + third_sup * drift,
+            };
+            let scaled_mean = location_x.div(total);
+            let scaled_covariance = covariance.div(total);
+            let bracket = Bounded::exact(2.0)
+                .sub(scaled_mean.mul(scaled_mean))
+                .sub(spread_x.div(total))
+                .mul(smoothed)
+                .sub(Bounded::exact(2.0).mul(scaled_mean).mul(scaled_covariance).mul(slope))
+                .sub(scaled_covariance.mul(scaled_covariance).mul(curvature));
+            Ok(half.mul(density).mul(bracket))
+        }
+        GaussianActivation::Silu => Err(GaussianActivationError::NoClosedForm { activation }),
+    }
+}
+
+/// Upper bounds on `sup|σ′|`, `sup|σ″|` and `sup|σ‴|` for the exact GELU `σ(x) = x·Φ(x)`, each with its evaluation's
+/// rounding added.
+/// - `σ′ = Φ + xφ` peaks at `x = √2`, where `σ″ = (2 − x²)φ` vanishes.
+/// - `|σ″|` peaks at the origin, `2φ(0)`: `0 ≤ (2 − x²)φ ≤ 2φ(0)` on `|x| ≤ √2`, and `|x² − 2|·φ(x)` is at most
+///   `2φ(2) < 2φ(0)` beyond.
+/// - `σ‴ = (x³ − 4x)φ` has its extrema where `x⁴ − 7x² + 4 = 0`, i.e. `x² = (7 ∓ √33)/2`. The inner root gives the
+///   larger magnitude, `|σ‴(0.7925…)| = 0.780…`, against `0.0986…` at the outer.
+fn exact_gelu_derivative_suprema() -> [f64; 3] {
+    let slope_point = Bounded::exact(std::f64::consts::SQRT_2);
+    let slope = bounded_normal_cdf(slope_point).add(slope_point.mul(bounded_normal_pdf(slope_point)));
+    let curvature = Bounded::exact(2.0).mul(bounded_normal_pdf(Bounded::exact(0.0)));
+    let third_point = Bounded::exact(7.0)
+        .sub(Bounded::exact(33.0).sqrt())
+        .mul(Bounded::exact(0.5))
+        .sqrt();
+    let cube = third_point.mul(third_point).mul(third_point);
+    let third = cube
+        .sub(Bounded::exact(4.0).mul(third_point))
+        .mul(bounded_normal_pdf(third_point));
+    [
+        slope.value.abs() + slope.bound,
+        curvature.value.abs() + curvature.bound,
+        third.value.abs() + third.bound,
+    ]
+}
+
 /// A pre-activation covariance on the Cauchy-Schwarz interval of its variances.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProjectedCovariance {
@@ -4059,6 +4237,107 @@ mod tests {
             "Φ₂ at (−3, −3, 0.5) claims {:?} outside the certified region",
             outside.contract
         );
+    }
+
+    #[test]
+    fn variance_partials_match_richardson_checked_differences_of_the_kernel() {
+        // ∂_v K at fixed means and covariance against central differences of pair_kernel in v, the step then halved.
+        // Once the difference converges quadratically, |coarse − fine| bounds the finer one's truncation, and each
+        // kernel's rounding enters divided by 2h. Biased, zero-mean and strongly correlated laws, both activations,
+        // both variances.
+        let laws: [(f64, f64, f64, f64, f64); 4] = [
+            (0.4, -0.3, 1.0, 1.5, 0.5),
+            (0.0, 0.0, 1.0, 2.0, -0.6),
+            (-1.2, 0.8, 0.5, 0.7, 0.1),
+            (1.5, 1.0, 2.0, 1.0, 1.2),
+        ];
+        let difference = |activation: GaussianActivation, pair: PreactivationPair, along_x: bool, step: f64| {
+            let shifted = |sign: f64| {
+                let moved = if along_x {
+                    PreactivationPair { variance_x: pair.variance_x + sign * step, ..pair }
+                } else {
+                    PreactivationPair { variance_y: pair.variance_y + sign * step, ..pair }
+                };
+                pair_kernel(activation, moved).expect("pair kernel near the law")
+            };
+            let (up, down) = (shifted(1.0), shifted(-1.0));
+            (
+                (up.value - down.value) / (2.0 * step),
+                (up.value_rounding + down.value_rounding) / (2.0 * step),
+            )
+        };
+        let mut compared = 0_usize;
+        for activation in [GaussianActivation::Relu, GaussianActivation::ExactGelu] {
+            for (mean_x, mean_y, variance_x, variance_y, covariance) in laws {
+                let pair = PreactivationPair {
+                    mean_x,
+                    mean_y,
+                    variance_x,
+                    variance_y,
+                    covariance,
+                    covariance_rounding: 0.0,
+                };
+                let partials =
+                    pair_kernel_variance_partials(activation, pair).expect("variance partials at a smooth law");
+                for (along_x, variance, partial, rounding) in [
+                    (true, variance_x, partials.variance_x, partials.variance_x_rounding),
+                    (false, variance_y, partials.variance_y, partials.variance_y_rounding),
+                ] {
+                    let step = 1.0e-3 * variance;
+                    let (coarse, _) = difference(activation, pair, along_x, step);
+                    let (fine, fine_rounding) = difference(activation, pair, along_x, 0.5 * step);
+                    let tolerance = (coarse - fine).abs() + fine_rounding + rounding;
+                    assert!(
+                        (partial - fine).abs() <= tolerance && tolerance < 1.0e-4 * fine.abs().max(1.0e-3),
+                        "{activation:?} ∂K/∂v_{} at b = {mean_x}, c = {mean_y}, v = {variance_x}, w = {variance_y}, r = {covariance}: {partial} against the difference {fine} (tolerance {tolerance:e})",
+                        if along_x { "x" } else { "y" }
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 16);
+        // Positive controls at the first law, where r ≠ 0 and the means are nonzero:
+        // - exact GELU without the Stein cross term −2(b/A)(r/A)·T′;
+        // - ReLU with the unconditional mean c in place of the regression mean c − r·b/v.
+        // Each misses the difference, so the check above resolves both terms.
+        let (mean_x, mean_y, variance_x, variance_y, covariance) = laws[0];
+        let pair = PreactivationPair {
+            mean_x,
+            mean_y,
+            variance_x,
+            variance_y,
+            covariance,
+            covariance_rounding: 0.0,
+        };
+        let total = 1.0 + variance_x;
+        let tilted_mean = mean_y - covariance * mean_x / total;
+        let tilted_variance = (variance_y + (variance_x * variance_y - covariance * covariance)) / total;
+        let slope = smoothing(GaussianActivation::ExactGelu, tilted_mean, tilted_variance, 2)[1];
+        let gelu = pair_kernel_variance_partials(GaussianActivation::ExactGelu, pair).expect("GELU partials");
+        let without_cross = gelu.variance_x
+            + normal_pdf(mean_x / total.sqrt()) / total.sqrt() * (mean_x / total) * (covariance / total) * slope;
+        let relu = pair_kernel_variance_partials(GaussianActivation::Relu, pair).expect("ReLU partials");
+        let unconditional = 0.5 * normal_pdf(mean_x / variance_x.sqrt()) / variance_x.sqrt()
+            * smoothing(
+                GaussianActivation::Relu,
+                mean_y,
+                (variance_x * variance_y - covariance * covariance) / variance_x,
+                1,
+            )[0];
+        for (activation, control, partial) in [
+            (GaussianActivation::ExactGelu, without_cross, gelu.variance_x),
+            (GaussianActivation::Relu, unconditional, relu.variance_x),
+        ] {
+            let step = 1.0e-3 * variance_x;
+            let (coarse, _) = difference(activation, pair, true, step);
+            let (fine, fine_rounding) = difference(activation, pair, true, 0.5 * step);
+            let tolerance = (coarse - fine).abs() + fine_rounding;
+            assert!(
+                (control - fine).abs() > tolerance && (partial - fine).abs() < (control - fine).abs(),
+                "{activation:?}: the control {control} is not rejected against {fine} (tolerance {tolerance:e})"
+            );
+        }
     }
 
     #[test]
