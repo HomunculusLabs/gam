@@ -178,6 +178,33 @@ impl std::fmt::Display for ResidualRepairRefusal {
 
 impl std::error::Error for ResidualRepairRefusal {}
 
+/// A refused block reaches the fit boundary under the category of its reason. A
+/// contract the request or its data did not meet is `Input`. A centring test or
+/// joint law that could not be evaluated carries its cause only as prose, so it
+/// stays `Unclassified` rather than guessed.
+impl From<ResidualRepairRefusal> for crate::fit_orchestration::FitFailure {
+    fn from(refusal: ResidualRepairRefusal) -> Self {
+        let category = match &refusal {
+            ResidualRepairRefusal::ColumnNotCentred { .. }
+            | ResidualRepairRefusal::ColumnNonFinite { .. }
+            | ResidualRepairRefusal::ColumnConstant { .. }
+            | ResidualRepairRefusal::WidthUnsupported { .. }
+            | ResidualRepairRefusal::Empty
+            | ResidualRepairRefusal::RowCountMismatch { .. }
+            | ResidualRepairRefusal::FlexBlocksUnsupported
+            | ResidualRepairRefusal::LearnedFrailtyUnsupported
+            | ResidualRepairRefusal::InfluenceAbsorberUnsupported => {
+                gam_problem::FailureCategory::Input
+            }
+            ResidualRepairRefusal::CentringTestUnavailable { .. }
+            | ResidualRepairRefusal::JointCovarianceUnavailable { .. } => {
+                gam_problem::FailureCategory::Unclassified
+            }
+        };
+        Self::raised(category, refusal.to_string())
+    }
+}
+
 /// The residual block as the caller supplies it: named columns, already
 /// centred on the reference law, one row per fitted observation.
 #[derive(Clone, Debug)]
@@ -1360,6 +1387,29 @@ mod residual_repair_kernel_tests {
         let scale = sigma[[0, 0]].sqrt();
         sigma.mapv_inplace(|v| v / (scale * scale));
         MarginalSlopeCovariance::full(sigma).expect("SPD covariance")
+    }
+
+    #[test]
+    fn refusals_reach_the_fit_boundary_under_their_category() {
+        use crate::fit_orchestration::FitFailure;
+        use gam_problem::FailureCategory;
+        for refusal in [
+            ResidualRepairRefusal::FlexBlocksUnsupported,
+            ResidualRepairRefusal::LearnedFrailtyUnsupported,
+            ResidualRepairRefusal::InfluenceAbsorberUnsupported,
+            ResidualRepairRefusal::ColumnConstant {
+                column: "r1".to_string(),
+            },
+        ] {
+            let text = refusal.to_string();
+            let failure = FitFailure::from(refusal);
+            assert_eq!(failure.category(), FailureCategory::Input, "{text}");
+            assert_eq!(failure.to_string(), text);
+        }
+        let unevaluated = FitFailure::from(ResidualRepairRefusal::JointCovarianceUnavailable {
+            reason: "not SPD".to_string(),
+        });
+        assert_eq!(unevaluated.category(), FailureCategory::Unclassified);
     }
 
     /// A skewed finite law of the score: a discretised `exp(0.7·u)`,

@@ -2204,21 +2204,20 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         None => None,
         Some(residual) => {
             if spec.score_warp.is_some() || spec.link_dev.is_some() {
-                return Err(ResidualRepairRefusal::FlexBlocksUnsupported.to_string());
+                return Err(ResidualRepairRefusal::FlexBlocksUnsupported.into());
             }
             if sigma_learnable {
-                return Err(ResidualRepairRefusal::LearnedFrailtyUnsupported.to_string());
+                return Err(ResidualRepairRefusal::LearnedFrailtyUnsupported.into());
             }
             let a_block = conditioning_dense
                 .as_ref()
-                .ok_or_else(|| ResidualRepairRefusal::InfluenceAbsorberUnsupported.to_string())?;
+                .ok_or(ResidualRepairRefusal::InfluenceAbsorberUnsupported)?;
             let runtime = ResidualBlockRuntime::fit(
                 residual,
                 z_train.view(),
                 spec.weights.view(),
                 a_block.view(),
-            )
-            .map_err(|refusal| refusal.to_string())?;
+            )?;
             log::info!(
                 "[BMS residual repair] {} centred column(s) admitted; joint (z, r) covariance is {}",
                 runtime.width(),
