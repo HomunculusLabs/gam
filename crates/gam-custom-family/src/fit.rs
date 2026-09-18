@@ -2793,6 +2793,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         // gradient and skip the full k²·n·p² coupled-joint LAML gradient assembly.
         // A value probe seeds nothing: only an accepted iterate's mode does (#2668).
         if matches!(order, OuterEvalOrder::Value) {
+            let seed_identity = crate::warm_start::SeedIdentity::of(outer.seed_for(rho));
             let warm_ref = if force_cold {
                 canonical_seed.as_ref()
             } else {
@@ -2810,6 +2811,11 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             ) {
                 Ok(eval) if eval.inner_converged && eval.objective.is_finite() => {
                     crate::warm_start::publish_outer_selected_evaluation(&eval);
+                    // The gradient at this θ starts from the same seed and would
+                    // re-derive this mode; it is served there instead (#979).
+                    if !force_cold {
+                        outer.record_value_probe(rho, seed_identity, eval.warm_start.clone());
+                    }
                     outer.last_criterion_rank = eval.criterion_rank;
                     let inner_beta_hint = Some(Array1::from_iter(
                         eval.warm_start
@@ -3027,6 +3033,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             // reads the seed, and the probe itself never replaces it.
             outer.adopt_accepted_steps();
             outer.last_criterion_rank = None;
+            let seed_identity = crate::warm_start::SeedIdentity::of(outer.seed_for(rho));
             let warm_ref = if force_cold {
                 canonical_seed.as_ref()
             } else {
@@ -3044,6 +3051,11 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             ) {
                 Ok(eval) if eval.inner_converged && eval.objective.is_finite() => {
                     crate::warm_start::publish_outer_selected_evaluation(&eval);
+                    // The gradient at this θ starts from the same seed and would
+                    // re-derive this mode; it is served there instead (#979).
+                    if !force_cold {
+                        outer.record_value_probe(rho, seed_identity, eval.warm_start.clone());
+                    }
                     outer.last_criterion_rank = eval.criterion_rank;
                     outer.last_error = None;
                     Ok(eval.objective)

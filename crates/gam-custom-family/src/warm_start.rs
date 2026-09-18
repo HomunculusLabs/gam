@@ -1273,6 +1273,18 @@ pub(crate) struct CustomOuterState {
     /// seeds β from it. One mode per walk, not per iterate: inside a walk the
     /// incumbent's own θ is served by `warm_cache`.
     pub(crate) walk_endpoints: Vec<(Vec<u64>, ConstrainedWarmStart)>,
+    /// The converged mode of the latest value probe, filed under the bits of its θ and
+    /// the identity of the seed it was solved from (#979).
+    ///
+    /// A line search prices a trial θ by value, then asks for the gradient at the same θ,
+    /// and both lanes start from the same seed. The second lane's inner solve therefore
+    /// re-derives this mode: on the n=2000 BMS flex fit, 12 value/gradient pairs at 12 θ,
+    /// every pair with matching cycle counts (job 1244570). The mode is served only at
+    /// bitwise that θ, and only while [`Self::seed_for`] still returns a seed of the same
+    /// identity. So it seeds no other θ (#2668), and a seed that moved never inherits it.
+    /// Like a walk endpoint it is a start, not a value: the inner solve reuses it only
+    /// when its own same-ρ check accepts it.
+    pub(crate) value_probe: Option<ValueProbeMode>,
     /// Kept rank of the criterion the most recent successful evaluation priced (#2765),
     /// published to the outer search through `OuterObjective::criterion_rank`.
     pub(crate) last_criterion_rank: Option<usize>,
@@ -1280,6 +1292,38 @@ pub(crate) struct CustomOuterState {
 
 fn theta_bits(theta: &Array1<f64>) -> Vec<u64> {
     theta.iter().map(|value| value.to_bits()).collect()
+}
+
+/// What an inner solve's result depends on in its seed: the bits of the seed's θ, block
+/// coefficients and active sets, and whose objective a carried cached mode was solved
+/// for. Two solves at one θ from seeds of one identity are one deterministic computation.
+#[derive(PartialEq)]
+pub(crate) struct SeedIdentity {
+    theta: Vec<u64>,
+    block_beta: Vec<Vec<u64>>,
+    active_sets: Vec<Option<Vec<usize>>>,
+    cached_objective: Option<crate::assembly::InnerObjectiveState>,
+}
+
+impl SeedIdentity {
+    pub(crate) fn of(seed: Option<&ConstrainedWarmStart>) -> Option<Self> {
+        seed.map(|seed| Self {
+            theta: theta_bits(&seed.rho),
+            block_beta: seed.block_beta.iter().map(theta_bits).collect(),
+            active_sets: seed.active_sets.clone(),
+            cached_objective: seed
+                .cached_inner
+                .as_ref()
+                .map(|cached| cached.objective_state.clone()),
+        })
+    }
+}
+
+/// A converged value probe's mode with the θ it priced and the seed it was solved from.
+pub(crate) struct ValueProbeMode {
+    theta: Vec<u64>,
+    seed: Option<SeedIdentity>,
+    mode: ConstrainedWarmStart,
 }
 
 impl CustomOuterState {
@@ -1304,6 +1348,7 @@ impl CustomOuterState {
             pending_first_order_mode: None,
             walk_iterate: None,
             walk_endpoints: Vec::new(),
+            value_probe: None,
             last_criterion_rank: None,
         }
     }
@@ -1311,7 +1356,7 @@ impl CustomOuterState {
     /// The seed of one outer evaluation at `theta`: the certified mode a walk
     /// accepted at `theta` when there is one, otherwise the incumbent's (#2627,
     /// #2668).
-    pub(crate) fn warm_start_for(&self, theta: &Array1<f64>) -> Option<&ConstrainedWarmStart> {
+    pub(crate) fn seed_for(&self, theta: &Array1<f64>) -> Option<&ConstrainedWarmStart> {
         let key = theta_bits(theta);
         let endpoint = self
             .walk_endpoints
@@ -1319,6 +1364,34 @@ impl CustomOuterState {
             .find(|(bits, _)| *bits == key)
             .map(|(_, mode)| mode);
         screened_outer_warm_start(endpoint.or(self.warm_cache.as_ref()), theta)
+    }
+
+    /// The start of one outer evaluation at `theta`: the latest value probe's mode when
+    /// it priced bitwise this θ from a seed of the identity [`Self::seed_for`] returns now,
+    /// otherwise that seed (#979).
+    pub(crate) fn warm_start_for(&self, theta: &Array1<f64>) -> Option<&ConstrainedWarmStart> {
+        let seed = self.seed_for(theta);
+        match &self.value_probe {
+            Some(probe) if probe.theta == theta_bits(theta) && probe.seed == SeedIdentity::of(seed) => {
+                Some(&probe.mode)
+            }
+            _ => seed,
+        }
+    }
+
+    /// File a converged value probe's mode at `theta`, solved from a seed of identity
+    /// `seed` (#979). It replaces the previous probe's.
+    pub(crate) fn record_value_probe(
+        &mut self,
+        theta: &Array1<f64>,
+        seed: Option<SeedIdentity>,
+        mode: ConstrainedWarmStart,
+    ) {
+        self.value_probe = Some(ValueProbeMode {
+            theta: theta_bits(theta),
+            seed,
+            mode,
+        });
     }
 
     /// Observe the shared cold-reeval pulse (consuming it) and the sticky

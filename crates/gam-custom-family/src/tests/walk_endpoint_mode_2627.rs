@@ -205,3 +205,132 @@ fn terminal_installations_reuse_the_walks_certified_mode_after_reset_2627() {
         Some(final_theta),
     );
 }
+
+/// #979: a line search prices a trial θ by value and then asks for its gradient at the
+/// same θ, and both lanes start from one seed. So the gradient lane's inner solve
+/// re-derived the mode the value probe had just converged to. On the n=2000 BMS flex fit
+/// that was 12 value/gradient pairs whose cycle counts matched lane for lane: 7.48 s of
+/// solve wall (job 1244570, arm B). The probe's mode is now served to the gradient lane at
+/// bitwise that θ, while the seed it was solved from is still the seed. This replays one
+/// trial step against `CustomOuterState` and counts the family evaluations.
+#[test]
+fn a_value_probe_hands_its_mode_to_the_gradient_at_the_same_theta_979() {
+    let evaluations = Arc::new(AtomicUsize::new(0));
+    let family = CountingGaussianFamily {
+        gaussian: OneBlockGaussianFamily {
+            y: array![0.3, -1.1, 0.8, 2.0, -0.4, 1.5],
+        },
+        evaluations: Arc::clone(&evaluations),
+    };
+    let specs = vec![ParameterBlockSpec {
+        name: "value_probe".to_string(),
+        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![
+            [1.0, -1.0],
+            [1.0, -0.6],
+            [1.0, -0.2],
+            [1.0, 0.2],
+            [1.0, 0.6],
+            [1.0, 1.0],
+        ])),
+        offset: Array1::zeros(6),
+        penalties: vec![PenaltyMatrix::Dense(Array2::<f64>::eye(2))],
+        nullspace_dims: vec![0],
+        initial_log_lambdas: array![0.0],
+        initial_beta: Some(Array1::zeros(2)),
+        gauge_priority: 100,
+        jacobian_callback: None,
+        stacked_design: None,
+        stacked_offset: None,
+    }];
+    let options = BlockwiseFitOptions {
+        compute_covariance: false,
+        ..BlockwiseFitOptions::default()
+    };
+    let penalty_counts = validate_blockspecs(&specs).expect("valid value-probe spec");
+    let layout = penalty_label_layout_with_joint(&specs, penalty_counts, Vec::new())
+        .expect("valid value-probe layout");
+    let evaluate = |seed: Option<&ConstrainedWarmStart>, theta: &Array1<f64>, mode: EvalMode| {
+        evaluations.store(0, Ordering::Relaxed);
+        let eval = outerobjectivegradienthessian_labeled(
+            &family,
+            &specs,
+            &options,
+            &layout,
+            theta,
+            seed,
+            &gam_problem::RhoPrior::Flat,
+            mode,
+        )
+        .expect("value-probe outer evaluation");
+        assert!(eval.inner_converged, "the Gaussian inner solve converges at {theta:?}");
+        (eval, evaluations.load(Ordering::Relaxed))
+    };
+    let bits = |values: &Array1<f64>| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+
+    let accepted_steps = Arc::new(AtomicUsize::new(0));
+    let mut state = CustomOuterState::new_with_cold_signal(
+        None,
+        Arc::new(AtomicBool::new(false)),
+        Arc::clone(&accepted_steps),
+    );
+    // The walk's starting iterate, accepted as soon as it is evaluated.
+    let start_theta = array![0.5];
+    state.adopt_accepted_steps();
+    let start = evaluate(state.warm_start_for(&start_theta), &start_theta, EvalMode::ValueAndGradient).0;
+    state.record_first_order_mode(start.warm_start.clone());
+
+    // A trial θ, priced first by the line search's value probe.
+    let trial_theta = array![1.5];
+    state.adopt_accepted_steps();
+    let seed_identity = crate::warm_start::SeedIdentity::of(state.seed_for(&trial_theta));
+    let probe = evaluate(state.warm_start_for(&trial_theta), &trial_theta, EvalMode::ValueOnly).0;
+    state.record_value_probe(&trial_theta, seed_identity, probe.warm_start.clone());
+
+    // Controls at the trial θ. The negative control is what the gradient lane did: solve
+    // from the seed. The positive control solves from the probe's mode, a same-ρ reuse.
+    let seed = state.seed_for(&trial_theta).cloned();
+    let (fresh, fresh_count) = evaluate(seed.as_ref(), &trial_theta, EvalMode::ValueAndGradient);
+    let (_, reuse_count) =
+        evaluate(Some(&probe.warm_start), &trial_theta, EvalMode::ValueAndGradient);
+    assert!(
+        fresh_count > reuse_count,
+        "the evaluation count must tell a solve from the seed ({fresh_count}) from a reuse \
+         ({reuse_count}), or this test cannot see the repeated solve",
+    );
+
+    // The gradient lane: it must cost a reuse and price what a solve from the seed prices,
+    // bit for bit.
+    state.adopt_accepted_steps();
+    let (lane, lane_count) =
+        evaluate(state.warm_start_for(&trial_theta), &trial_theta, EvalMode::ValueAndGradient);
+    assert_eq!(
+        lane_count, reuse_count,
+        "the gradient lane made {lane_count} family evaluations; a reuse of the probe's mode \
+         makes {reuse_count} and a solve from the seed {fresh_count}",
+    );
+    assert_eq!(lane.objective.to_bits(), fresh.objective.to_bits());
+    assert_eq!(bits(&lane.gradient), bits(&fresh.gradient));
+    assert_eq!(
+        bits(&lane.inner.block_states[0].beta),
+        bits(&fresh.inner.block_states[0].beta),
+    );
+
+    // The probe seeds no other θ: every other θ still starts from the incumbent.
+    let other_theta = array![2.0];
+    assert_eq!(
+        state.warm_start_for(&other_theta).map(|seed| seed.rho.clone()),
+        Some(start_theta.clone()),
+    );
+
+    // A seed that moved never inherits the probe. Once the trial step is accepted the seed
+    // is the gradient lane's own mode, and that is what the trial θ is served.
+    state.record_first_order_mode(lane.warm_start.clone());
+    accepted_steps.fetch_add(1, Ordering::Relaxed);
+    state.adopt_accepted_steps();
+    let served = state.warm_start_for(&trial_theta).expect("the accepted mode seeds the trial θ");
+    let moved_seed = state.seed_for(&trial_theta).expect("the accepted mode is the seed");
+    assert!(
+        std::ptr::eq(served, moved_seed),
+        "after the seed moved, the trial θ must be served the new seed, not the older probe",
+    );
+}
