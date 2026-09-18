@@ -74,7 +74,7 @@ The fitted `Model` public workflow methods/properties are `predict`,
 `smoothing_parameters`, `check`, `curvature`, `smooth_significance`,
 `basis_check`, `debiased_functional`, `report`, `sample`, `sample_replicates`,
 `iter_replicates`, `design_matrix`, `design_matrix_array`, `difference_smooth`,
-`partial_dependence`, `variance_share`, `evidence`, `evidence_ratio_vs`,
+`partial_dependence`, `variance_share`, `conditional_aic`, `evidence_ratio_vs`,
 `diagnose`, `plot`, persistence methods, group extension, and model metadata.
 `MultinomialModel` exposes classes, deviance/iterations, prediction and standard
 errors, posterior prediction, smooth significance, summary, and persistence.

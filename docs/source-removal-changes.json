@@ -613,5 +613,13 @@
     ],
     "reason": "#2946 Stage D patch 3: gaussian_law_responses is reshaped from single rows into the paired coupled law (rows at the draws z and at the coupled draws z' = Pz + (I-P)z~, per law and frame), so the single-row pin is restated in the same commit as gaussian_law_responses_pair_draw_and_coupled_rows_and_refuse_designed_rows. The replacement keeps the pin's fence and its positive control: rows declared as designed with identical values execute no randomized arm and are refused. It adds the pairing check and the unknown-frame, repeated-law-arm and repeated-draw-key refusals.",
     "evidence": "dy1 direct gate fr-intervene-p3-8906998811 at base 8906998811: RC_CHECK=0, RC_PUBLIC_API=0, and 24/24 intervention_shard tests including the replacement pin. The source-removal guard reported exactly this one identity (test_scoped, removed_declarations 1, production_occurrences 0) and nothing else."
+  },
+  {
+    "base": "9f9e719f78c4070c2cc3e6ee288b8902bead8ee4",
+    "items": [
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:model_evidence"
+    ],
+    "reason": "#2946 T12 (Stage A census): rename with no value change. The pyfunction model_evidence returns the conditional AIC -2*loglik + 2*edf that compare_models ranks on (#2079), a cost on the -2 log scale and not a marginal likelihood or evidence. It becomes model_conditional_aic, and the Python property Model.evidence it backs becomes Model.conditional_aic, with no alias.",
+    "evidence": "At origin/main 6b6c05401e, git grep on lane sw2c finds model_evidence only at its definition (reml_latent_fit_ffi.rs:4180), its registration (geometry_ffi.rs:5123), its one Python caller (gamfit/_model.py:1270) and a test docstring; all are renamed in this commit. The .evidence attribute of Model is read by six Python tests, docs/diagnostics.md and docs/frontend-parity.md, which are updated here too; tests/test_manifold_sae_pyclass_getters.py:118 reads AtomCore.evidence, a different class. Gate: direct lane dy5, tag fr-census-t12b (workspace --all-targets check, gam-pyffi check, both ledger scripts on the exact landing tree)."
   }
 ]

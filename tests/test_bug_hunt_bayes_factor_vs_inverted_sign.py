@@ -39,9 +39,9 @@ def _fit_pair() -> tuple["gamfit.Model", "gamfit.Model"]:
 def test_bayes_factor_vs_favours_better_model_not_worse() -> None:
     m_sx, m_null = _fit_pair()
 
-    # Anchor: the smooth model is the better fit. `evidence` is a minimised
+    # Anchor: the smooth model is the better fit. `conditional_aic` is a minimised
     # cost, so the better model has the *lower* value.
-    assert m_sx.evidence < m_null.evidence
+    assert m_sx.conditional_aic < m_null.conditional_aic
 
     # And `compare_models` agrees the smooth model wins.
     comparison = gamfit.compare_models([m_sx, m_null], names=["sx", "null"])

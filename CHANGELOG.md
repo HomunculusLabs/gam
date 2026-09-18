@@ -65,6 +65,11 @@
 - Rust: `ScoreRow.bayes_factor_best_over_model` is renamed to match, and
   `evidence::log_bayes_factor(a, b)` is now `criterion_gap(a, b)` (`b − a`). The same gap
   measures the conditional-AIC ranking delta, where "Bayes" was wrong as well.
+- **`Model.evidence` is now `Model.conditional_aic`** (#2946). The property has returned
+  the conditional AIC `−2·loglik + 2·edf` that `compare_models` ranks on since #2079. That
+  is a cost on the −2·log scale, not a marginal likelihood or evidence. No alias is kept.
+  **Migration:** read `Model.conditional_aic`. `Model.evidence_ratio_vs` keeps its name,
+  since it is the Akaike evidence ratio of that cost.
 
 ## gamfit 0.1.268 (2026-09-11)
 

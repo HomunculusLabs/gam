@@ -5120,7 +5120,7 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(smoothing_parameters_from_model, module)?)?;
     module.add_function(wrap_pyfunction!(model_group_metadata, module)?)?;
     module.add_function(wrap_pyfunction!(model_deployment_extensions, module)?)?;
-    module.add_function(wrap_pyfunction!(model_evidence, module)?)?;
+    module.add_function(wrap_pyfunction!(model_conditional_aic, module)?)?;
     module.add_function(wrap_pyfunction!(summary_repr, module)?)?;
     module.add_function(wrap_pyfunction!(summary_criterion_row, module)?)?;
     module.add_function(wrap_pyfunction!(summary_html, module)?)?;

@@ -4247,9 +4247,9 @@ fn compare_reml_fits(
 
     // Python-specific work: extract raw diagnostic score plus the required
     // conditional-AIC inputs (log-likelihood and EDF) from each PyAny
-    // fit (which may be a saved-summary dict, a Model object, or any
-    // object exposing .evidence). Then the ranking, delta, Bayes-factor,
-    // and evidence-summary logic is delegated to the pure-Rust core in
+    // fit (which may be a saved-summary mapping, a Model object, or its
+    // saved bytes; see `reml_fit_view`). Then the ranking, delta,
+    // evidence-ratio and evidence-summary logic is delegated to the pure-Rust core in
     // `gam::solver::evidence`, which is identically callable from
     // the CLI binary.
     let mut candidates = Vec::with_capacity(fits.len());
@@ -4365,8 +4365,9 @@ fn with_tierney_kadane_normalizer_from_view(
 
 /// Occam-penalised conditional-AIC ranking score for a saved-model summary
 /// payload, matching `gam::solver::evidence::RemlCandidate::ranking_score`
-/// exactly (`-2·loglik + 2·edf`) so `Model.evidence` and `Model.evidence_ratio_vs`
-/// pick the SAME winner as `gamfit.compare_models` (issue #2079).
+/// exactly (`-2·loglik + 2·edf`) so `Model.conditional_aic` and
+/// `Model.evidence_ratio_vs` pick the SAME winner as `gamfit.compare_models`
+/// (issue #2079).
 ///
 /// Both inputs are required and finite. A raw REML/LAML criterion is a different
 /// estimand, so an incomplete summary is refused rather than ranked on another

@@ -2,8 +2,7 @@
 pure-noise smooth added — it cannot tell a useful predictor from noise.
 
 ``compare_models`` ranks fits on the REML/LAML marginal-likelihood evidence
-headline (the per-fit ``reml_score``, which numerically equals the model's own
-``Model.evidence`` property; the score table the API returns carries only
+headline (the per-fit ``reml_score``; the score table the API returns carries only
 ``reml_score`` / ``delta_reml`` / ``reml_criterion_ratio_best_over_model`` /
 ``effective_dof``).  The module behind it
 (``src/inference/model_comparison.rs``) advertises "honest, calibrated model
@@ -28,7 +27,7 @@ The model's own evidence numbers show the failure directly: ``small`` and
 gets the *better* (lower) score every time, by a near-constant margin of ~3
 nats — so it is the evidence/REML score itself that fails to penalise the extra
 term, not a ranking-direction or normalisation disagreement between entry
-points (``Model.evidence`` and ``Model.bayes_factor_vs`` agree with
+points (``Model.evidence``, now ``Model.conditional_aic``, and ``Model.bayes_factor_vs`` agree with
 ``compare_models`` here, all preferring ``big``).
 
 The direction is confirmed by a relevant-``z`` control: when ``z`` genuinely
