@@ -613,10 +613,12 @@ pub(crate) fn dot(a: ArrayView1<'_, f64>, b: ArrayView1<'_, f64>) -> f64 {
 /// auto-dispatch `fast_ab` (single-device GPU or faer). f64 throughout, so the
 /// result is identical regardless of which path produced it.
 ///
-/// Choosing the tiling: we target as many equal tiles as there are output rows
-/// can support while keeping each tile a non-trivial GEMM, so the batch axis is
-/// long enough to cross `crate::gpu::linalg_dispatch`'s multi-GPU batch floor and spread
-/// across every device.
+/// Choosing the tiling: the dispatch layer splits a batch across devices once
+/// the batch reaches its multi-GPU batch floor
+/// ([`GpuGemmDispatch::multi_gpu_batch_floor`](gam_linalg::gpu_hook::GpuGemmDispatch::multi_gpu_batch_floor)),
+/// so the rows are cut into equal tiles of `⌊m/floor⌋` rows, at least `floor`
+/// of them. Whether a batch of that shape is worth the GPU at all is the
+/// dispatch policy's own decision.
 pub(crate) fn fast_ab_rows_multi_gpu(
     a: ArrayView2<'_, f64>,
     b: ArrayView2<'_, f64>,
@@ -626,16 +628,17 @@ pub(crate) fn fast_ab_rows_multi_gpu(
     let (kb, n) = b.dim();
     assert_eq!(k, kb, "fast_ab_rows_multi_gpu inner dimension mismatch");
 
-    // Only worth the reshape/stitch overhead when the pool actually has more than
-    // one device and there are enough rows to tile across it; otherwise the plain
-    // single-device shim is strictly better.
-    let multi_gpu = gam_linalg::gpu_hook::gpu_dispatch().is_some_and(|d| d.device_count() > 1);
-    // The batch axis must clear the multi-GPU floor used inside the dispatch
-    // layer (64) for the split to engage, so we need at least that many tiles.
-    const MIN_TILES: usize = 64;
-    const MIN_TILE_ROWS: usize = 4;
-    if multi_gpu && m >= MIN_TILES * MIN_TILE_ROWS && n > 0 {
-        let rows_per_tile = (m / MIN_TILES).max(MIN_TILE_ROWS);
+    // Only worth the reshape/stitch overhead when the pool can split a batch at
+    // all (more than one device) and there are at least as many rows as the
+    // split needs tiles; otherwise the plain single-device shim is strictly
+    // better.
+    let floor = gam_linalg::gpu_hook::gpu_dispatch().and_then(|d| d.multi_gpu_batch_floor());
+    if let Some(floor) = floor
+        && floor > 0
+        && m >= floor
+        && n > 0
+    {
+        let rows_per_tile = m / floor;
         let tiles = m / rows_per_tile;
         let covered = tiles * rows_per_tile;
         // Reshape the first `covered` rows into a tiles×rows_per_tile×k batch
