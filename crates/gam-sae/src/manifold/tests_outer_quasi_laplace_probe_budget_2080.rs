@@ -702,7 +702,6 @@ struct CeilingPathologyConfig {
     harmonics: usize,
     sigma: f64,
     inner_max_iter: usize,
-    outer_max_iter: usize,
     initial_step_norm: f64,
     materialization_ratio_floor: f64,
     step_collapse_radius: f64,
@@ -718,7 +717,6 @@ impl Default for CeilingPathologyConfig {
             harmonics: 2,
             sigma: 0.05,
             inner_max_iter: 8,
-            outer_max_iter: 8,
             initial_step_norm: 0.25,
             materialization_ratio_floor: 0.05,
             step_collapse_radius: 1.0e-3,
@@ -864,8 +862,11 @@ fn run_ceiling_vs_pathology_instrument(cfg: CeilingPathologyConfig) -> CeilingPa
     let seed = fit_seeded.2;
     let mut objective = fit_seeded.3;
     let n_params = seed.len();
+    // #2080: no hand-set outer budget. The search runs to its own certificate or to the
+    // engine's typed non-convergence, as the acceptances in this file do since 9d46bfa66.
+    // Under an 8-iteration budget the run stopped at that budget before its certificate
+    // (job 1230144: termination=iteration_budget); without it the run certifies (job 1264867).
     let mut problem = OuterProblem::new(n_params)
-        .with_max_iter(cfg.outer_max_iter)
         .with_seed_config(gam_problem::SeedConfig {
             max_seeds: 1,
             seed_budget: 1,
