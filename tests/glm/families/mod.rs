@@ -30,3 +30,4 @@ mod owed_1477_double_vs_single_penalty;
 mod owed_1477_factorial;
 mod perf_1074_gamma_shape_freeze;
 mod transformation_normal_failure_category_2937;
+mod bernoulli_marginal_slope_failure_category_2937;
