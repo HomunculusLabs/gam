@@ -42,7 +42,7 @@
 //! position: the cached prefix keeps its clean keys and values, and every later
 //! query attends over both.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use super::apply::{ApplyError, FactoredEdit};
@@ -334,7 +334,85 @@ pub fn edit_cotangent(
     ParameterCotangent::from_terms(stored.0, stored.1, terms).map_err(OccurrenceError::Cotangent)
 }
 
-/// Typed refusals of occurrence scopes, edit records and edit cotangents.
+/// Refuse an external execution whose use sites disagree with the registry or the records.
+///
+/// `discovered` lists every use site the executed forward read, in execution order.
+/// `substituted` lists every use site that read an edited value. Both use the executor's
+/// numbering.
+///
+/// A forward that read a different set of use sites, or numbered them differently, ran
+/// another path, where the ordinals address other reads. So the discovered reads of each
+/// storage tensor must be exactly its registered sites, in ordinal order.
+///
+/// An edit that reached the wrong use is a different experiment, even when its numbers
+/// agree. So every use a record reaches must be substituted exactly once, and no other use
+/// may be.
+pub fn check_substitutions(
+    registry: &TensorRegistry,
+    records: &[ParameterEditRecord],
+    discovered: &[UseSiteId],
+    substituted: &[UseSiteId],
+) -> Result<(), OccurrenceError> {
+    let found = registry.teacher_fingerprint();
+    if let Some(record) = records.iter().find(|record| record.registry != found) {
+        return Err(OccurrenceError::RegistryMismatch {
+            record: record.registry,
+            registry: found,
+        });
+    }
+    let mut next_ordinal: BTreeMap<TensorId, usize> = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    for use_site in discovered {
+        let storage = match registry.resolve_use_site(use_site) {
+            Ok(read) => read.storage,
+            Err(LiftError::UnknownUseSite(..)) => {
+                return Err(OccurrenceError::UnregisteredDiscovery(use_site.clone()));
+            }
+            Err(err) => return Err(err.into()),
+        };
+        if !seen.insert(use_site.clone()) {
+            return Err(OccurrenceError::RepeatedDiscovery(use_site.clone()));
+        }
+        let ordinal = next_ordinal.entry(storage.clone()).or_insert(0);
+        let expected = UseSiteId::read(&storage, *ordinal);
+        if use_site != &expected {
+            return Err(OccurrenceError::OrdinalOutOfOrder {
+                use_site: use_site.clone(),
+                expected,
+            });
+        }
+        *ordinal += 1;
+    }
+    for storage in registry.storage_ids() {
+        if let Some(missing) = registry
+            .use_sites_of(storage)
+            .into_iter()
+            .find(|use_site| !seen.contains(*use_site))
+        {
+            return Err(OccurrenceError::UndiscoveredUse(missing.clone()));
+        }
+    }
+    let mut planned = BTreeSet::new();
+    for record in records {
+        planned.extend(record.scope.affected_uses(registry)?);
+    }
+    let mut applied = BTreeSet::new();
+    for use_site in substituted {
+        if !planned.contains(use_site) {
+            return Err(OccurrenceError::UnplannedSubstitution(use_site.clone()));
+        }
+        if !applied.insert(use_site.clone()) {
+            return Err(OccurrenceError::RepeatedSubstitution(use_site.clone()));
+        }
+    }
+    match planned.into_iter().find(|use_site| !applied.contains(use_site)) {
+        Some(use_site) => Err(OccurrenceError::MissingSubstitution(use_site)),
+        None => Ok(()),
+    }
+}
+
+/// Typed refusals of occurrence scopes, edit records, edit cotangents and executed
+/// substitutions.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OccurrenceError {
     /// The registry refused a name or a use site.
@@ -383,6 +461,24 @@ pub enum OccurrenceError {
     },
     /// The cotangent refused the pulled-back terms.
     Cotangent(String),
+    /// The executor discovered a use site the registry does not hold.
+    UnregisteredDiscovery(UseSiteId),
+    /// The executor reported one use site as discovered twice.
+    RepeatedDiscovery(UseSiteId),
+    /// A storage tensor's reads were not discovered in ordinal order, so the executor
+    /// numbered another path.
+    OrdinalOutOfOrder {
+        use_site: UseSiteId,
+        expected: UseSiteId,
+    },
+    /// A registered use site was not discovered, so the forward read the tensors on
+    /// another path.
+    UndiscoveredUse(UseSiteId),
+    /// A use site read an edited value that no record reaches.
+    UnplannedSubstitution(UseSiteId),
+    RepeatedSubstitution(UseSiteId),
+    /// A use that a record reaches did not read the edited value.
+    MissingSubstitution(UseSiteId),
 }
 
 impl From<LiftError> for OccurrenceError {
@@ -458,6 +554,41 @@ impl fmt::Display for OccurrenceError {
                 use_site.0
             ),
             Self::Cotangent(reason) => write!(f, "occurrence: invalid cotangent: {reason}"),
+            Self::UnregisteredDiscovery(use_site) => write!(
+                f,
+                "occurrence: the executor discovered use site {}, which the registry does not hold",
+                use_site.0
+            ),
+            Self::RepeatedDiscovery(use_site) => write!(
+                f,
+                "occurrence: the executor discovered use site {} twice",
+                use_site.0
+            ),
+            Self::OrdinalOutOfOrder { use_site, expected } => write!(
+                f,
+                "occurrence: the executor discovered {} where the next read of its storage is {}, so it numbered another path",
+                use_site.0, expected.0
+            ),
+            Self::UndiscoveredUse(use_site) => write!(
+                f,
+                "occurrence: registered use site {} was not discovered, so the forward ran another path",
+                use_site.0
+            ),
+            Self::UnplannedSubstitution(use_site) => write!(
+                f,
+                "occurrence: use site {} read an edited value that no record reaches",
+                use_site.0
+            ),
+            Self::RepeatedSubstitution(use_site) => write!(
+                f,
+                "occurrence: use site {} was substituted twice",
+                use_site.0
+            ),
+            Self::MissingSubstitution(use_site) => write!(
+                f,
+                "occurrence: use site {} is reached by a record but did not read the edited value",
+                use_site.0
+            ),
         }
     }
 }
@@ -1263,6 +1394,92 @@ mod tests {
                 use_site: lookup,
                 stored: (3, 2),
                 pulled_back: (2, 3)
+            })
+        );
+    }
+
+    #[test]
+    fn substitutions_must_match_the_discovered_path_and_the_planned_uses() {
+        let chain = Chain::rectangular();
+        let (registry, storage, uses) = registry_with_uses(&chain.weight, &TIES);
+        let global = ParameterEditRecord::new(
+            &registry,
+            EditScope::Global(storage.clone()),
+            PositionScope::every(),
+            rank_one_delta(&chain),
+        )
+        .expect("the global record is valid");
+        let middle = ParameterEditRecord::new(
+            &registry,
+            EditScope::UseSite(uses[1].clone()),
+            PositionScope::every(),
+            rank_one_delta(&chain),
+        )
+        .expect("the use-specific record is valid");
+        let records = [global, middle.clone()];
+        let pick = |indices: &[usize]| indices.iter().map(|&k| uses[k].clone()).collect::<Vec<_>>();
+        assert_eq!(check_substitutions(&registry, &records, &uses, &uses), Ok(()));
+        assert_eq!(
+            check_substitutions(&registry, &[middle.clone()], &uses, &pick(&[1])),
+            Ok(())
+        );
+
+        // An edit that reached another use is refused even though its numbers could agree.
+        assert_eq!(
+            check_substitutions(&registry, &[middle.clone()], &uses, &pick(&[0])),
+            Err(OccurrenceError::UnplannedSubstitution(uses[0].clone()))
+        );
+        assert_eq!(
+            check_substitutions(&registry, &records, &uses, &pick(&[0, 2])),
+            Err(OccurrenceError::MissingSubstitution(uses[1].clone()))
+        );
+        assert_eq!(
+            check_substitutions(&registry, &records, &uses, &pick(&[0, 1, 1, 2])),
+            Err(OccurrenceError::RepeatedSubstitution(uses[1].clone()))
+        );
+
+        // Another forward path: a read left out, an extra read, a repeated read, or reads
+        // numbered out of order.
+        assert_eq!(
+            check_substitutions(&registry, &records, &pick(&[0, 1]), &uses),
+            Err(OccurrenceError::UndiscoveredUse(uses[2].clone()))
+        );
+        let extra = UseSiteId::read(&storage, 3);
+        let mut longer = uses.clone();
+        longer.push(extra.clone());
+        assert_eq!(
+            check_substitutions(&registry, &records, &longer, &uses),
+            Err(OccurrenceError::UnregisteredDiscovery(extra))
+        );
+        assert_eq!(
+            check_substitutions(&registry, &records, &pick(&[0, 0, 1, 2]), &uses),
+            Err(OccurrenceError::RepeatedDiscovery(uses[0].clone()))
+        );
+        assert_eq!(
+            check_substitutions(&registry, &records, &pick(&[1, 0, 2]), &uses),
+            Err(OccurrenceError::OrdinalOutOfOrder {
+                use_site: uses[1].clone(),
+                expected: uses[0].clone()
+            })
+        );
+
+        // Records checked against another path's registry are refused before any site is
+        // compared.
+        let (decode, decode_storage, decode_uses) = registry_with_uses(
+            &chain.weight,
+            &[
+                TieOrientation::Identity,
+                TieOrientation::Transpose,
+                TieOrientation::Identity,
+                TieOrientation::Identity,
+            ],
+        );
+        assert_eq!(decode_storage, storage);
+        assert_eq!(
+            check_substitutions(&decode, &records, &decode_uses, &uses),
+            Err(OccurrenceError::RegistryMismatch {
+                record: registry.teacher_fingerprint(),
+                registry: decode.teacher_fingerprint(),
             })
         );
     }
