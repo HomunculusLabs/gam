@@ -6271,9 +6271,21 @@ fn falsify_face_law(
     for &k in limit.face.iter() {
         pulled_back[k] -= delta;
     }
-    let pulled_value = obj.eval_cost(&pulled_back)?;
+    let pulled = obj.eval_cost(&pulled_back);
     // Every exit below ships the certified point, so restore it before judging.
     obj.eval_cost(rho)?;
+    let pulled_value = match pulled {
+        Ok(value) => value,
+        // A refused pulled-back point is a statement about that point: the face
+        // law cannot be tested there, so the falsification declines instead of
+        // ending the fit (#2735).
+        Err(error) if error.is_trial_point_infeasible() => {
+            return Ok(Err(format!(
+                "the criterion refuses the pulled-back falsification point: {error}"
+            )));
+        }
+        Err(error) => return Err(error),
+    };
     if !baseline.is_finite() || !pulled_value.is_finite() {
         return Ok(Err(
             "the criterion is not finite at the falsification points".to_string()

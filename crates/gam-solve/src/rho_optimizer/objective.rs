@@ -71,10 +71,14 @@ pub enum SeedOutcome {
 ///   points even when `capability().hessian == Analytic`; `opt` degrades that
 ///   step to first-order behavior instead of requiring the objective to fake a
 ///   stale or non-finite Hessian.
-/// - Use `eval_cost()` / `OuterEval::infeasible()` for infeasible trial points.
-///   Return `Err(...)` only when the evaluation artifact itself cannot be
-///   constructed. Such errors are fatal across screening, multistart, and
-///   solver plans; they are never reinterpreted as another numerical trial.
+/// - An infeasible trial point returns `Err` carrying a refusal whose
+///   `EstimationError::is_trial_point_infeasible` answers true (for example
+///   `EstimationError::TrialPointRefused`), so the refusal's reason reaches the
+///   outer log and every consumer classifies the point by variant (#2735). Every
+///   other `Err` means the evaluation artifact itself cannot be constructed; it
+///   is fatal across screening, multistart, and solver plans and is never
+///   reinterpreted as another numerical trial. A +∞ cost
+///   (`OuterEval::infeasible()`) still reads as infeasible but names no reason.
 /// - `eval_cost()` is used only for cost-based optimization paths.
 /// - `eval()` is the main evaluation path (cost + gradient + optional Hessian).
 /// - `eval_efs()` is used only by the EFS solver. It runs the inner solve,

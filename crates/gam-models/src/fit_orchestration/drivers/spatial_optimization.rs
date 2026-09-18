@@ -859,17 +859,22 @@ fn nfree_skip_gate_status_from_parts(
     }
 }
 
-/// Apply the same trial-point classification to the value and derivative lanes.
-/// `Ok(+∞)` means the point is outside the evaluable numerical domain; `Err`
-/// means the evaluation artifact itself could not be constructed and must abort
-/// every outer solver route.
-fn classify_spatial_value_probe_failure(
-    error: EstimationError,
-) -> Result<f64, EstimationError> {
-    if is_recoverable_trial_point_error(&error) {
-        Ok(f64::INFINITY)
+/// Give the value and derivative lanes one typed answer for a failed trial.
+///
+/// A refusal at this trial travels as an error whose variant answers
+/// `is_trial_point_infeasible()`, so every outer consumer classifies it by
+/// variant and the refusal's reason reaches the outer log (#2735). A bare
+/// `BasisError` — the design cannot be built at this hyperparameter — is a
+/// refusal here but graded fatal by `is_trial_point_infeasible`, so it is carried
+/// as `TrialPointRefused` with its own message. Every other error is returned
+/// unchanged and stays fatal.
+fn classify_spatial_value_probe_failure(error: EstimationError) -> EstimationError {
+    if error.is_trial_point_infeasible() || !is_recoverable_trial_point_error(&error) {
+        error
     } else {
-        Err(error)
+        EstimationError::TrialPointRefused {
+            reason: format!("the design cannot be realized at this trial point: {error}"),
+        }
     }
 }
 
@@ -1423,8 +1428,12 @@ impl<'d> SpatialJointContext<'d> {
             && self.evaluator.has_psi_gram_tensor()
             && !self.evaluator.psi_gram_tensor_covers(theta[self.rho_dim])
         {
-            self.cache.store_cost_at(theta, f64::INFINITY);
-            return Ok(f64::INFINITY);
+            return Err(EstimationError::TrialPointRefused {
+                reason: format!(
+                    "psi={:.6e} lies outside the certified psi-Gram tensor window",
+                    theta[self.rho_dim]
+                ),
+            });
         }
         // #2481: preserve the derivative-lane contract. A basis or inner-solve
         // refusal at this trial is a recoverable domain wall; layout, topology,
@@ -1432,18 +1441,13 @@ impl<'d> SpatialJointContext<'d> {
         if !skip_value_realization && let Err(error) = self.cache.ensure_theta(theta) {
             self.value_realization_failures += 1;
             let (theta_norm, log_kappa_norm) = kphase_log_norms(theta, self.rho_dim);
-            if is_recoverable_trial_point_error(&error) {
-                log::debug!(
-                    "[STAGE] {} value-probe: design realization makes this trial infeasible at theta_norm={:.4e} log_kappa_norm={:.4e} ({error}); retreating",
-                    self.kind.label(), theta_norm, log_kappa_norm,
-                );
-            } else {
+            if !is_recoverable_trial_point_error(&error) {
                 log::warn!(
                     "[STAGE] {} value-probe: design realization FAILED fatally at theta_norm={:.4e} log_kappa_norm={:.4e} ({error}); propagating",
                     self.kind.label(), theta_norm, log_kappa_norm,
                 );
             }
-            return classify_spatial_value_probe_failure(error);
+            return Err(classify_spatial_value_probe_failure(error));
         }
         // #1033 penalty lane: stage the EXACT n-free `S(ψ)` for this probe's ψ so
         // the cost-only fast path re-keys the kept surface without `reset_surface`
@@ -1524,16 +1528,12 @@ impl<'d> SpatialJointContext<'d> {
             Err(error) => {
                 self.value_evaluation_failures += 1;
                 let (theta_norm, log_kappa_norm) = kphase_log_norms(theta, self.rho_dim);
-                if is_recoverable_trial_point_error(&error) {
-                    log::debug!(
-                        "[STAGE] {cost_label} value-probe: cost evaluator makes this trial infeasible at theta_norm={theta_norm:.4e} log_kappa_norm={log_kappa_norm:.4e} ({error}); retreating",
-                    );
-                } else {
+                if !is_recoverable_trial_point_error(&error) {
                     log::warn!(
                         "[STAGE] {cost_label} value-probe: cost evaluation FAILED fatally at theta_norm={theta_norm:.4e} log_kappa_norm={log_kappa_norm:.4e} ({error}); propagating",
                     );
                 }
-                classify_spatial_value_probe_failure(error)
+                Err(classify_spatial_value_probe_failure(error))
             }
         }
     }
@@ -1957,23 +1957,21 @@ fn run_exact_joint_spatial_optimization(
                 hessian: hess,
                 inner_beta_hint: None,
             }),
-            // A trial hyperparameter at which the spatial kernel design /
-            // ψ-derivatives are non-constructible is an infeasible point, not
-            // a fatal error: the gradient/Hessian path must retreat exactly as
-            // the cost-only path (which already returns +∞) does. Returning
-            // `OuterEval::infeasible` keeps the two paths symmetric so a single
-            // bad probe — e.g. an anisotropy that overflows the Duchon radial
-            // kernel — no longer aborts the whole REML optimization.
-            Err(err) if is_recoverable_trial_point_error(&err) => {
-                // Each refusal costs the line search a halving and this call's
-                // work; a run that crawls on refusals must say why (#2735).
-                log::info!(
-                    "[{label}] trial point infeasible (kernel design \
-                     not constructible at theta={theta:?}): {err}; retreating",
-                );
-                Ok(OuterEval::infeasible(theta_dim))
+            // A trial hyperparameter at which the spatial kernel design, its
+            // ψ-derivatives or the criterion refuse is an infeasible point, not
+            // a fatal error. The refusal travels typed, through the same
+            // classifier as the value lane, so a single bad probe — e.g. an
+            // anisotropy that overflows the Duchon radial kernel — makes the
+            // search retreat and its reason reaches the outer log (#2735).
+            Err(err) => {
+                let err = classify_spatial_value_probe_failure(err);
+                if err.is_trial_point_infeasible() {
+                    // Each refusal costs the line search a halving and this call's
+                    // work; a run that crawls on refusals must say why (#2735).
+                    log::info!("[{label}] trial point refused at theta={theta:?}: {err}; retreating");
+                }
+                Err(err)
             }
-            Err(err) => Err(err),
         }
     };
 
