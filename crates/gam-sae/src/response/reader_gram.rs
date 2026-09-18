@@ -32,7 +32,7 @@ use ndarray::{ArrayView2, s};
 use std::fmt;
 
 /// A refusal of the reader Gram.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ReaderGramError {
     DimensionMismatch {
         context: &'static str,

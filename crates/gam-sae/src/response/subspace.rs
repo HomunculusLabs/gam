@@ -60,9 +60,14 @@
 //!
 //! # Tiles
 //!
-//! The frame enters only through `R = W Q` (`h × k`) and the metric only through `M U` (`p × h`). One tile of `t`
-//! units forms `R_J Rᵀ` and `U_Jᵀ (M U)` (each `t × h`) and `B_J R` (`t × k`), so no `d × d` matrix and no resident
-//! `h × h` matrix is ever formed. The gradient is then `Wᵀ(B R) − Q (Qᵀ Wᵀ (B R))`.
+//! The frame enters only through `R = W Q` (`h × k`) and the metric only through `D = Uᵀ M U`. `D` is read over
+//! `j ≤ k` from the block's [`ReaderGram`], or, when the process-wide ledger declines that cache, streamed per tile
+//! by [`fill_upper_rows`] over the same tiles, so both routes read the same words. `D` and the pair law are both
+//! symmetric, so a pass evaluates only the pairs `k ≥ j` and counts each strictly upper term twice. A tile `J` of `t`
+//! units starting at `s` forms `R_J R_{k≥s}ᵀ` and its weights `B_J` over `k ≥ s` (each `t × (h − s)`). It adds
+//! `B_J R_{k≥s}` to its own rows of `B R`, and the strictly upper part transposed, `B_Jᵀ R_J`, to the rows `k ≥ s`.
+//! No `d × d` matrix is formed, and the only resident `h × h` object is the packed half of `D`, charged to the
+//! memory governor. The gradient is then `Wᵀ(B R) − Q (Qᵀ Wᵀ (B R))`.
 //!
 //! # Rounding of the pair law
 //!
@@ -71,6 +76,7 @@
 //! covariance within the stated band [`covariance_rounding_band`] onto the boundary and refuses one beyond it. A frame
 //! whose measured defect reaches 1 is not a frame and is refused ([`ResponseError::FrameNotOrthonormal`]).
 
+use super::reader_gram::{ReaderGram, ReaderGramError, fill_upper_rows, upper_tile_rows};
 use faer::Side;
 use gam_linalg::faer_ndarray::{FaerCholesky, fast_ab, fast_abt, fast_atb};
 use gam_linalg::roundoff::accumulation_growth;
@@ -82,6 +88,7 @@ use gam_runtime::resource::byte_balanced_row_chunk;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
 use rayon::prelude::*;
 use std::fmt;
+use std::sync::Arc;
 
 /// A refusal of the retained-response operator.
 #[derive(Debug, Clone, PartialEq)]
@@ -121,6 +128,11 @@ pub enum ResponseError {
         context: &'static str,
         error: GaussianActivationError,
     },
+    /// The reader Gram refused for a reason other than the ledger declining its footprint, which the block answers
+    /// by streaming `D`.
+    ReaderGram {
+        error: ReaderGramError,
+    },
 }
 
 impl fmt::Display for ResponseError {
@@ -152,6 +164,7 @@ impl fmt::Display for ResponseError {
                 "retained coordinate at position {position} is out of range or not strictly increasing"
             ),
             Self::Kernel { context, error } => write!(f, "{context}: {error}"),
+            Self::ReaderGram { error } => write!(f, "reader Gram: {error}"),
         }
     }
 }
@@ -310,6 +323,9 @@ struct BlockUnits {
     metric: Array2<f64>,
     /// `M U`, `p × h`, so a tile's `D_J = U_Jᵀ (M U)`.
     metric_writers: Array2<f64>,
+    /// `D = Uᵀ M U` over `j ≤ k` when the process-wide ledger admitted it; `None` streams the same rows per tile.
+    /// Clones of the block share one charged cache.
+    reader_gram: Option<Arc<ReaderGram>>,
     activation: GaussianActivation,
     /// `v̂_j = fl(‖w_j‖²)`.
     reader_variances: Array1<f64>,
@@ -356,6 +372,14 @@ impl KnownBlock {
                 reason: error.to_string(),
             })?;
         let metric_writers = fast_ab(&metric, &writers);
+        // `M U` of finite factors can still overflow. Both routes to `D` read it, so it is refused here, once.
+        require_finite("output metric times writers", metric_writers.iter())?;
+        let reader_gram = match ReaderGram::new(writers.view(), metric_writers.view()) {
+            Ok(gram) => Some(Arc::new(gram)),
+            // A footprint the ledger declines, or one with no representable byte count, streams the same rows instead.
+            Err(ReaderGramError::Admission { .. } | ReaderGramError::SizeOverflow { .. }) => None,
+            Err(error) => return Err(ResponseError::ReaderGram { error }),
+        };
         let reader_variances: Array1<f64> = readers.rows().into_iter().map(|row| row.dot(&row)).collect();
         let variance_growth = accumulation_growth(input_dim);
         let reader_variance_errors = reader_variances.mapv(|variance| variance_growth * variance / (1.0 - variance_growth));
@@ -369,6 +393,7 @@ impl KnownBlock {
             output_bias,
             metric: metric.to_owned(),
             metric_writers,
+            reader_gram,
             activation,
             reader_variances,
             reader_variance_errors,
@@ -575,10 +600,13 @@ impl KnownBlock {
 }
 
 impl BlockUnits {
-    /// One tiled pass over the unit pairs for reader coordinates `coordinates` (`h × c`, with covariance
-    /// `r_jk = coordinates_j · coordinates_k`): returns `Σ_jk D_jk [K_σ − m_j m_k]`, and when `weighted_coordinates`
-    /// is given writes `B R` into it (`h × c`, with `B_jk = D_jk ∂_r K_σ`). Units are summed in order, so the value
-    /// does not depend on the thread count.
+    /// One tiled pass over the unit pairs `j ≤ k` for reader coordinates `coordinates` (`h × c`, with covariance
+    /// `r_jk = coordinates_j · coordinates_k`). It returns `Σ_jk D_jk [K_σ − m_j m_k]`, formed as
+    /// `Σ_j (D_jj [K_jj − m_j²] + 2 Σ_{k>j} D_jk [K_jk − m_j m_k])` because `D` and the pair law are symmetric. When
+    /// `weighted_coordinates` is given it writes `B R` into it (`h × c`, with `B_jk = D_jk ∂_r K_σ`, symmetric by
+    /// construction): row `j` is `Σ_{k≥j} B_jk R_k + Σ_{i<j} B_ij R_i`. The tiles are the reader Gram's own
+    /// ([`upper_tile_rows`]), so a streamed pass reads the cached rows' words. Units are summed in order and tiles merge
+    /// in order, so neither the value nor `B R` depends on the thread count or on the route to `D`.
     fn pair_pass(
         &self,
         coordinates: ArrayView2<'_, f64>,
@@ -602,22 +630,57 @@ impl BlockUnits {
                 frame_defect,
             ),
         };
-        let tile = byte_balanced_row_chunk(2 * width, width);
+        if let Some(out) = weighted_coordinates.as_deref_mut() {
+            out.fill(0.0);
+        }
+        let tile = upper_tile_rows(width);
         let mut unit_sums = Vec::with_capacity(width);
+        let mut streamed_rows: Vec<f64> = Vec::new();
+        let mut row_starts: Vec<usize> = Vec::with_capacity(tile + 1);
         for start in (0..width).step_by(tile) {
             let end = (start + tile).min(width);
-            let covariances = fast_abt(&coordinates.slice(s![start..end, ..]), &coordinates);
-            // Entry `(j, k)` starts as `D_jk` and leaves as `B_jk`.
-            let mut weights = fast_atb(&self.writers.slice(s![.., start..end]), &self.metric_writers);
-            let sums = weights
+            let rows = end - start;
+            // Row `j ∈ J` against the columns `k ≥ start`, at entry `k − start`.
+            let covariances = fast_abt(
+                &coordinates.slice(s![start..end, ..]),
+                &coordinates.slice(s![start.., ..]),
+            );
+            // Row `j` of `D` over `k ≥ j` starts at `row_starts[j − start]` of the tile's packed rows.
+            row_starts.clear();
+            let mut packed_length = 0;
+            for unit in start..end {
+                row_starts.push(packed_length);
+                packed_length += width - unit;
+            }
+            row_starts.push(packed_length);
+            if self.reader_gram.is_none() {
+                streamed_rows.resize(packed_length, 0.0);
+                fill_upper_rows(
+                    self.writers.view(),
+                    self.metric_writers.view(),
+                    start,
+                    end,
+                    &mut streamed_rows,
+                )
+                .map_err(|error| ResponseError::ReaderGram { error })?;
+            }
+            // `B_J` over the columns `k ≥ start`, zero below each row's diagonal.
+            let mut upper_weights = Array2::<f64>::zeros((rows, width - start));
+            let sums = upper_weights
                 .axis_iter_mut(Axis(0))
                 .into_par_iter()
                 .zip(covariances.axis_iter(Axis(0)).into_par_iter())
                 .enumerate()
                 .map(|(offset, (mut weight_row, covariance_row))| {
                     let unit = start + offset;
-                    let mut sum = 0.0;
-                    for other in 0..width {
+                    let metric_row = match &self.reader_gram {
+                        Some(gram) => gram.upper_row(unit),
+                        None => &streamed_rows[row_starts[offset]..row_starts[offset + 1]],
+                    };
+                    let mut diagonal = 0.0;
+                    let mut off_diagonal = 0.0;
+                    for (index, &metric_product) in metric_row.iter().enumerate() {
+                        let other = unit + index;
                         let covariance_rounding = covariance_rounding_band(
                             &CovarianceFormation {
                                 terms,
@@ -639,22 +702,33 @@ impl BlockUnits {
                                 mean_y: self.biases[other],
                                 variance_x: self.reader_variances[unit],
                                 variance_y: self.reader_variances[other],
-                                covariance: covariance_row[other],
+                                covariance: covariance_row[other - start],
                                 covariance_rounding,
                             },
                         )?;
-                        let metric_product = weight_row[other];
-                        sum += metric_product
+                        let term = metric_product
                             * (moments.value - self.unit_means[unit] * self.unit_means[other]);
-                        weight_row[other] = metric_product * moments.covariance_derivative;
+                        if index == 0 {
+                            diagonal = term;
+                        } else {
+                            off_diagonal += term;
+                        }
+                        weight_row[other - start] = metric_product * moments.covariance_derivative;
                     }
-                    Ok(sum)
+                    Ok(diagonal + 2.0 * off_diagonal)
                 })
                 .collect::<Result<Vec<f64>, ResponseError>>()?;
             unit_sums.extend(sums);
             if let Some(out) = weighted_coordinates.as_deref_mut() {
-                out.slice_mut(s![start..end, ..])
-                    .assign(&fast_ab(&weights, &coordinates));
+                // `Σ_{k≥j} B_jk R_k` for the rows `j ∈ J`.
+                let own = fast_ab(&upper_weights, &coordinates.slice(s![start.., ..]));
+                out.slice_mut(s![start..end, ..]).scaled_add(1.0, &own);
+                // `Σ_{j∈J, j<k} B_jk R_j` for the rows `k ≥ start`: the strictly upper part of `B_J`, transposed.
+                for offset in 0..rows {
+                    upper_weights[[offset, offset]] = 0.0;
+                }
+                let mirrored = fast_atb(&upper_weights, &coordinates.slice(s![start..end, ..]));
+                out.slice_mut(s![start.., ..]).scaled_add(1.0, &mirrored);
             }
         }
         Ok(unit_sums.iter().sum())
@@ -711,3 +785,7 @@ pub fn require_finite<'a>(
 #[cfg(test)]
 #[path = "subspace_tests.rs"]
 mod subspace_tests;
+
+#[cfg(test)]
+#[path = "subspace_route_tests.rs"]
+mod subspace_route_tests;
