@@ -3104,15 +3104,28 @@ fn evaluate_marginal_slope_baseline_point(
         ));
     }
     let survival = (-cumulative_hazard).exp();
-    if !(survival.is_finite() && survival > 0.0 && survival < 1.0) {
+    if !(survival > 0.0) {
         return Err(format!(
-            "{} marginal-slope baseline survival must be strictly inside (0,1), got {survival}",
+            "{} marginal-slope baseline survival must be positive, got {survival} at cumulative hazard {cumulative_hazard}",
             survival_baseline_targetname(cfg.target)
         ));
     }
-    let q = -standard_normal_quantile(survival).map_err(|e| {
+    // q = −Φ⁻¹(S). While S > ½ the small quantity is the event probability
+    // F = 1 − S = −expm1(−H), and q = Φ⁻¹(F) reads it in the quantile's lower
+    // tail at full relative accuracy. Forming S first loses F to cancellation
+    // and rounds S to exactly 1 once H < 2⁻⁵⁴, where q is still finite. Every
+    // row without delayed entry enters at SURVIVAL_TIME_FLOOR = 1e-9, and a
+    // Weibull chart with scale 3.35 and shape 1.71 already puts H there below
+    // 2⁻⁵⁴: the #2930 fixture's outer search refused 135 such probes around its
+    // planted law and certified a railed model instead.
+    let q = if cumulative_hazard < std::f64::consts::LN_2 {
+        standard_normal_quantile(-(-cumulative_hazard).exp_m1())
+    } else {
+        standard_normal_quantile(survival).map(|x| -x)
+    }
+    .map_err(|e| {
         format!(
-            "{} marginal-slope baseline failed to invert survival probability {survival}: {e}",
+            "{} marginal-slope baseline failed to invert survival probability {survival} at cumulative hazard {cumulative_hazard}: {e}",
             survival_baseline_targetname(cfg.target)
         )
     })?;
@@ -5902,6 +5915,81 @@ mod tests {
                 *fqt,
                 1e-5,
                 &format!("near-zero gm-probit q' theta[{k}]"),
+            );
+        }
+    }
+
+    /// A row without delayed entry enters at `SURVIVAL_TIME_FLOOR`, where a Weibull cumulative
+    /// hazard can fall below 2⁻⁵⁴ so that `exp(−H)` rounds to exactly 1. The probit index
+    /// `q = Φ⁻¹(1 − S)` is finite there, and it must be evaluated rather than refused: the
+    /// #2930 fixture's outer search refused 135 probes at such charts around its planted law
+    /// (shape 1.675) and certified a model with every penalty railed. The witness is one of
+    /// those refused charts, `log λ = 1.2093`, `log k = 0.5365`, with `H(1e-9) = 5.2e-17`.
+    #[test]
+    fn marginal_slope_baseline_is_finite_where_the_entry_floor_rounds_survival_to_one_2930() {
+        let cfg = SurvivalBaselineConfig {
+            target: SurvivalBaselineTarget::Weibull,
+            scale: Some(1.2093_f64.exp()),
+            shape: Some(0.5365_f64.exp()),
+            rate: None,
+            makeham: None,
+        };
+        let scale = cfg.scale.expect("scale");
+        let shape = cfg.shape.expect("shape");
+        let age = SURVIVAL_TIME_FLOOR;
+        let cumulative_hazard = (age / scale).powf(shape);
+        assert_eq!(
+            (-cumulative_hazard).exp(),
+            1.0,
+            "this witness has stopped being one: exp(−H) no longer rounds to 1 at H = {cumulative_hazard:e}"
+        );
+        let event_probability = -(-cumulative_hazard).exp_m1();
+
+        let (q, q_derivative) = evaluate_survival_marginal_slope_baseline(age, &cfg)
+            .expect("the probit baseline is finite at the entry floor");
+        assert!(
+            (normal_cdf(q) / event_probability - 1.0).abs() <= 1e-12,
+            "Φ(q) = {:e} must reproduce the event probability {event_probability:e}",
+            normal_cdf(q)
+        );
+
+        // dq/dlog t = t·q′, against a central difference in log age.
+        let log_step = 1e-4_f64;
+        let q_later = evaluate_survival_marginal_slope_baseline(age * log_step.exp(), &cfg)
+            .expect("q at a later age")
+            .0;
+        let q_earlier = evaluate_survival_marginal_slope_baseline(age * (-log_step).exp(), &cfg)
+            .expect("q at an earlier age")
+            .0;
+        assert_close(
+            age * q_derivative,
+            (q_later - q_earlier) / (2.0 * log_step),
+            1e-6,
+            "floor-age probit q' in log age",
+        );
+
+        let analytic = marginal_slope_baseline_offset_theta_partials(age, &cfg)
+            .expect("partials")
+            .expect("nonlinear");
+        let fd = fd_marginal_slope_baseline_offset(age, &cfg, &[1e-7, 1e-7]);
+        assert_eq!(analytic.len(), fd.len());
+        for (k, ((aq, aqt), (fq, fqt))) in analytic.iter().zip(fd.iter()).enumerate() {
+            assert_close(*aq, *fq, 1e-6, &format!("floor-age weibull-probit q theta[{k}]"));
+            assert_close(*aqt, *fqt, 1e-6, &format!("floor-age weibull-probit q' theta[{k}]"));
+        }
+
+        let age_entry = array![SURVIVAL_TIME_FLOOR, SURVIVAL_TIME_FLOOR];
+        let age_exit = array![0.5, 2.0];
+        let geometry =
+            build_survival_marginal_slope_baseline_geometry(&age_entry, &age_exit, &cfg)
+                .expect("the row geometry builds at the entry floor")
+                .expect("Weibull is a nonlinear chart");
+        for row in 0..age_entry.len() {
+            assert_eq!(geometry.offset_entry[row].to_bits(), q.to_bits(), "entry row {row}");
+            let exit_hazard = (age_exit[row] / scale).powf(shape);
+            assert!(
+                (normal_cdf(-geometry.offset_exit[row]) - (-exit_hazard).exp()).abs() <= 1e-12,
+                "exit row {row}"
             );
         }
     }
