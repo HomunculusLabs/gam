@@ -35,7 +35,6 @@
 
 use gam_linalg::faer_ndarray::fast_ab;
 use gam_math::special::{logaddexp, logistic};
-use gam_solve::evidence::log_bayes_factor;
 use gam_solve::gaussian_marginal::{
     GaussianEvidenceParts, GaussianMarginalError, GaussianMarginalModel,
 };
@@ -258,8 +257,9 @@ fn assemble(
     log_evidence_specialized: f64,
     prior_share_probability: f64,
 ) -> ReuseComparison {
-    // Negative log evidences are the costs `log_bayes_factor` orders.
-    let log_bayes_factor = log_bayes_factor(-log_evidence_shared, -log_evidence_specialized);
+    // Both arms pass normalized log evidences (exact under a declared prior, at each hypothesis' REML λ in
+    // `compare_reuse_reml`), so their difference is the log Bayes factor itself, not a raw `criterion_gap`.
+    let log_bayes_factor = log_evidence_shared - log_evidence_specialized;
     let log_posterior_odds =
         log_bayes_factor + prior_share_probability.ln() - (-prior_share_probability).ln_1p();
     ReuseComparison {
