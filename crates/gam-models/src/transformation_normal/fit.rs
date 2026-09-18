@@ -425,21 +425,14 @@ pub(crate) fn fit_transformation_normal(
     // penalty for the four tensor coordinates, so without it this search kept the
     // precision box ±ln(1/√ε) and railed ρ at −18.022 in large_scale run
     // 34666040783 (#2896).
-    let (rho_lower, rho_upper) =
-        crate::custom_family::per_block_resolvability_rho_domain(&probe_blocks, &options)
-            .map_err(|error| format!("transformation-normal rho resolvability domain: {error}"))?;
-    if rho_lower.len() != rho0.len() || rho_upper.len() != rho0.len() {
-        return Err(FitFailure::raised(
-            gam_problem::FailureCategory::Invariant,
-            format!(
-                "transformation-normal rho resolvability domain has {} coordinates for {} smoothing penalties",
-                rho_lower.len(),
-                rho0.len(),
-            ),
-        ));
-    }
-    let joint_setup = ExactJointHyperSetup::new(rho0, kappa0, kappa_lower, kappa_upper)
-        .with_rho_domain(rho_lower, rho_upper);
+    let (rho_lower, rho_upper) = crate::fit_orchestration::drivers::realized_blocks_rho_domain(
+        &probe_blocks,
+        &options,
+        rho0.len(),
+    )
+    .map_err(|failure| failure.context("transformation-normal"))?;
+    let joint_setup =
+        ExactJointHyperSetup::new(rho0, rho_lower, rho_upper, kappa0, kappa_lower, kappa_upper);
 
     // Clone response basis parts for use inside closures.
     let rv = resp_val.clone();

@@ -93,8 +93,12 @@ fn unit_score_covariance() -> ScoreCovarianceField {
 
 fn no_spatial_joint_setup(rho_dim: usize) -> ExactJointHyperSetup {
     let no_kappa = SpatialLogKappaCoords::new_with_dims(Array1::zeros(0), Vec::new());
+    // No block owns these coordinates, so the representable log-strength range
+    // is their only domain.
     ExactJointHyperSetup::new(
         Array1::zeros(rho_dim),
+        Array1::from_elem(rho_dim, gam_problem::LOG_STRENGTH_MIN),
+        Array1::from_elem(rho_dim, gam_problem::LOG_STRENGTH_MAX),
         no_kappa.clone(),
         no_kappa.clone(),
         no_kappa,

@@ -878,8 +878,9 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // The ρ domain per coordinate, in the layout the seeds above use: the time
     // block's penalties against its exit design, the marginal and slope blocks
     // against their own designs, the prepared extra blocks against theirs, and
-    // the absorber ridge on the precision box (#2812).
-    let rho_domain = {
+    // the absorber's identity ridge against the residualized influence columns
+    // it penalizes (#2812, #2902 item 15).
+    let (rho_lower, rho_upper) = {
         let mut lower = Vec::with_capacity(core_rho0_seed.len() + extra_rho0.len());
         let mut upper = Vec::with_capacity(core_rho0_seed.len() + extra_rho0.len());
         let (lo, hi) = crate::fit_orchestration::drivers::penalized_block_rho_domain(
@@ -916,12 +917,15 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             lower.extend(lo);
             upper.extend(hi);
         }
-        if influence_absorber_residualized.is_some() {
-            let (lo, hi) = gam_problem::precision_box();
-            lower.push(lo);
-            upper.push(hi);
+        if let Some(absorber) = influence_absorber_residualized.as_ref() {
+            let (lo, hi) = crate::fit_orchestration::drivers::penalized_block_rho_domain(
+                &DesignMatrix::from(absorber.clone()),
+                [&Array2::<f64>::eye(absorber.ncols())],
+            );
+            lower.extend(lo);
+            upper.extend(hi);
         }
-        Some((Array1::from_vec(lower), Array1::from_vec(upper)))
+        (Array1::from_vec(lower), Array1::from_vec(upper))
     };
     let setup = joint_setup(
         data,
@@ -932,7 +936,8 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         slope_design.penalties.len(),
         &core_rho0_seed,
         &extra_rho0,
-        rho_domain,
+        rho_lower,
+        rho_upper,
         &baseline_initial_theta,
         &baseline_lower_theta,
         &baseline_upper_theta,

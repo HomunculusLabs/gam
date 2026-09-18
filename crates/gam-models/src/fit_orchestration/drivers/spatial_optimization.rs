@@ -73,37 +73,32 @@ pub(crate) fn joint_rho_resolvability_domain(
     (lower, upper)
 }
 
-/// The joint ρ domain across the blocks of an exact-joint route: the blocks'
-/// penalties, in block order, are the ρ coordinates, and each takes the
-/// resolvability interval of its own block design (#2812). When the blocks'
-/// penalties do not account for every coordinate the layout is not the
-/// driver's to guess: `None`, and the box the setup's builder derived (or the
-/// precision box) stands.
-pub(crate) fn joint_rho_resolvability_domain_over_blocks<'a>(
-    blocks: &[(&'a DesignMatrix, &'a [gam_terms::smooth::BlockwisePenalty])],
+/// The ρ domain of an exact-joint search over a custom family's blocks realized
+/// at the seed: the #2812 law `fit_custom_family` applies to those same blocks
+/// ([`per_block_resolvability_rho_domain`](crate::custom_family::per_block_resolvability_rho_domain)),
+/// so a coordinate is searched on one domain whichever route fits it. Every
+/// block that owns a ρ coordinate is realized, including the ones the driver's
+/// term collections never carry (a survival time or link-wiggle block, an
+/// influence absorber, a noise ridge). A layout whose free penalties do not
+/// number `rho_dim` is refused rather than given a box (#2902 item 15).
+pub(crate) fn realized_blocks_rho_domain(
+    blocks: &[crate::custom_family::ParameterBlockSpec],
+    options: &crate::custom_family::BlockwiseFitOptions,
     rho_dim: usize,
-) -> Option<(Array1<f64>, Array1<f64>)> {
-    let declared: usize = blocks.iter().map(|(_, penalties)| penalties.len()).sum();
-    if declared != rho_dim {
-        log::info!(
-            "[spatial-exact-joint] joint rho domain: {rho_dim} coordinates but the {} blocks \
-             declare {declared} penalties between them; the setup's own box stands",
-            blocks.len()
-        );
-        return None;
+) -> Result<(Array1<f64>, Array1<f64>), FitFailure> {
+    let (lower, upper) = crate::custom_family::per_block_resolvability_rho_domain(blocks, options)
+        .map_err(|error| FitFailure::from(error).context("exact-joint rho resolvability domain"))?;
+    if lower.len() != rho_dim || upper.len() != rho_dim {
+        return Err(FitFailure::raised(
+            gam_problem::FailureCategory::Invariant,
+            format!(
+                "exact-joint rho resolvability domain: the realized blocks carry {} free \
+                 penalties for {rho_dim} rho coordinates",
+                lower.len()
+            ),
+        ));
     }
-    let mut lower = Array1::<f64>::zeros(rho_dim);
-    let mut upper = Array1::<f64>::zeros(rho_dim);
-    let mut cursor = 0usize;
-    for (design, penalties) in blocks {
-        let n_block = penalties.len();
-        let (block_lower, block_upper) =
-            joint_rho_resolvability_domain(design, penalties, n_block);
-        lower.slice_mut(s![cursor..cursor + n_block]).assign(&block_lower);
-        upper.slice_mut(s![cursor..cursor + n_block]).assign(&block_upper);
-        cursor += n_block;
-    }
-    Some((lower, upper))
+    Ok((lower, upper))
 }
 
 /// The per-coordinate ρ domain of one penalized block given as a design and
@@ -650,34 +645,27 @@ fn exact_joint_spatial_seed(
     }
 
     // The joint ρ domain is derived from the incumbent's own design and
-    // penalties (#2812): this route hands its θ box straight to the joint
-    // optimizer, so the derivation happens here rather than in the
-    // multi-block driver. The setup itself carries only the seed.
+    // penalties (#2812), and the setup projects the incumbent's seed into it.
     let rho_seed = best.fit.lambdas.mapv(f64::ln);
-    let setup = ExactJointHyperSetup::new(rho_seed, log_kappa0, log_kappa_lower, log_kappa_upper);
-
-    let mut theta0 = setup.theta0();
-    let mut lower = setup.lower();
-    let mut upper = setup.upper();
-    {
-        let (rho_lower, rho_upper) =
-            joint_rho_resolvability_domain(&best.design.design, &best.design.penalties, rho_dim);
-        for k in 0..rho_dim {
-            lower[k] = rho_lower[k];
-            upper[k] = rho_upper[k];
-            theta0[k] = if theta0[k].is_finite() {
-                theta0[k].clamp(rho_lower[k], rho_upper[k])
-            } else {
-                0.5 * (rho_lower[k] + rho_upper[k])
-            };
-        }
-        log::info!(
-            "[spatial-kappa] joint rho domain per coordinate: lower={:.3?} upper={:.3?} seed={:.3?}",
-            rho_lower.to_vec(),
-            rho_upper.to_vec(),
-            theta0.iter().take(rho_dim).copied().collect::<Vec<_>>(),
-        );
-    }
+    let (rho_lower, rho_upper) =
+        joint_rho_resolvability_domain(&best.design.design, &best.design.penalties, rho_dim);
+    let setup = ExactJointHyperSetup::new(
+        rho_seed,
+        rho_lower,
+        rho_upper,
+        log_kappa0,
+        log_kappa_lower,
+        log_kappa_upper,
+    );
+    let theta0 = setup.theta0();
+    let lower = setup.lower();
+    let upper = setup.upper();
+    log::info!(
+        "[spatial-kappa] joint rho domain per coordinate: lower={:.3?} upper={:.3?} seed={:.3?}",
+        lower.iter().take(rho_dim).copied().collect::<Vec<_>>(),
+        upper.iter().take(rho_dim).copied().collect::<Vec<_>>(),
+        theta0.iter().take(rho_dim).copied().collect::<Vec<_>>(),
+    );
     let kind = if use_aniso {
         SpatialHyperKind::Anisotropic
     } else {
@@ -4682,11 +4670,11 @@ pub enum SpatialFitProvenance<'a, M> {
 #[derive(Debug, Clone)]
 pub struct ExactJointHyperSetup {
     rho0: Array1<f64>,
-    /// A per-coordinate ρ domain the builder derived from structures the
-    /// driver cannot see (a survival time block's own design and penalties);
-    /// `None` leaves the ρ half of the θ box at the precision box until the
-    /// driver derives it from the blocks' seed designs.
-    rho_domain: Option<(Array1<f64>, Array1<f64>)>,
+    /// The per-coordinate ρ domain its builder derived over every block that
+    /// owns a ρ coordinate (#2812). It is the ρ half of the θ box, and no
+    /// coordinate is searched without one (#2902 item 15).
+    rho_lower: Array1<f64>,
+    rho_upper: Array1<f64>,
     log_kappa0: SpatialLogKappaCoords,
     log_kappa_lower: SpatialLogKappaCoords,
     log_kappa_upper: SpatialLogKappaCoords,
@@ -4696,13 +4684,23 @@ pub struct ExactJointHyperSetup {
 }
 
 impl ExactJointHyperSetup {
-    /// The ρ seed inside the arithmetic envelope. The setup carries no ρ box
-    /// of its own: the searchable domain of each ρ coordinate is derived from
-    /// the seed designs by the driver that builds them (#2812), and until then
-    /// the only bound a coordinate has is the one working precision imposes.
-    fn sanitize_rho_seed(rho0: Array1<f64>) -> Array1<f64> {
-        let (lo, hi) = gam_solve::estimate::rho_domain::precision_box();
-        rho0.mapv(|value| if value.is_finite() { value.clamp(lo, hi) } else { 0.0 })
+    /// A ρ seed inside its derived domain. A finite seed is projected onto the
+    /// domain, and a non-finite one takes the domain's midpoint, the geometric
+    /// mean of the two edge strengths.
+    fn project_rho_seed(
+        rho0: Array1<f64>,
+        lower: &Array1<f64>,
+        upper: &Array1<f64>,
+    ) -> Array1<f64> {
+        Array1::from_iter(rho0.iter().zip(lower.iter().zip(upper.iter())).map(
+            |(&value, (&lo, &hi))| {
+                if value.is_finite() {
+                    value.clamp(lo, hi)
+                } else {
+                    0.5 * (lo + hi)
+                }
+            },
+        ))
     }
 
     /// An auxiliary seed inside the box its caller derived for it.
@@ -4722,16 +4720,27 @@ impl ExactJointHyperSetup {
         }))
     }
 
+    /// The setup of a ρ seed on the domain its builder derived for it, and of
+    /// the κ coordinates on their bounds. The seed is projected into the domain.
     pub(crate) fn new(
         rho0: Array1<f64>,
+        rho_lower: Array1<f64>,
+        rho_upper: Array1<f64>,
         log_kappa0: SpatialLogKappaCoords,
         log_kappa_lower: SpatialLogKappaCoords,
         log_kappa_upper: SpatialLogKappaCoords,
     ) -> Self {
-        let rho0 = Self::sanitize_rho_seed(rho0);
+        assert_eq!(rho_lower.len(), rho0.len(), "rho domain lower length mismatch");
+        assert_eq!(rho_upper.len(), rho0.len(), "rho domain upper length mismatch");
+        assert!(
+            rho_lower.iter().zip(rho_upper.iter()).all(|(lo, hi)| lo <= hi),
+            "rho domain must be ordered: lower={rho_lower:?} upper={rho_upper:?}"
+        );
+        let rho0 = Self::project_rho_seed(rho0, &rho_lower, &rho_upper);
         Self {
             rho0,
-            rho_domain: None,
+            rho_lower,
+            rho_upper,
             log_kappa0,
             log_kappa_lower,
             log_kappa_upper,
@@ -4739,19 +4748,6 @@ impl ExactJointHyperSetup {
             auxiliary_lower: Array1::zeros(0),
             auxiliary_upper: Array1::zeros(0),
         }
-    }
-
-    /// The ρ domain a builder derived for coordinates whose penalties are not
-    /// carried by the blocks' term-collection designs (#2812). The seed is
-    /// projected into it.
-    pub(crate) fn with_rho_domain(mut self, lower: Array1<f64>, upper: Array1<f64>) -> Self {
-        assert_eq!(lower.len(), self.rho0.len(), "rho domain lower length mismatch");
-        assert_eq!(upper.len(), self.rho0.len(), "rho domain upper length mismatch");
-        for k in 0..self.rho0.len() {
-            self.rho0[k] = self.rho0[k].clamp(lower[k], upper[k]);
-        }
-        self.rho_domain = Some((lower, upper));
-        self
     }
 
     pub(crate) fn with_auxiliary(
@@ -4800,17 +4796,11 @@ impl ExactJointHyperSetup {
         out
     }
 
-    /// The θ box with the ρ half at the arithmetic envelope; the driver
-    /// replaces that half with the domain derived from the seed designs.
+    /// The θ box: the derived ρ domain, the κ bounds, then the auxiliary box.
     pub(crate) fn lower(&self) -> Array1<f64> {
         let mut out =
             Array1::<f64>::zeros(self.rho_dim() + self.log_kappa_dim() + self.auxiliary_dim());
-        match self.rho_domain.as_ref() {
-            Some((lower, _)) => out.slice_mut(s![..self.rho_dim()]).assign(lower),
-            None => out
-                .slice_mut(s![..self.rho_dim()])
-                .fill(gam_solve::estimate::rho_domain::precision_box().0),
-        }
+        out.slice_mut(s![..self.rho_dim()]).assign(&self.rho_lower);
         out.slice_mut(s![self.rho_dim()..self.rho_dim() + self.log_kappa_dim()])
             .assign(self.log_kappa_lower.as_array());
         out.slice_mut(s![self.rho_dim() + self.log_kappa_dim()..])
@@ -4821,12 +4811,7 @@ impl ExactJointHyperSetup {
     pub(crate) fn upper(&self) -> Array1<f64> {
         let mut out =
             Array1::<f64>::zeros(self.rho_dim() + self.log_kappa_dim() + self.auxiliary_dim());
-        match self.rho_domain.as_ref() {
-            Some((_, upper)) => out.slice_mut(s![..self.rho_dim()]).assign(upper),
-            None => out
-                .slice_mut(s![..self.rho_dim()])
-                .fill(gam_solve::estimate::rho_domain::precision_box().1),
-        }
+        out.slice_mut(s![..self.rho_dim()]).assign(&self.rho_upper);
         out.slice_mut(s![self.rho_dim()..self.rho_dim() + self.log_kappa_dim()])
             .assign(self.log_kappa_upper.as_array());
         out.slice_mut(s![self.rho_dim() + self.log_kappa_dim()..])
@@ -5367,33 +5352,6 @@ mod joint_rho_resolvability_domain_tests {
         }
     }
 
-    /// Across blocks the coordinates are the blocks' penalties in block
-    /// order, each on its own block's interval; a coordinate count the blocks
-    /// do not account for is not a layout the driver may guess, and every
-    /// coordinate then keeps the precision box.
-    #[test]
-    fn the_joint_domain_is_the_blocks_intervals_in_block_order_2812() {
-        let (design_a, penalties_a) = two_column_block(1.0);
-        let (design_b, penalties_b) = two_column_block(3.0e4);
-        let blocks = [
-            (&design_a, penalties_a.as_slice()),
-            (&design_b, penalties_b.as_slice()),
-        ];
-        let (lower, upper) =
-            joint_rho_resolvability_domain_over_blocks(&blocks, 2).expect("two penalties, two coordinates");
-        assert!(
-            (lower[0] - 0.5 * f64::EPSILON.ln()).abs() < 1e-9
-                && (upper[0] + 0.5 * f64::EPSILON.ln()).abs() < 1e-9
-                && (lower[1] - (0.5 * f64::EPSILON.ln() + 3.0e4_f64.ln())).abs() < 1e-9
-                && (upper[1] - (3.0e4_f64.ln() - 0.5 * f64::EPSILON.ln())).abs() < 1e-9,
-            "block order: lower={lower:?} upper={upper:?}"
-        );
-        assert!(
-            joint_rho_resolvability_domain_over_blocks(&blocks, 3).is_none(),
-            "an unaccounted coordinate is not the driver's to place"
-        );
-    }
-
     /// The #2760 incumbents that used to sit on the `±12` wall are interior
     /// points of the derived domain of a unit-curvature term: a fit inside
     /// its own domain seeds the joint search inside this one. The one
@@ -5777,9 +5735,9 @@ where
     // -----------------------------------------------------------------------
     // Full optimization path.
     // -----------------------------------------------------------------------
-    let mut theta0 = joint_setup.theta0();
-    let mut lower = joint_setup.lower();
-    let mut upper = joint_setup.upper();
+    let theta0 = joint_setup.theta0();
+    let lower = joint_setup.lower();
+    let upper = joint_setup.upper();
     if theta0.len() < log_kappa_dim || lower.len() != theta0.len() || upper.len() != theta0.len() {
         return Err(FitFailure::raised(
             gam_problem::FailureCategory::Invariant,
@@ -5806,38 +5764,14 @@ where
             "failed to build and freeze joint block designs during exact joint kappa bootstrap: {e}"
         )
     })?;
-    // The ρ half of the θ box is the resolvability domain of each coordinate
-    // on its own block's seed design (#2812): nothing the setup's builder could
-    // know before these designs existed, and nothing the driver needs a
-    // hand-supplied box for now that they do.
-    {
-        let seed_blocks: Vec<(&DesignMatrix, &[gam_terms::smooth::BlockwisePenalty])> =
-            boot_designs
-                .iter()
-                .map(|d| (&d.design, d.penalties.as_slice()))
-                .collect();
-        if let Some((rho_lower, rho_upper)) =
-            joint_rho_resolvability_domain_over_blocks(&seed_blocks, rho_dim)
-        {
-            for k in 0..rho_dim {
-                lower[k] = rho_lower[k];
-                upper[k] = rho_upper[k];
-            }
-        }
-        for k in 0..rho_dim {
-            theta0[k] = if theta0[k].is_finite() {
-                theta0[k].clamp(lower[k], upper[k])
-            } else {
-                0.5 * (lower[k] + upper[k])
-            };
-        }
-        log::info!(
-            "[spatial-exact-joint] joint rho domain per coordinate: lower={:.3?} upper={:.3?} seed={:.3?}",
-            lower.iter().take(rho_dim).copied().collect::<Vec<_>>(),
-            upper.iter().take(rho_dim).copied().collect::<Vec<_>>(),
-            theta0.iter().take(rho_dim).copied().collect::<Vec<_>>(),
-        );
-    }
+    // The ρ half of the θ box is the domain the setup's builder derived over
+    // every block that owns a ρ coordinate (#2812, #2902 item 15).
+    log::info!(
+        "[spatial-exact-joint] joint rho domain per coordinate: lower={:.3?} upper={:.3?} seed={:.3?}",
+        lower.iter().take(rho_dim).copied().collect::<Vec<_>>(),
+        upper.iter().take(rho_dim).copied().collect::<Vec<_>>(),
+        theta0.iter().take(rho_dim).copied().collect::<Vec<_>>(),
+    );
     // Capability vs realized policy: the family may *advertise* an exact
     // analytic outer Hessian, but at this realized (n, psi_dim, rho_dim,
     // p_total) the predicted per-eval cost can still exceed the universal

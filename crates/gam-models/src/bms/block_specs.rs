@@ -1281,32 +1281,22 @@ mod runaway_tests {
 
     #[test]
     pub(crate) fn spatial_joint_setup_counts_only_learned_penalties_in_rho() {
-        let data = Array2::<f64>::zeros((3, 1));
-        let empty_terms = TermCollectionSpec {
-            linear_terms: Vec::new(),
-            random_effect_terms: Vec::new(),
-            smooth_terms: Vec::new(),
-        };
-        let setup = joint_setup(
-            data.view(),
-            &empty_terms,
-            &empty_terms,
-            2,
-            3,
-            Some(2.5),
-            &[0.4],
-        )
-        .expect("empty spatial geometry is valid");
+        let rho_seed = joint_rho_seed(2, 3, Some(2.5), &[0.4]);
 
         assert_eq!(
-            setup.rho_dim(),
+            rho_seed.len(),
             6,
             "BMS spatial setup rho holds every learned marginal/slope/auxiliary penalty; the #461 absorber ridge occupies the trailing marginal slot"
         );
         assert_eq!(
-            setup.theta0()[1],
+            rho_seed[1],
             2.5,
             "absorber ridge seeds the trailing marginal rho coordinate at the ln(n) leakage scale"
+        );
+        assert_eq!(
+            rho_seed[5],
+            0.4,
+            "the auxiliary penalty seeds the trailing rho coordinate"
         );
     }
 
@@ -2605,7 +2595,7 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
 
     // With the #461 influence absorber active, the marginal block carries one
     // extra REML-learned ρ coordinate (the absorber ridge precision), seeded
-    // at the ln(n) leakage scale and clamped into the outer ρ box.
+    // at the ln(n) leakage scale and projected into its derived domain.
     let absorber_slots = usize::from(influence_columns.is_some());
     let absorber_rho0 = influence_columns
         .as_ref()
@@ -2614,33 +2604,12 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         // ~1.6e5 rows, where it silently capped `ln n` (#2469).
         .map(|_| influence_absorber_log_lambda(spec.z.len()));
     let marginal_penalty_count = marginal_design.penalties.len() + absorber_slots;
-    let setup = joint_setup(
-        data_view,
-        &marginalspec_boot,
-        &slopespec_boot,
+    let rho_seed = joint_rho_seed(
         marginal_penalty_count,
         slope_design.penalties.len(),
         absorber_rho0,
         &extra_rho0,
-    )
-    .map_err(|error| error.to_string())?;
-    // A learned frailty scale owns one outer coordinate, ln σ. Its domain is the
-    // one the scale derives for itself, `ln(1/√ε)` e-folds either side of the
-    // seed (the gradient resolution every derived ρ edge sits at). This is the
-    // same coordinate the survival marginal-slope family searches, and it
-    // replaces a hand-supplied `[ln 0.01, ln 5]` box (#2902, SPEC rule 20).
-    let learned_log_sigma = match &spec.frailty {
-        FrailtySpec::GaussianShift { scale } => scale.learned_log_sigma_coordinate(),
-        FrailtySpec::None | FrailtySpec::HazardMultiplier { .. } => None,
-    };
-    let setup = match learned_log_sigma {
-        Some((log_sigma, lower, upper)) => setup.with_auxiliary(
-            Array1::from_vec(vec![log_sigma]),
-            Array1::from_vec(vec![lower]),
-            Array1::from_vec(vec![upper]),
-        ),
-        None => setup,
-    };
+    );
     let final_sigma_cell = std::cell::Cell::new(initial_sigma);
     let walk_signals = crate::exact_mode_branch::OuterWalkSignals::default();
     let exact_mode_branch = RefCell::new(ExactCoefficientModeBranch::new(walk_signals.clone()));
@@ -2783,6 +2752,42 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         }
     };
 
+    // The blocks realized at the seed: every block that owns a ρ coordinate, the
+    // absorber ridge and the deviation blocks included. The family reports its
+    // capability on them, and the search takes its ρ domain from them by the
+    // #2812 law `fit_custom_family` applies to the same blocks (#2902 item 15).
+    let initial_blocks = build_blocks(&rho_seed, &marginal_design, &slope_design)?;
+    let (rho_lower, rho_upper) = crate::fit_orchestration::drivers::realized_blocks_rho_domain(
+        &initial_blocks,
+        options,
+        rho_seed.len(),
+    )?;
+    let setup = joint_setup(
+        data_view,
+        &marginalspec_boot,
+        &slopespec_boot,
+        rho_seed,
+        rho_lower,
+        rho_upper,
+    )
+    .map_err(|error| error.to_string())?;
+    // A learned frailty scale owns one outer coordinate, ln σ. Its domain is the
+    // one the scale derives for itself, `ln(1/√ε)` e-folds either side of the
+    // seed (the gradient resolution every derived ρ edge sits at). This is the
+    // same coordinate the survival marginal-slope family searches, and it
+    // replaces a hand-supplied `[ln 0.01, ln 5]` box (#2902, SPEC rule 20).
+    let learned_log_sigma = match &spec.frailty {
+        FrailtySpec::GaussianShift { scale } => scale.learned_log_sigma_coordinate(),
+        FrailtySpec::None | FrailtySpec::HazardMultiplier { .. } => None,
+    };
+    let setup = match learned_log_sigma {
+        Some((log_sigma, lower, upper)) => setup.with_auxiliary(
+            Array1::from_vec(vec![log_sigma]),
+            Array1::from_vec(vec![lower]),
+            Array1::from_vec(vec![upper]),
+        ),
+        None => setup,
+    };
     let marginal_terms = spatial_length_scale_term_indices(&marginalspec_boot);
     let slope_terms = spatial_length_scale_term_indices(&slopespec_boot);
     let marginal_has_spatial = !marginal_terms.is_empty();
@@ -2795,8 +2800,6 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
             "exact bernoulli marginal-slope spatial optimization requires analytic joint psi derivatives",
         ));
     }
-    let initial_rho = setup.theta0().slice(s![..setup.rho_dim()]).to_owned();
-    let initial_blocks = build_blocks(&initial_rho, &marginal_design, &slope_design)?;
     let initial_family = make_family(&marginal_design, &slope_design, initial_sigma);
     let (joint_gradient, joint_hessian) =
         custom_family_outer_derivatives(&initial_family, &initial_blocks, options);

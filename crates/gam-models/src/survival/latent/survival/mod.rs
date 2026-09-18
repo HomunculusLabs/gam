@@ -1001,8 +1001,20 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
     let (precision_lower, precision_upper) = gam_solve::estimate::rho_domain::precision_box();
     let no_kappa =
         || gam_terms::smooth::SpatialLogKappaCoords::new_with_dims(Array1::zeros(0), Vec::new());
-    let setup = ExactJointHyperSetup::new(rho0, no_kappa(), no_kappa(), no_kappa())
-        .with_auxiliary(
+    // ρ is searched on the #2812 domain `fit_custom_family` gives these same seed
+    // blocks, over every block that owns a ρ coordinate (#2902 item 15).
+    let (rho_lower, rho_upper) =
+        crate::fit_orchestration::drivers::realized_blocks_rho_domain(seed_blocks, options, rho_dim)
+            .map_err(|failure| failure.to_string())?;
+    let setup = ExactJointHyperSetup::new(
+        rho0,
+        rho_lower,
+        rho_upper,
+        no_kappa(),
+        no_kappa(),
+        no_kappa(),
+    )
+    .with_auxiliary(
             theta0,
             Array1::from_elem(axis_count, precision_lower),
             Array1::from_elem(axis_count, precision_upper),
@@ -9652,6 +9664,9 @@ type LatentBinaryHessianWorkspace = LatentHessianWorkspace<LatentBinaryFamily>;
 /// when this file hit the 10,000-line ceiling; see `survival/custom_family.rs`.
 mod baseline_chart_pairs;
 mod custom_family;
+
+#[cfg(test)]
+mod tests_rho_domain_2902;
 
 #[cfg(test)]
 mod tests;

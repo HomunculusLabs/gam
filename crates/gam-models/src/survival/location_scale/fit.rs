@@ -655,29 +655,6 @@ pub(crate) fn fit_survival_location_scale_terms(
         rho0.slice_mut(s![range.start..range.end])
             .assign(&wiggle_rho0);
     }
-    let joint_setup = build_survival_two_block_exact_joint_setup(
-        data.view(),
-        &spec.thresholdspec,
-        &spec.log_sigmaspec,
-        rho0,
-    )?;
-    // θ = [ρ | log κ | inverse-link shape]. A shape coordinate may be any finite
-    // real, so the only bound it has is the one working precision imposes.
-    let joint_setup = if link_shape0.is_empty() {
-        joint_setup
-    } else {
-        let (lower, upper) = gam_solve::estimate::rho_domain::precision_box();
-        joint_setup.with_auxiliary(
-            link_shape0.clone(),
-            Array1::from_elem(link_shape0.len(), lower),
-            Array1::from_elem(link_shape0.len(), upper),
-        )
-    };
-    let link_shape_start = joint_setup.rho_dim() + joint_setup.log_kappa_dim();
-    let inverse_link_at = |theta: &Array1<f64>| -> Result<InverseLink, String> {
-        inverse_link_with_shape(&spec.inverse_link, theta.slice(s![link_shape_start..]))
-    };
-
     let time_beta_hint = std::cell::RefCell::new(spec.time_block.initial_beta.clone());
     let threshold_beta_hint = std::cell::RefCell::new(None::<Array1<f64>>);
     let log_sigma_beta_hint = std::cell::RefCell::new(None::<Array1<f64>>);
@@ -823,6 +800,52 @@ pub(crate) fn fit_survival_location_scale_terms(
             persistent_warm_start_store: spec.persistent_warm_start_store.clone(),
             cache_mirror_sessions: spec.cache_mirror_sessions.clone(),
         })
+    };
+    // The ρ domain of every block that owns a ρ coordinate (time, threshold,
+    // log-sigma, link wiggle), realized at the seed by the same preparation every
+    // evaluation runs, under the #2812 law `fit_custom_family` applies to those
+    // blocks (#2902 item 15). The threshold and log-sigma term collections alone
+    // do not carry the time and wiggle penalties.
+    let (rho_lower, rho_upper) = {
+        let seed_spec = build_spec(
+            &rho0,
+            spec.inverse_link.clone(),
+            &spec.thresholdspec,
+            &spec.log_sigmaspec,
+            &threshold_boot_design,
+            &log_sigma_boot_design,
+        )
+        .map_err(|reason| FitFailure::raised(gam_problem::FailureCategory::Invariant, reason))?;
+        let prepared = prepare_survival_location_scale_model(&seed_spec)?;
+        crate::fit_orchestration::drivers::realized_blocks_rho_domain(
+            &prepared.blockspecs,
+            &survival_blockwise_fit_options(&seed_spec),
+            layout.total(),
+        )?
+    };
+    let joint_setup = build_survival_two_block_exact_joint_setup(
+        data.view(),
+        &spec.thresholdspec,
+        &spec.log_sigmaspec,
+        rho0,
+        rho_lower,
+        rho_upper,
+    )?;
+    // θ = [ρ | log κ | inverse-link shape]. A shape coordinate may be any finite
+    // real, so the only bound it has is the one working precision imposes.
+    let joint_setup = if link_shape0.is_empty() {
+        joint_setup
+    } else {
+        let (lower, upper) = gam_solve::estimate::rho_domain::precision_box();
+        joint_setup.with_auxiliary(
+            link_shape0.clone(),
+            Array1::from_elem(link_shape0.len(), lower),
+            Array1::from_elem(link_shape0.len(), upper),
+        )
+    };
+    let link_shape_start = joint_setup.rho_dim() + joint_setup.log_kappa_dim();
+    let inverse_link_at = |theta: &Array1<f64>| -> Result<InverseLink, String> {
+        inverse_link_with_shape(&spec.inverse_link, theta.slice(s![link_shape_start..]))
     };
 
     let threshold_terms = spatial_length_scale_term_indices(&spec.thresholdspec);

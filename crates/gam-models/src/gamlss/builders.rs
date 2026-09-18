@@ -205,30 +205,39 @@ fn fitted_log_lambdas(lambdas: &Array1<f64>, context: &str) -> Result<Array1<f64
         .map(Array1::from_vec)
 }
 
+/// The GAMLSS exact-joint ρ seed in `[mean | noise | extra]` penalty order: the
+/// extra coordinates take their own seeds and every penalty coordinate starts at
+/// unit strength.
+pub(crate) fn two_block_rho_seed(
+    mean_penalties: usize,
+    noise_penalties: usize,
+    extra_rho0: &[f64],
+) -> Array1<f64> {
+    let mut rho0vec = Array1::<f64>::zeros(mean_penalties + noise_penalties + extra_rho0.len());
+    for (i, &rho_init) in extra_rho0.iter().enumerate() {
+        rho0vec[mean_penalties + noise_penalties + i] = rho_init;
+    }
+    rho0vec
+}
+
 pub(crate) fn build_two_block_exact_joint_setup(
     data: ArrayView2<'_, f64>,
     meanspec: &TermCollectionSpec,
     noisespec: &TermCollectionSpec,
-    mean_penalties: usize,
-    noise_penalties: usize,
-    extra_rho0: &[f64],
-    rho0_override: Option<&Array1<f64>>,
+    rho0: Array1<f64>,
+    rho_lower: Array1<f64>,
+    rho_upper: Array1<f64>,
 ) -> Result<ExactJointHyperSetup, gam_terms::basis::BasisError> {
-    // GAMLSS-specific part: assemble the rho seed in [mean | noise | extra]
-    // penalty order, honoring a caller override when it matches the layout.
-    let rho_dim = mean_penalties + noise_penalties + extra_rho0.len();
-    let mut rho0vec = Array1::<f64>::zeros(rho_dim);
-    if let Some(rho0) = rho0_override.filter(|rho0| rho0.len() == rho_dim) {
-        rho0vec.assign(rho0);
-    } else {
-        for (i, &rho_init) in extra_rho0.iter().enumerate() {
-            rho0vec[mean_penalties + noise_penalties + i] = rho_init;
-        }
-    }
-
-    // Generic part: per-block log(kappa) seed/bounds and exact-joint assembly,
-    // with the two linear predictors (mean, noise) in theta order.
-    build_location_scale_exact_joint_setup(data, &[meanspec, noisespec], rho0vec)
+    // Per-block log(kappa) seed/bounds and exact-joint assembly, with the two
+    // linear predictors (mean, noise) in theta order and the ρ domain the caller
+    // derived over the realized blocks.
+    build_location_scale_exact_joint_setup(
+        data,
+        &[meanspec, noisespec],
+        rho0,
+        rho_lower,
+        rho_upper,
+    )
 }
 
 pub(crate) fn gaussian_location_scalewarm_start(
@@ -3129,14 +3138,38 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
     // theta = [rho, psi] with the real joint Hessian required by NewtonTR/ARC.
     macro_rules! run_exact_joint_spatial {
         () => {{
+            let rho_seed = two_block_rho_seed(
+                mean_penalty_count,
+                noise_penalty_count,
+                extra_rho0.as_slice().unwrap_or(&[]),
+            );
+            // The blocks realized at the seed: every block that owns a ρ
+            // coordinate, the noise ridge and the link wiggle included. The
+            // family reports its capability on them, and the search takes its ρ
+            // domain from them by the #2812 law `fit_custom_family` applies to
+            // the same blocks (#2902 item 15).
+            let seed_blocks = builder
+                .build_blocks(
+                    &rho_seed,
+                    &mean_boot_design,
+                    &noise_boot_design,
+                    mean_beta_hint.clone(),
+                    noise_beta_hint.clone(),
+                )
+                .map_err(|reason| FitFailure::raised(FailureCategory::Invariant, reason))?;
+            let (rho_lower, rho_upper) =
+                crate::fit_orchestration::drivers::realized_blocks_rho_domain(
+                    &seed_blocks,
+                    options,
+                    rho_seed.len(),
+                )?;
             let joint_setup = build_two_block_exact_joint_setup(
                 data,
                 builder.meanspec(),
                 builder.noisespec(),
-                mean_penalty_count,
-                noise_penalty_count,
-                extra_rho0.as_slice().unwrap_or(&[]),
-                None,
+                rho_seed,
+                rho_lower,
+                rho_upper,
             )?;
             let mean_terms = spatial_length_scale_term_indices(builder.meanspec());
             let noise_terms = spatial_length_scale_term_indices(builder.noisespec());
@@ -3155,46 +3188,13 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
             // for hundreds of seconds before the runner falls back.
             let gamlss_disable_fixed_point = true;
             let outer_policy = {
-                // Realize the blocks at the seed rho so the family reports its
-                // capability on the realized designs.
-                let theta_seed = joint_setup.theta0();
-                let rho_dim = joint_setup.rho_dim();
-                let rho_seed = theta_seed.slice(s![..rho_dim]).to_owned();
-                let policy_blocks_res = builder.build_blocks(
-                    &rho_seed,
-                    &mean_boot_design,
-                    &noise_boot_design,
-                    mean_beta_hint_cell.borrow().clone(),
-                    noise_beta_hint_cell.borrow().clone(),
+                // The family reports its capability on the seed blocks.
+                let policy_family = builder.build_family(&mean_boot_design, &noise_boot_design);
+                let mut policy = crate::custom_family::CustomFamily::outer_derivative_policy(
+                    &policy_family,
+                    &seed_blocks,
+                    options,
                 );
-                let mut policy = match policy_blocks_res {
-                    Ok(policy_blocks) => {
-                        let policy_family =
-                            builder.build_family(&mean_boot_design, &noise_boot_design);
-                        crate::custom_family::CustomFamily::outer_derivative_policy(
-                            &policy_family,
-                            &policy_blocks,
-                            options,
-                        )
-                    }
-                    Err(err) => {
-                        // Block construction at the seed should not fail for
-                        // any in-tree family, but if it does, fall back to a
-                        // policy that names the capability honestly.
-                        log::warn!(
-                            "[GAMLSS spatial] failed to realize policy blocks at seed rho ({err}); \
-                             routing outer optimizer through gradient-only BFGS"
-                        );
-                        let capability = if analytic_joint_derivatives_available {
-                            crate::custom_family::ExactOuterDerivativeOrder::Second
-                        } else {
-                            crate::custom_family::ExactOuterDerivativeOrder::First
-                        };
-                        crate::custom_family::OuterDerivativePolicy {
-                            capability,
-                        }
-                    }
-                };
                 if !analytic_joint_derivatives_available {
                     // Capability must not exceed what the analytic derivatives
                     // path can supply — the macro's hyper evaluator returns

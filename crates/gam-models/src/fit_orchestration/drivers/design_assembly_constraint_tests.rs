@@ -375,7 +375,14 @@ pub(super) fn two_block_exact_joint_hyper_setup(
         SpatialLogKappaCoords::upper_bounds_aniso_from_data(data, noisespec, &noise_terms, &noise_dims)
             .expect("noise-block spatial search box"),
     );
-    ExactJointHyperSetup::new(Array1::zeros(0), log_kappa0, lower, upper)
+    ExactJointHyperSetup::new(
+        Array1::zeros(0),
+        Array1::zeros(0),
+        Array1::zeros(0),
+        log_kappa0,
+        lower,
+        upper,
+    )
 }
 
 fn max_abs_diff_matrix(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
@@ -2620,8 +2627,12 @@ fn exact_spatial_joint_engine_aniso_iso_parity_1d() {
         SpatialLogKappaCoords::upper_bounds_from_data(data.view(), &frozen, &spatial_terms)
             .expect("upper isotropic-scale bounds");
     let log_kappa0 = log_kappa0.clamp_to_bounds(&log_kappa_lower, &log_kappa_upper);
+    let (rho_lower, rho_upper) =
+        joint_rho_resolvability_domain(&frozen_design.design, &frozen_design.penalties, rho_dim);
     let setup = ExactJointHyperSetup::new(
         Array1::<f64>::zeros(rho_dim), // log λ seed (λ = 1)
+        rho_lower,
+        rho_upper,
         log_kappa0,
         log_kappa_lower,
         log_kappa_upper,
@@ -2797,8 +2808,12 @@ fn psi_gram_tensor_lane_matches_streamed_reml_cost_and_gradient() {
         SpatialLogKappaCoords::upper_bounds_from_data(data.view(), &frozen, &spatial_terms)
             .expect("upper isotropic-scale bounds");
     let log_kappa0 = log_kappa0.clamp_to_bounds(&log_kappa_lower, &log_kappa_upper);
+    let (rho_lower, rho_upper) =
+        joint_rho_resolvability_domain(&frozen_design.design, &frozen_design.penalties, rho_dim);
     let setup = ExactJointHyperSetup::new(
         Array1::<f64>::zeros(rho_dim),
+        rho_lower,
+        rho_upper,
         log_kappa0,
         log_kappa_lower,
         log_kappa_upper,
@@ -3145,8 +3160,12 @@ fn psi_gram_tensor_e2e_kappa_optimum_matches_streamed() {
         SpatialLogKappaCoords::upper_bounds_from_data(data.view(), &frozen, &spatial_terms)
             .expect("upper isotropic-scale bounds");
     let log_kappa0 = log_kappa0.clamp_to_bounds(&log_kappa_lower, &log_kappa_upper);
+    let (rho_lower, rho_upper) =
+        joint_rho_resolvability_domain(&frozen_design.design, &frozen_design.penalties, rho_dim);
     let setup = ExactJointHyperSetup::new(
         Array1::<f64>::zeros(rho_dim),
+        rho_lower,
+        rho_upper,
         log_kappa0.clone(),
         log_kappa_lower.clone(),
         log_kappa_upper.clone(),
