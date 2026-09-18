@@ -41,8 +41,9 @@
 //!   approaches the nested gain as `n` grows and exceeds the linear oracle;
 //! * `E[p̂ | x]` stays within tolerance of `Φ(q(x))` on held-out contexts, with
 //!   and without the block;
-//! * under `r ⟂ Y`, `β̂` shrinks to ~0 and the score-only surfaces are left
-//!   unchanged to solver tolerance.
+//! * under `r ⟂ Y`, `β̂` shrinks to ~0, the ridge spends a nonzero trace (block
+//!   EDF below `K`), and against `p_true` the fit loses no more than an
+//!   unpenalised block costs in expectation.
 
 use csv::StringRecord;
 use gam::families::survival::predict::fit_result_from_saved_model_for_prediction;
@@ -143,6 +144,8 @@ struct Sample {
     y: Vec<f64>,
     /// The generator's `E[Y | x, z, r]` at every row.
     p_true: Vec<f64>,
+    /// The generator's probit index at every row, `p_true = Φ(eta_true)`.
+    eta_true: Vec<f64>,
 }
 
 /// Draw `n` rows from the generator with coefficient block `beta` (all-zero for
@@ -161,6 +164,7 @@ fn draw(n: usize, beta: &[f64; 2], seed: u64) -> Sample {
     let mut x = Vec::with_capacity(n);
     let mut y = Vec::with_capacity(n);
     let mut p_true = Vec::with_capacity(n);
+    let mut eta_true = Vec::with_capacity(n);
     for _ in 0..n {
         let xi = 2.0 * next_unit(&mut state) - 1.0;
         let z = next_gauss(&mut state);
@@ -181,12 +185,14 @@ fn draw(n: usize, beta: &[f64; 2], seed: u64) -> Sample {
         x.push(xi);
         y.push(f64::from(yi));
         p_true.push(p);
+        eta_true.push(eta);
     }
     Sample {
         dataset: encode_recordswith_inferred_schema(headers, rows).expect("encode #2924 sample"),
         x,
         y,
         p_true,
+        eta_true,
     }
 }
 
@@ -196,6 +202,8 @@ struct Fitted {
     beta_residual: Option<Vec<f64>>,
     /// The residual ridge's fitted `log λ`.
     residual_log_lambda: Option<f64>,
+    /// The residual block's effective degrees of freedom (sum of its leverages).
+    residual_edf: Option<f64>,
 }
 
 fn fit(sample: &Sample, with_block: bool) -> Fitted {
@@ -232,6 +240,7 @@ fn fit_with(
         let rho = &unified.log_lambdas;
         rho[rho.len() - 1]
     });
+    let residual_edf = with_block.then(|| unified.blocks[2].edf);
     if with_block {
         let geometry = payload
             .residual_repair
@@ -248,6 +257,7 @@ fn fit_with(
         model: FittedModel::from_payload(payload),
         beta_residual,
         residual_log_lambda,
+        residual_edf,
     }
 }
 
@@ -312,6 +322,54 @@ fn mean_sq_gap(a: &Array1<f64>, b: &[f64]) -> f64 {
         .map(|(&a, &b)| (a - b) * (a - b))
         .sum::<f64>()
         / b.len() as f64
+}
+
+/// What estimating the residual coefficients by unpenalised maximum likelihood
+/// costs in expected squared accuracy against `p_true` when they are null:
+/// `tr(E_test[φ(η)² r rᵀ] · (Σ_train w(η) r rᵀ)⁻¹)`, with
+/// `w = φ(η)² / (Φ(η)(1 − Φ(η)))` the probit working weight. Also returns, for
+/// comparison only, the shortcut `K·E_test[φ(η)²] / (n·E_train[w])` that
+/// assumes the block's columns independent of `η`.
+fn null_ml_cost_floors(train: &Sample, test: &Sample) -> (f64, f64) {
+    let moment = |sample: &Sample, weight: &dyn Fn(f64) -> f64| {
+        let columns = sample.dataset.column_map();
+        let (c1, c2) = (columns["r1"], columns["r2"]);
+        let mut m = [[0.0; 2]; 2];
+        for (row, &eta) in sample.eta_true.iter().enumerate() {
+            let r = [sample.dataset.values[[row, c1]], sample.dataset.values[[row, c2]]];
+            let w = weight(eta);
+            for a in 0..2 {
+                for b in 0..2 {
+                    m[a][b] += w * r[a] * r[b];
+                }
+            }
+        }
+        m
+    };
+    let working_weight = |eta: f64| {
+        let p = normal_cdf(eta);
+        normal_pdf(eta).powi(2) / (p * (1.0 - p))
+    };
+    let density_sq = |eta: f64| normal_pdf(eta).powi(2);
+    let information = moment(train, &working_weight);
+    let det = information[0][0] * information[1][1] - information[0][1] * information[1][0];
+    let covariance = [
+        [information[1][1] / det, -information[0][1] / det],
+        [-information[1][0] / det, information[0][0] / det],
+    ];
+    let spread = moment(test, &density_sq);
+    let mut floor = 0.0;
+    for a in 0..2 {
+        for b in 0..2 {
+            floor += spread[a][b] * covariance[b][a];
+        }
+    }
+    let rows_test = test.eta_true.len() as f64;
+    let rows_train = train.eta_true.len() as f64;
+    let mean_density_sq = test.eta_true.iter().map(|&eta| density_sq(eta)).sum::<f64>() / rows_test;
+    let mean_weight = train.eta_true.iter().map(|&eta| working_weight(eta)).sum::<f64>() / rows_train;
+    let independent = 2.0 * mean_density_sq / (rows_train * mean_weight);
+    (floor / rows_test, independent)
 }
 
 /// Max over context bins of `|mean p̂ − mean Φ(q(x))|`.
@@ -514,6 +572,7 @@ fn draw_skewed(n: usize, beta: &[f64; 2], alpha: &[f64], seed: u64) -> Sample {
     let mut state = seed;
     let mut rows = Vec::with_capacity(n);
     let (mut x, mut y, mut p_true) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+    let mut eta_true = Vec::with_capacity(n);
     for _ in 0..n {
         let level = ((next_unit(&mut state) * LEVELS as f64) as usize).min(LEVELS - 1);
         let xi = level_x(level);
@@ -522,7 +581,8 @@ fn draw_skewed(n: usize, beta: &[f64; 2], alpha: &[f64], seed: u64) -> Sample {
         let e2 = next_gauss(&mut state);
         let r1 = l11 * e1;
         let r2 = l21 * e1 + l22 * e2;
-        let p = normal_cdf(alpha[level] + b_of(xi) * z + beta[0] * r1 + beta[1] * r2);
+        let eta = alpha[level] + b_of(xi) * z + beta[0] * r1 + beta[1] * r2;
+        let p = normal_cdf(eta);
         let yi = u8::from(next_unit(&mut state) < p);
         rows.push(StringRecord::from(vec![
             yi.to_string(),
@@ -534,12 +594,14 @@ fn draw_skewed(n: usize, beta: &[f64; 2], alpha: &[f64], seed: u64) -> Sample {
         x.push(xi);
         y.push(f64::from(yi));
         p_true.push(p);
+        eta_true.push(eta);
     }
     Sample {
         dataset: encode_recordswith_inferred_schema(headers, rows).expect("encode #2924 skewed sample"),
         x,
         y,
         p_true,
+        eta_true,
     }
 }
 
@@ -626,12 +688,27 @@ fn residual_block_shrinks_to_zero_when_the_features_carry_no_outcome_information
         .fold(0.0, f64::max);
     let mean_gap = mean_sq_gap(&pred1.plugin, pred0.plugin.as_slice().expect("contiguous")).sqrt();
     let gain = brier(&test.y, &pred0.plugin) - brier(&test.y, &pred1.plugin);
+    // Against p_true the block may cost at most what estimating its null
+    // coefficients by unpenalised maximum likelihood costs in expectation: the
+    // trace tr(E_test[φ(η)² r rᵀ] · (Σ_train w(η) r rᵀ)⁻¹), with
+    // w = φ(η)² / (Φ(η)(1 − Φ(η))) the probit working weight. The REML ridge
+    // shrinks below it. This is an accuracy bound, not a ridge guard: the bound
+    // is the expected cost of an unpenalised block, so such a block exceeds it
+    // on only some draws. The gap max|p1 − p0| is reported, not asserted: it
+    // moves with smoothing parameters the criterion leaves flat, in either
+    // direction of accuracy.
+    let (floor, independent_floor) = null_ml_cost_floors(&train, &test);
+    let excess = mean_sq_gap(&pred1.plugin, &test.p_true) - mean_sq_gap(&pred0.plugin, &test.p_true);
     eprintln!(
-        "[2924 null] beta_hat=({:.4}, {:.4}) log_lambda_r={:.3} | max|p1-p0|={max_gap:.2e} \
-         rms|p1-p0|={mean_gap:.2e} | held-out Brier gain={gain:.2e}",
+        "[2924 null] beta_hat=({:.4}, {:.4}) log_lambda_r={:.3} edf_r={:.6} (K - edf_r = {:.3e}) | \
+         max|p1-p0|={max_gap:.2e} rms|p1-p0|={mean_gap:.2e} | held-out Brier gain={gain:.2e} | \
+         E[(p1-p_true)^2]-E[(p0-p_true)^2]={excess:.3e} floor={floor:.3e} \
+         independent_floor={independent_floor:.3e}",
         beta_hat[0],
         beta_hat[1],
-        repaired.residual_log_lambda.unwrap_or(f64::NAN)
+        repaired.residual_log_lambda.unwrap_or(f64::NAN),
+        repaired.residual_edf.unwrap_or(f64::NAN),
+        beta_hat.len() as f64 - repaired.residual_edf.unwrap_or(f64::NAN)
     );
     for k in 0..2 {
         assert!(
@@ -640,9 +717,24 @@ fn residual_block_shrinks_to_zero_when_the_features_carry_no_outcome_information
             beta_hat[k]
         );
     }
+    // The ridge guard. The block's EDF is its width K minus the trace its ridge
+    // spends, λ·tr(H⁻¹S). With S = 0 that trace is exactly zero and the EDF reads
+    // exactly K; any active ridge spends a positive trace. K − K·ε separates that
+    // exact zero from an active ridge; it is not a rounding bound on the trace.
+    // It guards a missing ridge, not a weakened one: a tiny λ reads under K.
+    let width = beta_hat.len() as f64;
+    let edf = repaired.residual_edf.expect("the residual fit reports its block EDF");
+    let exact_zero_margin = width * f64::EPSILON;
     assert!(
-        max_gap < 0.02,
-        "the residual fit moved the score-only probabilities by up to {max_gap}"
+        edf < width - exact_zero_margin,
+        "the residual block's EDF {edf} is within {exact_zero_margin:.3e} of its width \
+         {width}: the ridge spends nothing"
+    );
+    assert!(
+        excess <= floor,
+        "the residual fit lost {excess:.3e} of squared accuracy against p_true, above the \
+         {floor:.3e} that estimating {} null coefficients costs",
+        beta_hat.len()
     );
     assert!(
         gain.abs() < 1.0e-3,
