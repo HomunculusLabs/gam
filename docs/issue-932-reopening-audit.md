@@ -709,7 +709,12 @@ against the hand, two rounds each (EPYC 7763):
 | the same, with the Horner chains reassociated to shorten the longest | 0.958, 1.001 |
 | contracted first through the hand's `q_z = −r·z_t − q·z_ls` | 1.082, 1.065 |
 
-The chain length is not what loses; the negations are.
+The chain length is not what loses; the negations are. `row_atom!` now moves a contracted
+surface's channel signs onto its first direction, one negation per axis shared by every entry,
+when that strictly lowers the surface's count of distinct negations. The binomial third then
+runs at 1.033 and 1.029 (wins 1.00), and every cell of the gam-row-macros suite passes in both
+release runs (job 1274913). The cause-specific surfaces, whose negative channels would not get
+cheaper, are emitted unchanged (job 1277751).
 
 ### Other rows, read
 

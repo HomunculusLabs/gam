@@ -1267,6 +1267,24 @@ impl Graph {
         best.expect("at least the declaration order was tried").1
     }
 
+    /// Distinct negations reachable from `roots`, each counted once, as
+    /// [`Graph::operation_count`] counts the other operations.
+    fn negation_count(&self, roots: &[usize]) -> usize {
+        let mut seen = HashSet::new();
+        let mut stack = roots.to_vec();
+        let mut negations = 0;
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if matches!(self.nodes[id], Node::Neg(_)) {
+                negations += 1;
+            }
+            stack.extend(children(self, id));
+        }
+        negations
+    }
+
     /// Distinct multiplies (and divisions) and distinct additions (and
     /// subtractions) reachable from `roots`; a node shared by several roots
     /// is counted once, which is what interning buys.
@@ -2066,6 +2084,108 @@ impl<'a> Scheduler<'a> {
     }
 }
 
+/// One term of a contracted surface: a derivative channel times one component
+/// of each direction, `T·u[a]·v[b]…`, with `axes[i]` indexing direction `i`.
+struct ContractedTerm {
+    channel: usize,
+    axes: Vec<usize>,
+}
+
+/// The sum `Σ T·u[a]·v[b]…` of each contracted entry, with the channels'
+/// signs moved onto the first direction where that takes fewer negations.
+///
+/// A negative channel is the node `Neg(T)`, one negation on each such
+/// channel's own chain. Reading `T·(−u[a])` instead costs one negation per
+/// axis `a` of the first direction, shared by every entry that reads it. The
+/// binomial location-scale third at zero has four negative channels over two
+/// axes. Raced against the hand schedule, a copy of its emitted schedule lost
+/// (`median_ratio` 0.957 and 0.965), and the same copy with the signs on the
+/// direction won (1.033 and 1.041; job 1273155, #932). The move is taken only
+/// when it strictly lowers the count of distinct negations the surface
+/// evaluates, so a surface without negative channels is emitted unchanged.
+///
+/// Returns the channel roots to schedule, the negated direction components
+/// to define ahead of the sums, and each entry's sum (`None` when every term
+/// of the entry is zero).
+fn contracted_sums(
+    graph: &Graph,
+    entries: &[Vec<ContractedTerm>],
+    directions: &[Ident],
+    primaries: &[Ident],
+    constants: &[Ident],
+) -> (Vec<usize>, Vec<TokenStream2>, Vec<Option<TokenStream2>>) {
+    let channels = entries
+        .iter()
+        .flatten()
+        .map(|term| term.channel)
+        .collect::<BTreeSet<_>>();
+    let unsigned = channels
+        .iter()
+        .filter_map(|&channel| match graph.nodes[channel] {
+            Node::Neg(value) => Some((channel, value)),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let negated_axes = entries
+        .iter()
+        .flatten()
+        .filter(|term| unsigned.contains_key(&term.channel))
+        .map(|term| term.axes[0])
+        .collect::<BTreeSet<_>>();
+    let signed_roots = channels.iter().copied().collect::<Vec<_>>();
+    let unsigned_roots = channels
+        .iter()
+        .map(|channel| unsigned.get(channel).copied().unwrap_or(*channel))
+        .collect::<Vec<_>>();
+    let move_signs = graph.negation_count(&unsigned_roots) + negated_axes.len()
+        < graph.negation_count(&signed_roots);
+    let first = &directions[0];
+    let negated = |axis: usize| format_ident!("__row_atom_negated_{first}_{axis}");
+    let definitions = if move_signs {
+        negated_axes
+            .iter()
+            .map(|&axis| {
+                let name = negated(axis);
+                quote!(let #name = -#first[#axis];)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let sums = entries
+        .iter()
+        .map(|terms| {
+            let terms = terms
+                .iter()
+                .map(|term| {
+                    let axis = term.axes[0];
+                    let (channel, leading) = match unsigned.get(&term.channel) {
+                        Some(&value) if move_signs => {
+                            let name = negated(axis);
+                            (value, quote!(#name))
+                        }
+                        _ => (term.channel, quote!(#first[#axis])),
+                    };
+                    let reference = node_reference(channel, graph, primaries, constants);
+                    let rest = directions[1..]
+                        .iter()
+                        .zip(&term.axes[1..])
+                        .map(|(direction, axis)| quote!(* #direction[#axis]));
+                    quote!(#reference * #leading #(#rest)*)
+                })
+                .collect::<Vec<_>>();
+            let (head, tail) = terms.split_first()?;
+            Some(quote!(#head #(+ #tail)*))
+        })
+        .collect();
+    let roots = if move_signs {
+        unsigned_roots
+    } else {
+        signed_roots
+    };
+    (roots, definitions, sums)
+}
+
 fn schedule_definitions(
     roots: impl IntoIterator<Item = usize>,
     graph: &Graph,
@@ -2352,30 +2472,40 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                 *derivative = next.next().expect("one normalized channel per derivative");
             }
         }
-        let mut roots = Vec::new();
-        let mut assignments = Vec::new();
-        let mut entries = vec![vec![quote!(0.0); dimension]; dimension];
+        let mut cells = Vec::new();
+        let mut cell_terms = Vec::new();
         for (row, columns) in channels.iter().enumerate() {
             for (column, derivatives) in columns.iter().enumerate().skip(row) {
-                roots.extend(derivatives.iter().copied());
-                let terms = derivatives
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, id)| !graph.is_zero(**id))
-                    .map(|(axis, &id)| {
-                        let derivative = node_reference(id, &graph, &primaries, &constants);
-                        quote!(#derivative * direction[#axis])
-                    })
-                    .collect::<Vec<_>>();
-                let sum = match terms.split_first() {
-                    None => continue,
-                    Some((first, rest)) => quote!(#first #(+ #rest)*),
-                };
-                let temporary = format_ident!("__row_atom_third_{row}_{column}");
-                assignments.push(quote!(let #temporary = #sum;));
-                entries[row][column] = quote!(#temporary);
-                entries[column][row] = quote!(#temporary);
+                cells.push((row, column));
+                cell_terms.push(
+                    derivatives
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, id)| !graph.is_zero(**id))
+                        .map(|(axis, &channel)| ContractedTerm {
+                            channel,
+                            axes: vec![axis],
+                        })
+                        .collect::<Vec<_>>(),
+                );
             }
+        }
+        let (roots, mut assignments, sums) = contracted_sums(
+            &graph,
+            &cell_terms,
+            &[format_ident!("direction")],
+            &primaries,
+            &constants,
+        );
+        let mut entries = vec![vec![quote!(0.0); dimension]; dimension];
+        for ((row, column), sum) in cells.into_iter().zip(sums) {
+            let Some(sum) = sum else {
+                continue;
+            };
+            let temporary = format_ident!("__row_atom_third_{row}_{column}");
+            assignments.push(quote!(let #temporary = #sum;));
+            entries[row][column] = quote!(#temporary);
+            entries[column][row] = quote!(#temporary);
         }
         let definitions = schedule_definitions(roots, &graph, &primaries, &constants)?;
         let primary_parameters = if at_zero {
@@ -2459,36 +2589,46 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                 *derivative = next.next().expect("one normalized channel per derivative");
             }
         }
-        let mut roots = Vec::new();
-        let mut assignments = Vec::new();
-        let mut entries = vec![vec![quote!(0.0); dimension]; dimension];
+        let mut cells = Vec::new();
+        let mut cell_terms = Vec::new();
+        let zero = |id: usize| graph.is_zero(id);
         for (row, columns) in channels.iter().enumerate() {
             for (column, derivatives) in columns.iter().enumerate().skip(row) {
-                roots.extend(derivatives.iter().flatten().copied());
-                let terms = derivatives
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(axis_u, derivatives)| {
-                        derivatives
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, id)| !graph.is_zero(**id))
-                            .map(|(axis_v, &id)| {
-                                let derivative = node_reference(id, &graph, &primaries, &constants);
-                                quote!(#derivative * direction_u[#axis_u] * direction_v[#axis_v])
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<_>>();
-                let sum = match terms.split_first() {
-                    None => continue,
-                    Some((first, rest)) => quote!(#first #(+ #rest)*),
-                };
-                let temporary = format_ident!("__row_atom_fourth_{row}_{column}");
-                assignments.push(quote!(let #temporary = #sum;));
-                entries[row][column] = quote!(#temporary);
-                entries[column][row] = quote!(#temporary);
+                cells.push((row, column));
+                cell_terms.push(
+                    derivatives
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(axis_u, derivatives)| {
+                            derivatives
+                                .iter()
+                                .enumerate()
+                                .filter(move |(_, id)| !zero(**id))
+                                .map(move |(axis_v, &channel)| ContractedTerm {
+                                    channel,
+                                    axes: vec![axis_u, axis_v],
+                                })
+                        })
+                        .collect::<Vec<_>>(),
+                );
             }
+        }
+        let (roots, mut assignments, sums) = contracted_sums(
+            &graph,
+            &cell_terms,
+            &[format_ident!("direction_u"), format_ident!("direction_v")],
+            &primaries,
+            &constants,
+        );
+        let mut entries = vec![vec![quote!(0.0); dimension]; dimension];
+        for ((row, column), sum) in cells.into_iter().zip(sums) {
+            let Some(sum) = sum else {
+                continue;
+            };
+            let temporary = format_ident!("__row_atom_fourth_{row}_{column}");
+            assignments.push(quote!(let #temporary = #sum;));
+            entries[row][column] = quote!(#temporary);
+            entries[column][row] = quote!(#temporary);
         }
         let definitions = schedule_definitions(roots, &graph, &primaries, &constants)?;
         let primary_parameters = if at_zero {
@@ -2592,46 +2732,51 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                 *derivative = next.next().expect("one normalized channel per derivative");
             }
         }
-        let mut roots = Vec::new();
-        let mut assignments = Vec::new();
-        let mut entries = vec![vec![quote!(0.0); dimension]; dimension];
+        let mut cells = Vec::new();
+        let mut cell_terms = Vec::new();
+        let zero = |id: usize| graph.is_zero(id);
         for (row, columns) in channels.iter().enumerate() {
             for (column, derivatives) in columns.iter().enumerate().skip(row) {
-                roots.extend(derivatives.iter().flatten().flatten().copied());
-                let terms = derivatives
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(axis_u, by_v)| {
-                        by_v.iter()
-                            .enumerate()
-                            .flat_map(|(axis_v, by_w)| {
+                cells.push((row, column));
+                cell_terms.push(
+                    derivatives
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(axis_u, by_v)| {
+                            by_v.iter().enumerate().flat_map(move |(axis_v, by_w)| {
                                 by_w.iter()
                                     .enumerate()
-                                    .filter(|(_, id)| !graph.is_zero(**id))
-                                    .map(|(axis_w, &id)| {
-                                        let derivative =
-                                            node_reference(id, &graph, &primaries, &constants);
-                                        quote!(
-                                            #derivative
-                                                * direction_u[#axis_u]
-                                                * direction_v[#axis_v]
-                                                * direction_w[#axis_w]
-                                        )
+                                    .filter(move |(_, id)| !zero(**id))
+                                    .map(move |(axis_w, &channel)| ContractedTerm {
+                                        channel,
+                                        axes: vec![axis_u, axis_v, axis_w],
                                     })
-                                    .collect::<Vec<_>>()
                             })
-                            .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<_>>();
-                let sum = match terms.split_first() {
-                    None => continue,
-                    Some((first, rest)) => quote!(#first #(+ #rest)*),
-                };
-                let temporary = format_ident!("__row_atom_fifth_{row}_{column}");
-                assignments.push(quote!(let #temporary = #sum;));
-                entries[row][column] = quote!(#temporary);
-                entries[column][row] = quote!(#temporary);
+                        })
+                        .collect::<Vec<_>>(),
+                );
             }
+        }
+        let (roots, mut assignments, sums) = contracted_sums(
+            &graph,
+            &cell_terms,
+            &[
+                format_ident!("direction_u"),
+                format_ident!("direction_v"),
+                format_ident!("direction_w"),
+            ],
+            &primaries,
+            &constants,
+        );
+        let mut entries = vec![vec![quote!(0.0); dimension]; dimension];
+        for ((row, column), sum) in cells.into_iter().zip(sums) {
+            let Some(sum) = sum else {
+                continue;
+            };
+            let temporary = format_ident!("__row_atom_fifth_{row}_{column}");
+            assignments.push(quote!(let #temporary = #sum;));
+            entries[row][column] = quote!(#temporary);
+            entries[column][row] = quote!(#temporary);
         }
         let definitions = schedule_definitions(roots, &graph, &primaries, &constants)?;
         let primary_parameters = if at_zero {
@@ -2908,5 +3053,50 @@ mod row_atom_tests {
             "no term reads m4:\n{body}"
         );
         assert!(!body.contains("e-16"), "no ulp-sized coefficient survives:\n{body}");
+    }
+
+    /// The binomial location-scale third at zero has four negative channels
+    /// over two axes, so its signs move onto the direction: two negations
+    /// instead of four, and no channel is negated. Its fourth has no negative
+    /// channel and reads both directions as given.
+    #[test]
+    fn contracted_signs_move_onto_the_direction_932() {
+        let d = "((q0 - delta_eta_t * inv_sigma) * exp(-delta_eta_ls) - q0)";
+        let source = format!(
+            "fn atom_binomial_ls [third_at_zero, fourth_at_zero](
+                delta_eta_t, delta_eta_ls;
+                inv_sigma: f64, q0: f64, m1: f64, m2: f64, m3: f64, m4: f64, neg_ll: f64
+            ) {{
+                neg_ll + m1 * {d} + 0.5 * m2 * {d} * {d} + m3 / 6.0 * {d} * {d} * {d}
+                    + m4 / 24.0 * {d} * {d} * {d} * {d}
+            }}"
+        );
+        let input = syn::parse_str::<RowAtomInput>(&source).expect("binomial row atom");
+        let expanded = super::expand(input).expect("expand row atom").to_string();
+        let third_start = expanded
+            .find("fn atom_binomial_ls_third_contracted_at_zero")
+            .expect("the third at-zero lowering");
+        let fourth_start = expanded
+            .find("fn atom_binomial_ls_fourth_contracted_at_zero")
+            .expect("the fourth at-zero lowering");
+        let (third, fourth) = if third_start < fourth_start {
+            (&expanded[third_start..fourth_start], &expanded[fourth_start..])
+        } else {
+            (&expanded[third_start..], &expanded[fourth_start..third_start])
+        };
+        for axis in 0..2 {
+            let negated =
+                format!("let __row_atom_negated_direction_{axis} = - direction [{axis}usize]");
+            assert_eq!(third.matches(&negated).count(), 1, "{negated} once:\n{third}");
+        }
+        assert_eq!(
+            third.matches("= - __row_atom").count(),
+            0,
+            "no channel is negated:\n{third}"
+        );
+        assert!(
+            !fourth.contains("negated"),
+            "the fourth reads its directions as given:\n{fourth}"
+        );
     }
 }
