@@ -550,6 +550,50 @@ fn an_exterior_warm_start_is_retreated_into_the_domain_2765() {
     }
 }
 
+/// The retreat stops at the time block's own guard, not at the domain boundary
+/// (#2627, docs/marginal-slope.md:205). The smallest retreat with `η′₁ > 0` is
+/// interior by the bisection's resolution only, and `−log η′₁` then starts the
+/// inner solve where its gradient scales as `1/η′₁` and its curvature as
+/// `1/η′₁²`. The md:205 seeds started at `min η′₁ = 1.9e-14`, and every one was
+/// refused at the reduced-face KKT check.
+#[test]
+fn an_exterior_warm_start_is_retreated_to_the_derivative_guard_2627() {
+    let family = family(true);
+    let exterior_beta = &interior_slope_beta() + &ndarray::array![0.0, -6.0];
+    let seed_margin = family
+        .follow_up_domain_margin(&states(&family, exterior_beta.clone()))
+        .expect("the margin evaluates")
+        .expect("the follow-up frame has a margin");
+    assert!(
+        seed_margin < 0.0,
+        "the fixture seed must be outside the domain; min η′₁ = {seed_margin:.6e}"
+    );
+    let mut blocks = blocks_for(&family, exterior_beta.clone());
+    let fraction = family
+        .retreat_seed_into_follow_up_domain(&mut blocks)
+        .expect("the retreat answers on the follow-up frame");
+    let restored = blocks[2]
+        .initial_beta
+        .as_ref()
+        .expect("the retreat writes the seed it restored")
+        .clone();
+    let restored_margin = family
+        .follow_up_domain_margin(&states(&family, restored))
+        .expect("the margin evaluates")
+        .expect("the follow-up frame has a margin");
+    assert!(
+        restored_margin >= family.derivative_guard,
+        "the retreated seed must meet the derivative guard, not merely the boundary: \
+         min η′₁ = {restored_margin:.6e}, guard = {:.6e}",
+        family.derivative_guard
+    );
+    assert!(
+        fraction > 0.0 && fraction < 1.0,
+        "the guard is met short of the origin, so the retreat keeps part of the warm \
+         start; got fraction {fraction:.6e}"
+    );
+}
+
 #[test]
 fn an_interior_warm_start_is_left_alone_2765() {
     let family = family(true);
