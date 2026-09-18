@@ -4374,5 +4374,14 @@
     "reason": "Pure move for line-count headroom (build.rs MAX_TRACKED_FILE_LINES = 10000; construction_quasi_laplace.rs was 9740 lines): main :706-2447, the inner solve behind the undamped evidence log-determinant (is_undamped_evidence_row_non_pd, freeze_collapse_prevention_gates, converge_inner_for_undamped_logdet, descend_exact_a_saddle, converge_inner_for_undamped_logdet_gate_frozen), moves verbatim into construction_undamped_inner.rs as a further impl SaeManifoldTerm block, which construction_quasi_laplace.rs include!s, so every method keeps its type, module and visibility.",
     "evidence": "Pure move: every removed identity is declared again, with the same body, in the new sibling file of this landing (the sorted line multiset of the old file equals the two new files' lines plus only the added include and comment lines); gated in Slurm job 1270438, which re-runs this instrument with the entry and checks the workspace.",
     "base": "38c2680c1201b0e7ba985cd85ebe51ffe273c60f"
+  },
+  {
+    "removed": {
+      "crates/gam-models/src/survival/latent/survival/mod.rs::latent_kernel_differentiate_terms": 1,
+      "crates/gam-models/src/survival/latent/survival/mod.rs::latent_kernel_sum_log_jet": 1
+    },
+    "reason": "Pure move for line-count headroom (build.rs MAX_TRACKED_FILE_LINES = 10000; latent/survival/mod.rs was 9712 lines): main :1777-4125, the latent row kernel's jet machinery (the primary-coordinate constants, LatentExactExpansion and its certified cumulants, the A-basis term kernels, the LatentRowJet backends, the primary direction maps and their inline tests_* modules), moves verbatim into row_kernel_jets.rs, which mod.rs include!s at the same position, so every item keeps its module, path, visibility and textual order.",
+    "evidence": "Pure move: every removed identity is declared again, with the same body, in the new sibling file of this landing (the sorted line multiset of the old file equals the two new files' lines plus only the added include and comment lines); gated in Slurm job 1270437, which re-runs this instrument with the entry and checks the workspace.",
+    "base": "776bd1ad6664690f4b75a51b9ad0e55eb5478006"
   }
 ]
