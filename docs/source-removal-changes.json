@@ -559,5 +559,13 @@
     ],
     "reason": "#2502: replaced by stored_span and stored_spans, which return each block's inverse Gram (UU^T)^-1 together with tr(UU^T) and the Frobenius norm of the inverse, so the rounding band of the span coordinates carries the stored frame's conditioning (StoredSpans::coordinate_rounding, residual_band), and which refuse by name a nonzero frame whose f32 storage cannot resolve its span instead of silently giving the unresolved row no coordinate.",
     "evidence": "git grep -n stored_span_inverse_gram at db6a3680d8 finds 22 lines, all in crates/gam-sae/src/sparse_dict: block.rs (10: the two declarations, their docs and callers), block_stream.rs (5), block_scoring_gpu.rs (4), block_stream_tests.rs (2), block_tests.rs (1). This commit rewrites every one onto stored_spans(..).inverse_grams or stored_span; no file outside sparse_dict names either function. Gate gx1 job 1260605 at db6a3680d8 on the exact tree: RC_CHECK 0, RC_PYFFI 0, assertionless 0, and exactly these two removals refused before this entry; lane job 1259575: sparse_dict::block tests 62 passed."
+  },
+  {
+    "base": "9e8fca33752f55ff15b87af0db0c2b6dff4611af",
+    "items": [
+      "crates/gam-geometry/src/response_geometry.rs:const:CONTEXT"
+    ],
+    "reason": "#2469: the function-local const CONTEXT inside response_frechet_mean held the refusal context string. The descent moves out into karcher_descent, and both functions need the string, so it becomes the module const FRECHET_MEAN_CONTEXT with the same value. Every use is rewritten to it.",
+    "evidence": "At base 90a88caa111aeb60d43c2617afeb2457cb942af2, git grep -n -w CONTEXT in crates/gam-geometry/src/response_geometry.rs finds the declaration at :850 and its three uses at :942, :1017 and :1031, all inside response_frechet_mean. The other production occurrences the guard counts are other files' own CONTEXT items. This commit rewrites the three uses to FRECHET_MEAN_CONTEXT, declared once at module scope with the identical string. Gate job 1259190 on gx4 (base 90a88caa11, exact tree f3f227d645, patch md5 071dcd51): workspace --all-targets check RC 0, cargo check -p gam-pyffi --all-targets RC 0, cargo test -p gam-geometry 284 + 1 passed including karcher_descent_below_its_rounding_floor_refuses_by_stall, public_api_census.py RC 0, and source_removal_guard.py listed exactly this identity."
   }
 ]

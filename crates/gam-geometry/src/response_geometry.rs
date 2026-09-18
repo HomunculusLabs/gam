@@ -811,6 +811,9 @@ fn karcher_state(
     })
 }
 
+/// The context every typed Fréchet-mean refusal carries.
+const FRECHET_MEAN_CONTEXT: &str = "response geometry Fréchet mean";
+
 /// Intrinsic (Karcher) Fréchet mean of manifold-valued responses, the default
 /// base point when the user supplies none. `values` is `(n_rows, ambient)`.
 ///
@@ -847,7 +850,6 @@ pub(crate) fn response_frechet_mean(
     values: ArrayView2<'_, f64>,
     weights: Option<ArrayView1<'_, f64>>,
 ) -> GeometryResult<Array1<f64>> {
-    const CONTEXT: &str = "response geometry Fréchet mean";
     let ambient = manifold.ambient_dim();
     let (m, cols) = values.dim();
     if m == 0 || cols != ambient {
@@ -859,19 +861,6 @@ pub(crate) fn response_frechet_mean(
         GeometryError::InvalidPoint("response geometry Fréchet mean has invalid weights")
     })?;
     let samples: Vec<Array1<f64>> = (0..m).map(|i| values.row(i).to_owned()).collect();
-
-    let dispersion = |p: ArrayView1<'_, f64>| -> GeometryResult<f64> {
-        let mut acc = 0.0_f64;
-        for (i, x) in samples.iter().enumerate() {
-            if w[i] == 0.0 {
-                continue;
-            }
-            let lg = manifold.log_point(p, x.view())?;
-            let sq = manifold.sq_metric_norm(p, lg.view())?;
-            acc += w[i] * sq;
-        }
-        Ok(acc)
-    };
 
     let stationarity = |p: ArrayView1<'_, f64>| karcher_state(manifold, values, w.view(), p);
 
@@ -939,13 +928,67 @@ pub(crate) fn response_frechet_mean(
         let seed_spread = support_radius(start.view())?;
         if seed_spread >= 2.0 * uniqueness_radius {
             return Err(GeometryError::FrechetMeanSupportNotLocalized {
-                context: CONTEXT,
+                context: FRECHET_MEAN_CONTEXT,
                 seed_spread,
                 uniqueness_radius,
             });
         }
     }
 
+    let (p, state) = karcher_descent(manifold, values, w.view(), start, stationarity)?;
+
+    if let Some(uniqueness_radius) = uniqueness_radius {
+        let support_radius = support_radius(p.view())?;
+        if support_radius >= uniqueness_radius {
+            return Err(GeometryError::FrechetMeanNotGloballyCertified {
+                context: FRECHET_MEAN_CONTEXT,
+                stationarity_residual: state.residual,
+                tolerance: state.band,
+                support_radius,
+                uniqueness_radius,
+            });
+        }
+    }
+
+    Ok(p)
+}
+
+/// Weighted dispersion `V(p) = Σ wᵢ ‖log_p(xᵢ)‖²_p` over the positive-mass rows.
+fn karcher_dispersion(
+    manifold: ResponseManifold,
+    values: ArrayView2<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+    p: ArrayView1<'_, f64>,
+) -> GeometryResult<f64> {
+    let mut acc = 0.0_f64;
+    for (x, &weight) in values.outer_iter().zip(weights.iter()) {
+        if weight == 0.0 {
+            continue;
+        }
+        let lg = manifold.log_point(p, x)?;
+        acc += weight * manifold.sq_metric_norm(p, lg.view())?;
+    }
+    Ok(acc)
+}
+
+/// The two-phase Karcher descent of [`response_frechet_mean`] from `start`,
+/// certified by the band `stationarity` reports with each residual. Returns the
+/// certified point with its state, or the typed stall.
+///
+/// It stops without a budget. Each accepted phase-1 step lowers the computed
+/// `V ≥ 0` by more than its cushion `8ε(1 + V) ≥ 8ε`, so phase 1 takes at most
+/// `V(start)/(8ε)` steps. Each accepted phase-2 step strictly lowers the
+/// computed residual, a non-negative double, and only finitely many doubles lie
+/// below the residual phase 2 starts from. Each backtracking search tries a
+/// bounded number of step lengths.
+fn karcher_descent(
+    manifold: ResponseManifold,
+    values: ArrayView2<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+    start: Array1<f64>,
+    stationarity: impl Fn(ArrayView1<'_, f64>) -> GeometryResult<KarcherState>,
+) -> GeometryResult<(Array1<f64>, KarcherState)> {
+    let dispersion = |p: ArrayView1<'_, f64>| karcher_dispersion(manifold, values, weights, p);
     let mut p = start;
     let mut state = stationarity(p.view())?;
     let mut f_cur = dispersion(p.view())?;
@@ -1014,7 +1057,7 @@ pub(crate) fn response_frechet_mean(
         };
         let Some(accepted_step) = accepted else {
             return Err(GeometryError::NonConvergence {
-                context: CONTEXT,
+                context: FRECHET_MEAN_CONTEXT,
                 iterations,
                 residual: state.residual,
                 tolerance: state.band,
@@ -1023,21 +1066,7 @@ pub(crate) fn response_frechet_mean(
         (p, state) = accepted_step.payload;
         iterations += 1;
     }
-
-    if let Some(uniqueness_radius) = uniqueness_radius {
-        let support_radius = support_radius(p.view())?;
-        if support_radius >= uniqueness_radius {
-            return Err(GeometryError::FrechetMeanNotGloballyCertified {
-                context: CONTEXT,
-                stationarity_residual: state.residual,
-                tolerance: state.band,
-                support_radius,
-                uniqueness_radius,
-            });
-        }
-    }
-
-    Ok(p)
+    Ok((p, state))
 }
 
 // ── Curvature as an estimand on the response geometry (#944 stage 4 / #1104) ──
@@ -2164,6 +2193,52 @@ mod tests {
                 assert!(message.contains("clamped at the ball boundary"), "{message}");
             }
             other => panic!("expected the clamped cloud to be refused, got {other:?}"),
+        }
+    }
+
+    /// The phase-2 stall refusal, forced. The same SPD cloud and seed are
+    /// descended twice: with its derived band the descent certifies, and with
+    /// the band set to zero, below the residual's own rounding floor, phase 2
+    /// runs until no step strictly lowers the residual and must then refuse,
+    /// typed, rather than loop or certify.
+    #[test]
+    fn karcher_descent_below_its_rounding_floor_refuses_by_stall() {
+        let manifold = ResponseManifold::Spd { n: 2 };
+        let values = array![
+            [2.0, 0.0, 0.0, 1.0],
+            [1.0, 0.3, 0.3, 2.0],
+            [3.0, -0.5, -0.5, 1.5],
+        ];
+        let weights = Array1::from_elem(3, 1.0 / 3.0);
+        let start = values.row(0).to_owned();
+        let derived =
+            |p: ArrayView1<'_, f64>| karcher_state(manifold, values.view(), weights.view(), p);
+        let (mean, state) =
+            karcher_descent(manifold, values.view(), weights.view(), start.clone(), derived)
+                .expect("the derived band certifies this cloud");
+        assert!(state.residual <= state.band);
+        assert!(mean.iter().all(|value| value.is_finite()));
+
+        let zero_band = |p: ArrayView1<'_, f64>| {
+            karcher_state(manifold, values.view(), weights.view(), p)
+                .map(|state| KarcherState { band: 0.0, ..state })
+        };
+        match karcher_descent(manifold, values.view(), weights.view(), start, zero_band) {
+            Err(GeometryError::NonConvergence {
+                context,
+                residual,
+                tolerance,
+                ..
+            }) => {
+                assert_eq!(context, "response geometry Fréchet mean");
+                assert_eq!(tolerance, 0.0);
+                assert!(residual.is_finite() && residual > 0.0);
+            }
+            Ok((_, state)) => panic!(
+                "the zero-band descent certified at residual {:.3e}",
+                state.residual
+            ),
+            Err(other) => panic!("expected the zero-band descent to stall, got {other:?}"),
         }
     }
 
