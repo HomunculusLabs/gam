@@ -9,7 +9,10 @@
 //! These are the building blocks a library consumer needs to construct
 //! a `FitRequest::SurvivalLocationScale` without going through the CLI.
 
-use crate::probability::{normal_pdf, standard_normal_quantile};
+use crate::probability::{
+    signed_probit_logcdf_and_mills_ratio, standard_normal_quantile,
+    standard_normal_quantile_from_log_cdf,
+};
 use crate::survival::location_scale::{
     DEFAULT_SURVIVAL_LOCATION_SCALE_DERIVATIVE_GUARD, ResidualDistribution,
     SurvivalCovariateTermBlockTemplate, SurvivalCovariateTimeBasis,
@@ -3079,6 +3082,8 @@ fn survival_cumulative_and_instant_hazard(
 struct MarginalSlopeBaselinePoint {
     instant_hazard: f64,
     q: f64,
+    /// `A = S/φ(q)`, the factor every θ partial of the chart carries.
+    survival_over_density: f64,
     q_t: f64,
 }
 
@@ -3103,13 +3108,6 @@ fn evaluate_marginal_slope_baseline_point(
             survival_baseline_targetname(cfg.target)
         ));
     }
-    let survival = (-cumulative_hazard).exp();
-    if !(survival > 0.0) {
-        return Err(format!(
-            "{} marginal-slope baseline survival must be positive, got {survival} at cumulative hazard {cumulative_hazard}",
-            survival_baseline_targetname(cfg.target)
-        ));
-    }
     // q = −Φ⁻¹(S). While S > ½ the small quantity is the event probability
     // F = 1 − S = −expm1(−H), and q = Φ⁻¹(F) reads it in the quantile's lower
     // tail at full relative accuracy. Forming S first loses F to cancellation
@@ -3118,28 +3116,38 @@ fn evaluate_marginal_slope_baseline_point(
     // Weibull chart with scale 3.35 and shape 1.71 already puts H there below
     // 2⁻⁵⁴: the #2930 fixture's outer search refused 135 such probes around its
     // planted law and certified a railed model instead.
+    //
+    // Otherwise the quantile reads ln S = −H, which is exact for every finite H.
+    // S = exp(−H) itself underflows to zero once H exceeds 745, where q ≈ √(2H)
+    // is still finite: the Weibull chart's k → 0, λ → 0 limit crosses that point
+    // (#2969), and forming S refused every probe beyond it.
     let q = if cumulative_hazard < std::f64::consts::LN_2 {
         standard_normal_quantile(-(-cumulative_hazard).exp_m1())
     } else {
-        standard_normal_quantile(survival).map(|x| -x)
+        standard_normal_quantile_from_log_cdf(-cumulative_hazard).map(|x| -x)
     }
     .map_err(|e| {
         format!(
-            "{} marginal-slope baseline failed to invert survival probability {survival} at cumulative hazard {cumulative_hazard}: {e}",
+            "{} marginal-slope baseline failed to invert the survival probability at cumulative hazard {cumulative_hazard}: {e}",
             survival_baseline_targetname(cfg.target)
         )
     })?;
-    let phi_q = normal_pdf(q);
-    if !(phi_q.is_finite() && phi_q > 0.0) {
+    // A = S/φ(q) = Φ(−q)/φ(q) is the reciprocal of the Mills ratio φ(−q)/Φ(−q),
+    // which the erfcx form keeps finite and relatively accurate where S and φ(q)
+    // both underflow.
+    let (_, mills_ratio) = signed_probit_logcdf_and_mills_ratio(-q);
+    let survival_over_density = mills_ratio.recip();
+    if !(survival_over_density.is_finite() && survival_over_density > 0.0) {
         return Err(format!(
-            "{} marginal-slope baseline produced non-positive probit density phi(q)={phi_q} at q={q}",
+            "{} marginal-slope baseline produced a non-positive survival-to-density ratio {survival_over_density} at q={q}",
             survival_baseline_targetname(cfg.target)
         ));
     }
     Ok(Some(MarginalSlopeBaselinePoint {
         instant_hazard,
         q,
-        q_t: instant_hazard * survival / phi_q,
+        survival_over_density,
+        q_t: instant_hazard * survival_over_density,
     }))
 }
 
@@ -3266,7 +3274,7 @@ pub fn marginal_slope_baseline_offset_theta_partials(
     };
     let hazard_partials = survival_hazard_theta_partials(age, cfg)?
         .ok_or_else(|| "unexpected missing hazard partials for nonlinear baseline".to_string())?;
-    let a = point.q_t / point.instant_hazard;
+    let a = point.survival_over_density;
     let a_log_derivative_factor = point.q * a - 1.0;
     Ok(Some(
         hazard_partials
@@ -3317,9 +3325,8 @@ pub(crate) fn marginal_slope_baseline_offset_theta_geometry(
     let Some((hazard, first, second)) = survival_hazard_theta_first_second(age, cfg)? else {
         return Ok(None);
     };
-    let (cum_hazard, instant_hazard) = hazard;
-    let survival = (-cum_hazard).exp();
-    let a = survival / normal_pdf(point.q);
+    let (_, instant_hazard) = hazard;
+    let a = point.survival_over_density;
     let b = point.q * a - 1.0;
     let b_factor = a + point.q * b;
     let dim = first.len();
@@ -5076,7 +5083,7 @@ mod tests {
         build_time_varying_survival_covariate_template, slope_time_margin_rows,
         replay_slope_follow_up_designs, replay_slope_time_margin_value_tangent_design,
     };
-    use crate::probability::normal_cdf;
+    use crate::probability::{normal_cdf, normal_logcdf, normal_pdf};
     use crate::survival::base::ENTRY_AT_ORIGIN_THRESHOLD;
     use crate::survival::OffsetChannelResiduals;
     use gam_terms::inference::formula_dsl::LinkWiggleFormulaSpec;
@@ -6074,6 +6081,102 @@ mod tests {
                 "exit row {row}"
             );
         }
+    }
+
+    /// gam#2969: along the Weibull chart's k → 0, λ → 0 limit the cumulative hazard passes 745,
+    /// where `exp(−H)` underflows to zero while `q ≈ √(2H)` is still finite. The chart reads `q`
+    /// through `ln S = −H` and `S/φ(q)` as the reciprocal Mills ratio, so a member the old
+    /// evaluation refused ("survival must be positive, got 0") is evaluable with its exact time
+    /// and θ derivatives.
+    #[test]
+    fn marginal_slope_baseline_is_finite_where_survival_underflows_2969() {
+        // On the limit curve through the #2969 log-normal law (anchor slope 0.945 at t = 1).
+        let cfg = SurvivalBaselineConfig {
+            target: SurvivalBaselineTarget::Weibull,
+            scale: Some((-132.0632_f64).exp()),
+            shape: Some((-3.0_f64).exp()),
+            rate: None,
+            makeham: None,
+        };
+        let scale = cfg.scale.expect("scale");
+        let shape = cfg.shape.expect("shape");
+        let age = 3.0_f64;
+        let cumulative_hazard = (age / scale).powf(shape);
+        assert_eq!(
+            (-cumulative_hazard).exp(),
+            0.0,
+            "this witness has stopped being one: exp(−H) no longer underflows at H = {cumulative_hazard:e}"
+        );
+
+        let (q, q_derivative) = evaluate_survival_marginal_slope_baseline(age, &cfg)
+            .expect("the probit baseline is finite where the survival probability underflows");
+        assert_close(normal_logcdf(-q), -cumulative_hazard, 1e-12, "ln Φ(−q) against ln S = −H");
+
+        // dq/dlog t = t·q′, against a central difference in log age.
+        let log_step = 1e-4_f64;
+        let q_later = evaluate_survival_marginal_slope_baseline(age * log_step.exp(), &cfg)
+            .expect("q at a later age")
+            .0;
+        let q_earlier = evaluate_survival_marginal_slope_baseline(age * (-log_step).exp(), &cfg)
+            .expect("q at an earlier age")
+            .0;
+        assert_close(
+            age * q_derivative,
+            (q_later - q_earlier) / (2.0 * log_step),
+            1e-6,
+            "underflow-age probit q' in log age",
+        );
+
+        let analytic = marginal_slope_baseline_offset_theta_partials(age, &cfg)
+            .expect("partials")
+            .expect("nonlinear");
+        let fd = fd_marginal_slope_baseline_offset(age, &cfg, &[1e-7, 1e-7]);
+        assert_eq!(analytic.len(), fd.len());
+        for (k, ((aq, aqt), (fq, fqt))) in analytic.iter().zip(fd.iter()).enumerate() {
+            assert_close(*aq, *fq, 1e-6, &format!("underflow-age weibull-probit q theta[{k}]"));
+            assert_close(*aqt, *fqt, 1e-6, &format!("underflow-age weibull-probit q' theta[{k}]"));
+        }
+
+        // Rows whose exits straddle the underflow point build one finite geometry.
+        let age_entry = array![SURVIVAL_TIME_FLOOR, SURVIVAL_TIME_FLOOR, SURVIVAL_TIME_FLOOR];
+        let age_exit = array![1.0, age, 5.0];
+        let geometry =
+            build_survival_marginal_slope_baseline_geometry(&age_entry, &age_exit, &cfg)
+                .expect("the row geometry builds across the underflow point")
+                .expect("Weibull is a nonlinear chart");
+        for row in 0..age_exit.len() {
+            let exit_hazard = (age_exit[row] / scale).powf(shape);
+            assert_close(
+                normal_logcdf(-geometry.offset_exit[row]),
+                -exit_hazard,
+                1e-12,
+                &format!("exit row {row}"),
+            );
+            assert!(geometry.derivative_offset_exit[row].is_finite(), "exit row {row} q'");
+        }
+
+        // Positive control: where S is representable the Mills form reproduces q′ = h·S/φ(q).
+        let representable = SurvivalBaselineConfig {
+            target: SurvivalBaselineTarget::Weibull,
+            scale: Some(1.2093_f64.exp()),
+            shape: Some(0.5365_f64.exp()),
+            rate: None,
+            makeham: None,
+        };
+        let age = 5.0_f64;
+        let scale = representable.scale.expect("scale");
+        let shape = representable.shape.expect("shape");
+        let cumulative_hazard = (age / scale).powf(shape);
+        assert!(cumulative_hazard > std::f64::consts::LN_2, "the control reads the log-survival side");
+        let instant_hazard = shape * cumulative_hazard / age;
+        let (q, q_derivative) =
+            evaluate_survival_marginal_slope_baseline(age, &representable).expect("q");
+        assert_close(
+            q_derivative,
+            instant_hazard * (-cumulative_hazard).exp() / normal_pdf(q),
+            1e-13,
+            "q' against h·S/φ(q) where S is representable",
+        );
     }
 
     #[test]
