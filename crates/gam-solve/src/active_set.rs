@@ -2534,15 +2534,14 @@ fn independent_violated_operator_rows(
         return Ok(Vec::new());
     }
 
-    // Every gathered row is unit-normalized. Use the same relative rank scale
-    // as the working-face reducer, with `p` (the maximum attainable rank) in
-    // place of a row-count-dependent tolerance.
-    let rank_tolerance = 100.0 * f64::EPSILON * p.max(1) as f64;
+    // Every gathered row is unit-normalized. A row adds a normal-space direction
+    // when its reorthogonalized residual is resolved above the Gram–Schmidt
+    // arithmetic's own band (`gram_schmidt_residual_band`).
     let mut basis = Vec::<Array1<f64>>::with_capacity(p);
     if !active.is_empty() {
         let active_rows = ops.gather_unit_rows(active)?;
         for row in active_rows.a.rows() {
-            extend_operator_normal_basis(&mut basis, row, rank_tolerance);
+            extend_operator_normal_basis(&mut basis, row);
         }
     }
 
@@ -2552,11 +2551,7 @@ fn independent_violated_operator_rows(
         let chunk_ids = chunk.iter().map(|(row, _)| *row).collect::<Vec<_>>();
         let gathered = ops.gather_unit_rows(&chunk_ids)?;
         for (position, &row) in chunk_ids.iter().enumerate() {
-            if extend_operator_normal_basis(
-                &mut basis,
-                gathered.a.row(position),
-                rank_tolerance,
-            ) {
+            if extend_operator_normal_basis(&mut basis, gathered.a.row(position)) {
                 selected.push(row);
                 if selected.len() == max_new || basis.len() == p {
                     return Ok(selected);
@@ -2569,23 +2564,26 @@ fn independent_violated_operator_rows(
 
 /// Reorthogonalized modified Gram--Schmidt append for one unit constraint
 /// normal. Returns true exactly when the row adds a resolved normal-space
-/// direction.
-fn extend_operator_normal_basis(
-    basis: &mut Vec<Array1<f64>>,
-    row: ArrayView1<'_, f64>,
-    rank_tolerance: f64,
-) -> bool {
+/// direction: its residual after `GRAM_SCHMIDT_PASSES` passes exceeds
+/// `gam_math::roundoff::gram_schmidt_residual_band` (#2469).
+fn extend_operator_normal_basis(basis: &mut Vec<Array1<f64>>, row: ArrayView1<'_, f64>) -> bool {
+    let band = gam_math::roundoff::gram_schmidt_residual_band(
+        gam_math::roundoff::GRAM_SCHMIDT_PASSES,
+        basis.len(),
+        row.len(),
+        row.dot(&row).sqrt(),
+    );
     let mut residual = row.to_owned();
     // The second pass prevents a long, nearly dependent active basis from
     // manufacturing a false new direction through first-pass roundoff.
-    for _ in 0..2 {
+    for _ in 0..gam_math::roundoff::GRAM_SCHMIDT_PASSES {
         for direction in basis.iter() {
             let projection = residual.dot(direction);
             residual.scaled_add(-projection, direction);
         }
     }
     let residual_norm = residual.dot(&residual).sqrt();
-    if !(residual_norm.is_finite() && residual_norm > rank_tolerance) {
+    if !(residual_norm.is_finite() && residual_norm > band) {
         return false;
     }
     residual /= residual_norm;
@@ -2987,19 +2985,22 @@ const ACTIVE_SET_DUAL_DEPENDENCE_TOL: f64 = 1e-11;
 /// The dual active-set solve maintains an independent face by construction, so
 /// `None` is a genuine numerical breakdown rather than an expected branch, and
 /// the caller converts it into a typed refusal.
-fn thin_qr_reorthogonalized(
-    columns: &[Array1<f64>],
-    rank_tolerance: f64,
-) -> Option<(Vec<Array1<f64>>, Array2<f64>)> {
+fn thin_qr_reorthogonalized(columns: &[Array1<f64>]) -> Option<(Vec<Array1<f64>>, Array2<f64>)> {
     let k = columns.len();
     let mut q: Vec<Array1<f64>> = Vec::with_capacity(k);
     let mut r = Array2::<f64>::zeros((k, k));
     for (column_index, column) in columns.iter().enumerate() {
         let scale = column.dot(column).sqrt();
+        let band = gam_math::roundoff::gram_schmidt_residual_band(
+            gam_math::roundoff::GRAM_SCHMIDT_PASSES,
+            q.len(),
+            column.len(),
+            scale,
+        );
         let mut residual = column.clone();
         // Two passes: one sweep leaves a long, nearly dependent basis able to
         // manufacture a false orthogonal direction out of first-pass roundoff.
-        for _ in 0..2 {
+        for _ in 0..gam_math::roundoff::GRAM_SCHMIDT_PASSES {
             for (basis_index, basis) in q.iter().enumerate() {
                 let projection = residual.dot(basis);
                 r[[basis_index, column_index]] += projection;
@@ -3007,7 +3008,7 @@ fn thin_qr_reorthogonalized(
             }
         }
         let norm = residual.dot(&residual).sqrt();
-        if !(norm.is_finite() && scale.is_finite() && norm > rank_tolerance * scale.max(1.0)) {
+        if !(norm.is_finite() && scale.is_finite() && norm > band) {
             return None;
         }
         r[[column_index, column_index]] = norm;
@@ -3278,7 +3279,6 @@ fn solve_operator_metric_projection_dual_active_set(
     let p = unconstrained.len();
     let m = ops.nrows();
     let lower = factor.lower_triangular();
-    let face_rank_tolerance = 100.0 * f64::EPSILON * (p.max(1) as f64);
 
     let mut beta = unconstrained.clone();
     let mut active = Vec::<usize>::new();
@@ -3401,7 +3401,7 @@ fn solve_operator_metric_projection_dual_active_set(
                     (Array1::<f64>::zeros(0), whitened_normal.clone())
                 } else {
                     let Some((q, r)) =
-                        thin_qr_reorthogonalized(&whitened_active, face_rank_tolerance)
+                        thin_qr_reorthogonalized(&whitened_active)
                     else {
                         crate::bail_invalid_estim!(
                             "operator metric projection lost independence of its {} active normals",
@@ -3994,6 +3994,62 @@ pub fn solve_quadratic_with_linear_constraints(
 
 #[cfg(test)]
 mod tests {
+
+    /// #2469: a direction joins a Gram–Schmidt basis when its reorthogonalized
+    /// residual is resolved above the arithmetic's own band `2·k·γ_{p+4}·‖x‖`.
+    /// Against `e₁` in three dimensions, `(1, 1e-14, 0)` leaves a residual of
+    /// `1e-14`. That is above the band (`≈1.6e-15`) and below the `100·p·ε ≈ 6.7e-14`
+    /// cutoff both appends used before. A vector already in the span is refused.
+    #[test]
+    fn gram_schmidt_appends_admit_a_residual_resolved_above_their_band_2469() {
+        use ndarray::array;
+        let gap = 1.0e-14_f64;
+        let band = gam_math::roundoff::gram_schmidt_residual_band(
+            gam_math::roundoff::GRAM_SCHMIDT_PASSES,
+            1,
+            3,
+            1.0,
+        );
+        assert!(
+            gap > band && gap < 100.0 * 3.0 * f64::EPSILON,
+            "fixture premise: the residual {gap:.1e} sits between the band {band:.3e} and the \
+             replaced cutoff {:.3e}",
+            100.0 * 3.0 * f64::EPSILON
+        );
+        let mut basis = vec![array![1.0_f64, 0.0, 0.0]];
+        assert!(super::extend_operator_normal_basis(&mut basis, array![1.0_f64, gap, 0.0].view()));
+        assert_eq!(basis.len(), 2);
+        assert!(!super::extend_operator_normal_basis(&mut basis, array![0.6_f64, 0.8, 0.0].view()));
+        assert_eq!(basis.len(), 2);
+
+        let columns = vec![array![2.0_f64, 0.0, 0.0], array![2.0_f64, 2.0 * gap, 0.0]];
+        let (q, r) = super::thin_qr_reorthogonalized(&columns)
+            .expect("a column resolved above its band is independent");
+        assert_eq!(q.len(), 2);
+        assert!(
+            (r[[1, 1]] - 2.0 * gap).abs()
+                <= gam_math::roundoff::gram_schmidt_residual_band(
+                    gam_math::roundoff::GRAM_SCHMIDT_PASSES,
+                    1,
+                    3,
+                    2.0
+                )
+        );
+        assert!(
+            super::thin_qr_reorthogonalized(&[array![2.0_f64, 0.0, 0.0], array![3.0_f64, 0.0, 0.0]])
+                .is_none(),
+            "a column in its predecessors' span is dependent"
+        );
+
+        // A zero vector has a zero band and a zero residual, so `residual > band`
+        // is false: it adds no direction to a basis, and a thin QR over it is the
+        // dependent-column refusal. Upstream, `gather_unit_rows` refuses a zero-norm
+        // row typed before either append sees it.
+        let mut empty = Vec::new();
+        assert!(!super::extend_operator_normal_basis(&mut empty, array![0.0_f64, 0.0, 0.0].view()));
+        assert!(empty.is_empty());
+        assert!(super::thin_qr_reorthogonalized(&[array![0.0_f64, 0.0, 0.0]]).is_none());
+    }
 
     /// The metric projection's stationarity is judged above its operands'
     /// roundoff floor (#1561). The measured refusal, one unit in the last place
