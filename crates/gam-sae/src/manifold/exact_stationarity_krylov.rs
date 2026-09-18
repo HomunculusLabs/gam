@@ -282,10 +282,15 @@ where
             let mut classification_resolved = true;
             let mut seed: Option<Array1<f64>> = None;
             let mut worst_seed_excess = 0.0_f64;
+            // `ΦVc` and `‖ΦV‖²_F`, for the basis's `Φ`-orthonormality defect below.
+            let mut metric_image_of_coefficients = Array1::<f64>::zeros(dim);
+            let mut metric_images_frobenius_sq = 0.0_f64;
             for index in 0..values.len() {
                 let direction = vectors.column(index).to_owned();
                 let a_image = a_flat(&direction)?;
                 let b_image = b_flat(&direction)?;
+                metric_image_of_coefficients.scaled_add(coefficients[index], &b_image);
+                metric_images_frobenius_sq += b_image.dot(&b_image);
                 let metric = direction.dot(&b_image);
                 if !(metric.is_finite() && metric > 0.0) {
                     return Err(format!(
@@ -345,6 +350,18 @@ where
                 + norm(&projected_rhs);
             let dual_norm = norm(&vectors.t().dot(&residual));
             let dual_scale = curvature_norm * solution_metric_norm + norm(&coefficients);
+            // The Ritz vectors are `Φ`-orthonormal only to the Rayleigh--Ritz arithmetic,
+            // `VᵀΦV = I + E` with `‖E‖` of order `κ(VᵀΦV)·ε`. On a basis that spans the space,
+            // `ΦV(VᵀΦV)⁻¹Vᵀ = I`, so even the exact pseudoinverse on this basis leaves the dual
+            // residual `Ec` and the physical residual `ΦVEc`, to first order in `E`. That floor
+            // belongs to the basis, not to the solve's convergence, and `Ec = Vᵀ(ΦVc) − c` is
+            // measured here. At #2828 item 2's in-band state, `κ(VᵀΦV)` reached `1.3e9` and
+            // `‖Ec‖ = 1.4e-13` against the `γ` bar of `1.3e-14`, so a converged solve was refused
+            // (job 1273989). A basis that misses directions still leaves `(I − ΦVVᵀ)rhs`, which
+            // this floor does not cover, and a defect above `√ε` of the coefficients is no
+            // basis to certify on.
+            let gram_defect = norm(&(vectors.t().dot(&metric_image_of_coefficients) - &coefficients));
+            let physical_gram_defect = metric_images_frobenius_sq.sqrt() * gram_defect;
             let band_mass = band_images
                 .iter()
                 .fold(0.0_f64, |n, image| n.hypot(image.dot(&solution)));
@@ -354,8 +371,9 @@ where
             if scale_resolved
                 && classification_resolved
                 && solution.iter().all(|x| x.is_finite())
-                && residual_norm <= operator_gamma * physical_scale
-                && dual_norm <= operator_gamma * dual_scale
+                && gram_defect <= tolerance * norm(&coefficients)
+                && residual_norm <= operator_gamma * physical_scale + physical_gram_defect
+                && dual_norm <= operator_gamma * dual_scale + gram_defect
                 && band_mass <= tolerance * solution_metric_norm
             {
                 return Ok(split(&solution));

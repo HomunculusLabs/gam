@@ -7687,11 +7687,14 @@ mod tests_route_forced_classification_2673 {
     /// same comparison but does not assert it, and says why: its fixture "sits
     /// `2.8e7` bands away from any classification boundary, so it exercises the
     /// routes, not the predicate". #2828 item 2 is about a state that is IN the
-    /// band, so this gate anchors on the #2330 Patch-D converged mode, whose
-    /// exact `A` carries a cluster of eigenvalues at `2.7e-8` — a factor of 1.8
-    /// above their own `√ε·vᵀBv` floor, i.e. inside the band by any reading —
-    /// against a spectral norm of `3.0e1`. The band membership is ASSERTED, so
-    /// the gate cannot quietly become the far-from-the-boundary one it replaces.
+    /// band, so this gate anchors on the #2330 Patch-D fixture's converged mode
+    /// with its gates at the deflating temperature `τ = f^{-1/2}`, whose pencil
+    /// carries 19 in-band directions (job 1265484). The deeper rung `τ = 1/f`,
+    /// tried only when that one has none, is the less informative state: it puts
+    /// every gate direction `f²` deep in the band, a null to rounding, where two
+    /// solves compare 0/0 relative to themselves (job 1266736). The band
+    /// membership is ASSERTED, so the gate cannot quietly become the
+    /// far-from-the-boundary one it replaces.
     ///
     /// What it caught: the matrix-free route reaches its majorizer through
     /// `matrix_free_arrow_operator_apply`, which applies the CONDITIONED row
@@ -7704,29 +7707,69 @@ mod tests_route_forced_classification_2673 {
     /// detect. See [`SaeManifoldTerm::apply_exact_hessian_matrix_free`].
     #[test]
     fn matrix_free_exact_a_matches_the_dense_operator_and_solve_in_the_band_2828() {
+        use crate::manifold::tests_deflated_from_probes_2712::deflating_gate_temperatures;
         use crate::manifold::tests_logdet_adjoint_780::obb_patchd_fixture;
-        let (mut term, target, rho) = obb_patchd_fixture(0.0, -6.0);
-        term.penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
-            200,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .expect("the Patch-D fixture must converge to its own mode");
-        // Reassemble the undamped system at the converged state and factor it,
-        // exactly as the matrix-free route's own caller does.
-        let system = term
-            .assemble_arrow_schur(target.view(), &rho, None)
-            .expect("undamped arrow-Schur assembly at the converged mode");
-        // #2933 F07 — production's evidence factor, whose unit pins are what put a saturated
-        // gate direction inside the pencil band.
-        let options = term.evidence_factor_options();
-        let (_delta_t, _delta_beta, cache) =
-            solve_arrow_newton_step_with_options(&system, 0.0, 0.0, &options)
+        // #2933 F07 — the band is a property of the pencil `(A, Φ)`, read off production's
+        // own geometry. The gate is only about the classification band, so it aims at the
+        // in-band direction nearest its own edge; an empty band would leave the two routes
+        // nothing to classify differently, which is why #2673's report is not evidence about
+        // the predicate.
+        //
+        // The in-band directions are saturated gate directions, which production's evidence
+        // factor pins. At the fixture's historical gate temperature 0.7 the gate-logit Jacobian
+        // (19ce8785f3) gives the gates an interior mode, so no row deflates and the band is
+        // empty (min |μ|/floor 1.3e7, job 1265484). Every logit-slot curvature carries τ⁻², so
+        // the gates go on the deflating temperature ladder the #2080 anchors use (ee6d82a554),
+        // job 1265484 found 19 in-band directions at τ = f^{-1/2} and 20 at τ = 1/f. This gate
+        // aims at the band's EDGE, so the rung that puts a logit eigenvalue at the band's own
+        // scale, f^{-1/2}, comes first. At 1/f every gate direction sits f² deep, a null to
+        // rounding (μ = -9.8e-17 against the floor 1.5e-8, job 1266736), where the solves'
+        // null-only comparison has no scale.
+        let (term, target, rho, system, cache, geometry) = deflating_gate_temperatures()
+            .into_iter()
+            .rev()
+            .find_map(|temperature| {
+                let (mut term, target, rho) = obb_patchd_fixture(0.0, -6.0);
+                term.assignment.mode =
+                    crate::assignment::AssignmentMode::ordered_beta_bernoulli(temperature, 0.9, false);
+                if let Err(error) = term.penalized_quasi_laplace_criterion_with_cache(
+                    target.view(),
+                    &rho,
+                    None,
+                    200,
+                    0.4,
+                    1.0e-6,
+                    1.0e-6,
+                ) {
+                    eprintln!("#2828 item 2: tau={temperature:.1e} has no converged mode: {error}");
+                    return None;
+                }
+                // Reassemble the undamped system at the converged state and factor it,
+                // exactly as the matrix-free route's own caller does.
+                let system = term
+                    .assemble_arrow_schur(target.view(), &rho, None)
+                    .expect("undamped arrow-Schur assembly at the converged mode");
+                let (_delta_t, _delta_beta, cache) = solve_arrow_newton_step_with_options(
+                    &system,
+                    0.0,
+                    0.0,
+                    &term.evidence_factor_options(),
+                )
                 .expect("undamped factor cache");
+                let geometry = term
+                    .materialize_exact_stationarity_geometry(&rho, target.view(), &cache)
+                    .expect("dense pencil geometry at the converged mode");
+                eprintln!(
+                    "#2828 item 2: tau={temperature:.1e}: {} in-band pencil directions",
+                    geometry.band.len()
+                );
+                (!geometry.band.is_empty()).then_some((term, target, rho, system, cache, geometry))
+            })
+            .expect(
+                "#2828 item 2: this gate is stated ON the classification band, but no deflating \
+                 gate temperature gives the Patch-D fixture a converged mode with an in-band \
+                 pencil direction",
+            );
         let total_t = cache.delta_t_len();
         let k = cache.k;
         let dim = total_t + k;
@@ -7734,14 +7777,6 @@ mod tests_route_forced_classification_2673 {
             .materialize_exact_hessian_dense(&rho, target.view(), &cache)
             .expect("dense exact A at the converged mode");
         let spectral_norm = dense.iter().map(|value| value * value).sum::<f64>().sqrt();
-        // #2933 F07 — the band is a property of the pencil `(A, Φ)`, read off production's
-        // own geometry. The gate is only about the classification band, so it aims at the
-        // in-band direction nearest its own edge; an empty band would leave the two routes
-        // nothing to classify differently, which is why #2673's report is not evidence about
-        // the predicate.
-        let geometry = term
-            .materialize_exact_stationarity_geometry(&rho, target.view(), &cache)
-            .expect("dense pencil geometry at the converged mode");
         let flattest = geometry
             .band
             .iter()
@@ -7750,10 +7785,7 @@ mod tests_route_forced_classification_2673 {
                 (geometry.eigenvalues[a].abs() / geometry.rank_floor(a))
                     .total_cmp(&(geometry.eigenvalues[b].abs() / geometry.rank_floor(b)))
             })
-            .expect(
-                "#2828 item 2: this gate is stated ON the classification band, but the converged \
-                 Patch-D mode has no in-band pencil direction",
-            );
+            .expect("the accepted mode has an in-band pencil direction");
         let steepest = (0..dim)
             .max_by(|&a, &b| {
                 geometry.eigenvalues[a]
@@ -7861,8 +7893,32 @@ mod tests_route_forced_classification_2673 {
                      residual at the scale of the right-hand side is not a solution."
                 );
             }
-            let scale = norm(&dense_flat).max(norm(&free_flat));
-            let difference = norm(&(&dense_flat - &free_flat));
+            // The routes are compared in the pencil's own metric, `‖Δx‖_Φ`, against the scale the
+            // adjoint lives at, `‖rhs‖_Φ⁻¹ / μ_min` over the retained directions, as well as the
+            // solutions' own. A right-hand side inside the band has pseudoinverse zero, so each
+            // route returns its own rounding there: the dense solve 5.4e-10, at its own
+            // Φ-orthonormality floor of 5.9e-10, and the Krylov solve 1.4e-9 (job 1276139). A
+            // comparison relative to those alone is 0/0. A route that kept a band direction would
+            // differ by that direction's `1/μ`, about 2e8 here, in the same norm.
+            let metric_norm = |x: &Array1<f64>| -> f64 {
+                x.dot(&metric.apply(x.view()).expect("metric image")).max(0.0).sqrt()
+            };
+            let dual_rhs_norm = norm(&geometry.eigenvectors.t().dot(&flat));
+            let smallest_retained = (0..dim)
+                .filter(|index| !geometry.band.contains(index))
+                .map(|index| geometry.eigenvalues[index].abs())
+                .fold(f64::INFINITY, f64::min);
+            let scale = metric_norm(&dense_flat)
+                .max(metric_norm(&free_flat))
+                .max(dual_rhs_norm / smallest_retained);
+            let difference = metric_norm(&(&dense_flat - &free_flat));
+            eprintln!(
+                "#2828 item 2 ({label}): |x_dense|_Φ = {:.6e}, |x_free|_Φ = {:.6e}, difference \
+                 {difference:.6e} against the scale {scale:.6e} (|rhs|_Φ⁻¹/μ_min = {:.6e})",
+                metric_norm(&dense_flat),
+                metric_norm(&free_flat),
+                dual_rhs_norm / smallest_retained,
+            );
             assert!(
                 difference <= 1.0e-6 * scale,
                 "#2828 item 2 ({label}): the dense and matrix-free exact-stationarity solves \
