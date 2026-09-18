@@ -4618,7 +4618,7 @@ impl SaeManifoldTerm {
         // at every such state, off the same predicate the dense route stiffens on, so the two
         // routes never price one state differently without saying so.
         if let Some(atom) = self
-            .compact_orbit_pricing(rho, &converged_cache)?
+            .separated_compact_orbit_pricing(rho, target, &converged_cache)?
             .iter()
             .find_map(|pricing| match pricing {
                 CompactOrbitPricing::ExactCircle(generator) => Some(generator.atom),

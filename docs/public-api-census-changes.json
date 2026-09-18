@@ -4241,5 +4241,13 @@
     },
     "reason": "#979 Jeffreys floor stage (a1): the crate-private custom-family twin of gam-solve's reduced-information spectrum is deleted. custom_family_joint_jeffreys_contract_weight and its helpers custom_family_jeffreys_cap, custom_family_jeffreys_floored_inverse and custom_family_jeffreys_conditioning_gate_weight re-derived the gate, floor and floored inverse that JointJeffreysPlan already owns. The completion now reads the plan's conditioning_gate_weight() and the new contracted_trace_weight() instead.",
     "evidence": "At the base, git grep -w finds these four names only in crates/gam-custom-family/src/jeffreys.rs: their definitions and the one caller, custom_family_joint_jeffreys_second_order_completion, which this commit rewrites to read the plan. None is pub outside the crate, and gam-pyffi has 0 references. Lane job 1247303 (a1.patch md5 76b566a7 at e7955a5704): gam-custom-family lib 315 passed, 0 failed."
+  },
+  {
+    "removed": {
+      "crates/gam-sae/src/manifold/construction_orbit_elimination.rs::price_compact_orbit": 1
+    },
+    "reason": "#2234 item 2: the dense exact-A criterion now integrates every closure-certified circle orbit alone in its connected block of A and Φ, not one, so the crate-private one-orbit pricer price_compact_orbit is replaced by price_compact_orbits, which prices each eliminated orbit off the same stiffened decomposition and forms the joint correction −log det N − 2·Σ log I_k + K·log 2π.",
+    "evidence": "The removed map is the census's own output: scripts/public_api_census.py in direct lane dy5 run i2234-item2d (base 8473989829, exact tree 50344beb, patch md5 16372d8d) refused exactly this item. At that base, git grep -n -w price_compact_orbit finds the pub(crate) declaration (construction_orbit_elimination.rs:254) and its two callers only: the value site in construction_exact_hessian.rs (:4697) and compact_orbit_differential (construction_orbit_elimination.rs:572). This landing moves both to price_compact_orbits.",
+    "base": "cd4e4d3662be44e5bfa4e8f3e0047b1941cf3aa8"
   }
 ]

@@ -163,7 +163,7 @@ fn orbit_priced_dense_gradient_factors_are_derivatives_of_the_criterion_2234() {
     let mut geometry = geometry.expect("the dense criterion hands out the block it priced");
     // Premise: the evaluation integrates the atom's orbit.
     assert!(
-        geometry.orbit_generator.is_some() && geometry.block.orbit.is_some(),
+        !geometry.orbit_generators.is_empty() && geometry.block.orbit.is_some(),
         "the periodic ARD atom must be priced through its circle orbit"
     );
     let lambda_smooth = anchor.lambda_smooth_vec().expect("smoothing strengths");
@@ -257,7 +257,7 @@ fn orbit_priced_dense_gradient_factors_are_derivatives_of_the_criterion_2234() {
     eprintln!("[#2234 orbit gradient] ard partial {ard_partial:.12e} against {ard_partial_fd:.12e}");
 
     // Positive control: without the orbit legs the channels contract the stiffened block's own weights.
-    geometry.orbit_generator = None;
+    geometry.orbit_generators.clear();
     let control = state
         .analytic_outer_rho_gradient_components_with_bundle(
             target.view(),
@@ -299,7 +299,7 @@ fn streaming_route_refuses_the_orbit_criterion_by_name_2234() {
         .penalized_quasi_laplace_criterion_with_geometry(target.view(), &at, None, 0, 0.05, 1.0e-6, 1.0e-6, true)
         .expect("the criterion prices the converged state");
     assert!(
-        geometry.is_some_and(|geometry| geometry.orbit_generator.is_some()),
+        geometry.is_some_and(|geometry| !geometry.orbit_generators.is_empty()),
         "the dense route must price the atom through its circle orbit"
     );
     let streaming = objective.evaluate_outer_criterion_route(&at, false, false);
@@ -329,5 +329,295 @@ fn streaming_route_refuses_the_orbit_criterion_by_name_2234() {
     assert!(
         !matches!(routed, Err(SaeCriterionError::OrbitCriterionUnavailableOnArrowRoute { .. })),
         "a linear atom carries no compact orbit, so the arrow route must not refuse it for one"
+    );
+}
+
+const TOPK_ROWS: usize = 48;
+const TOPK_OUTPUT: usize = 6;
+
+/// Two planted circles in orthogonal output planes, the rows alternating between them.
+fn planted_two_circles() -> Array2<f64> {
+    let mut state = 0x1357_9bdf_2468_ace0u64;
+    let mut unit = move || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((state >> 11) as f64) / ((1u64 << 53) as f64)
+    };
+    let mut z = Array2::<f64>::zeros((TOPK_ROWS, TOPK_OUTPUT));
+    for i in 0..TOPK_ROWS {
+        let theta = std::f64::consts::TAU * unit();
+        let plane = 2 * (i % 2);
+        z[[i, plane]] = 2.0 * theta.cos();
+        z[[i, plane + 1]] = 2.0 * theta.sin();
+        for j in 0..TOPK_OUTPUT {
+            z[[i, j]] += 0.01 * (2.0 * unit() - 1.0);
+        }
+    }
+    z
+}
+
+/// Two periodic atoms with native ARD under hard TopK(1): each row holds one atom's coordinate,
+/// so the cache's layout is compact.
+fn topk_two_circle_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
+    let z = planted_two_circles();
+    let minimal = build_sae_minimal_seed(SaeMinimalSeedRequest {
+        target: z.view(),
+        atom_basis: vec!["periodic".to_string(); 2],
+        atom_dim: vec![1, 1],
+        assignment_kind: SaeFitAssignmentKind::TopK,
+        alpha: 1.0,
+        tau: 1.0,
+        threshold: 0.0,
+        top_k: Some(1),
+        random_state: 45,
+        initial_logits: None,
+        initial_coords: None,
+    })
+    .expect("minimal seed");
+    let registry = AnalyticPenaltyRegistry::new();
+    let seed = build_sae_fit_seed(SaeFitSeedRequest {
+        target: z.view(),
+        geometry_plans: &minimal.geometry_plans,
+        basis_values: minimal.basis_values.view(),
+        basis_jacobian: minimal.basis_jacobian.view(),
+        decoder_coefficients: minimal.decoder_coefficients.view(),
+        smooth_penalties: minimal.smooth_penalties.view(),
+        initial_logits: minimal.initial_logits.view(),
+        initial_coords: minimal.initial_coords.view(),
+        alpha: 1.0,
+        tau: 1.0,
+        learnable_alpha: false,
+        assignment_kind: SaeFitAssignmentKind::TopK,
+        sparsity_strength: 1.0,
+        smoothness: 1.0,
+        max_iter: 40,
+        learning_rate: 0.05,
+        ridge_ext_coord: 1.0e-6,
+        ridge_beta: 1.0e-6,
+        top_k: Some(1),
+        threshold: 0.0,
+        native_ard_enabled: true,
+        seed_refine_routing: minimal.refine_routing,
+        seed_refine_random_state: 45,
+        fit_config: SaeFitConfig::default(),
+        temperature_schedule: None,
+        fisher_metric: None,
+        row_loss_weights: None,
+        registry: &registry,
+    })
+    .expect("fit seed");
+    (seed.base_term, z, seed.initial_rho)
+}
+
+/// The term moved by `scale·step` in the compact hard-TopK layout: each row's selected coordinates
+/// at their compact slots, and every atom's basis-major decoder block of the border.
+fn displaced_compact(
+    term: &SaeManifoldTerm,
+    row_offsets: &[usize],
+    step: &SaeArrowVector,
+    scale: f64,
+) -> SaeManifoldTerm {
+    let mut moved = term.clone();
+    let layout = moved
+        .last_row_layout
+        .clone()
+        .expect("a hard-TopK state carries its row layout");
+    for atom in 0..moved.k_atoms() {
+        let mut coords = moved.assignment.coords[atom].as_matrix().to_owned();
+        for row in 0..layout.active_atoms.len() {
+            if let Some(position) = layout.active_atoms[row].iter().position(|&active| active == atom) {
+                coords[[row, 0]] += scale * step.t[row_offsets[row] + layout.coord_starts[row][position]];
+            }
+        }
+        let manifold = moved.assignment.coords[atom].manifold().clone();
+        moved.assignment.coords[atom] =
+            LatentCoordValues::from_matrix_with_manifold(coords.view(), LatentIdMode::None, manifold);
+    }
+    let offsets = moved.factored_border_offsets();
+    for atom in 0..moved.k_atoms() {
+        let decoder = moved.atoms[atom].decoder_coefficients().clone();
+        let block = step
+            .beta
+            .slice(ndarray::s![offsets[atom]..offsets[atom] + decoder.len()])
+            .to_vec();
+        let decoder_step = Array2::from_shape_vec(decoder.dim(), block).expect("basis-major decoder layout");
+        moved.atoms[atom]
+            .set_decoder_coefficients(&decoder + &(decoder_step * scale))
+            .expect("the decoder keeps its shape");
+    }
+    moved
+}
+
+/// #2234 item 2 — two circle orbits in a compact hard-TopK layout are each integrated exactly, and
+/// the criterion's dense ρ-gradient through both orbits' legs is its derivative. Before, the
+/// compact layout priced every atom by Laplace (`CompactRowLayout`), and two certified orbits
+/// did as well (`MultipleCompactOrbits`). The positive control drops the orbit legs.
+#[test]
+fn two_compact_topk_orbits_are_integrated_and_differentiated_2234() {
+    let (term, target, rho) = topk_two_circle_fixture();
+    let mut objective =
+        SaeManifoldOuterObjective::new(term, target.clone(), None, rho, 40, 0.05, 1.0e-6, 1.0e-6);
+    let anchor = objective.baseline_rho.clone();
+    objective
+        .evaluate_outer_criterion_route(&anchor, true, false)
+        .expect("the dense route converges the anchor");
+    let mut state = objective.term.clone();
+    let (cost, loss, cache, geometry) = state
+        .penalized_quasi_laplace_criterion_with_geometry(
+            target.view(),
+            &anchor,
+            None,
+            0,
+            0.05,
+            1.0e-6,
+            1.0e-6,
+            true,
+        )
+        .expect("the criterion prices the converged state");
+    let mut geometry = geometry.expect("the dense criterion hands out the block it priced");
+    let layout = state
+        .last_row_layout
+        .clone()
+        .expect("hard TopK assembles a compact row layout");
+    let selecting: Vec<usize> = (0..2)
+        .map(|atom| layout.active_atoms.iter().filter(|active| active.contains(&atom)).count())
+        .collect();
+    let orbit_atoms: Vec<usize> = geometry.orbit_generators.iter().map(|generator| generator.atom).collect();
+    let orbit_rows: Vec<usize> = geometry
+        .orbit_generators
+        .iter()
+        .map(|generator| generator.prior_rows.len())
+        .collect();
+    eprintln!(
+        "[#2234 compact orbits] cost={cost:.12e} delta_t_len={} dense n·q={} border={} selecting rows={selecting:?} \
+         orbit atoms={orbit_atoms:?} orbit prior rows={orbit_rows:?}",
+        cache.delta_t_len(),
+        TOPK_ROWS * state.assignment.row_block_dim(),
+        cache.k,
+    );
+    // Premise: a compact layout, both atoms' orbits certified and separated, each over the rows
+    // that select its atom.
+    assert!(
+        cache.delta_t_len() < TOPK_ROWS * state.assignment.row_block_dim(),
+        "hard TopK(1) must drop the unselected atoms' coordinates"
+    );
+    assert_eq!(orbit_atoms, vec![0, 1], "both periodic atoms must be integrated through their orbits");
+    assert_eq!(orbit_rows, selecting, "each orbit's prior covers exactly the rows selecting its atom");
+    assert!(geometry.block.orbit.is_some(), "the block must carry the eliminated orbits");
+
+    let lambda_smooth = anchor.lambda_smooth_vec().expect("smoothing strengths");
+    let solver = state
+        .outer_gradient_arrow_solver(&cache, &lambda_smooth)
+        .expect("dense outer gradient solver");
+    let components = state
+        .analytic_outer_rho_gradient_components_with_bundle(
+            target.view(),
+            &anchor,
+            &loss,
+            &cache,
+            &solver,
+            None,
+            None,
+            Some(&geometry),
+        )
+        .expect("dense gradient components at the converged state");
+    let residual = inner_gradient(&state, target.view(), &anchor);
+    let flat = anchor.flat_coordinates();
+    let row_offsets = cache.row_offsets.to_vec();
+    let price = |at_state: &SaeManifoldTerm, at: &SaeManifoldRho| -> f64 {
+        let mut arm = at_state.clone();
+        arm.penalized_quasi_laplace_criterion_with_cache(target.view(), at, None, 0, 0.05, 1.0e-6, 1.0e-6)
+            .expect("the criterion prices the fixed state")
+            .0
+    };
+    let moved_rho = |index: usize, step: f64| -> SaeManifoldRho {
+        let mut coordinates = flat.clone();
+        coordinates[index] += step;
+        anchor.from_flat(coordinates.view()).expect("a nearby ρ")
+    };
+    let coordinates = [
+        ("ard0", anchor.ard_flat_index(0, 0)),
+        ("ard1", anchor.ard_flat_index(1, 0)),
+        ("smooth0", anchor.smooth_flat_index(0)),
+    ];
+    let mut ard_checks = Vec::new();
+    for (label, index) in coordinates {
+        let partial = components.explicit[index] + components.logdet_trace[index] + components.occam[index];
+        let implicit = components.third_order_correction[index];
+        let cost_over_rho = |step: f64| -> f64 {
+            (price(&state, &moved_rho(index, step)) - price(&state, &moved_rho(index, -step))) / (2.0 * step)
+        };
+        let step = 1.0e-3_f64;
+        let (partial_fd, partial_spread) = richardson(cost_over_rho(step), cost_over_rho(0.5 * step));
+        let g_rho = state
+            .outer_rho_gradient_ift_rhs(&anchor, index, &cache)
+            .expect("implicit right-hand side");
+        let a_pinv_g = state
+            .solve_exact_stationarity(&anchor, target.view(), &cache, &g_rho)
+            .expect("A⁺ g_ρ");
+        let theta_hat = SaeArrowVector {
+            t: a_pinv_g.t.mapv(|value| -value),
+            beta: a_pinv_g.beta.mapv(|value| -value),
+        };
+        let response_step = 1.0e-4 / arrow_norm(&theta_hat).max(1.0);
+        let cost_along_response = |eps: f64| -> f64 {
+            (price(&displaced_compact(&state, &row_offsets, &theta_hat, eps), &anchor)
+                - price(&displaced_compact(&state, &row_offsets, &theta_hat, -eps), &anchor))
+                / (2.0 * eps)
+        };
+        let (directional_fd, directional_spread) =
+            richardson(cost_along_response(response_step), cost_along_response(0.5 * response_step));
+        let implicit_fd = directional_fd - arrow_dot(&residual, &theta_hat);
+        let partial_tolerance = 10.0 * partial_spread + 1.0e-6 * partial_fd.abs().max(1.0);
+        let implicit_tolerance = 10.0 * directional_spread + 1.0e-6 * directional_fd.abs().max(1.0);
+        eprintln!(
+            "[#2234 compact orbits] {label}: partial={partial:.12e} partial_fd={partial_fd:.12e} \
+             (spread {partial_spread:.3e}) implicit={implicit:.12e} implicit_fd={implicit_fd:.12e} \
+             (spread {directional_spread:.3e})"
+        );
+        assert!(
+            (partial - partial_fd).abs() <= partial_tolerance,
+            "{label}: fixed-state partials {partial} are not the frozen criterion's derivative {partial_fd} \
+             (|Δ| = {}, tolerance {partial_tolerance})",
+            (partial - partial_fd).abs()
+        );
+        assert!(
+            (implicit - implicit_fd).abs() <= implicit_tolerance,
+            "{label}: the implicit correction {implicit} is not ½Γᵀθ̂ = {implicit_fd} (|Δ| = {}, tolerance {implicit_tolerance})",
+            (implicit - implicit_fd).abs()
+        );
+        if label.starts_with("ard") {
+            ard_checks.push((index, partial_fd, partial_tolerance));
+        }
+    }
+
+    // Positive control: without the orbit legs the channels contract the stiffened block's own
+    // weights, and at least one ARD partial misses the frozen criterion.
+    geometry.orbit_generators.clear();
+    let control = state
+        .analytic_outer_rho_gradient_components_with_bundle(
+            target.view(),
+            &anchor,
+            &loss,
+            &cache,
+            &solver,
+            None,
+            None,
+            Some(&geometry),
+        )
+        .expect("control gradient components");
+    let misses: Vec<f64> = ard_checks
+        .iter()
+        .map(|&(index, partial_fd, tolerance)| {
+            let control_partial = control.explicit[index] + control.logdet_trace[index] + control.occam[index];
+            (control_partial - partial_fd).abs() / tolerance
+        })
+        .collect();
+    eprintln!("[#2234 compact orbits] control |Δ|/tolerance per ARD axis {misses:?}");
+    assert!(
+        misses.iter().any(|&miss| miss > 10.0),
+        "the control without orbit legs already matches the frozen criterion on every ARD axis ({misses:?}), \
+         so the pin cannot see the orbit legs"
     );
 }

@@ -87,6 +87,78 @@ fn symmetric_positive_function(
 }
 
 impl SaeManifoldTerm {
+    /// Every atom's orbit pricing at `cache`, with the orbits that share a connected block of `A`
+    /// or `Φ` kept on Laplace ([`Self::separate_coupled_compact_orbits`]). Both evaluation routes
+    /// read their orbit set here, so the arrow route refuses exactly the states whose dense
+    /// evaluation integrates an orbit. Two or more certified orbits are first separated by the
+    /// row blocks and mass carriers alone, which already couple every atom a dense row holds;
+    /// only when an orbit survives that pass are the border columns probed: `A`'s through the one
+    /// exact-Hessian apply the dense materialization's probes run, and `Φ`'s through the joint
+    /// metric the dense block is classified in.
+    pub(crate) fn separated_compact_orbit_pricing(
+        &self,
+        rho: &SaeManifoldRho,
+        target: ArrayView2<'_, f64>,
+        cache: &ArrowFactorCache,
+    ) -> Result<Vec<CompactOrbitPricing>, String> {
+        let pricings = self.compact_orbit_pricing(rho, cache)?;
+        let certified = pricings
+            .iter()
+            .filter(|pricing| matches!(pricing, CompactOrbitPricing::ExactCircle(_)))
+            .count();
+        if certified < 2 {
+            return Ok(pricings);
+        }
+        let carriers = self.ordered_mass_hessian_carriers(rho, cache)?;
+        let by_rows = Self::separate_coupled_compact_orbits(
+            pricings.clone(),
+            &cache.row_offsets,
+            cache.k,
+            &carriers,
+            None,
+        )?;
+        if !by_rows
+            .iter()
+            .any(|pricing| matches!(pricing, CompactOrbitPricing::ExactCircle(_)))
+        {
+            return Ok(by_rows);
+        }
+        let total_t = cache.delta_t_len();
+        let k = cache.k;
+        let dim = total_t + k;
+        let prepared = self.prepare_decoder_prior_beta_curvature(1.0);
+        let residual = self.prepare_residual_curvature_rows(target, cache)?;
+        let metric = ArrowMetric::Joint(cache).prepare()?;
+        let mut operator_columns = Array2::<f64>::zeros((dim, k));
+        let mut metric_columns = Array2::<f64>::zeros((dim, k));
+        for column in 0..k {
+            let mut unit = SaeArrowVector {
+                t: Array1::<f64>::zeros(total_t),
+                beta: Array1::<f64>::zeros(k),
+            };
+            unit.beta[column] = 1.0;
+            let image = self.apply_exact_hessian_prepared(rho, cache, &unit, &prepared, &residual)?;
+            operator_columns
+                .slice_mut(s![..total_t, column])
+                .assign(&image.t);
+            operator_columns
+                .slice_mut(s![total_t.., column])
+                .assign(&image.beta);
+            let mut flat = Array1::<f64>::zeros(dim);
+            flat[total_t + column] = 1.0;
+            metric_columns
+                .column_mut(column)
+                .assign(&metric.apply(flat.view())?);
+        }
+        Self::separate_coupled_compact_orbits(
+            pricings,
+            &cache.row_offsets,
+            cache.k,
+            &carriers,
+            Some((operator_columns.view(), metric_columns.view())),
+        )
+    }
+
     /// `A_s = A − ΦTN⁻¹(AT)ᵀ − ATN⁻¹(ΦT)ᵀ + ΦTN⁻¹(TᵀAT + N)N⁻¹(ΦT)ᵀ`, which in `[T, Q]` coordinates
     /// is `diag(N, QᵀAQ)`, and the images it was built from. With no tangent the operator is
     /// returned unchanged.
@@ -230,7 +302,7 @@ impl OrbitStiffening {
     }
 }
 
-/// The orbit's evidence terms at one dense evaluation (#2234).
+/// One orbit's evidence terms at one dense evaluation (#2234).
 pub(crate) struct CompactOrbitValue {
     /// `u`, `v` and their complement images `G_⊥u`, `G_⊥v`, which the differential reads again.
     pub(crate) trigonometric: (Array1<f64>, Array1<f64>),
@@ -238,51 +310,77 @@ pub(crate) struct CompactOrbitValue {
     /// `(a, b, d) = (uᵀG_⊥u, uᵀG_⊥v, vᵀG_⊥v)`.
     pub(crate) coupling_forms: [f64; 3],
     pub(crate) integral: CircleOrbitIntegral,
-    /// `log det N`.
+}
+
+/// Every eliminated orbit's evidence terms at one dense evaluation, in tangent-column order.
+pub(crate) struct CompactOrbitsValue {
+    pub(crate) orbits: Vec<CompactOrbitValue>,
+    /// `log det N` over every orbit tangent at once.
     pub(crate) log_gram_det: f64,
-    /// `−log det N − 2·log I + log 2π`. Added to the priced `log|A_s|` it gives the log-determinant
-    /// the criterion ranks: `½log|A|` becomes `½log|A_s| − ½log det N − log I + ½log 2π`, where the
-    /// `½log 2π` restores the Laplace constant the orbit dimension no longer carries (#2933 F26
-    /// pairs one per integrated dimension with the coordinate prior's normalizer).
+    /// `−log det N − 2·Σ log I_k + K·log 2π`. Added to the priced `log|A_s|` it gives the
+    /// log-determinant the criterion ranks: `½log|A|` becomes
+    /// `½log|A_s| − ½log det N − Σ log I_k + ½K·log 2π`, where each `½log 2π` restores the Laplace
+    /// constant an integrated orbit dimension no longer carries (#2933 F26 pairs one per integrated
+    /// dimension with the coordinate prior's normalizer). The orbits are integrated one by one
+    /// because [`SaeManifoldTerm::separate_coupled_compact_orbits`] admitted only orbits in
+    /// distinct connected blocks of `A` and `Φ`, whose complement couples no two of them.
     pub(crate) log_det_correction: f64,
 }
 
 impl SaeManifoldTerm {
-    /// Price the eliminated orbit of `block` for `generator`. The block must already be classified
-    /// without refusal, so the complement pseudo-inverse is positive semidefinite and the coupling
-    /// is a nonnegative quadratic form, which the quadrature's lower bound needs.
-    pub(crate) fn price_compact_orbit(
-        generator: &CircleOrbitGenerator,
+    /// Price the eliminated orbits of `block`, one per generator in tangent-column order. The block
+    /// must already be classified without refusal, so the complement pseudo-inverse is positive
+    /// semidefinite and every coupling is a nonnegative quadratic form, which the quadrature's
+    /// lower bound needs.
+    pub(crate) fn price_compact_orbits(
+        generators: &[CircleOrbitGenerator],
         block: &ExactHessianSpectralBlock,
-    ) -> Result<CompactOrbitValue, String> {
+    ) -> Result<CompactOrbitsValue, String> {
         let orbit = block
             .orbit
             .as_ref()
-            .ok_or_else(|| "price_compact_orbit: the block carries no eliminated orbit".to_string())?;
+            .ok_or_else(|| "price_compact_orbits: the block carries no eliminated orbit".to_string())?;
+        if orbit.gram().nrows() != generators.len() {
+            return Err(format!(
+                "price_compact_orbits: {} generators for {} eliminated orbit tangents",
+                generators.len(),
+                orbit.gram().nrows()
+            ));
+        }
         let dim = block.eigenvalues.len();
-        let (u, v) = generator.trigonometric_images(dim);
-        let complement_u = orbit.complement_apply(block, u.view());
-        let complement_v = orbit.complement_apply(block, v.view());
-        let coupling_forms = [
-            u.dot(&complement_u),
-            0.5 * (u.dot(&complement_v) + v.dot(&complement_u)),
-            v.dot(&complement_v),
-        ];
-        let integral = generator
-            .integrand(coupling_forms[0], coupling_forms[1], coupling_forms[2])
-            .integrate()?;
+        let mut orbits = Vec::with_capacity(generators.len());
+        for generator in generators {
+            let (u, v) = generator.trigonometric_images(dim);
+            let complement_u = orbit.complement_apply(block, u.view());
+            let complement_v = orbit.complement_apply(block, v.view());
+            let coupling_forms = [
+                u.dot(&complement_u),
+                0.5 * (u.dot(&complement_v) + v.dot(&complement_u)),
+                v.dot(&complement_v),
+            ];
+            let integral = generator
+                .integrand(coupling_forms[0], coupling_forms[1], coupling_forms[2])
+                .integrate()?;
+            orbits.push(CompactOrbitValue {
+                trigonometric: (u, v),
+                complement_images: (complement_u, complement_v),
+                coupling_forms,
+                integral,
+            });
+        }
         let (gram_values, _) = orbit
             .gram()
             .eigh(Side::Lower)
-            .map_err(|error| format!("price_compact_orbit: Gram eigendecomposition failed: {error:?}"))?;
+            .map_err(|error| format!("price_compact_orbits: Gram eigendecomposition failed: {error:?}"))?;
         let log_gram_det = gram_values.iter().map(|value| value.ln()).sum::<f64>();
-        let log_det_correction = -log_gram_det - 2.0 * integral.log_integral
+        let log_integrals = orbits
+            .iter()
+            .map(|value| value.integral.log_integral)
+            .sum::<f64>();
+        let log_det_correction = -log_gram_det - 2.0 * log_integrals
             + orbit.gram().nrows() as f64 * std::f64::consts::TAU.ln();
-        Ok(CompactOrbitValue {
-            trigonometric: (u, v),
-            complement_images: (complement_u, complement_v),
-            coupling_forms,
-            integral,
+        Ok(CompactOrbitsValue {
+            orbits,
             log_gram_det,
             log_det_correction,
         })
@@ -493,8 +591,8 @@ impl ExactHessianSpectralBlock {
 ///   df = −(G_⊥x)ᵀ dA (G_⊥y) − ⟨G_⊥x(TN⁻¹Vᵀy)ᵀ + TN⁻¹Vᵀx(G_⊥y)ᵀ, dΦ⟩ − ⟨ΦG_⊥x(N⁻¹Vᵀy)ᵀ + ΦG_⊥y(N⁻¹Vᵀx)ᵀ, dT⟩,
 /// ```
 ///
-/// and the integral's coordinate and log-precision legs are expectations under its node weights.
-/// The tangent moves only with the decoder coordinates: `∂τ_β/∂C = −K̃`.
+/// and each integral's coordinate and log-precision legs are expectations under its node weights.
+/// Every orbit's tangent moves only with its own atom's decoder coordinates: `∂τ_β/∂C = −K̃`.
 struct CompactOrbitDifferential {
     /// Weight on `dA` (full log-determinant units).
     operator_weight: Array2<f64>,
@@ -502,8 +600,8 @@ struct CompactOrbitDifferential {
     metric_weight: Array2<f64>,
     /// θ legs that reach neither `A` nor `Φ` (full units).
     theta: SaeArrowVector,
-    /// `∂/∂log α` of the orbit integral at fixed `A`, on the atom's ARD axis (full units).
-    log_precision: f64,
+    /// `(atom, ∂/∂log α)` of each orbit integral at fixed `A`, on its atom's ARD axis (full units).
+    log_precisions: Vec<(usize, f64)>,
 }
 
 fn orbit_outer(left: &Array1<f64>, right: &Array1<f64>) -> Array2<f64> {
@@ -516,7 +614,7 @@ fn orbit_symmetrized(matrix: &Array2<f64>) -> Array2<f64> {
 
 impl SaeManifoldTerm {
     fn compact_orbit_differential(
-        generator: &CircleOrbitGenerator,
+        generators: &[CircleOrbitGenerator],
         block: &ExactHessianSpectralBlock,
         pricing: &ExactHessianPricing,
         metric: &dyn ExactAPencilMetric,
@@ -568,106 +666,113 @@ impl SaeManifoldTerm {
         tangent_weight += &(images.dot(&sandwich) * 2.0);
         tangent_weight -= &(images.dot(gram_inverse) * 2.0);
 
-        // −2·log I: expectations under the quadrature's node weights.
-        let value = Self::price_compact_orbit(generator, block)?;
-        let (u, v) = &value.trigonometric;
-        let (complement_u, complement_v) = &value.complement_images;
-        let angles = &value.integral.angles;
-        let node_weights = &value.integral.weights;
-        let expect = |function: &dyn Fn(f64) -> f64| -> f64 {
-            angles
-                .iter()
-                .zip(node_weights.iter())
-                .map(|(&angle, &node_weight)| node_weight * function(angle))
-                .sum()
-        };
-        let one_minus_cos = |angle: f64| {
-            let half = (0.5 * angle).sin();
-            2.0 * half * half
-        };
-        let eta = generator.eta;
-        let kappa = generator.kappa;
-        let coupling_scale = 0.5 * eta * eta * kappa * kappa;
-        let mean_one_minus_cos = expect(&one_minus_cos);
-        let mean_sin = expect(&|angle: f64| angle.sin());
-        let weight_a = coupling_scale * expect(&|angle: f64| one_minus_cos(angle).powi(2));
-        let weight_b =
-            -2.0 * coupling_scale * expect(&|angle: f64| one_minus_cos(angle) * angle.sin());
-        let weight_d = coupling_scale * expect(&|angle: f64| angle.sin().powi(2));
-
+        // −2·Σ log I_k: expectations under each quadrature's node weights. Every coupling form reads
+        // the complement of ALL eliminated orbits, so its `dT` leg reaches every tangent column.
+        let values = Self::price_compact_orbits(generators, block)?;
         let mut response = tangents.clone();
         for column in 0..k {
             let solved = orbit.complement_apply(block, operator_images.column(column));
             let mut target = response.column_mut(column);
             target -= &solved;
         }
-        let forms: [(f64, &Array1<f64>, &Array1<f64>, &Array1<f64>, &Array1<f64>); 3] = [
-            (weight_a, u, u, complement_u, complement_u),
-            (weight_b, u, v, complement_u, complement_v),
-            (weight_d, v, v, complement_v, complement_v),
-        ];
-        for (form_weight, x, y, complement_x, complement_y) in forms {
-            if form_weight == 0.0 {
-                continue;
-            }
-            // d(−2·log I) = −2·(∂log I/∂f)·df, and every leg of df carries a leading minus.
-            let scale = 2.0 * form_weight;
-            operator_weight += &(orbit_symmetrized(&orbit_outer(complement_x, complement_y)) * scale);
-            let coefficient_x = gram_inverse.dot(&response.t().dot(x));
-            let coefficient_y = gram_inverse.dot(&response.t().dot(y));
-            let lift_x = tangents.dot(&coefficient_x);
-            let lift_y = tangents.dot(&coefficient_y);
-            let metric_leg = &orbit_outer(complement_x, &lift_y) + &orbit_outer(&lift_x, complement_y);
-            metric_weight += &(orbit_symmetrized(&metric_leg) * scale);
-            let metric_complement_x = metric.apply(complement_x.view())?;
-            let metric_complement_y = metric.apply(complement_y.view())?;
-            tangent_weight += &(orbit_outer(&metric_complement_x, &coefficient_y) * scale);
-            tangent_weight += &(orbit_outer(&metric_complement_y, &coefficient_x) * scale);
-        }
-
+        let one_minus_cos = |angle: f64| {
+            let half = (0.5 * angle).sin();
+            2.0 * half * half
+        };
         let mut theta = SaeArrowVector {
             t: Array1::<f64>::zeros(total_t),
             beta: Array1::<f64>::zeros(dim - total_t),
         };
-        for &(slot, row_weight, coordinate) in &generator.prior_rows {
-            let (sin, cos) = (kappa * coordinate).sin_cos();
-            let resultant = -eta * kappa * row_weight * (-sin * mean_one_minus_cos + cos * mean_sin);
-            let moved_u = row_weight * kappa * cos;
-            let moved_v = -row_weight * kappa * sin;
-            let coupling = weight_a * 2.0 * complement_u[slot] * moved_u
-                + weight_b * (complement_v[slot] * moved_u + complement_u[slot] * moved_v)
-                + weight_d * 2.0 * complement_v[slot] * moved_v;
-            theta.t[slot] -= 2.0 * (resultant + coupling);
-        }
-        // The tangent's border block is −K̃C, so its weight reaches the decoder coordinates as −K̃ᵀ.
-        let rank = generator.border_rank;
-        for column in 0..generator.basis_size {
-            for channel in 0..rank {
-                let moved = tangent_weight[[generator.border_start + column * rank + channel, 0]];
-                if moved == 0.0 {
+        let mut log_precisions = Vec::with_capacity(generators.len());
+        for (generator, value) in generators.iter().zip(values.orbits.iter()) {
+            let (u, v) = &value.trigonometric;
+            let (complement_u, complement_v) = &value.complement_images;
+            let angles = &value.integral.angles;
+            let node_weights = &value.integral.weights;
+            let expect = |function: &dyn Fn(f64) -> f64| -> f64 {
+                angles
+                    .iter()
+                    .zip(node_weights.iter())
+                    .map(|(&angle, &node_weight)| node_weight * function(angle))
+                    .sum()
+            };
+            let eta = generator.eta;
+            let kappa = generator.kappa;
+            let coupling_scale = 0.5 * eta * eta * kappa * kappa;
+            let mean_one_minus_cos = expect(&one_minus_cos);
+            let mean_sin = expect(&|angle: f64| angle.sin());
+            let weight_a = coupling_scale * expect(&|angle: f64| one_minus_cos(angle).powi(2));
+            let weight_b =
+                -2.0 * coupling_scale * expect(&|angle: f64| one_minus_cos(angle) * angle.sin());
+            let weight_d = coupling_scale * expect(&|angle: f64| angle.sin().powi(2));
+            let forms: [(f64, &Array1<f64>, &Array1<f64>, &Array1<f64>, &Array1<f64>); 3] = [
+                (weight_a, u, u, complement_u, complement_u),
+                (weight_b, u, v, complement_u, complement_v),
+                (weight_d, v, v, complement_v, complement_v),
+            ];
+            for (form_weight, x, y, complement_x, complement_y) in forms {
+                if form_weight == 0.0 {
                     continue;
                 }
-                for j in 0..generator.basis_size {
-                    theta.beta[generator.border_start - total_t + j * rank + channel] -=
-                        generator.closure[[column, j]] * moved;
+                // d(−2·log I) = −2·(∂log I/∂f)·df, and every leg of df carries a leading minus.
+                let scale = 2.0 * form_weight;
+                operator_weight += &(orbit_symmetrized(&orbit_outer(complement_x, complement_y)) * scale);
+                let coefficient_x = gram_inverse.dot(&response.t().dot(x));
+                let coefficient_y = gram_inverse.dot(&response.t().dot(y));
+                let lift_x = tangents.dot(&coefficient_x);
+                let lift_y = tangents.dot(&coefficient_y);
+                let metric_leg = &orbit_outer(complement_x, &lift_y) + &orbit_outer(&lift_x, complement_y);
+                metric_weight += &(orbit_symmetrized(&metric_leg) * scale);
+                let metric_complement_x = metric.apply(complement_x.view())?;
+                let metric_complement_y = metric.apply(complement_y.view())?;
+                tangent_weight += &(orbit_outer(&metric_complement_x, &coefficient_y) * scale);
+                tangent_weight += &(orbit_outer(&metric_complement_y, &coefficient_x) * scale);
+            }
+            for &(slot, row_weight, coordinate) in &generator.prior_rows {
+                let (sin, cos) = (kappa * coordinate).sin_cos();
+                let resultant = -eta * kappa * row_weight * (-sin * mean_one_minus_cos + cos * mean_sin);
+                let moved_u = row_weight * kappa * cos;
+                let moved_v = -row_weight * kappa * sin;
+                let coupling = weight_a * 2.0 * complement_u[slot] * moved_u
+                    + weight_b * (complement_v[slot] * moved_u + complement_u[slot] * moved_v)
+                    + weight_d * 2.0 * complement_v[slot] * moved_v;
+                theta.t[slot] -= 2.0 * (resultant + coupling);
+            }
+            let integrand =
+                generator.integrand(value.coupling_forms[0], value.coupling_forms[1], value.coupling_forms[2]);
+            let [qa, qb, qd] = integrand.coupling;
+            let mean_ard =
+                -(integrand.resultant_cos * mean_one_minus_cos + integrand.resultant_sin * mean_sin);
+            let mean_coupling = expect(&|angle: f64| {
+                let lowered = one_minus_cos(angle);
+                let sin = angle.sin();
+                qa * lowered * lowered - 2.0 * qb * lowered * sin + qd * sin * sin
+            });
+            log_precisions.push((generator.atom, -2.0 * (mean_ard + 2.0 * mean_coupling)));
+        }
+        // Each tangent's border block is −K̃C on its own atom, so its column's weight reaches that
+        // atom's decoder coordinates as −K̃ᵀ.
+        for (column_of_tangent, generator) in generators.iter().enumerate() {
+            let rank = generator.border_rank;
+            for column in 0..generator.basis_size {
+                for channel in 0..rank {
+                    let moved =
+                        tangent_weight[[generator.border_start + column * rank + channel, column_of_tangent]];
+                    if moved == 0.0 {
+                        continue;
+                    }
+                    for j in 0..generator.basis_size {
+                        theta.beta[generator.border_start - total_t + j * rank + channel] -=
+                            generator.closure[[column, j]] * moved;
+                    }
                 }
             }
         }
-
-        let integrand =
-            generator.integrand(value.coupling_forms[0], value.coupling_forms[1], value.coupling_forms[2]);
-        let [qa, qb, qd] = integrand.coupling;
-        let mean_ard = -(integrand.resultant_cos * mean_one_minus_cos + integrand.resultant_sin * mean_sin);
-        let mean_coupling = expect(&|angle: f64| {
-            let lowered = one_minus_cos(angle);
-            let sin = angle.sin();
-            qa * lowered * lowered - 2.0 * qb * lowered * sin + qd * sin * sin
-        });
         Ok(CompactOrbitDifferential {
             operator_weight,
             metric_weight,
             theta,
-            log_precision: -2.0 * (mean_ard + 2.0 * mean_coupling),
+            log_precisions,
         })
     }
 }

@@ -39,9 +39,6 @@ pub(crate) enum CompactOrbitLaplaceReason {
     /// The atom is not a one-dimensional periodic harmonic chart. Sphere, projective-plane,
     /// torus, cylinder, Klein and every non-compact family keep the Laplace path.
     NotAPeriodicChart,
-    /// The evidence factor's coordinate layout is compact (hard TopK), so the dense generator
-    /// layout does not name its slots.
-    CompactRowLayout,
     /// The compensation design `a·Φ` loses a column, so the decoder compensation is the
     /// minimum-norm one and the smoothing reads the dropped component along the shift.
     RankDeficientCompensation,
@@ -54,10 +51,12 @@ pub(crate) enum CompactOrbitLaplaceReason {
     /// The shift moves no reconstruction (the atom decodes a constant), so there is no orbit to
     /// integrate.
     StationaryReconstruction,
-    /// Several atoms carry closure-certified circle orbits. Their orbit coordinates couple through
-    /// the complement, so the orbit integral is not a product of per-atom circle integrals, and a
-    /// torus quadrature grows exponentially with the atom count. Every such atom keeps Laplace.
-    MultipleCompactOrbits { count: usize },
+    /// The atom's orbit shares a connected block of the exact Hessian or the evidence metric with
+    /// the closure-certified orbits of `atoms`, so the complement couples their orbit coordinates
+    /// and the orbit integral is not a product of per-atom circle integrals. A torus quadrature's
+    /// node count multiplies across the group (the demo-like coupling alone needs 1743 nodes per
+    /// orbit), so every orbit of the group keeps Laplace.
+    CoupledCompactOrbits { atoms: Vec<usize> },
 }
 
 /// One atom's pricing of its declared compact chart orbit.
@@ -163,8 +162,7 @@ impl SaeManifoldTerm {
         let q = self.assignment.row_block_dim();
         let coord_offsets = self.assignment.coord_offsets();
         let beta_offsets = self.factored_border_offsets();
-        let total_len = n * q + self.factored_border_dim();
-        let dense_layout = cache.delta_t_len() == n * q;
+        let dense_len = n * q + self.factored_border_dim();
         let precisions = self.validated_ard_precisions(rho)?;
         let row_weights = self.row_loss_weights.as_deref();
         let mut out = Vec::with_capacity(self.k_atoms());
@@ -178,10 +176,6 @@ impl SaeManifoldTerm {
                 || self.assignment.coords[atom_idx].latent_dim() != 1
             {
                 out.push(laplace(CompactOrbitLaplaceReason::NotAPeriodicChart));
-                continue;
-            }
-            if !dense_layout {
-                out.push(laplace(CompactOrbitLaplaceReason::CompactRowLayout));
                 continue;
             }
             let Some(prior_period) = self.ard_axis_periods(atom_idx).first().copied().flatten() else {
@@ -207,30 +201,54 @@ impl SaeManifoldTerm {
                 }));
                 continue;
             }
+            // The generator is global in the dense product chart: a unit shift on every row's
+            // coordinate and the decoder compensation. A hard-TopK cache holds only the selected
+            // atoms' coordinates, so the tangent crosses the one dense-to-arrow seam every chart
+            // gauge crosses, which drops the inactive rows' slots and keeps the border.
             let field = Array2::<f64>::ones((n, 1));
-            let Some(tangent) = self.dense_step_gauge_vector_from_field(
+            let Some(dense_tangent) = self.dense_step_gauge_vector_from_field(
                 atom_idx,
                 field.view(),
                 &coord_offsets,
                 &beta_offsets,
-                total_len,
+                dense_len,
             )?
             else {
                 out.push(laplace(CompactOrbitLaplaceReason::StationaryReconstruction));
                 continue;
             };
+            let tangent = self.dense_joint_vector_in_arrow_layout(
+                dense_tangent.view(),
+                &cache.row_offsets,
+                cache.k,
+                "compact_orbit_pricing",
+            )?;
             let alpha = precisions[atom_idx].get(0).copied().unwrap_or(0.0);
             let kappa = std::f64::consts::TAU / prior_period;
             let coords = self.assignment.coords[atom_idx].as_matrix();
-            let prior_rows = (0..n)
-                .map(|row| {
-                    (
-                        row * q + coord_offsets[atom_idx],
-                        row_weights.map_or(1.0, |weights| weights[row]),
-                        coords[[row, 0]],
-                    )
-                })
-                .collect();
+            // The ARD prior covers the slots the cache's layout holds for this atom: every row in
+            // the dense layout, the selecting rows in a hard-TopK one (#2933 F27), at the same
+            // slot [`Self::ard_inverse_traces`] reads.
+            let mut prior_rows = Vec::with_capacity(n);
+            for row in 0..n {
+                let start = match self.last_row_layout.as_ref() {
+                    Some(layout) => {
+                        let Some(position) = layout.active_atoms[row]
+                            .iter()
+                            .position(|&active| active == atom_idx)
+                        else {
+                            continue;
+                        };
+                        layout.coord_starts[row][position]
+                    }
+                    None => coord_offsets[atom_idx],
+                };
+                prior_rows.push((
+                    cache.row_offsets[row] + start,
+                    row_weights.map_or(1.0, |weights| weights[row]),
+                    coords[[row, 0]],
+                ));
+            }
             out.push(CompactOrbitPricing::ExactCircle(CircleOrbitGenerator {
                 atom: atom_idx,
                 period: prior_period,
@@ -241,7 +259,7 @@ impl SaeManifoldTerm {
                 closure_residual,
                 closure_band,
                 closure,
-                border_start: n * q + beta_offsets[atom_idx],
+                border_start: cache.delta_t_len() + beta_offsets[atom_idx],
                 basis_size: atom.basis_size(),
                 border_rank: atom
                     .decoder_frame
@@ -249,21 +267,154 @@ impl SaeManifoldTerm {
                     .map_or(self.output_dim(), |frame| frame.frame().ncols()),
             }));
         }
-        let count = out
-            .iter()
-            .filter(|pricing| matches!(pricing, CompactOrbitPricing::ExactCircle(_)))
-            .count();
-        if count > 1 {
-            for pricing in out.iter_mut() {
-                if let CompactOrbitPricing::ExactCircle(generator) = pricing {
-                    *pricing = CompactOrbitPricing::Laplace {
-                        atom: generator.atom,
-                        reason: CompactOrbitLaplaceReason::MultipleCompactOrbits { count },
-                    };
+        Ok(out)
+    }
+
+    /// Keep an exact circle only for an orbit alone in its connected block of `A` and `Φ` (#2234).
+    ///
+    /// The orbit integrals multiply exactly when the complement pseudo-inverse `G_⊥` couples no two
+    /// orbits' trigonometric images, and it couples none when their atoms' joint indices fall in
+    /// distinct connected blocks of the operator and the metric: `G_⊥`, the stiffening and `N`
+    /// then split over the blocks. The block structure is read off entries both evaluation routes
+    /// build the same way. A coordinate row block couples only its own row's slots, so each row is
+    /// joined whole; the ordered Beta–Bernoulli mass carriers join their slots across rows; and the
+    /// border columns of `A` and `Φ` carry every coordinate–border and border–border entry. Hard
+    /// TopK rows that each select one atom, over a border with no cross-atom block, leave every
+    /// orbit its own block. Orbits whose blocks meet, directly or through a third orbit, keep
+    /// Laplace by name.
+    ///
+    /// Without `border_columns` (`(A, Φ)` border columns) only the row blocks and the carriers
+    /// join. Joins only merge blocks, so every orbit that partial structure couples stays coupled
+    /// in the full one, and a partial pass that leaves no orbit exact is already the answer.
+    pub(crate) fn separate_coupled_compact_orbits(
+        pricings: Vec<CompactOrbitPricing>,
+        row_offsets: &[usize],
+        border_dim: usize,
+        mass_carriers: &[(f64, Vec<(usize, f64)>)],
+        border_columns: Option<(ArrayView2<'_, f64>, ArrayView2<'_, f64>)>,
+    ) -> Result<Vec<CompactOrbitPricing>, String> {
+        let orbits: Vec<usize> = (0..pricings.len())
+            .filter(|&index| matches!(pricings[index], CompactOrbitPricing::ExactCircle(_)))
+            .collect();
+        if orbits.len() < 2 {
+            return Ok(pricings);
+        }
+        let Some(&total_t) = row_offsets.last() else {
+            return Err("separate_coupled_compact_orbits: the row offsets are empty".to_string());
+        };
+        let dim = total_t + border_dim;
+        let mut blocks = JointBlocks::new(dim);
+        for window in row_offsets.windows(2) {
+            let (start, end) = (window[0], window[1]);
+            for slot in (start + 1)..end {
+                blocks.join(start, slot);
+            }
+        }
+        for (_, carrier) in mass_carriers {
+            if let Some(&(first, _)) = carrier.first() {
+                for &(slot, _) in carrier {
+                    blocks.join(first, slot);
                 }
             }
         }
+        if let Some((operator_columns, metric_columns)) = border_columns {
+            if operator_columns.dim() != (dim, border_dim) || metric_columns.dim() != (dim, border_dim) {
+                return Err(format!(
+                    "separate_coupled_compact_orbits: border columns {:?} and {:?} for a joint dimension \
+                     {dim} with {border_dim} border columns",
+                    operator_columns.dim(),
+                    metric_columns.dim(),
+                ));
+            }
+            for column in 0..border_dim {
+                for index in 0..dim {
+                    if operator_columns[[index, column]] != 0.0 || metric_columns[[index, column]] != 0.0 {
+                        blocks.join(index, total_t + column);
+                    }
+                }
+            }
+        }
+        // Each orbit's blocks are the roots its tangent touches; orbits whose blocks meet are one
+        // group, closed transitively because a shared block couples them through `G_⊥`.
+        let mut touched: Vec<Vec<usize>> = Vec::with_capacity(orbits.len());
+        for &index in &orbits {
+            let CompactOrbitPricing::ExactCircle(generator) = &pricings[index] else {
+                return Err("separate_coupled_compact_orbits: an orbit index names no exact circle".to_string());
+            };
+            let mut roots: Vec<usize> = generator
+                .tangent
+                .iter()
+                .enumerate()
+                .filter(|&(_, &value)| value != 0.0)
+                .map(|(slot, _)| blocks.find(slot))
+                .collect();
+            roots.sort_unstable();
+            roots.dedup();
+            touched.push(roots);
+        }
+        let mut groups = JointBlocks::new(orbits.len());
+        for left in 0..orbits.len() {
+            for right in (left + 1)..orbits.len() {
+                if touched[left].iter().any(|root| touched[right].binary_search(root).is_ok()) {
+                    groups.join(left, right);
+                }
+            }
+        }
+        let mut members: Vec<Vec<usize>> = vec![Vec::new(); orbits.len()];
+        for position in 0..orbits.len() {
+            let root = groups.find(position);
+            members[root].push(position);
+        }
+        let atoms: Vec<usize> = orbits
+            .iter()
+            .map(|&index| match &pricings[index] {
+                CompactOrbitPricing::ExactCircle(generator) => generator.atom,
+                CompactOrbitPricing::Laplace { atom, .. } => *atom,
+            })
+            .collect();
+        let mut out = pricings;
+        for group in members.iter().filter(|group| group.len() > 1) {
+            for &position in group {
+                let partners = group
+                    .iter()
+                    .filter(|&&other| other != position)
+                    .map(|&other| atoms[other])
+                    .collect();
+                out[orbits[position]] = CompactOrbitPricing::Laplace {
+                    atom: atoms[position],
+                    reason: CompactOrbitLaplaceReason::CoupledCompactOrbits { atoms: partners },
+                };
+            }
+        }
         Ok(out)
+    }
+}
+
+/// Disjoint sets over joint indices, rooted at each set's smallest index.
+struct JointBlocks {
+    parent: Vec<usize>,
+}
+
+impl JointBlocks {
+    fn new(size: usize) -> Self {
+        Self {
+            parent: (0..size).collect(),
+        }
+    }
+
+    fn find(&mut self, mut index: usize) -> usize {
+        while self.parent[index] != index {
+            self.parent[index] = self.parent[self.parent[index]];
+            index = self.parent[index];
+        }
+        index
+    }
+
+    fn join(&mut self, left: usize, right: usize) {
+        let (left, right) = (self.find(left), self.find(right));
+        if left != right {
+            self.parent[left.max(right)] = left.min(right);
+        }
     }
 }
 

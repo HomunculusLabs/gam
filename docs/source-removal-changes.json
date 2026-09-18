@@ -436,5 +436,13 @@
     ],
     "reason": "#2469: fast_ab_rows_multi_gpu tiled a tall product with MIN_TILES = 64, a hand copy of gam-gpu's private MULTI_GPU_BATCH_FLOOR, and MIN_TILE_ROWS = 4, a chosen tile height. GpuGemmDispatch::device_count, whose only caller was that tiling, is replaced by multi_gpu_batch_floor(), which returns Some(MULTI_GPU_BATCH_FLOOR) when the pool holds more than one device and None otherwise. gam-gpu's should_split_batch reads the same helper, so the split threshold has one owner. Geometry cuts the rows into tiles of floor(m/floor) rows. gam-gpu's CudaGemmDispatch, the only implementor, implements the new method in place of device_count. GpuRuntime::device_count is a different item and is kept.",
     "evidence": "At base d5827b00980d838a098e23476b3708ccc5ea11af, git grep -n -w finds MIN_TILES and MIN_TILE_ROWS only in crates/gam-geometry/src/manifold.rs (declarations :635/:636, uses :637/:638). The trait method device_count is declared at crates/gam-linalg/src/gpu_hook.rs:32 and implemented at crates/gam-gpu/src/linalg_dispatch.rs:75, and its one call is the gpu_dispatch().is_some_and(|d| d.device_count() > 1) at crates/gam-geometry/src/manifold.rs:632. The other device_count hits in gam-gpu (:372, :924) and elsewhere call GpuRuntime::device_count, which this commit keeps. Gate job 1255253 on gx1 (base d5827b0098, exact tree 1a8408172b, patch md5 b2ed93e1): workspace --all-targets check RC 0, cargo check -p gam-pyffi --all-targets RC 0, cargo test -p gam-geometry -p gam-gpu all passed, public_api_census.py RC 0, and source_removal_guard.py listed exactly these four identities."
+  },
+  {
+    "items": [
+      "crates/gam-sae/src/manifold/construction_orbit_elimination.rs:fn:price_compact_orbit"
+    ],
+    "reason": "#2234 item 2: the dense exact-A criterion now integrates every closure-certified circle orbit alone in its connected block of A and Φ, not one, so the one-orbit pricer price_compact_orbit is replaced by price_compact_orbits, which prices each eliminated orbit off the same stiffened decomposition and forms the joint correction −log det N − 2·Σ log I_k + K·log 2π.",
+    "evidence": "In direct lane dy5 run i2234-item2d (base 8473989829, exact tree 50344beb, patch md5 16372d8d) scripts/source_removal_guard.py counted exactly this one guarded removal and accepted this entry (RC_SOURCE_REMOVAL 0). git grep -n -w price_compact_orbit at bf762c2a1e finds the pub(crate) declaration (construction_orbit_elimination.rs:254) and its two callers only: the value site in construction_exact_hessian.rs (:4697) and compact_orbit_differential (construction_orbit_elimination.rs:572). This landing moves both to price_compact_orbits.",
+    "base": "cd4e4d3662be44e5bfa4e8f3e0047b1941cf3aa8"
   }
 ]
