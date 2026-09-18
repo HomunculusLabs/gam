@@ -80,6 +80,9 @@ mod oracle_tests;
 // Executed-stage receipts against the native lift.
 pub mod receipts;
 
+// Structured-edit coordinates from a declared single-cycle row action: closed-form planes, rotation edits, plane code.
+pub mod cyclic_action;
+
 // Planted-rotation teacher controls (test builds only).
 #[cfg(test)]
 mod teacher_tests;
