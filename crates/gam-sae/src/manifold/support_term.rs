@@ -3712,8 +3712,21 @@ impl SaeSupportSparseTerm {
     }
 
     /// The symmetrized dense exact Hessian `A` and majorizer `B` of the support
-    /// stationarity pencil, materialized column by column from their matrix-free
-    /// applies. Every dense consumer reads the pencil through this seam.
+    /// stationarity pencil. Every dense consumer reads the pencil through this seam.
+    ///
+    /// #2576: assembled from the arrow's blocks, not probed column by column. A column
+    /// probe applies both operators to a unit vector, so each of the `dim` columns paid a
+    /// full pass over every row and over the whole `H_ββ` operator, twice. At 3000x48
+    /// (`dim` 19680) job 1190710's stack samples of its 12-14 min terminal certificates sat
+    /// in that probe loop. Here each entry is the one term its probe reads,
+    /// accumulated in the order the probe's sums take it:
+    /// - `H_ββ` from the installed penalty operator's `to_dense`, the operator
+    ///   `assemble_arrow_schur` installs in lock-step with `hbb_matvec`;
+    /// - each row's `H_tt`, and its `H_tβ` row from the same transpose apply the probe of
+    ///   that coordinate reads;
+    /// - the exact residual corrections of `support_outer_exact_hessian_apply`, row-local.
+    /// The matrices are the probe's bit for bit
+    /// (`dense_pencil_assembly_is_its_column_probes_2576`).
     fn support_outer_dense_hessian_matrices(
         &self,
         system: &ArrowSchurSystem,
@@ -3727,32 +3740,116 @@ impl SaeSupportSparseTerm {
         if dim == 0 {
             return Err("support outer Hessian pencil has zero dimension".to_string());
         }
-        let mut exact = Array2::<f64>::zeros((dim, dim));
-        let mut majorizer = Array2::<f64>::zeros((dim, dim));
-        for column in 0..dim {
-            let mut unit = SaeArrowVector {
-                t: Array1::zeros(t_len),
-                beta: Array1::zeros(beta_len),
-            };
-            if column < t_len {
-                unit.t[column] = 1.0;
-            } else {
-                unit.beta[column - t_len] = 1.0;
+        if rows.len() != system.rows.len()
+            || *system.row_offsets.last().unwrap_or(&0) != t_len
+            || system.k != beta_len
+        {
+            return Err(format!(
+                "support outer Hessian pencil: {} differential rows, coordinate length {t_len} and \
+                 beta length {beta_len} do not describe the arrow system ({} rows, {}, {})",
+                rows.len(),
+                system.rows.len(),
+                system.row_offsets.last().unwrap_or(&0),
+                system.k,
+            ));
+        }
+        let hbb = match (system.hbb_matvec.as_ref(), system.penalty_op.as_ref()) {
+            (Some(_), Some(operator)) => operator.to_dense(),
+            (Some(_), None) => {
+                return Err(
+                    "support outer Hessian pencil: H_betabeta operator installed without its \
+                     penalty operator"
+                        .to_string(),
+                );
             }
-            let applied = self.support_outer_exact_hessian_apply(system, rows, &unit)?;
-            exact
-                .slice_mut(ndarray::s![..t_len, column])
-                .assign(&applied.t);
-            exact
-                .slice_mut(ndarray::s![t_len.., column])
-                .assign(&applied.beta);
-            let applied_b = support_arrow_majorizer_apply(system, &unit)?;
+            (None, _) if system.hbb.dim() == (beta_len, beta_len) => system.hbb.clone(),
+            (None, _) => {
+                return Err(format!(
+                    "support outer Hessian pencil: H_betabeta shape {:?} != ({beta_len}, \
+                     {beta_len}) and no operator is installed",
+                    system.hbb.dim(),
+                ));
+            }
+        };
+        if hbb.dim() != (beta_len, beta_len) {
+            return Err(format!(
+                "support outer Hessian pencil: dense H_betabeta shape {:?} != ({beta_len}, \
+                 {beta_len})",
+                hbb.dim(),
+            ));
+        }
+        let mut majorizer = Array2::<f64>::zeros((dim, dim));
+        majorizer.slice_mut(ndarray::s![t_len.., t_len..]).assign(&hbb);
+        drop(hbb);
+        let mut cross = Array1::<f64>::zeros(beta_len);
+        for row in 0..system.rows.len() {
+            let start = system.row_offsets[row];
+            let q = system.row_offsets[row + 1] - start;
+            let htt = &system.rows[row].htt;
+            if htt.dim() != (q, q) {
+                return Err(format!(
+                    "support outer Hessian pencil: row {row} H_tt shape {:?} != ({q}, {q})",
+                    htt.dim(),
+                ));
+            }
             majorizer
-                .slice_mut(ndarray::s![..t_len, column])
-                .assign(&applied_b.t);
-            majorizer
-                .slice_mut(ndarray::s![t_len.., column])
-                .assign(&applied_b.beta);
+                .slice_mut(ndarray::s![start..start + q, start..start + q])
+                .assign(htt);
+            let mut unit = Array1::<f64>::zeros(q);
+            for axis in 0..q {
+                unit[axis] = 1.0;
+                cross.fill(0.0);
+                support_arrow_cross_transpose_add(system, row, unit.view(), &mut cross)?;
+                unit[axis] = 0.0;
+                majorizer
+                    .slice_mut(ndarray::s![start + axis, t_len..])
+                    .assign(&cross);
+                majorizer
+                    .slice_mut(ndarray::s![t_len.., start + axis])
+                    .assign(&cross);
+            }
+        }
+        let mut exact = majorizer.clone();
+        for (row_index, row) in rows.iter().enumerate() {
+            let row_start = system.row_offsets[row_index];
+            for slot in &row.slots {
+                let atom = &self.atoms[slot.atom];
+                let d = atom.latent_dim();
+                let m = atom.basis_size();
+                let decoder = atom.decoder_coefficients();
+                for axis_a in 0..d {
+                    let t_a = row_start + slot.coordinate_offset + axis_a;
+                    // Exact residual curvature `-sum_p r_p d2f_p/dt_a dt_b`, and the
+                    // prior's Hessian remainder on the diagonal.
+                    for axis_b in 0..d {
+                        let mut residual_second = 0.0_f64;
+                        for basis in 0..m {
+                            let coefficient = slot.second_jet[[basis, axis_a, axis_b]];
+                            for output in 0..self.output_dim {
+                                residual_second += coefficient
+                                    * decoder[[basis, output]]
+                                    * row.residual[output];
+                            }
+                        }
+                        let mut correction = -residual_second;
+                        if axis_a == axis_b {
+                            correction +=
+                                row.prior_hessian_remainder[slot.coordinate_offset + axis_a];
+                        }
+                        exact[[t_a, row_start + slot.coordinate_offset + axis_b]] += correction;
+                    }
+                    // Exact coordinate-decoder residual cross block, both triangles.
+                    for basis in 0..m {
+                        let derivative = slot.jet[[basis, axis_a]];
+                        for output in 0..self.output_dim {
+                            let beta_index =
+                                t_len + slot.beta_offset + basis * self.output_dim + output;
+                            exact[[t_a, beta_index]] -= derivative * row.residual[output];
+                            exact[[beta_index, t_a]] -= row.residual[output] * derivative;
+                        }
+                    }
+                }
+            }
         }
         for row in 0..dim {
             for column in 0..row {

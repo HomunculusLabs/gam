@@ -1384,3 +1384,153 @@ fn planted_decoder_offset_refuses_under_the_roundoff_floor_2933_f08() {
         tolerance * displaced_scale,
     );
 }
+
+/// #2576 — the dense stationarity pencil read off the arrow's blocks is the column-probe
+/// pencil bit for bit. Four rows each carry a periodic atom and a plane patch, so every
+/// row has two slots and the cross-atom `H_ββ` and cross-slot `H_tt` entries exist.
+/// `P = 2`, the periodic axis has the von-Mises prior, and the residual does not vanish,
+/// so both blocks of exact corrections are populated. The oracle is the probe build that
+/// `support_outer_dense_hessian_matrices` replaced.
+#[test]
+fn dense_pencil_assembly_is_its_column_probes_2576() {
+    let periodic_eval: Arc<dyn SaeBasisSecondJet> =
+        Arc::new(PeriodicHarmonicEvaluator::new(3).expect("periodic"));
+    let patch_eval: Arc<dyn SaeBasisSecondJet> =
+        Arc::new(EuclideanPatchEvaluator::new(2, 1).expect("patch"));
+    let atoms = vec![
+        atom(
+            "circle",
+            SaeAtomBasisKind::Periodic,
+            1,
+            periodic_eval,
+            &[0.3],
+            array![[0.2, -0.7], [1.1, 0.4], [-0.4, 0.9]],
+        ),
+        atom(
+            "plane",
+            SaeAtomBasisKind::Linear,
+            2,
+            patch_eval,
+            &[0.1, -0.2],
+            array![[0.3, 1.2], [2.0, -0.6], [-1.0, 0.5]],
+        ),
+    ];
+    let specs = vec![
+        SaeAssignmentAtomSpec {
+            latent_dim: 1,
+            manifold: SaeAtomBasisKind::Periodic.latent_manifold(1),
+            retraction: gam_problem::LatentRetractionRegistry::all_euclidean(),
+        },
+        SaeAssignmentAtomSpec::euclidean(2),
+    ];
+    let rows = 4usize;
+    let state = SaeAssignmentState::from_topk_support_heterogeneous(
+        rows,
+        2,
+        2,
+        specs,
+        vec![vec![0, 1]; rows],
+        vec![vec![1.3, -0.8], vec![0.6, 2.1], vec![-1.7, 0.9], vec![2.4, -0.3]],
+        vec![
+            vec![0.1, 3.0, 1.0],
+            vec![0.37, -0.5, 0.8],
+            vec![0.62, 1.4, -2.2],
+            vec![0.85, 0.2, 0.6],
+        ],
+    )
+    .expect("state");
+    let term = SaeSupportSparseTerm::new(atoms, state).expect("term");
+    let target = array![[1.4, -0.3], [4.3, 0.8], [-2.1, 1.7], [0.6, -1.1]];
+    let lambda = vec![0.35, 2.8];
+    let ard = vec![vec![1.0], vec![1.0, 0.5]];
+    let system = term
+        .assemble_arrow_schur(target.view(), &lambda, &ard)
+        .expect("arrow system");
+    let (beta_offsets, beta_len) = term.beta_layout().expect("beta layout");
+    let differential = term
+        .support_outer_differential_rows(target.view(), &ard, &beta_offsets)
+        .expect("exact differential rows");
+    let t_len = *system.row_offsets.last().unwrap_or(&0);
+    assert_eq!((t_len, beta_len), (12, 12));
+    let (exact, majorizer) = term
+        .support_outer_dense_hessian_matrices(&system, &differential, t_len, beta_len)
+        .expect("assembled pencil");
+    let (probed_exact, probed_majorizer) =
+        dense_pencil_by_column_probes(&term, &system, &differential, t_len, beta_len);
+    assert_eq!(majorizer, probed_majorizer, "the assembled majorizer must be the probed one");
+    assert_eq!(exact, probed_exact, "the assembled exact Hessian must be the probed one");
+    // Both correction blocks are populated, or the equality above could not see one of
+    // them missing.
+    let largest_gap = |block: ndarray::ArrayView2<'_, f64>, reference: ndarray::ArrayView2<'_, f64>| {
+        block
+            .iter()
+            .zip(reference.iter())
+            .fold(0.0_f64, |largest, (left, right)| largest.max((left - right).abs()))
+    };
+    let coordinate_gap = largest_gap(
+        exact.slice(ndarray::s![..t_len, ..t_len]),
+        majorizer.slice(ndarray::s![..t_len, ..t_len]),
+    );
+    let cross_gap = largest_gap(
+        exact.slice(ndarray::s![..t_len, t_len..]),
+        majorizer.slice(ndarray::s![..t_len, t_len..]),
+    );
+    assert!(
+        coordinate_gap > 0.0 && cross_gap > 0.0,
+        "the exact corrections must be populated: coordinate block {coordinate_gap:.3e}, \
+         cross block {cross_gap:.3e}"
+    );
+}
+
+/// The column-probe build `support_outer_dense_hessian_matrices` replaced (#2576): both
+/// operators applied to every unit vector, then symmetrized. The oracle of
+/// `dense_pencil_assembly_is_its_column_probes_2576`.
+fn dense_pencil_by_column_probes(
+    term: &SaeSupportSparseTerm,
+    system: &ArrowSchurSystem,
+    rows: &[SupportOuterDifferentialRow],
+    t_len: usize,
+    beta_len: usize,
+) -> (Array2<f64>, Array2<f64>) {
+    let dim = t_len + beta_len;
+    let mut exact = Array2::<f64>::zeros((dim, dim));
+    let mut majorizer = Array2::<f64>::zeros((dim, dim));
+    for column in 0..dim {
+        let mut unit = SaeArrowVector {
+            t: Array1::zeros(t_len),
+            beta: Array1::zeros(beta_len),
+        };
+        if column < t_len {
+            unit.t[column] = 1.0;
+        } else {
+            unit.beta[column - t_len] = 1.0;
+        }
+        let applied = term
+            .support_outer_exact_hessian_apply(system, rows, &unit)
+            .expect("exact Hessian apply");
+        exact
+            .slice_mut(ndarray::s![..t_len, column])
+            .assign(&applied.t);
+        exact
+            .slice_mut(ndarray::s![t_len.., column])
+            .assign(&applied.beta);
+        let applied_b = support_arrow_majorizer_apply(system, &unit).expect("majorizer apply");
+        majorizer
+            .slice_mut(ndarray::s![..t_len, column])
+            .assign(&applied_b.t);
+        majorizer
+            .slice_mut(ndarray::s![t_len.., column])
+            .assign(&applied_b.beta);
+    }
+    for row in 0..dim {
+        for column in 0..row {
+            let symmetric = 0.5 * (exact[[row, column]] + exact[[column, row]]);
+            exact[[row, column]] = symmetric;
+            exact[[column, row]] = symmetric;
+            let symmetric_b = 0.5 * (majorizer[[row, column]] + majorizer[[column, row]]);
+            majorizer[[row, column]] = symmetric_b;
+            majorizer[[column, row]] = symmetric_b;
+        }
+    }
+    (exact, majorizer)
+}
