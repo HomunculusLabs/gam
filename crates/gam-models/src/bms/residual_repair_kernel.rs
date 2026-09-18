@@ -69,6 +69,18 @@ pub(super) struct DriveMoments {
 
 impl DriveMoments {
     pub(super) fn at(covariance: &MarginalSlopeCovariance, beta: &[f64]) -> Self {
+        let (sigma_beta, u, v) = Self::drive_products(covariance, beta);
+        Self {
+            gamma: (0..beta.len()).map(|j| covariance.coefficient(0, j + 1)).collect(),
+            sigma_beta,
+            u,
+            v,
+        }
+    }
+
+    /// The `β`-dependent moments alone, `(Σ_rrβ, u, v)`, from one product with
+    /// the joint covariance; [`Self::at`] adds `γ`, which does not depend on `β`.
+    fn drive_products(covariance: &MarginalSlopeCovariance, beta: &[f64]) -> (Vec<f64>, f64, f64) {
         let k = beta.len();
         let mut lifted = vec![0.0_f64; k + 1];
         lifted[1..].copy_from_slice(beta);
@@ -76,12 +88,7 @@ impl DriveMoments {
         covariance.multiply(&lifted, &mut image);
         let sigma_beta = image[1..].to_vec();
         let v = beta.iter().zip(&sigma_beta).map(|(b, x)| b * x).sum();
-        Self {
-            gamma: (0..k).map(|j| covariance.coefficient(0, j + 1)).collect(),
-            sigma_beta,
-            u: image[0],
-            v,
-        }
+        (sigma_beta, image[0], v)
     }
 }
 
@@ -657,10 +664,11 @@ impl RowMoments {
             .zip(u.par_iter_mut().zip(v.par_iter_mut()))
             .enumerate()
             .for_each(|(row, (sigma_beta_row, (u_row, v_row)))| {
-                let moments = DriveMoments::at(field.at_row(row), beta);
-                sigma_beta_row.copy_from_slice(&moments.sigma_beta);
-                *u_row = moments.u;
-                *v_row = moments.v;
+                // `γ` is the fit cache's; only the product with `β` is this kernel's.
+                let (product, u_i, v_i) = DriveMoments::drive_products(field.at_row(row), beta);
+                sigma_beta_row.copy_from_slice(&product);
+                *u_row = u_i;
+                *v_row = v_i;
             });
         Self {
             width: k,
