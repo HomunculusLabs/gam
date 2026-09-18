@@ -6,3 +6,5 @@
 
 pub mod subspace;
 pub mod reader_gram;
+pub mod context;
+pub mod raw_block;
