@@ -7044,9 +7044,7 @@ impl SaeManifoldTerm {
                 .map_err(|err| format!("SaeManifoldTerm::run_joint_fit_arrow_schur: {err}"))?
                 .admitted_or_error(self.n_obs(), self.output_dim(), self.k_atoms())
                 .map_err(|err| format!("SaeManifoldTerm::run_joint_fit_arrow_schur: {err}"))?;
-            let mut solve_options = plan
-                .solve_options_for_border_dim(sys.k)
-                .with_gpu_policy(self.gpu_policy);
+            let mut solve_options = plan.solve_options().with_gpu_policy(self.gpu_policy);
             // #2228 — gauge-fix the inner Newton STEP on the reduced β border.
             //
             // The closed-form chart gauge (circle/torus phase, patch

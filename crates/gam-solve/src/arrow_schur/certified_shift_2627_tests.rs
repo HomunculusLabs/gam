@@ -336,14 +336,16 @@ fn the_ladder_reaches_a_border_deficit_past_any_fixed_count_2627() {
     assert_eq!(scaled, Ok(24), "the deficit scaled by 1e14 clears at μ = 1e15, rung 24");
 }
 
-/// A positive definite system whose inexact PCG may take no iteration, so every rung
-/// refuses with `PcgFailed`. The ladder must stop at the first rung the declared bounds
-/// certify, carry that refusal as the cause, and climb no further; a fixed count
-/// refused after 22 rungs with the bare `PcgFailed`.
+/// A positive definite system whose explicit InexactPCG request is priced at zero
+/// products: its dense route costs less than one reduced-Schur product, and a request
+/// that asked for InexactPCG refuses a miss instead of handing it to Direct (#2900 row
+/// 6.15). So every rung refuses with `PcgBudgetExhausted`. The ladder must stop at the
+/// first rung the declared bounds certify, carry that refusal as the cause, and climb
+/// no further; a fixed count refused after 22 rungs with a bare PCG refusal.
 #[test]
 fn a_refusal_at_a_certified_rung_is_typed_and_ends_the_ladder_2627() {
     let n = 2;
-    let k = 101;
+    let k = 1;
     let mut sys = ArrowSchurSystem::new(n, 1, k);
     let entries = uniform_entries(11, n * k);
     for (row_index, row) in sys.rows.iter_mut().enumerate() {
@@ -357,13 +359,15 @@ fn a_refusal_at_a_certified_rung_is_typed_and_ends_the_ladder_2627() {
         sys.hbb[[a, a]] = 3.0;
         sys.gb[a] = 1.0;
     }
-    let mut first_direction = Array1::<f64>::zeros(k);
-    first_direction[0] = 1.0;
-    sys.beta_gauge_quotient =
-        Some(ArrowBetaGaugeQuotient::new(vec![first_direction]).expect("one unit direction"));
     let mut options = ArrowSolveOptions::inexact_pcg();
     options.gpu_matvec = None;
-    options.pcg.max_iterations = 0;
+    let budget = resolve_arrow_route(&sys, &options).pcg_budget;
+    assert_eq!(
+        budget,
+        Some(ArrowPcgBudget::dense_route_priced(0, false)),
+        "premise: the explicit InexactPCG request is priced at zero products, and a miss \
+         refuses instead of falling back to Direct"
+    );
 
     let certificate = ArrowShiftCertificate::from_system(&sys, 0.0, 0.0).expect("finite fixture");
     let mut certified_ridge = 0.0_f64;
@@ -376,7 +380,7 @@ fn a_refusal_at_a_certified_rung_is_typed_and_ends_the_ladder_2627() {
     );
 
     let refusal = solve_with_lm_escalation_inner(&sys, 0.0, 0.0, &options)
-        .expect_err("a PCG that takes no iteration refuses at every rung");
+        .expect_err("a PCG priced at zero products refuses at every rung");
     let ArrowSchurError::RefusedAtCertifiedShift {
         proximal_ridge,
         cause,
@@ -390,8 +394,14 @@ fn a_refusal_at_a_certified_rung_is_typed_and_ends_the_ladder_2627() {
         "the ladder must stop at the first certified rung {certified_ridge:e}, got {proximal_ridge:e}"
     );
     assert!(
-        matches!(*cause, ArrowSchurError::PcgFailed { .. }),
-        "the cause must be the PCG refusal, got {cause:?}"
+        matches!(
+            *cause,
+            ArrowSchurError::PcgBudgetExhausted {
+                products_spent: 0,
+                ..
+            }
+        ),
+        "the cause must be the budget refusal, got {cause:?}"
     );
 }
 

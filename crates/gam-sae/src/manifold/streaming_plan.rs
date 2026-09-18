@@ -478,9 +478,11 @@ impl SaeStreamingPlan {
         }
     }
 
-    pub(crate) fn solve_options_for_border_dim(self, border_dim: usize) -> ArrowSolveOptions {
+    pub(crate) fn solve_options(self) -> ArrowSolveOptions {
+        // Where the plan admits the dense route, the step prices Direct against
+        // InexactPCG from the system at solve time (#2900 row 6.15).
         let mut options = if self.direct_admitted {
-            ArrowSolveOptions::automatic(border_dim)
+            ArrowSolveOptions::priced()
         } else {
             ArrowSolveOptions::inexact_pcg()
         };

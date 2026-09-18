@@ -984,10 +984,11 @@ impl ArrowSchurSystem {
 
     /// Schur-eliminate the per-row latent block and solve for `(Δt, Δβ, diag)`.
     ///
-    /// This uses [`ArrowSolveOptions::automatic`]: BA dense RCS for
-    /// `K <= 2000`, and Agarwal-style inexact Schur PCG above that size.
-    /// Call [`ArrowSchurSystem::solve_with_options`] to force Square-Root BA
-    /// or a specific inexact solve policy.
+    /// This uses [`ArrowSolveOptions::priced`]: BA dense RCS or Agarwal-style
+    /// inexact Schur PCG, priced against each other from this system's row dims
+    /// and border at solve time (#2900 row 6.15). Call
+    /// [`ArrowSchurSystem::solve_with_options`] to force Square-Root BA or a
+    /// specific inexact solve policy.
     ///
     /// Returns `(delta_t, delta_beta, ArrowPcgDiagnostics)` with `delta_t` flat
     /// row-major of length `N · d` and `delta_beta` of length `K`. The sign
@@ -1008,7 +1009,7 @@ impl ArrowSchurSystem {
         ridge_t: f64,
         ridge_beta: f64,
     ) -> Result<(Array1<f64>, Array1<f64>, ArrowPcgDiagnostics), ArrowSchurError> {
-        let options = ArrowSolveOptions::automatic(self.k);
+        let options = ArrowSolveOptions::priced();
         solve_arrow_newton_step_core(self, ridge_t, ridge_beta, &options)
     }
 
@@ -1407,8 +1408,9 @@ impl StreamingArrowSchur {
             match mode {
                 // InexactPCG differs from Direct only in how the *reduced* system
                 // is solved, not how it is assembled, so it shares this Schur
-                // subtraction.
-                ArrowSolverMode::Direct | ArrowSolverMode::InexactPCG => {
+                // subtraction, and so does a Priced request, which resolves to one
+                // of the two.
+                ArrowSolverMode::Direct | ArrowSolverMode::InexactPCG | ArrowSolverMode::Priced => {
                     let solved = backend.solve_block_matrix(factor.view(), htbeta.view());
                     stack.subtract_or_stack(&backend, s_part, &htbeta, &solved);
                 }

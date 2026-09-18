@@ -4746,7 +4746,7 @@ pub(crate) fn giant_host_working_set_plan_flips_to_matrix_free_before_dense_allo
     assert!(!plan.direct_admitted);
     assert!(plan.matrix_free_admitted);
     assert_eq!(
-        plan.solve_options_for_border_dim(border_dim).mode,
+        plan.solve_options().mode,
         gam_solve::arrow_schur::ArrowSolverMode::InexactPCG
     );
 }

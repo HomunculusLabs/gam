@@ -17,10 +17,6 @@ pub(crate) use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 pub(crate) use std::ops::Range;
 pub(crate) use std::sync::Arc;
 
-pub(crate) const DIRECT_SOLVE_MAX_K: usize = 2_000;
-
-pub(crate) const DEFAULT_PCG_MAX_ITERATIONS: usize = 200;
-
 pub(crate) const DEFAULT_PCG_RELATIVE_TOLERANCE: f64 = 1e-4;
 
 /// Absolute floor on the Steihaug-CG residual stopping threshold.

@@ -1801,16 +1801,8 @@ pub(crate) fn solve_dense_reduced_system(
             return Ok((direct, Some(factor), ArrowPcgDiagnostics::default()));
         }
         let identity = IdentityPreconditioner;
-        let (delta, diag) = steihaug_dense_system(
-            &floored,
-            rhs_beta,
-            &identity,
-            &ArrowPcgOptions {
-                max_iterations: options.trust_region.max_iterations,
-                relative_tolerance: options.trust_region.steihaug_relative_tolerance,
-            },
-            &options.trust_region,
-        )?;
+        let (delta, diag) =
+            steihaug_dense_system(&floored, rhs_beta, &identity, &options.trust_region)?;
         return Ok((delta, Some(factor), diag));
     }
     // Ill-conditioned-but-PD Schur guard. The per-row factor checks reject
@@ -1856,16 +1848,8 @@ pub(crate) fn solve_dense_reduced_system(
                 return Ok((direct, Some(floored_factor), ArrowPcgDiagnostics::default()));
             }
             let identity = IdentityPreconditioner;
-            let (delta, diag) = steihaug_dense_system(
-                &floored,
-                rhs_beta,
-                &identity,
-                &ArrowPcgOptions {
-                    max_iterations: options.trust_region.max_iterations,
-                    relative_tolerance: options.trust_region.steihaug_relative_tolerance,
-                },
-                &options.trust_region,
-            )?;
+            let (delta, diag) =
+                steihaug_dense_system(&floored, rhs_beta, &identity, &options.trust_region)?;
             return Ok((delta, Some(floored_factor), diag));
         }
         return Err(ArrowSchurError::SchurFactorFailed {
@@ -1892,16 +1876,7 @@ pub(crate) fn solve_dense_reduced_system(
     // step outside the trust ball, Steihaug-CG returns the boundary point
     // without requiring a second dense factorization.
     let identity = IdentityPreconditioner;
-    let (delta, diag) = steihaug_dense_system(
-        schur,
-        rhs_beta,
-        &identity,
-        &ArrowPcgOptions {
-            max_iterations: options.trust_region.max_iterations,
-            relative_tolerance: options.trust_region.steihaug_relative_tolerance,
-        },
-        &options.trust_region,
-    )?;
+    let (delta, diag) = steihaug_dense_system(schur, rhs_beta, &identity, &options.trust_region)?;
     Ok((delta, Some(factor), diag))
 }
 
@@ -6994,14 +6969,16 @@ pub(crate) fn build_schur_scalar_inv<B: BatchedBlockSolver>(
 /// Inexact PCG with automatic preconditioner-ladder escalation.
 ///
 /// Starts with `JacobiPreconditioner` (Diagonal or BetaBlockJacobi).
-/// If PCG hits `MaxIter` and `k > PRECOND_ESCALATE_K_THRESHOLD`,
-/// escalates to `ClusterJacobi`; if still `MaxIter`, escalates to
-/// `AdditiveSchwarz { overlap: 1 }`.
+/// If PCG spends its resolved `budget` without converging
+/// (`BudgetExhausted`) and `k > PRECOND_ESCALATE_K_THRESHOLD`, escalates to
+/// `ClusterJacobi`; if that also spends its budget, escalates to
+/// `AdditiveSchwarz { overlap: 1 }`. Each tier may spend the same budget.
 pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
     sys: &ArrowSchurSystem,
     htt_factors: &ArrowFactorSlab,
     ridge_beta: f64,
     rhs: &Array1<f64>,
+    budget: ArrowPcgBudget,
     pcg: &ArrowPcgOptions,
     trust: &ArrowTrustRegionOptions,
     backend: &B,
@@ -7039,27 +7016,26 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
             ridge_beta,
             rhs,
             |r| identity.apply(r),
+            budget,
             pcg,
             trust,
             backend,
             gpu_matvec,
             resident.as_ref(),
         )?;
-        // Mirror the non-gauge contract: below the escalation threshold a MaxIter
-        // stop is accepted (the ladder returns it as `Ok`); above it the ladder
-        // would escalate the preconditioner, but the cluster/Schwarz/IC(0) tiers
-        // assume the un-pinned Schur and cannot precondition the gauge pin, so
-        // surface a recoverable failure and let the outer LM loop escalate the
+        // Mirror the non-gauge contract: below the escalation threshold a
+        // `BudgetExhausted` stop is accepted (the ladder returns it as `Ok`); above it
+        // the ladder would escalate the preconditioner, but the cluster/Schwarz/IC(0)
+        // tiers assume the un-pinned Schur and cannot precondition the gauge pin, so
+        // surface the typed budget refusal and let the outer LM loop escalate the
         // ridge instead (a bespoke pinned-diagonal preconditioner is the follow-up).
-        if diag.stopping_reason == PcgStopReason::MaxIter
+        if diag.stopping_reason == PcgStopReason::BudgetExhausted
             && sys.k > PRECOND_ESCALATE_K_THRESHOLD
         {
-            return Err(ArrowSchurError::PcgFailed {
-                reason: format!(
-                    "gauge-pinned Schur PCG (identity preconditioner) exhausted its \
-                     iteration budget without converging; final relative residual = {:e}",
-                    diag.final_relative_residual
-                ),
+            return Err(ArrowSchurError::PcgBudgetExhausted {
+                budget,
+                products_spent: diag.matvec_calls,
+                final_relative_residual: diag.final_relative_residual,
             });
         }
         return Ok((step, diag));
@@ -7138,6 +7114,7 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
             effective_ridge,
             rhs,
             |r| jacobi.apply(r),
+            budget,
             pcg,
             trust,
             backend,
@@ -7196,7 +7173,9 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
             }));
         }
     };
-    if sys.k <= PRECOND_ESCALATE_K_THRESHOLD || diag0.stopping_reason != PcgStopReason::MaxIter {
+    if sys.k <= PRECOND_ESCALATE_K_THRESHOLD
+        || diag0.stopping_reason != PcgStopReason::BudgetExhausted
+    {
         return Ok((x0, diag0));
     }
     // Escalation tiers reuse the curvature-floored `effective_ridge` so the
@@ -7227,13 +7206,14 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
         effective_ridge,
         rhs,
         |r| cluster.apply(r),
+        budget,
         pcg,
         trust,
         backend,
         gpu_matvec,
         resident.as_ref(),
     )?;
-    if diag1.stopping_reason != PcgStopReason::MaxIter {
+    if diag1.stopping_reason != PcgStopReason::BudgetExhausted {
         return Ok((x1, diag1));
     }
     let schwarz = AdditiveSchwarzPreconditioner::from_arrow_schur(
@@ -7249,13 +7229,14 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
         effective_ridge,
         rhs,
         |r| schwarz.apply(r),
+        budget,
         pcg,
         trust,
         backend,
         gpu_matvec,
         resident.as_ref(),
     )?;
-    if diag2.stopping_reason != PcgStopReason::MaxIter {
+    if diag2.stopping_reason != PcgStopReason::BudgetExhausted {
         return Ok((x2, diag2));
     }
     // Final tier — diagonal-assembled additive Schwarz (#299), the cheap-apply
@@ -7278,13 +7259,14 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
         effective_ridge,
         rhs,
         |r| diag_schwarz.apply(r),
+        budget,
         pcg,
         trust,
         backend,
         gpu_matvec,
         resident.as_ref(),
     )?;
-    if diag3.stopping_reason != PcgStopReason::MaxIter {
+    if diag3.stopping_reason != PcgStopReason::BudgetExhausted {
         return Ok((x3, diag3));
     }
     // Richest tier — level-0 incomplete Cholesky (#299). ClusterJacobi keeps the
@@ -7308,6 +7290,7 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
         effective_ridge,
         rhs,
         |r| ic0.apply(r),
+        budget,
         pcg,
         trust,
         backend,
@@ -7315,21 +7298,21 @@ pub(crate) fn steihaug_pcg_auto<B: BatchedBlockSolver + Sync>(
         resident.as_ref(),
     )?;
     // All five preconditioner tiers (Jacobi -> ClusterJacobi -> AdditiveSchwarz
-    // -> DiagAssembledSchwarz -> BlockIncompleteCholesky) exhausted their
-    // iteration budget without driving the residual below tolerance. Returning a
+    // -> DiagAssembledSchwarz -> BlockIncompleteCholesky) spent their product
+    // budget without driving the residual below tolerance. Returning a
     // truncated iterate as `Ok` would feed an arbitrarily-large-residual step
-    // into the Newton driver, where the PCG diagnostics are discarded. Surface a
-    // recoverable failure instead so `solve_with_lm_escalation_inner` escalates
+    // into the Newton driver, where the PCG diagnostics are discarded. Surface the
+    // typed budget refusal instead so `solve_with_lm_escalation_inner` escalates
     // the proximal ridge: better conditioning is precisely what a stalled PCG on
     // an ill-conditioned reduced system needs.
-    if diag4.stopping_reason == PcgStopReason::MaxIter {
-        return Err(ArrowSchurError::PcgFailed {
-            reason: format!(
-                "Schur PCG exhausted all preconditioner tiers (Jacobi, ClusterJacobi, \
-                 AdditiveSchwarz, DiagAssembledSchwarz, BlockIncompleteCholesky) at MaxIter; \
-                 final relative residual = {:e}",
-                diag4.final_relative_residual
-            ),
+    if diag4.stopping_reason == PcgStopReason::BudgetExhausted {
+        return Err(ArrowSchurError::PcgBudgetExhausted {
+            budget,
+            products_spent: [&diag0, &diag1, &diag2, &diag3, &diag4]
+                .iter()
+                .map(|diag| diag.matvec_calls)
+                .sum(),
+            final_relative_residual: diag4.final_relative_residual,
         });
     }
     Ok((x4, diag4))
@@ -7343,6 +7326,7 @@ pub(crate) fn run_pcg_with_preconditioner<ApplyPrec, B: BatchedBlockSolver + Syn
     ridge_beta: f64,
     rhs: &Array1<f64>,
     apply_prec: ApplyPrec,
+    budget: ArrowPcgBudget,
     pcg: &ArrowPcgOptions,
     trust: &ArrowTrustRegionOptions,
     backend: &B,
@@ -7352,7 +7336,6 @@ pub(crate) fn run_pcg_with_preconditioner<ApplyPrec, B: BatchedBlockSolver + Syn
 where
     ApplyPrec: FnMut(&Array1<f64>) -> Array1<f64>,
 {
-    let max_iters = pcg.max_iterations.min(trust.max_iterations);
     let tol = pcg
         .relative_tolerance
         .max(trust.steihaug_relative_tolerance);
@@ -7368,7 +7351,7 @@ where
         rhs,
         |p, out| op.apply_into(p, out),
         apply_prec,
-        max_iters,
+        budget,
         tol,
         trust.radius,
     )
@@ -7383,28 +7366,36 @@ impl IdentityPreconditioner {
     }
 }
 
+/// Steihaug-CG on an assembled dense Schur, the trust-region correction of a dense
+/// step that left the trust ball. The Schur is already factored, so CG may take the
+/// Krylov dimension of the system (#2900 row 6.15).
 pub(crate) fn steihaug_dense_system(
     schur: &Array2<f64>,
     rhs: &Array1<f64>,
     preconditioner: &IdentityPreconditioner,
-    pcg: &ArrowPcgOptions,
     trust: &ArrowTrustRegionOptions,
 ) -> Result<(Array1<f64>, ArrowPcgDiagnostics), ArrowSchurError> {
     steihaug_cg(
         rhs,
         |p, out| dense_matvec(schur, p, out),
         |r| preconditioner.apply(r),
-        pcg.max_iterations,
-        pcg.relative_tolerance,
+        ArrowPcgBudget::krylov_dimension(schur.nrows()),
+        trust.steihaug_relative_tolerance,
         trust.radius,
     )
 }
 
+/// Steihaug-CG on `matvec` within the resolved product `budget` (#2900 row 6.15).
+///
+/// The only budget stop is [`ArrowPcgBudget::stop_at`], read before each product and
+/// after the accuracy test, so a solve that meets its tolerance on the last product
+/// it may spend succeeds. A spent budget returns the truncated iterate with
+/// [`PcgStopReason::BudgetExhausted`].
 pub(crate) fn steihaug_cg<MatVec, ApplyPrec>(
     rhs: &Array1<f64>,
     mut matvec: MatVec,
     mut apply_preconditioner: ApplyPrec,
-    max_iterations: usize,
+    budget: ArrowPcgBudget,
     relative_tolerance: f64,
     trust_radius: f64,
 ) -> Result<(Array1<f64>, ArrowPcgDiagnostics), ArrowSchurError>
@@ -7457,7 +7448,12 @@ where
     let mut ap = Array1::<f64>::zeros(n);
     // Reused candidate scratch — avoid per-iteration clone of x.
     let mut candidate = Array1::<f64>::zeros(n);
-    for _ in 0..max_iterations {
+    loop {
+        if let Some(reason) = budget.stop_at(diag.matvec_calls) {
+            diag.final_relative_residual = euclidean_norm(r.view()) / rhs_norm;
+            diag.stopping_reason = reason;
+            return Ok((x, diag));
+        }
         matvec(&p, &mut ap);
         diag.matvec_calls += 1;
         diag.iterations += 1;
@@ -7510,9 +7506,6 @@ where
         }
         rz = rz_next;
     }
-    diag.final_relative_residual = euclidean_norm(r.view()) / rhs_norm;
-    diag.stopping_reason = PcgStopReason::MaxIter;
-    Ok((x, diag))
 }
 
 pub(crate) fn step_to_trust_boundary(
@@ -7597,6 +7590,19 @@ pub enum ArrowSchurError {
     /// The BA inexact-step PCG solve failed before producing a usable
     /// Steihaug trust-region step.
     PcgFailed { reason: String },
+    /// The inexact PCG spent its resolved product budget without meeting its
+    /// forcing tolerance, and nothing answers the miss (#2900 row 6.15): the
+    /// request asked for InexactPCG, or no dense route fits the materialization
+    /// cap. `products_spent` counts the products of every launch the refusal
+    /// covers, and `final_relative_residual` is the recursive `‖r̂‖/‖rhs‖` at the
+    /// last one. Floating-point CG can legitimately need more products than the
+    /// Krylov dimension, so the residual tells a solve cut off while still
+    /// converging from one that stalled.
+    PcgBudgetExhausted {
+        budget: ArrowPcgBudget,
+        products_spent: usize,
+        final_relative_residual: f64,
+    },
     /// The UNBOUNDED (trust-radius = ∞) Schur PCG encountered negative
     /// curvature `pᵀSp ≤ 0` (or a non-positive preconditioned residual): the
     /// reduced Schur is indefinite, the #1026 K≥4 co-collapse signature where
@@ -7697,6 +7703,18 @@ impl std::fmt::Display for ArrowSchurError {
             ArrowSchurError::PcgFailed { reason } => {
                 write!(f, "arrow-Schur: Schur PCG failed: {reason}")
             }
+            ArrowSchurError::PcgBudgetExhausted {
+                budget,
+                products_spent,
+                final_relative_residual,
+            } => write!(
+                f,
+                "arrow-Schur: Schur PCG spent its product budget ({} products, {:?}) \
+                 without meeting its tolerance: {products_spent} products spent, final \
+                 relative residual {final_relative_residual:e}",
+                budget.products(),
+                budget.basis()
+            ),
             ArrowSchurError::UnboundedNegativeCurvature {
                 curvature,
                 direction_norm_sq,

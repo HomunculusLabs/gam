@@ -6376,7 +6376,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         }
         let mut diag = ArrowPcgDiagnostics {
             precond_apply_calls: 1,
-            stopping_reason: PcgStopReason::MaxIter,
+            stopping_reason: PcgStopReason::BudgetExhausted,
             ..ArrowPcgDiagnostics::default()
         };
         for _ in 0..max_iterations.max(1) {
@@ -6420,7 +6420,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         if diag.stopping_reason != PcgStopReason::Converged {
             let r_norm = device_nrm2(blas, stream, k, &r_dev)?;
             diag.final_relative_residual = r_norm / rhs_norm;
-            diag.stopping_reason = PcgStopReason::MaxIter;
+            diag.stopping_reason = PcgStopReason::BudgetExhausted;
         }
         let x = stream
             .clone_dtoh(&x_dev)
@@ -6822,7 +6822,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         }
         let mut diag = ArrowPcgDiagnostics {
             precond_apply_calls: 1,
-            stopping_reason: PcgStopReason::MaxIter,
+            stopping_reason: PcgStopReason::BudgetExhausted,
             ..ArrowPcgDiagnostics::default()
         };
 
@@ -6867,7 +6867,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         if diag.stopping_reason != PcgStopReason::Converged {
             let r_norm = device_nrm2(&blas, &stream, k, &r_dev)?;
             diag.final_relative_residual = r_norm / rhs_norm;
-            diag.stopping_reason = PcgStopReason::MaxIter;
+            diag.stopping_reason = PcgStopReason::BudgetExhausted;
         }
         let x = stream
             .clone_dtoh(&x_dev)
@@ -6975,7 +6975,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         let mut rz = device_dot(&blas, &stream, k, &r_dev, &z_dev)?;
         let mut diag = ArrowPcgDiagnostics {
             precond_apply_calls: 1,
-            stopping_reason: PcgStopReason::MaxIter,
+            stopping_reason: PcgStopReason::BudgetExhausted,
             ..ArrowPcgDiagnostics::default()
         };
         if rz <= 0.0 || !rz.is_finite() {
@@ -7035,7 +7035,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         if diag.stopping_reason != PcgStopReason::Converged {
             let r_norm = device_nrm2(&blas, &stream, k, &r_dev)?;
             diag.final_relative_residual = r_norm / rhs_norm;
-            diag.stopping_reason = PcgStopReason::MaxIter;
+            diag.stopping_reason = PcgStopReason::BudgetExhausted;
         }
 
         let x = stream

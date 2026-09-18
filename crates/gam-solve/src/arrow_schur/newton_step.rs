@@ -60,6 +60,105 @@ pub(crate) fn device_failure_as_arrow_error(
     }
 }
 
+/// Work of the Newton step's two routes on rows of dims `row_dims` against a
+/// `k`-wide border, in flops (#2900 row 6.15).
+///
+/// Direct builds the reduced Schur, `Σ_i q_i·k·(k + q_i)` for each row's whitened
+/// `q_i × k` cross block and its `k × k` contribution, plus the `k × k` penalty,
+/// and factors it (the `k³/3` that [`gam_linalg::pcg::DenseRouteWork::pcg_attempt`]
+/// adds). One reduced-Schur product costs `Σ_i q_i·(2k + q_i)` (a cross-block apply,
+/// a triangular solve and the transpose apply per row) plus one penalty matvec,
+/// bounded by the dense `k²` because [`BetaPenaltyOp`] reports no cheaper cost.
+pub fn arrow_step_route_work(row_dims: &[usize], k: usize) -> gam_linalg::pcg::DenseRouteWork {
+    let k = k as u64;
+    let penalty = k.saturating_mul(k);
+    let (build, apply) = row_dims
+        .iter()
+        .fold((penalty, penalty), |(build, apply), &q| {
+            let q = q as u64;
+            (
+                build.saturating_add(q.saturating_mul(k).saturating_mul(k.saturating_add(q))),
+                apply.saturating_add(q.saturating_mul(k.saturating_mul(2).saturating_add(q))),
+            )
+        });
+    gam_linalg::pcg::DenseRouteWork { build, apply }
+}
+
+/// How an InexactPCG step on rows of dims `row_dims` against a `k`-wide border may
+/// spend products, against the materialization cap `cap_bytes` (#2900 row 6.15).
+///
+/// Where the dense `k × k` Schur exceeds the cap there is no dense route, and CG
+/// may take the Krylov dimension `k`. Otherwise CG may spend the dense route's cost
+/// in products, and `direct_answers_miss` says whether Direct answers a miss (a
+/// Priced request) or the trial is refused (a request that asked for InexactPCG).
+pub fn price_arrow_step(
+    row_dims: &[usize],
+    k: usize,
+    cap_bytes: usize,
+    direct_answers_miss: bool,
+) -> ArrowPcgBudget {
+    match arrow_step_route_work(row_dims, k).pcg_attempt_under_cap(k, cap_bytes) {
+        gam_linalg::pcg::PcgAttempt::Only => ArrowPcgBudget::krylov_dimension(k),
+        gam_linalg::pcg::PcgAttempt::Budgeted { products } => {
+            ArrowPcgBudget::dense_route_priced(products, direct_answers_miss)
+        }
+    }
+}
+
+/// Give a solve request its route before any route reads the mode (#2900 row 6.15).
+///
+/// * [`ArrowSolverMode::Priced`] is priced with [`arrow_step_route_work`]. When the
+///   dense `k × k` Schur exceeds the memory governor's single-materialization cap,
+///   the admission Direct itself applies, it resolves to InexactPCG with the
+///   Krylov-dimension budget. When the dense route costs less than one product it
+///   resolves to Direct. Otherwise it resolves to InexactPCG allowed the dense route's
+///   cost in products, and Direct answers a miss. A streaming request assembles its
+///   dense Schur by chunks, so a Priced streaming request resolves to Direct.
+/// * An InexactPCG request with an unresolved budget gets the same price
+///   ([`price_arrow_step`]), but a miss refuses the trial instead of falling back
+///   to Direct.
+/// * Every other request is returned as it is, so resolving twice changes nothing.
+pub fn resolve_arrow_route<'a>(
+    sys: &ArrowSchurSystem,
+    options: &'a ArrowSolveOptions,
+) -> std::borrow::Cow<'a, ArrowSolveOptions> {
+    resolve_arrow_route_under_cap(
+        sys,
+        options,
+        gam_runtime::resource::MemoryGovernor::global().single_materialization_cap_bytes(),
+    )
+}
+
+/// [`resolve_arrow_route`] against an explicit materialization cap.
+pub fn resolve_arrow_route_under_cap<'a>(
+    sys: &ArrowSchurSystem,
+    options: &'a ArrowSolveOptions,
+    cap_bytes: usize,
+) -> std::borrow::Cow<'a, ArrowSolveOptions> {
+    let (mode, pcg_budget) = match (options.mode, options.pcg_budget) {
+        (ArrowSolverMode::Priced, _) if options.streaming_chunk_size.is_some() => {
+            (ArrowSolverMode::Direct, None)
+        }
+        (ArrowSolverMode::Priced, _) => {
+            let budget = price_arrow_step(&sys.row_dims, sys.k, cap_bytes, true);
+            if budget.products() == 0 {
+                (ArrowSolverMode::Direct, None)
+            } else {
+                (ArrowSolverMode::InexactPCG, Some(budget))
+            }
+        }
+        (ArrowSolverMode::InexactPCG, None) => (
+            ArrowSolverMode::InexactPCG,
+            Some(price_arrow_step(&sys.row_dims, sys.k, cap_bytes, false)),
+        ),
+        _ => return std::borrow::Cow::Borrowed(options),
+    };
+    let mut resolved = options.clone();
+    resolved.mode = mode;
+    resolved.pcg_budget = pcg_budget;
+    std::borrow::Cow::Owned(resolved)
+}
+
 /// Schur-eliminate the per-row latent block and solve with an explicit BA
 /// mode, returning the factor cache alongside the increments.
 ///
@@ -72,6 +171,8 @@ pub fn solve_arrow_newton_step_with_options(
     ridge_beta: f64,
     options: &ArrowSolveOptions,
 ) -> Result<(Array1<f64>, Array1<f64>, ArrowFactorCache), ArrowSchurError> {
+    let resolved = resolve_arrow_route(sys, options);
+    let options = resolved.as_ref();
     if options.streaming_chunk_size.is_some() {
         return Err(ArrowSchurError::SchurFactorFailed {
             reason: "streaming Arrow-Schur solve does not materialize the factor cache required by this entry point".to_string(),
@@ -272,6 +373,8 @@ pub fn solve_arrow_newton_step_core(
     ridge_beta: f64,
     options: &ArrowSolveOptions,
 ) -> Result<(Array1<f64>, Array1<f64>, ArrowPcgDiagnostics), ArrowSchurError> {
+    let resolved = resolve_arrow_route(sys, options);
+    let options = resolved.as_ref();
     if let Some(chunk_size) = options.streaming_chunk_size {
         // #1014: the streaming/residency path is the memory-bound assembly wall,
         // so its reduced dense Schur solve runs certified mixed precision by
@@ -356,6 +459,8 @@ pub(crate) fn maybe_inject_gpu_schur_matvec(
     ridge_beta: f64,
     options: &ArrowSolveOptions,
 ) -> Result<Option<ArrowSolveOptions>, ArrowSchurError> {
+    let resolved = resolve_arrow_route(sys, options);
+    let options = resolved.as_ref();
     if options.mode != ArrowSolverMode::InexactPCG || options.gpu_matvec.is_some() {
         return Ok(None);
     }
@@ -367,8 +472,8 @@ pub(crate) fn maybe_inject_gpu_schur_matvec(
     // so the offload becomes profitable on the CG-AMORTISED batched work — the
     // exact `n × k × d` arithmetic the dense-Direct `(n, k)` floor misses (it
     // ignores the per-row frame depth `d` and the `1/cg_iters` staging
-    // amortisation). The CG budget here is the same `max_iterations` the PCG loop
-    // launches with (`pcg.max_iterations.min(trust_region.max_iterations)`).
+    // amortisation). The CG budget here is the one the PCG loop launches with,
+    // resolved from the system (#2900 row 6.15).
     // `try_device_arrow_direct` deliberately keeps the dense gate — that path is
     // one large factorization, not the amortised matvec.
     //
@@ -378,10 +483,10 @@ pub(crate) fn maybe_inject_gpu_schur_matvec(
     // availability resolution (whose first call creates a CUDA primary context on
     // every GPU). An admitted shape probes, and the probed device's calibrated
     // policy then decides.
-    let cg_iters = options
-        .pcg
-        .max_iterations
-        .min(options.trust_region.max_iterations);
+    // An unresolved budget declines the offload.
+    let Some(cg_iters) = options.pcg_budget.map(ArrowPcgBudget::products) else {
+        return Ok(None);
+    };
     if !gam_gpu::GpuDispatchPolicy::reduced_schur_matvec_admissible_under_any_policy(
         sys.rows.len(),
         sys.k,
@@ -640,10 +745,9 @@ fn build_resident_sae_frame_if_admitted(
     if options.streaming_chunk_size.is_some() {
         return Ok(None);
     }
-    let cg_iters = options
-        .pcg
-        .max_iterations
-        .min(options.trust_region.max_iterations);
+    let Some(cg_iters) = options.pcg_budget.map(ArrowPcgBudget::products) else {
+        return Ok(None);
+    };
     crate::gpu_kernels::arrow_schur::build_sae_resident_frame(sys, cg_iters)
         .map_err(|failure| device_failure_as_arrow_error("resident SAE frame build", failure))
 }
@@ -666,6 +770,8 @@ pub fn prepare_sae_resident_frame(
     Option<std::sync::Arc<dyn crate::gpu_kernels::arrow_schur::SaeResidentFrame + Send + Sync>>,
     ArrowSchurError,
 > {
+    let resolved = resolve_arrow_route(sys, options);
+    let options = resolved.as_ref();
     if options.mode != ArrowSolverMode::InexactPCG || sys
         .device_sae_pcg
         .as_ref()
@@ -704,9 +810,10 @@ pub fn prepare_sae_resident_frame(
 /// `solve`. Adaptive-correction exhaustion surfaces immediately because it is
 /// not recoverable by shifting the diagonal.
 ///
-/// A `PcgFailed` is likewise treated as recoverable: when the inexact-PCG
-/// path stalls (all preconditioner tiers hit `MaxIter`, negative curvature on
-/// an unbounded solve, or a non-PD preconditioned residual), shifting the
+/// A `PcgFailed` or `PcgBudgetExhausted` is likewise treated as recoverable:
+/// when the inexact-PCG path stalls (its CG spends the resolved product budget
+/// without meeting its tolerance and Direct does not answer, negative curvature
+/// on an unbounded solve, or a non-PD preconditioned residual), shifting the
 /// diagonal improves both conditioning and curvature, so a ridge bump is the
 /// right response. Only `AdaptiveCorrectionFailed` surfaces immediately, since
 /// it is an option-validation / line-search failure that a ridge shift cannot
@@ -730,6 +837,10 @@ pub fn solve_with_lm_escalation_inner(
     ridge_beta: f64,
     options: &ArrowSolveOptions,
 ) -> Result<(Array1<f64>, Array1<f64>, ArrowPcgDiagnostics), ArrowSchurError> {
+    // The system is fixed across the ladder, so its route is resolved once here and
+    // every rung, frame builder and device gate below reads the resolved mode.
+    let resolved = resolve_arrow_route(sys, options);
+    let options = resolved.as_ref();
     let mut proximal_ridge = 0.0_f64;
     let mut escalations: usize = 0;
     let mut certificate: Option<ArrowShiftCertificate> = None;
@@ -822,6 +933,20 @@ pub fn solve_with_lm_escalation_inner(
                 solve_arrow_newton_step_core(sys, damped_ridge_t, damped_ridge_beta, &core_options)
             }
         };
+        // #2900 row 6.15: an InexactPCG step whose CG spent its resolved budget without
+        // meeting its tolerance, and that Direct did not answer, is this rung's refusal.
+        let step_result = match (step_result, options.pcg_budget) {
+            (Ok((_, _, diag)), Some(budget))
+                if diag.stopping_reason == PcgStopReason::BudgetExhausted =>
+            {
+                Err(ArrowSchurError::PcgBudgetExhausted {
+                    budget,
+                    products_spent: diag.matvec_calls,
+                    final_relative_residual: diag.final_relative_residual,
+                })
+            }
+            (other, _) => other,
+        };
         match step_result {
             Ok((delta_t, delta_beta, mut pcg_diagnostics)) => {
                 pcg_diagnostics.ridge_escalations = escalations;
@@ -834,6 +959,7 @@ pub fn solve_with_lm_escalation_inner(
                         | ArrowSchurError::PerRowFactorIllConditioned { .. }
                         | ArrowSchurError::SchurFactorFailed { .. }
                         | ArrowSchurError::PcgFailed { .. }
+                        | ArrowSchurError::PcgBudgetExhausted { .. }
                         | ArrowSchurError::UnboundedNegativeCurvature { .. }
                 );
                 if !recoverable {
@@ -2085,12 +2211,44 @@ pub(crate) fn arrow_operator_infinity_norm(
     Ok(out)
 }
 
+/// Direct's answer to an InexactPCG step that missed its forcing tolerance within
+/// its budget (#2900 row 6.15), or `None` when Direct does not answer it.
+///
+/// For a Priced request, whose budget is the dense route's own cost, Direct answers
+/// the step, so the step costs at most twice the cheaper route. A request that asked
+/// for InexactPCG, or one with no dense route, keeps its truncated iterate with
+/// `PcgStopReason::BudgetExhausted`: a caller that can use a descent direction takes
+/// it (the support joint Newton, #2576), and the LM ladder refuses it as a budget
+/// miss.
+fn direct_answer_to_pcg_miss(
+    sys: &ArrowSchurSystem,
+    ridge_t: f64,
+    ridge_beta: f64,
+    options: &ArrowSolveOptions,
+    miss: &str,
+) -> Option<Result<ArrowNewtonStepArtifacts, ArrowSchurError>> {
+    let budget = options
+        .pcg_budget
+        .filter(|budget| budget.direct_answers_miss())?;
+    log::info!(
+        "arrow-Schur InexactPCG missed within the dense route's price ({} products): {miss}; \
+         Direct answers the step",
+        budget.products()
+    );
+    let mut direct = options.clone();
+    direct.mode = ArrowSolverMode::Direct;
+    direct.pcg_budget = None;
+    Some(solve_arrow_newton_step_artifacts(sys, ridge_t, ridge_beta, &direct))
+}
+
 pub(crate) fn solve_arrow_newton_step_artifacts(
     sys: &ArrowSchurSystem,
     ridge_t: f64,
     ridge_beta: f64,
     options: &ArrowSolveOptions,
 ) -> Result<ArrowNewtonStepArtifacts, ArrowSchurError> {
+    let resolved = resolve_arrow_route(sys, options);
+    let options = resolved.as_ref();
     if let Some(chunk_size) = options.streaming_chunk_size {
         let mut streaming = StreamingArrowSchur::from_system(sys, chunk_size);
         let (delta_t, delta_beta, schur_factor) = streaming.solve(ridge_t, ridge_beta, options)?;
@@ -2150,9 +2308,10 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
     let mut mixed_precision_status = MixedPrecisionStatus::Off;
     let (delta_beta, schur_factor, mut pcg_diagnostics, step_schur) = match options.mode {
         ArrowSolverMode::Direct => {
-            // #2660 — Direct has one numerical owner. Automatic mode selects it
-            // only for `k <= DIRECT_SOLVE_MAX_K`, where the exact dense Schur is
-            // required for the evidence factor as well as the Newton step. The
+            // #2660 — Direct has one numerical owner. A Priced request selects it
+            // where the dense route costs less than one reduced-Schur product, or to
+            // answer a PCG miss within the dense route's price (#2900 row 6.15), and the
+            // exact dense Schur serves the evidence factor as well as the Newton step. The
             // former SAE device-PCG detour solved a different (unquotiented,
             // unfloored) operator, then built this same canonical factor for
             // logdet and discarded its correct step. Assemble once and let the
@@ -2274,6 +2433,14 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
             )?;
             (db, sf, diag, None)
         }
+        // Every entry resolves a Priced request first (`resolve_arrow_route`), so an
+        // unresolved one here came from a caller that bypassed them.
+        ArrowSolverMode::Priced => {
+            return Err(ArrowSchurError::SchurFactorFailed {
+                reason: "arrow-Schur step reached the reduced solve with an unresolved Priced mode"
+                    .to_string(),
+            });
+        }
         ArrowSolverMode::InexactPCG => {
             // #2228 — the wide-`p` InexactPCG Newton step gauge-fixes exactly like
             // the dense modes: the matrix-free reduced-Schur matvec applies the
@@ -2292,7 +2459,7 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
             }
             // Auto-select preconditioner level: starts with JacobiPreconditioner
             // (Diagonal / BetaBlockJacobi) and escalates to ClusterJacobi or
-            // AdditiveSchwarz when K > 100 and PCG exhausts max_iterations.
+            // AdditiveSchwarz when K > 100 and PCG spends its product budget.
             //
             // #2228 — the device `solve_sae_matrix_free_pcg` kernel does not yet
             // apply the Faddeev–Popov pin, so a gauge-quotiented system takes the
@@ -2300,10 +2467,13 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
             // `ReducedSchurOperator`); kernel-side projection is the follow-up.
             if options.trust_region.radius == f64::INFINITY && !beta_gauge_active {
                 if let Some(device_data) = sys.device_sae_pcg.as_ref() {
-                    let max_iterations = options
-                        .pcg
-                        .max_iterations
-                        .min(options.trust_region.max_iterations);
+                    let Some(max_iterations) = options.pcg_budget.map(ArrowPcgBudget::products) else {
+                        return Err(ArrowSchurError::PcgFailed {
+                            reason: "InexactPCG step reached the device lane with an unresolved \
+                                     product budget"
+                                .to_string(),
+                        });
+                    };
                     let relative_tolerance = options
                         .pcg
                         .relative_tolerance
@@ -2358,6 +2528,21 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                     };
                     match device_result {
                         Ok((delta, mut diag)) => {
+                            if diag.stopping_reason == PcgStopReason::BudgetExhausted
+                                && let Some(answer) = direct_answer_to_pcg_miss(
+                                    sys,
+                                    ridge_t,
+                                    ridge_beta,
+                                    options,
+                                    &format!(
+                                        "device InexactPCG spent {max_iterations} products; final \
+                                         relative residual = {:e}",
+                                        diag.final_relative_residual
+                                    ),
+                                )
+                            {
+                                return answer;
+                            }
                             diag.selected_matrix_free_pcg = true;
                             diag.used_device_arrow = true;
                             return Ok(ArrowNewtonStepArtifacts {
@@ -2413,11 +2598,19 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                     }
                 }
             }
-            let (delta, mut diag) = steihaug_pcg_auto(
+            let Some(budget) = options.pcg_budget else {
+                return Err(ArrowSchurError::PcgFailed {
+                    reason: "InexactPCG step reached the CPU lane with an unresolved product \
+                             budget"
+                        .to_string(),
+                });
+            };
+            let pcg_step = steihaug_pcg_auto(
                 sys,
                 &htt_factors,
                 ridge_beta,
                 &rhs_beta_evidence,
+                budget,
                 &options.pcg,
                 &options.trust_region,
                 &backend,
@@ -2425,7 +2618,43 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                 // #1026 — the same opt-in floor the dense path uses, here gating
                 // the matrix-free unbounded-PCG curvature-floor retry.
                 options.newton_schur_tikhonov_rel_floor,
-            )?;
+            );
+            // #2900 row 6.15: CG spends at most its resolved budget. Where the budget is a
+            // Priced request's dense price, Direct answers a step CG did not converge
+            // within it, or one CG refused. Otherwise the truncated iterate stands with
+            // `BudgetExhausted`, which the LM ladder refuses.
+            let pcg_step = match pcg_step {
+                Ok((delta, diag)) if diag.stopping_reason == PcgStopReason::BudgetExhausted => {
+                    let miss = format!(
+                        "InexactPCG spent its product budget {budget:?}; final relative \
+                         residual = {:e}",
+                        diag.final_relative_residual
+                    );
+                    if let Some(answer) =
+                        direct_answer_to_pcg_miss(sys, ridge_t, ridge_beta, options, &miss)
+                    {
+                        return answer;
+                    }
+                    Ok((delta, diag))
+                }
+                Err(
+                    refusal @ (ArrowSchurError::PcgFailed { .. }
+                    | ArrowSchurError::PcgBudgetExhausted { .. }),
+                ) => {
+                    if let Some(answer) = direct_answer_to_pcg_miss(
+                        sys,
+                        ridge_t,
+                        ridge_beta,
+                        options,
+                        &refusal.to_string(),
+                    ) {
+                        return answer;
+                    }
+                    Err(refusal)
+                }
+                other => other,
+            };
+            let (delta, mut diag) = pcg_step?;
             diag.selected_matrix_free_pcg = true;
             (delta, None, diag, None)
         }

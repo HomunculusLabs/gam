@@ -2024,8 +2024,8 @@ pub(crate) fn device_dispatch_predicate_gates_on_work_not_rows() {
 /// rather than the dense-Direct `(rows, k)` floor: before the device probe on
 /// `reduced_schur_matvec_admissible_under_any_policy(rows, k, sys.d, cg_iters)`,
 /// and after it on the probed policy's `reduced_schur_matvec_should_offload`.
-/// This asserts both predicates — with the exact `cg_iters` the gate derives from
-/// the options (`pcg.max_iterations.min(trust_region.max_iterations)`) — fire for
+/// This asserts both predicates — with the exact `cg_iters` the gate reads from the
+/// request's resolved budget (#2900 row 6.15) — fire for
 /// the SAE LLM shape (n~2000 rows × k~2048 border × d~8 frame depth), whose single
 /// apply already clears the uncalibrated seed floor, while staying off for tiny
 /// shapes where launch latency dominates. The gate's typed device-absence
@@ -2036,20 +2036,14 @@ pub(crate) fn device_dispatch_predicate_gates_on_work_not_rows() {
 pub(crate) fn matvec_gate_engages_for_llm_shape_off_for_tiny() {
     use gam_gpu::policy::GpuDispatchPolicy;
     let policy = GpuDispatchPolicy::default();
-    // The cg_iters the live gate derives from default options is exactly the
-    // budget the PCG loop launches with.
-    let options = ArrowSolveOptions::inexact_pcg();
-    let cg_iters = options
-        .pcg
-        .max_iterations
-        .min(options.trust_region.max_iterations);
-    assert!(cg_iters > 0);
-
     // SAE LLM shape: few row blocks, wide border, modest frame depth. The
     // dense-Direct `(rows, k)` floor that the gate used to consult ignores the
     // frame depth `d` and the CG amortisation — assert the predicates the
     // re-keyed gate consults admit it.
     let (n_llm, k_llm, d_llm) = (2_000_usize, 2_048_usize, 8_usize);
+    // The cg_iters the live gate reads is the budget the PCG loop launches with: the
+    // dense route's price for this shape (#2900 row 6.15).
+    let cg_iters = price_arrow_step(&vec![d_llm; n_llm], k_llm, usize::MAX, false).products();
     assert!(GpuDispatchPolicy::reduced_schur_matvec_admissible_under_any_policy(
         n_llm, k_llm, d_llm, cg_iters
     ));
@@ -2074,7 +2068,7 @@ pub(crate) fn matvec_gate_engages_for_llm_shape_off_for_tiny() {
 /// dropping the per-row frame depth `d` (M) that multiplies the per-apply work and
 /// the `1/cg_iters` staging amortisation. The kernel now consults the SAME
 /// work-based predicate the host injection gate (`maybe_inject_gpu_schur_matvec`)
-/// uses — `reduced_schur_matvec_should_offload(n, k, d, max_iterations)` — so the
+/// uses — `reduced_schur_matvec_should_offload(n, k, d, cg_iters)` — so the
 /// two SAE-matvec dispatch sites cannot drift, and the gate registers the true
 /// `n × k × d × cg_iters` batched work. This asserts that policy invariant on any
 /// host (the predicates are pure; the device==CPU 1e-10 numeric parity stays the
@@ -2879,15 +2873,17 @@ pub(crate) fn sae_structured_system(
 /// cross-block `H_tβ`, and deterministic nonzero gradients. Shared by the Direct
 /// and InexactPCG engagement tests so both exercise the identical operator.
 ///
-/// Shape `k = n_atoms·p = 64 ≥ DEVICE_LOOP_MIN_P (32)`; at
-/// `cg_iters = DEFAULT_PCG_MAX_ITERATIONS` the solve's `cg_iters·n·(4·d·k + d²)`
-/// arithmetic is `200·512·(4·4·64 + 16) ≈ 1.07e8` flops, above the uncalibrated
-/// seed floor. Modest `n` keeps the CPU reference + dense parity check cheap.
+/// Shape `k = n_atoms·p = 256 ≥ DEVICE_LOOP_MIN_P (32)`. An InexactPCG request on
+/// this border resolves to the dense route's price, `cg_iters = (build + k³/3) /
+/// apply = 126` products (#2900 row 6.15), and the solve's
+/// `cg_iters·n·(4·d·k + d²)` arithmetic is `126·512·(4·4·256 + 16) ≈ 2.65e8` flops,
+/// above the uncalibrated seed floor. Modest `n` keeps the CPU reference + dense
+/// parity check cheap.
 pub(crate) fn well_posed_device_sae_system_1551() -> (ArrowSchurSystem, usize, usize) {
     let n = 512usize;
     let q = 4usize; // per-row latent depth d
     let p = 8usize;
-    let n_atoms = 8usize;
+    let n_atoms = 32usize;
     let m_active = 4usize;
     let (mut sys, _a_phi, _jac) = sae_structured_system(n, q, p, n_atoms, m_active);
 
@@ -2979,8 +2975,8 @@ pub(crate) fn well_posed_device_sae_system_1551() -> (ArrowSchurSystem, usize, u
 
 /// #2660 ALGORITHM SELECTION — a Direct SAE solve must have one canonical dense
 /// owner even when the system carries device-PCG data and clears that lane's
-/// economic gate. Automatic Direct is bounded by `DIRECT_SOLVE_MAX_K`, so it
-/// already needs the exact dense Schur factor for evidence; running matrix-free
+/// economic gate. Direct owns the exact dense Schur factor for evidence as well
+/// as the step; running matrix-free
 /// PCG first would duplicate the dominant reduction and, before #2660, solve an
 /// unquotiented/unfloored operator whose result disagreed with that factor.
 ///
@@ -2999,7 +2995,15 @@ pub(crate) fn sae_direct_uses_canonical_dense_owner_not_matrix_free_pcg_2660() {
 
     let policy = gam_gpu::policy::GpuDispatchPolicy::default();
     assert!(
-        policy.reduced_schur_matvec_should_offload(n, sys.k, q, DEFAULT_PCG_MAX_ITERATIONS),
+        policy.reduced_schur_matvec_should_offload(
+            n,
+            sys.k,
+            q,
+            resolve_arrow_route(&sys, &ArrowSolveOptions::inexact_pcg())
+                .pcg_budget
+                .map(ArrowPcgBudget::products)
+                .expect("a resolved InexactPCG request carries its product budget"),
+        ),
         "fixture must clear the reduced-Schur offload gate so the device path is eligible"
     );
 
@@ -3066,9 +3070,9 @@ pub(crate) fn sae_direct_uses_canonical_dense_owner_not_matrix_free_pcg_2660() {
     );
 }
 
-/// #1551/#1209 PRODUCTION ENGAGEMENT (InexactPCG mode) — the LARGE-K regime
-/// (`K > DIRECT_SOLVE_MAX_K`) that `ArrowSolverMode::automatic` routes to
-/// `InexactPCG`, which is where the device matters MOST. The InexactPCG branch
+/// #1551/#1209 PRODUCTION ENGAGEMENT (InexactPCG mode) — the large-border regime
+/// where no dense route fits, or a Priced request's CG is cheaper than one (#2900
+/// row 6.15), which is where the device matters MOST. The InexactPCG branch
 /// of `solve_arrow_newton_step_core` runs the device matrix-free SAE PCG when the
 /// trust radius is unbounded (the SAE inner-solve default). This pins TWO
 /// contracts the Direct test cannot:
@@ -3084,7 +3088,15 @@ pub(crate) fn sae_inexact_pcg_inner_solve_engages_device_and_matches_cpu_1551() 
 
     let policy = gam_gpu::policy::GpuDispatchPolicy::default();
     assert!(
-        policy.reduced_schur_matvec_should_offload(n, sys.k, q, DEFAULT_PCG_MAX_ITERATIONS),
+        policy.reduced_schur_matvec_should_offload(
+            n,
+            sys.k,
+            q,
+            resolve_arrow_route(&sys, &ArrowSolveOptions::inexact_pcg())
+                .pcg_budget
+                .map(ArrowPcgBudget::products)
+                .expect("a resolved InexactPCG request carries its product budget"),
+        ),
         "fixture must clear the reduced-Schur offload gate so the device path is eligible"
     );
 
@@ -5433,14 +5445,13 @@ pub(crate) fn covisibility_partition_recovers_groups_and_beats_scalar_jacobi() {
     let rhs: Array1<f64> =
         Array1::from_iter((0..k).map(|j| 0.3 * ((j + 1) as f64).sin() + 0.1 * (j as f64).cos()));
     let pcg = ArrowPcgOptions {
-        max_iterations: 8 * k,
         relative_tolerance: 1e-10,
     };
     let trust = ArrowTrustRegionOptions {
         radius: 1.0e12,
         steihaug_relative_tolerance: 1e-10,
-        max_iterations: 8 * k,
     };
+    let budget = ArrowPcgBudget::krylov_dimension(k);
 
     // (a) Scalar Jacobi baseline: clear block_offsets so the Jacobi build takes
     // the per-column scalar-diagonal path — the ceiling the cluster tier collapses
@@ -5465,6 +5476,7 @@ pub(crate) fn covisibility_partition_recovers_groups_and_beats_scalar_jacobi() {
             ridge_beta,
             &rhs,
             |r| jac.apply(r),
+            budget,
             &pcg,
             &trust,
             &backend,
@@ -5488,6 +5500,7 @@ pub(crate) fn covisibility_partition_recovers_groups_and_beats_scalar_jacobi() {
         ridge_beta,
         &rhs,
         |r| covis_pc.apply(r),
+        budget,
         &pcg,
         &trust,
         &backend,
@@ -6625,6 +6638,11 @@ fn rendered_verdict_matches_the_value_verdict_for_every_variant_2598() {
         ArrowSchurError::PcgFailed {
             reason: "residual stalled while the operator is not positive definite".to_string(),
         },
+        ArrowSchurError::PcgBudgetExhausted {
+            budget: ArrowPcgBudget::krylov_dimension(4),
+            products_spent: 4,
+            final_relative_residual: 1.0e-3,
+        },
         ArrowSchurError::UnboundedNegativeCurvature {
             curvature: -3.5e-4,
             direction_norm_sq: 2.0,
@@ -6867,4 +6885,77 @@ fn build_dense_schur_direct_refuses_oversize_border_1017() {
         }
         other => panic!("expected SchurFactorFailed for oversize sqrt-BA border, got {other:?}"),
     }
+}
+
+/// #2900 row 6.15: a Priced request resolves its route from the system's row dims and
+/// border, priced in flops, not from the `k <= 2000` literal `automatic(k)` used.
+#[test]
+fn a_priced_request_resolves_its_route_from_the_system_2900() {
+    let unbounded = usize::MAX;
+    let priced = ArrowSolveOptions::priced();
+
+    // 64 one-dimensional rows at k = 8. Direct builds Σ q·k·(k + q) + k² = 4608 + 64
+    // flops; one reduced-Schur product costs Σ q·(2k + q) + k² = 1088 + 64.
+    let wide = ArrowSchurSystem::new(64, 1, 8);
+    let work = arrow_step_route_work(&wide.row_dims, wide.k);
+    assert_eq!((work.build, work.apply), (4672, 1152));
+    // The dense route costs (4672 + 512/3) / 1152 = 4 products, so CG may take 4 and
+    // Direct answers a miss.
+    let resolved = resolve_arrow_route_under_cap(&wide, &priced, unbounded);
+    assert_eq!(resolved.mode, ArrowSolverMode::InexactPCG);
+    assert_eq!(
+        resolved.pcg_budget,
+        Some(ArrowPcgBudget::dense_route_priced(4, true))
+    );
+
+    // The same border with no room for the 8·8·8-byte dense Schur takes the Krylov
+    // dimension budget. `automatic(8)` chose Direct here whatever memory allowed.
+    let no_room = resolve_arrow_route_under_cap(&wide, &priced, 8 * 8 * 8 - 1);
+    assert_eq!(no_room.mode, ArrowSolverMode::InexactPCG);
+    assert_eq!(
+        no_room.pcg_budget,
+        Some(ArrowPcgBudget::krylov_dimension(8))
+    );
+
+    // Two one-dimensional rows at k = 1 build 5 flops against 7 per product: the dense
+    // route costs less than one product, so it answers directly.
+    let tiny = ArrowSchurSystem::new(2, 1, 1);
+    let direct = resolve_arrow_route_under_cap(&tiny, &priced, unbounded);
+    assert_eq!(direct.mode, ArrowSolverMode::Direct);
+    assert_eq!(direct.pcg_budget, None);
+
+    // An explicit InexactPCG request gets the same price, but a miss refuses the trial
+    // instead of falling back to Direct. A Direct request and an already-resolved
+    // request come back unchanged, so resolving twice is a no-op.
+    let inexact = ArrowSolveOptions::inexact_pcg();
+    let explicit = resolve_arrow_route_under_cap(&wide, &inexact, unbounded);
+    assert_eq!(explicit.mode, ArrowSolverMode::InexactPCG);
+    assert_eq!(
+        explicit.pcg_budget,
+        Some(ArrowPcgBudget::dense_route_priced(4, false))
+    );
+    // The tiny border's price of 0 products stays InexactPCG for an explicit request,
+    // so its CG launches with no product to spend.
+    assert_eq!(
+        resolve_arrow_route_under_cap(&tiny, &ArrowSolveOptions::inexact_pcg(), unbounded)
+            .pcg_budget,
+        Some(ArrowPcgBudget::dense_route_priced(0, false))
+    );
+    assert!(matches!(
+        resolve_arrow_route_under_cap(&wide, &ArrowSolveOptions::direct(), unbounded),
+        std::borrow::Cow::Borrowed(_)
+    ));
+    assert!(matches!(
+        resolve_arrow_route_under_cap(&wide, resolved.as_ref(), unbounded),
+        std::borrow::Cow::Borrowed(_)
+    ));
+
+    // A streaming Priced request assembles its dense Schur by chunks, so it resolves to
+    // Direct.
+    let mut streaming = ArrowSolveOptions::priced();
+    streaming.streaming_chunk_size = Some(16);
+    assert_eq!(
+        resolve_arrow_route_under_cap(&wide, &streaming, unbounded).mode,
+        ArrowSolverMode::Direct
+    );
 }

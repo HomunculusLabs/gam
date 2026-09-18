@@ -4340,5 +4340,14 @@
     },
     "reason": "#2937 final slice: optimize_spatial_length_scale_exact_joint was the text wrapper over optimize_spatial_length_scale_exact_joint_typed. It took a fit closure returning String, converted that text into FitFailure::Unclassified and rendered the typed driver's failure back to text. Every production caller moved to the typed driver in the #2937 slices f554cf4063, e2fb2948a6 and 19143a1511 and in 3b92de22cc and 6fd360fb42, and the one test caller moves in this landing. With From<String> for FitFailure deleted in the same landing, the wrapper has no way to convert text.",
     "evidence": "git grep -n 'optimize_spatial_length_scale_exact_joint(' at a99ab01898 finds only its test caller, design_assembly_constraint_tests.rs:2250, which this landing switches to optimize_spatial_length_scale_exact_joint_typed. Lane check sw1a job 1272252 at a99ab01898, with the wrapper deleted: the workspace --all-targets check and gam-pyffi --all-targets are RC 0."
+  },
+  {
+    "base": "fc4cb094ef948447dc2ecf293772770345fc3593",
+    "removed": {
+      "crates/gam-sae/src/manifold/streaming_plan.rs::solve_options_for_border_dim": 1,
+      "crates/gam-solve/src/arrow_schur/solve_options.rs::automatic": 2
+    },
+    "reason": "#2900 row 6.15: ArrowSolverMode::automatic(k) and ArrowSolveOptions::automatic(k) switched the arrow-Schur step to Direct at the literal k <= 2000; ArrowSolveOptions::priced() and resolve_arrow_route price Direct against InexactPCG from the system instead. SaeStreamingPlan::solve_options_for_border_dim becomes solve_options(), since the border only fed automatic(k).",
+    "evidence": "git grep -w at f554cf4063: every caller (system.rs, streaming_plan.rs, fit_drivers.rs, gam-sae tests.rs and tests_device_engage_1783.rs, arrow_schur/tests.rs, examples/full_color_fit_1017.rs) is migrated in this commit; gam-pyffi names neither. Direct gate dy6 i2900-615-g1 (base 6b6c05401e) named exactly these census removals."
   }
 ]
