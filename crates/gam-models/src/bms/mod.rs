@@ -2631,6 +2631,11 @@ pub(super) fn bms_row_chunk_size(n: usize) -> usize {
     n.div_ceil(target_chunks)
         .clamp(ROW_CHUNK_MIN, ROW_CHUNK_SIZE)
 }
+/// Row count from which `log_exact_work` turns on the BMS exact-path stage logs.
+///
+/// Work bound (#2469): result-invariant. Every `log_exact_work` gate encloses
+/// only `log` macros, the elapsed times and sizes they print, and progress
+/// counters that feed nothing but those lines.
 pub(super) const EXACT_WORK_LOG_MIN_ROWS: usize = 50_000;
 pub(super) const BMS_ROW_PRIMARY_HESSIAN_EXPECTED_REUSE_PASSES: usize = 3;
 pub(super) const BMS_ROW_PRIMARY_HESSIAN_MIN_REUSE_PASSES: usize = 2;
