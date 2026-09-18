@@ -1069,15 +1069,12 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
         }
     };
     let outer_policy = seed_family.outer_derivative_policy(seed_blocks, options);
-    // The driver declares an analytic outer Hessian exactly when the one predicate
-    // that withholds it finds nothing, over the options every evaluation and the
-    // certified fit run with (#2677).
-    let analytic_outer_hessian_available = crate::custom_family::custom_family_outer_hessian_absence(
-        seed_family,
-        seed_blocks,
-        &crate::outer_subsample::exact_outer_options(options),
-    )
-    .is_none();
+    // The chart axes are family-owned hyper axes. The evaluator's exact outer
+    // Hessian reads their coefficient drift through an owned exact-ψ workspace
+    // (`build_psi_drift_deriv_callback`), which neither latent family serves, so a
+    // Hessian request refuses every trial point. The route searches first-order
+    // until the chart axes have that workspace (#2677).
+    let analytic_outer_hessian_available = false;
     let kappa_options = gam_terms::smooth::SpatialLengthScaleOptimizationOptions {
         enabled: false,
         ..Default::default()
@@ -1126,6 +1123,13 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
             promote_pending_seed(&blocks);
             let rho = theta.slice(s![..rho_dim]).to_owned();
             let hyper_layout = family_hyper_layout(&blocks, theta)?;
+            // No exact outer Hessian along the chart axes (see above): ask for the gradient.
+            let eval_mode = match eval_mode {
+                gam_problem::EvalMode::ValueGradientHessian => {
+                    gam_problem::EvalMode::ValueAndGradient
+                }
+                other => other,
+            };
             let eval_options = crate::outer_subsample::exact_outer_options(options);
             let (first_iterate, candidates) =
                 exact_mode_branch

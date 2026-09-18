@@ -1090,35 +1090,34 @@
         use crate::custom_family::custom_family_outer_derivatives;
         use gam_problem::{DeclaredHessianForm, Derivative};
 
-        // Both latent families arm the Jeffreys term and neither implements the
-        // third information derivative. An armed term's exact outer Hessian needs
-        // that derivative (the mode-response completion and the mixed H_Φ drift),
-        // so since 98f431392 the planner declares no Hessian for them at any n,
-        // and the fit searches first-order instead of refusing every trial point.
+        // Both latent families arm the Jeffreys term. An armed term's exact outer
+        // Hessian needs the third information derivative (the mode-response
+        // completion and the mixed H_Φ drift), and since 98f431392 the planner
+        // declares no Hessian without it. Since e56f1f1dab both families supply it
+        // (#2677), so the planner declares the Hessian at any n and records no
+        // absence. The same families with that derivative withheld still get none.
         let options = BlockwiseFitOptions::default();
         let large_n = 50_001;
 
         let survival = learnable_sigma_test_family();
         assert!(survival.joint_jeffreys_term_required());
-        assert!(survival.jeffreys_third_information_derivative().is_none());
+        assert!(survival.jeffreys_third_information_derivative().is_some());
         let survival_specs =
             latent_test_specs(large_n, &[("time", 2), ("mean", 2), ("log_sigma", 1)]);
         let (surv_grad, surv_hess) =
             custom_family_outer_derivatives(&survival, &survival_specs, &options);
         assert_eq!(surv_grad, Derivative::Analytic);
-        assert_eq!(surv_hess, DeclaredHessianForm::Unavailable);
+        assert_eq!(surv_hess, DeclaredHessianForm::Either);
 
         let binary = fixed_sigma_binary_test_family();
         assert!(binary.joint_jeffreys_term_required());
-        assert!(binary.jeffreys_third_information_derivative().is_none());
+        assert!(binary.jeffreys_third_information_derivative().is_some());
         let binary_specs = latent_test_specs(large_n, &[("time", 2), ("mean", 2)]);
         let (bin_grad, bin_hess) =
             custom_family_outer_derivatives(&binary, &binary_specs, &options);
         assert_eq!(bin_grad, Derivative::Analytic);
-        assert_eq!(bin_hess, DeclaredHessianForm::Unavailable);
+        assert_eq!(bin_hess, DeclaredHessianForm::Either);
 
-        // #2677: a fit of either family that selects rho publishes no smoothing correction, and
-        // the reason it records is the armed Jeffreys term without its third derivative.
         for absence in [
             crate::custom_family::custom_family_outer_hessian_absence(
                 &survival,
@@ -1127,6 +1126,63 @@
             ),
             crate::custom_family::custom_family_outer_hessian_absence(
                 &binary,
+                &binary_specs,
+                &options,
+            ),
+        ] {
+            assert_eq!(absence, None);
+        }
+
+        /// A family with its third information derivative withheld and every
+        /// other planner input read from the family it wraps.
+        #[derive(Clone)]
+        struct WithoutThirdInformationDerivative<F>(F);
+        impl<F: CustomFamily + Clone> CustomFamily for WithoutThirdInformationDerivative<F> {
+            fn evaluate(
+                &self,
+                block_states: &[ParameterBlockState],
+            ) -> Result<FamilyEvaluation, String> {
+                self.0.evaluate(block_states)
+            }
+
+            fn joint_jeffreys_term_required(&self) -> bool {
+                self.0.joint_jeffreys_term_required()
+            }
+
+            fn jeffreys_third_information_derivative(
+                &self,
+            ) -> Option<&dyn crate::custom_family::JeffreysThirdInformationDerivative> {
+                None
+            }
+
+            fn exact_newton_outerobjective(&self) -> gam_problem::ExactNewtonOuterObjective {
+                self.0.exact_newton_outerobjective()
+            }
+
+            fn outer_derivative_policy(
+                &self,
+                specs: &[ParameterBlockSpec],
+                options: &BlockwiseFitOptions,
+            ) -> crate::custom_family::OuterDerivativePolicy {
+                self.0.outer_derivative_policy(specs, options)
+            }
+        }
+        let withheld_survival = WithoutThirdInformationDerivative(survival.clone());
+        let withheld_binary = WithoutThirdInformationDerivative(binary.clone());
+        let (_, withheld_survival_hess) =
+            custom_family_outer_derivatives(&withheld_survival, &survival_specs, &options);
+        let (_, withheld_binary_hess) =
+            custom_family_outer_derivatives(&withheld_binary, &binary_specs, &options);
+        assert_eq!(withheld_survival_hess, DeclaredHessianForm::Unavailable);
+        assert_eq!(withheld_binary_hess, DeclaredHessianForm::Unavailable);
+        for absence in [
+            crate::custom_family::custom_family_outer_hessian_absence(
+                &withheld_survival,
+                &survival_specs,
+                &options,
+            ),
+            crate::custom_family::custom_family_outer_hessian_absence(
+                &withheld_binary,
                 &binary_specs,
                 &options,
             ),
