@@ -49,12 +49,12 @@ impl ExactAPencilMetric for DensePencilMetric {
         Ok(self.substituted.dot(&v))
     }
 
-    fn lower_solve(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String> {
-        Ok(gam_linalg::triangular::forward_substitution_lower_vector(&self.lower, v))
+    fn lower_solve(&self, v: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+        Ok(gam_linalg::triangular::forward_substitution_lower_matrix(&self.lower, v))
     }
 
-    fn lower_transpose_solve(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String> {
-        Ok(gam_linalg::triangular::back_substitution_lower_transpose(&self.lower, v))
+    fn lower_transpose_solve(&self, v: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+        Ok(gam_linalg::triangular::back_substitution_lower_transpose_matrix(&self.lower, v))
     }
 
     fn log_det(&self) -> Result<f64, String> {
@@ -758,7 +758,10 @@ fn the_prepared_metric_factors_the_metric_it_applies_2933() {
         let dim = prepared.dim();
         let mut dense = Array2::<f64>::zeros((dim, dim));
         let mut substituted = Array2::<f64>::zeros((dim, dim));
-        let mut whitened = Array2::<f64>::zeros((dim, dim));
+        let half = prepared
+            .lower_transpose_solve(Array2::<f64>::eye(dim).view())
+            .expect("transpose triangular solve");
+        let mut image = Array2::<f64>::zeros((dim, dim));
         let mut unit = Array1::<f64>::zeros(dim);
         for column in 0..dim {
             unit[column] = 1.0;
@@ -768,15 +771,12 @@ fn the_prepared_metric_factors_the_metric_it_applies_2933() {
             substituted
                 .column_mut(column)
                 .assign(&prepared.substituted_image(unit.view()).expect("substituted image"));
-            let half = prepared
-                .lower_transpose_solve(unit.view())
-                .expect("transpose triangular solve");
-            let image = prepared.apply(half.view()).expect("metric apply");
-            whitened
+            image
                 .column_mut(column)
-                .assign(&prepared.lower_solve(image.view()).expect("triangular solve"));
+                .assign(&prepared.apply(half.column(column)).expect("metric apply"));
             unit[column] = 0.0;
         }
+        let whitened = prepared.lower_solve(image.view()).expect("triangular solve");
         let identity_error = (&whitened - &Array2::<f64>::eye(dim))
             .iter()
             .fold(0.0_f64, |m, x| m.max(x.abs()));
@@ -809,6 +809,111 @@ fn the_prepared_metric_factors_the_metric_it_applies_2933() {
             substitution_error <= f64::EPSILON.sqrt() * scale,
             "{label}: the substituted image must be Φ − B_raw, max error {substitution_error:.3e} \
              against scale {scale:.3e}"
+        );
+
+        // #2933 F36/F39: the whitening solves a whole block of right-hand sides at once, so
+        // its sums run in another order than one column at a time, and the result is compared
+        // to rounding, not to the bit. A triangular solve is exact for `L + ΔL`,
+        // `|ΔL| ≤ γ_n|L|` (Higham, Thm 8.5), so each side of one whitening moves `Ã = L⁻¹AL⁻ᵀ`
+        // by at most `γ_n·cond(L)·‖Ã‖₂`, with `cond(L) = ‖|L⁻¹||L|‖ ≤ n·κ₂(Φ)^½`. Two sides
+        // of two whitenings give `4γ_n·n·κ₂(Φ)^½·‖Ã‖₂`.
+        let operator = {
+            let pulled_back = embedding.t().dot(&raw).dot(&embedding);
+            (&pulled_back + &pulled_back.t()) * 0.5
+        };
+        let unit_roundoff = 0.5 * f64::EPSILON;
+        let gamma = dim as f64 * unit_roundoff / (1.0 - dim as f64 * unit_roundoff);
+        let condition = values[dim - 1] / values[0];
+        let solve_band = |whitened_norm: f64| {
+            4.0 * gamma * dim as f64 * condition.sqrt() * whitened_norm
+        };
+        let block = prepared
+            .lower_solve(
+                prepared
+                    .lower_solve(operator.view())
+                    .expect("block triangular solve")
+                    .t(),
+            )
+            .expect("block triangular solve");
+        let columnwise = |rhs: ArrayView2<'_, f64>| -> Array2<f64> {
+            let mut out = Array2::<f64>::zeros(rhs.raw_dim());
+            for column in 0..rhs.ncols() {
+                out.column_mut(column).assign(
+                    &prepared
+                        .lower_solve(rhs.slice(s![.., column..column + 1]))
+                        .expect("one-column triangular solve")
+                        .column(0),
+                );
+            }
+            out
+        };
+        let by_columns = columnwise(columnwise(operator.view()).t());
+        let symmetrized = (&block + &block.t()) * 0.5;
+        let (block_spectrum, _) = symmetrized.eigh(Side::Lower).expect("whitened eigendecomposition");
+        let whitened_norm = block_spectrum.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        assert!(
+            whitened_norm > 0.0,
+            "{label}: non-vacuity, the pulled-back majorizer must whiten to a nonzero operator"
+        );
+        let order_error = (&block - &by_columns).iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        eprintln!(
+            "[2933-F39] {label}: dim={dim} κ₂(Φ)={condition:.3e} ‖Ã‖₂={whitened_norm:.3e}: block vs \
+             column max error {order_error:.3e}, band {:.3e}",
+            solve_band(whitened_norm)
+        );
+        assert!(
+            order_error <= solve_band(whitened_norm),
+            "{label}: the block whitening must be the column-by-column whitening to rounding: \
+             max error {order_error:.3e} against the band {:.3e}",
+            solve_band(whitened_norm)
+        );
+
+        // The pencil spectrum against an independent whitening by the dense Cholesky factor of
+        // the applied `Φ`. A factor with `L⁻¹ΦL⁻ᵀ = I + F` whitens the pencil of `L·Lᵀ`, whose
+        // eigenvalues lie within a factor `[1/(1+‖F‖), 1/(1−‖F‖)]` of the pencil `(A, Φ)`'s
+        // (Ostrowski), so each factor contributes `‖F‖/(1−‖F‖)·|λᵢ|` and its solves the band above.
+        use gam_linalg::faer_ndarray::FaerCholesky;
+        use gam_linalg::triangular::forward_substitution_lower_matrix;
+        let symmetric_metric = (&dense + &dense.t()) * 0.5;
+        let reference_lower = symmetric_metric
+            .cholesky(Side::Lower)
+            .expect("dense Cholesky of the applied metric")
+            .lower_triangular();
+        let reference_whiten = |matrix: &Array2<f64>| {
+            forward_substitution_lower_matrix(
+                &reference_lower,
+                forward_substitution_lower_matrix(&reference_lower, matrix).t(),
+            )
+        };
+        let frobenius = |matrix: &Array2<f64>| matrix.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let block_residual = frobenius(&(&whitened - &Array2::<f64>::eye(dim)));
+        let reference_residual =
+            frobenius(&(&reference_whiten(&symmetric_metric) - &Array2::<f64>::eye(dim)));
+        let reference = reference_whiten(&operator);
+        let (reference_spectrum, _) = ((&reference + &reference.t()) * 0.5)
+            .eigh(Side::Lower)
+            .expect("reference whitened eigendecomposition");
+        let mut worst = (0.0_f64, 0);
+        for index in 0..dim {
+            let (ours, theirs) = (block_spectrum[index], reference_spectrum[index]);
+            let band = block_residual / (1.0 - block_residual) * ours.abs()
+                + reference_residual / (1.0 - reference_residual) * theirs.abs()
+                + solve_band(whitened_norm);
+            if (ours - theirs).abs() / band > worst.0 {
+                worst = ((ours - theirs).abs() / band, index);
+            }
+            assert!(
+                (ours - theirs).abs() <= band,
+                "{label}: pencil eigenvalue {index} of the block whitening {ours:.12e} is not the \
+                 dense metric's {theirs:.12e} within the band {band:.3e} (residuals ‖F‖ = \
+                 {block_residual:.3e}, {reference_residual:.3e})"
+            );
+        }
+        eprintln!(
+            "[2933-F39] {label}: residuals ‖F‖ = {block_residual:.3e} (block), \
+             {reference_residual:.3e} (dense); worst eigenvalue deviation {:.3e} of its band at \
+             index {}",
+            worst.0, worst.1
         );
     }
 }

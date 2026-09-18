@@ -167,8 +167,8 @@ pub(crate) fn exact_a_pencil_decompositions_on_this_thread() -> u64 {
 /// #2933 F07).
 ///
 /// The whitening `L⁻¹AL⁻ᵀ` is built from the metric's own Cholesky factor `Φ = LLᵀ`,
-/// applied one vector at a time, so a metric carried as a structured factorization is
-/// never materialized as a second `dim × dim` block.
+/// applied to a block of right-hand sides at once, so a metric carried as a structured
+/// factorization is never materialized as a second `dim × dim` block.
 pub(crate) trait ExactAPencilMetric {
     fn dim(&self) -> usize;
     /// `Φv`.
@@ -176,10 +176,10 @@ pub(crate) trait ExactAPencilMetric {
     /// `(Φ − B_raw)v`: the stiffness the evidence factor substituted where the
     /// majorizer has no resolved curvature.
     fn substituted_image(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String>;
-    /// `L⁻¹v`.
-    fn lower_solve(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String>;
-    /// `L⁻ᵀv`.
-    fn lower_transpose_solve(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String>;
+    /// `L⁻¹V`, one right-hand side per column.
+    fn lower_solve(&self, v: ArrayView2<'_, f64>) -> Result<Array2<f64>, String>;
+    /// `L⁻ᵀV`, one right-hand side per column.
+    fn lower_transpose_solve(&self, v: ArrayView2<'_, f64>) -> Result<Array2<f64>, String>;
     /// `log|Φ|`.
     fn log_det(&self) -> Result<f64, String>;
     /// `‖Φ‖_F`, read off the metric's own entries rather than `dim` applies (#2267).
@@ -225,8 +225,11 @@ impl<'a> ArrowMetric<'a> {
     ///       [ CᵀL_t⁻ᵀ    L_b ]
     /// ```
     ///
-    /// so `L⁻¹` and `L⁻ᵀ` cost row triangular solves, one border apply and one border
-    /// triangular solve. On the joint layout `L_b` is the cache's reduced-Schur factor
+    /// `CᵀL_t⁻ᵀ` is formed here once, from one transpose apply per latent coordinate of the
+    /// row cross blocks, so `L⁻¹` and `L⁻ᵀ` on a block of right-hand sides cost row
+    /// triangular solves, one product with that block and one border triangular solve. Each
+    /// right-hand side used to pay every row's cross-block apply itself, 3·dim times per
+    /// whitening (#2933 F36/F39). On the joint layout `L_b` is the cache's reduced-Schur factor
     /// `L_S`. A lift pulls the border back, `C → C·lift`, and the lifted Schur complement is
     /// `liftᵀ·L_S L_Sᵀ·lift`, one `r × r` Gram of `L_Sᵀ·lift` factored here.
     pub(crate) fn prepare(self) -> Result<PreparedArrowMetric<'a>, String> {
@@ -253,8 +256,13 @@ impl<'a> ArrowMetric<'a> {
                         .to_string(),
                 );
             }
+            // The products and blocked solves below read whole blocks, so the factor is carried
+            // as its lower triangle alone.
+            let schur_lower = Array2::from_shape_fn((k, k), |(row, column)| {
+                if row >= column { schur[[row, column]] } else { 0.0 }
+            });
             match lift {
-                None => schur.clone(),
+                None => schur_lower,
                 Some(lift) => {
                     if lift.nrows() != k {
                         return Err(format!(
@@ -262,18 +270,8 @@ impl<'a> ArrowMetric<'a> {
                             lift.nrows()
                         ));
                     }
-                    let width = lift.ncols();
-                    let mut factor_image = Array2::<f64>::zeros((k, width));
-                    for column in 0..width {
-                        for row in 0..k {
-                            let mut acc = 0.0_f64;
-                            for below in row..k {
-                                acc += schur[[below, row]] * lift[[below, column]];
-                            }
-                            factor_image[[row, column]] = acc;
-                        }
-                    }
-                    let gram = factor_image.t().dot(&factor_image);
+                    let factor_image = sequential_transpose_product(&schur_lower, lift);
+                    let gram = sequential_transpose_product(&factor_image, &factor_image);
                     gam_linalg::triangular::cholesky_factor_in_place(
                         gram.view(),
                         gam_linalg::triangular::CholeskyGuard::FiniteStrict,
@@ -286,12 +284,89 @@ impl<'a> ArrowMetric<'a> {
                 }
             }
         };
+        // Row `i`'s block of `CᵀL_t⁻ᵀ` is `(L_i⁻¹ H_tβ^(i))ᵀ`, and row `c` of `H_tβ^(i)` is
+        // `H_βt^(i)e_c`.
+        let total_t = cache.delta_t_len();
+        let mut cross = Array2::<f64>::zeros((k, total_t));
+        if k > 0 {
+            let mut image = Array1::<f64>::zeros(k);
+            for row in 0..cache.n_rows() {
+                let q = cache.row_dims[row];
+                let base = cache.row_offsets[row];
+                let mut row_cross = Array2::<f64>::zeros((q, k));
+                let mut unit = Array1::<f64>::zeros(q);
+                for coordinate in 0..q {
+                    unit[coordinate] = 1.0;
+                    image.fill(0.0);
+                    if !cache.apply_htbeta_row_transpose(row, unit.view(), &mut image, None) {
+                        return Err(format!("ArrowMetric::prepare: H_βt^({row}) apply failed"));
+                    }
+                    row_cross.row_mut(coordinate).assign(&image);
+                    unit[coordinate] = 0.0;
+                }
+                let solved = gam_linalg::triangular::forward_substitution_lower_matrix(
+                    cache.undamped_factor(row),
+                    row_cross.view(),
+                );
+                cross.slice_mut(s![.., base..base + q]).assign(&solved.t());
+            }
+        }
+        let cross = match lift {
+            None => cross,
+            Some(lift) => sequential_transpose_product(lift, &cross),
+        };
         Ok(PreparedArrowMetric {
             cache,
             lift,
             border_lower,
+            cross,
         })
     }
+}
+
+/// `AᵀB` by faer's GEMM at [`gam_linalg::faer_ndarray::decomposition_parallelism`], so the
+/// whitening's words do not depend on the pool width, as a factorization's do not.
+fn sequential_transpose_product<S1, S2>(
+    a: &ndarray::ArrayBase<S1, ndarray::Ix2>,
+    b: &ndarray::ArrayBase<S2, ndarray::Ix2>,
+) -> Array2<f64>
+where
+    S1: ndarray::Data<Elem = f64>,
+    S2: ndarray::Data<Elem = f64>,
+{
+    gam_linalg::faer_ndarray::fast_atb_with_parallelism(
+        a,
+        b,
+        gam_linalg::faer_ndarray::decomposition_parallelism(),
+    )
+}
+
+/// `L⁻¹B`, or `L⁻ᵀB` when `transpose`, by faer's blocked triangular solve over every
+/// right-hand side at once, at the same parallelism as [`sequential_transpose_product`].
+/// gam-linalg's `triangular` owner substitutes one right-hand side at a time in a scalar
+/// loop, the cost the whitening's border paid per direction (#2933 F36/F39).
+fn solve_lower_triangular_block(
+    lower: ArrayView2<'_, f64>,
+    mut rhs: Array2<f64>,
+    transpose: bool,
+) -> Array2<f64> {
+    let factor = gam_linalg::faer_ndarray::FaerArrayView::new(&lower);
+    let solution = gam_linalg::faer_ndarray::array2_to_matmut(&mut rhs);
+    let parallelism = gam_linalg::faer_ndarray::decomposition_parallelism();
+    if transpose {
+        faer::linalg::triangular_solve::solve_upper_triangular_in_place(
+            factor.as_ref().transpose(),
+            solution,
+            parallelism,
+        );
+    } else {
+        faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+            factor.as_ref(),
+            solution,
+            parallelism,
+        );
+    }
+    rhs
 }
 
 /// `Φ` with its border Cholesky factor resolved; see [`ArrowMetric::prepare`].
@@ -299,6 +374,8 @@ pub(crate) struct PreparedArrowMetric<'a> {
     cache: &'a ArrowFactorCache,
     lift: Option<&'a Array2<f64>>,
     border_lower: Array2<f64>,
+    /// `CᵀL_t⁻ᵀ`, the factor's lower-left block, in the metric's border coordinates.
+    cross: Array2<f64>,
 }
 
 impl PreparedArrowMetric<'_> {
@@ -361,80 +438,51 @@ impl ExactAPencilMetric for PreparedArrowMetric<'_> {
         Ok(out)
     }
 
-    fn lower_solve(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String> {
-        let total_t = self.split_len(v.len(), "lower_solve")?;
+    fn lower_solve(&self, v: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+        let total_t = self.split_len(v.nrows(), "lower_solve")?;
         let cache = self.cache;
-        let k = cache.k;
-        let mut out = Array1::<f64>::zeros(v.len());
-        // `CᵀT⁻¹v_t` in the cache's border layout.
-        let mut coupled = Array1::<f64>::zeros(k);
+        let mut out = Array2::<f64>::zeros(v.raw_dim());
         for row in 0..cache.n_rows() {
-            let q = cache.row_dims[row];
-            let base = cache.row_offsets[row];
-            let factor = cache.undamped_factor(row);
-            let half = gam_linalg::triangular::forward_substitution_lower_vector(
-                factor,
-                v.slice(s![base..base + q]),
+            let rows = cache.row_offsets[row]..cache.row_offsets[row] + cache.row_dims[row];
+            out.slice_mut(s![rows.clone(), ..]).assign(
+                &gam_linalg::triangular::forward_substitution_lower_matrix(
+                    cache.undamped_factor(row),
+                    v.slice(s![rows, ..]),
+                ),
             );
-            if k > 0 {
-                let solved =
-                    gam_linalg::triangular::back_substitution_lower_transpose(factor, half.view());
-                if !cache.apply_htbeta_row_transpose(row, solved.view(), &mut coupled, None) {
-                    return Err(format!("ArrowMetric::lower_solve: H_βt^({row}) apply failed"));
-                }
-            }
-            out.slice_mut(s![base..base + q]).assign(&half);
         }
         if self.border_width() > 0 {
-            let border_rhs = match self.lift {
-                None => &v.slice(s![total_t..]) - &coupled,
-                Some(lift) => &v.slice(s![total_t..]) - &lift.t().dot(&coupled),
-            };
-            let half = gam_linalg::triangular::forward_substitution_lower_vector(
-                self.border_lower.view(),
-                border_rhs.view(),
-            );
-            out.slice_mut(s![total_t..]).assign(&half);
+            let coupled = sequential_transpose_product(&self.cross.t(), &out.slice(s![..total_t, ..]));
+            let border_rhs = &v.slice(s![total_t.., ..]) - &coupled;
+            out.slice_mut(s![total_t.., ..])
+                .assign(&solve_lower_triangular_block(self.border_lower.view(), border_rhs, false));
         }
         Ok(out)
     }
 
-    fn lower_transpose_solve(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String> {
-        let total_t = self.split_len(v.len(), "lower_transpose_solve")?;
+    fn lower_transpose_solve(&self, v: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+        let total_t = self.split_len(v.nrows(), "lower_transpose_solve")?;
         let cache = self.cache;
-        let k = cache.k;
-        let mut out = Array1::<f64>::zeros(v.len());
-        let border = if self.border_width() > 0 {
-            gam_linalg::triangular::back_substitution_lower_transpose(
+        let mut out = Array2::<f64>::zeros(v.raw_dim());
+        let mut latent_rhs = v.slice(s![..total_t, ..]).to_owned();
+        if self.border_width() > 0 {
+            let border = solve_lower_triangular_block(
                 self.border_lower.view(),
-                v.slice(s![total_t..]),
-            )
-        } else {
-            Array1::<f64>::zeros(0)
-        };
-        // The border solution in the cache's border layout.
-        let border_in_cache = match self.lift {
-            None => border.clone(),
-            Some(lift) => lift.dot(&border),
-        };
-        for row in 0..cache.n_rows() {
-            let q = cache.row_dims[row];
-            let base = cache.row_offsets[row];
-            let factor = cache.undamped_factor(row);
-            let mut rhs = v.slice(s![base..base + q]).to_owned();
-            if k > 0 {
-                let mut coupled = Array1::<f64>::zeros(q);
-                if !cache.apply_htbeta_row(row, border_in_cache.view(), &mut coupled) {
-                    return Err(format!(
-                        "ArrowMetric::lower_transpose_solve: H_tβ^({row}) apply failed"
-                    ));
-                }
-                rhs -= &gam_linalg::triangular::forward_substitution_lower_vector(factor, coupled.view());
-            }
-            let solved = gam_linalg::triangular::back_substitution_lower_transpose(factor, rhs.view());
-            out.slice_mut(s![base..base + q]).assign(&solved);
+                v.slice(s![total_t.., ..]).to_owned(),
+                true,
+            );
+            latent_rhs -= &sequential_transpose_product(&self.cross, &border);
+            out.slice_mut(s![total_t.., ..]).assign(&border);
         }
-        out.slice_mut(s![total_t..]).assign(&border);
+        for row in 0..cache.n_rows() {
+            let rows = cache.row_offsets[row]..cache.row_offsets[row] + cache.row_dims[row];
+            out.slice_mut(s![rows.clone(), ..]).assign(
+                &gam_linalg::triangular::back_substitution_lower_transpose_matrix(
+                    cache.undamped_factor(row),
+                    latent_rhs.slice(s![rows, ..]),
+                ),
+            );
+        }
         Ok(out)
     }
 
@@ -4849,19 +4897,9 @@ impl SaeManifoldTerm {
         }
         // #2267 — the other half of the split; see `materialize_exact_hessian_dense`.
         let eigh_started = std::time::Instant::now();
-        // `L⁻¹A` column by column; `A` is symmetric, so `L⁻¹` on the columns of its
-        // transpose is `L⁻¹AL⁻ᵀ`.
-        let mut half = Array2::<f64>::zeros((dimension, dimension));
-        for column in 0..dimension {
-            half.column_mut(column)
-                .assign(&metric.lower_solve(operator.column(column))?);
-        }
-        let mut whitened = Array2::<f64>::zeros((dimension, dimension));
-        for column in 0..dimension {
-            whitened
-                .column_mut(column)
-                .assign(&metric.lower_solve(half.row(column))?);
-        }
+        // `L⁻¹A`; `A` is symmetric, so `L⁻¹` on the columns of its transpose is `L⁻¹AL⁻ᵀ`.
+        let half = metric.lower_solve(operator.view())?;
+        let mut whitened = metric.lower_solve(half.t())?;
         drop(half);
         for row in 0..dimension {
             for column in (row + 1)..dimension {
@@ -4874,12 +4912,7 @@ impl SaeManifoldTerm {
             .eigh(Side::Lower)
             .map_err(|error| format!("exact_hessian_spectral_block: whitened eigh failed: {error:?}"))?;
         drop(whitened);
-        let mut eigenvectors = Array2::<f64>::zeros((dimension, dimension));
-        for column in 0..dimension {
-            eigenvectors
-                .column_mut(column)
-                .assign(&metric.lower_transpose_solve(rotation.column(column))?);
-        }
+        let mut eigenvectors = metric.lower_transpose_solve(rotation.view())?;
         drop(rotation);
         EXACT_A_PENCIL_DECOMPOSITIONS.with(|count| count.set(count.get() + 1));
         log::info!(
