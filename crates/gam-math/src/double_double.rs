@@ -82,24 +82,6 @@ impl BoundedDoubleDouble {
         }
     }
 
-    /// `ab` through [`two_product`], within `η/2`.
-    pub(crate) fn product(a: f64, b: f64) -> Self {
-        Self {
-            value: two_product(a, b),
-            rounding: SMALLEST_SUBNORMAL,
-        }
-    }
-
-    pub(crate) fn negated(self) -> Self {
-        Self {
-            value: DoubleDouble {
-                high: -self.value.high,
-                low: -self.value.low,
-            },
-            rounding: self.rounding,
-        }
-    }
-
     /// `2Sum` on both words, the two carries rounded once each, renormalized by `2Sum`. Under cancellation every
     /// high-word step stays exact, so the charged rounding scales with the carries, not with the operands.
     /// `m = 7`: five rounded operations and two charged magnitudes.
@@ -120,10 +102,6 @@ impl BoundedDoubleDouble {
                 7,
             ),
         }
-    }
-
-    pub(crate) fn sub(self, other: Self) -> Self {
-        self.add(other.negated())
     }
 
     /// `2Prod` of the high word; the low word's product and the carry are rounded once each.
@@ -190,29 +168,6 @@ impl BoundedDoubleDouble {
                     + UNIT_ROUNDOFF * (remainder_high.abs() + remainder_low.abs() + remainder.abs())
                     + 2.0 * SMALLEST_SUBNORMAL)
                     / divisor.abs()
-                    + UNIT_ROUNDOFF * correction.abs()
-                    + SMALLEST_SUBNORMAL,
-                14,
-            ),
-        }
-    }
-
-    /// `s = √high`, the remainder `r = a − s²` through `2Prod`, and the correction `r/(2s)`. Requires `high > 0`.
-    /// Exactly `√a − s = r/(√a + s)`. With `√a + s ≥ s` and `|√a − s| ≤ |r|/s`, replacing `r/(√a + s)` by
-    /// `r_high/(2s)` moves it by at most `(bound_r + |r_low|)/s + |r_high|·(|r_high| + |r_low| + bound_r)/(2s³)`.
-    /// `m = 14`: thirteen rounded operations and one charged magnitude.
-    pub(crate) fn sqrt(self) -> Self {
-        let root = self.value.high.sqrt();
-        let remainder = self.sub(Self::product(root, root));
-        let correction = remainder.value.high / (2.0 * root);
-        let result = DoubleDouble::two_sum(root, correction);
-        let remainder_magnitude =
-            remainder.value.high.abs() + remainder.value.low.abs() + remainder.rounding;
-        Self {
-            value: result,
-            rounding: inflated(
-                (remainder.rounding + remainder.value.low.abs()) / root
-                    + remainder.value.high.abs() * remainder_magnitude / (2.0 * root * root * root)
                     + UNIT_ROUNDOFF * correction.abs()
                     + SMALLEST_SUBNORMAL,
                 14,
@@ -309,4 +264,59 @@ pub(crate) fn accurate_sum(parts: &mut [f64], products: usize) -> (f64, f64) {
     let error = (unit * res.abs() + gamma * gamma * magnitude_bound + 5.0 * SMALLEST_SUBNORMAL * products as f64)
         / (1.0 - unit);
     (res, inflated(error, 6))
+}
+
+/// The bounded operations only the proofs read: `probability::normal_table`'s certified Taylor models and the
+/// test oracles, since the table route replaced the production series that used them.
+#[cfg(test)]
+mod test_support {
+    use super::{BoundedDoubleDouble, DoubleDouble, SMALLEST_SUBNORMAL, two_product};
+    use crate::roundoff::{UNIT_ROUNDOFF, inflated};
+
+    impl BoundedDoubleDouble {
+        /// `ab` through [`two_product`], within `η/2`.
+        pub(crate) fn product(a: f64, b: f64) -> Self {
+            Self {
+                value: two_product(a, b),
+                rounding: SMALLEST_SUBNORMAL,
+            }
+        }
+
+        pub(crate) fn negated(self) -> Self {
+            Self {
+                value: DoubleDouble {
+                    high: -self.value.high,
+                    low: -self.value.low,
+                },
+                rounding: self.rounding,
+            }
+        }
+
+        pub(crate) fn sub(self, other: Self) -> Self {
+            self.add(other.negated())
+        }
+
+        /// `s = √high`, the remainder `r = a − s²` through `2Prod`, and the correction `r/(2s)`. Requires `high > 0`.
+        /// Exactly `√a − s = r/(√a + s)`. With `√a + s ≥ s` and `|√a − s| ≤ |r|/s`, replacing `r/(√a + s)` by
+        /// `r_high/(2s)` moves it by at most `(bound_r + |r_low|)/s + |r_high|·(|r_high| + |r_low| + bound_r)/(2s³)`.
+        /// `m = 14`: thirteen rounded operations and one charged magnitude.
+        pub(crate) fn sqrt(self) -> Self {
+            let root = self.value.high.sqrt();
+            let remainder = self.sub(Self::product(root, root));
+            let correction = remainder.value.high / (2.0 * root);
+            let result = DoubleDouble::two_sum(root, correction);
+            let remainder_magnitude =
+                remainder.value.high.abs() + remainder.value.low.abs() + remainder.rounding;
+            Self {
+                value: result,
+                rounding: inflated(
+                    (remainder.rounding + remainder.value.low.abs()) / root
+                        + remainder.value.high.abs() * remainder_magnitude / (2.0 * root * root * root)
+                        + UNIT_ROUNDOFF * correction.abs()
+                        + SMALLEST_SUBNORMAL,
+                    14,
+                ),
+            }
+        }
+    }
 }

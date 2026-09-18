@@ -1159,5 +1159,31 @@
     ],
     "reason": "#2627: pyffi's parse_manifold_kind was a second reader of the manifold descriptor contract after d4d72f5b6a gave it one reader and one emitter in gam-geometry (ManifoldSpec::from_descriptor / ManifoldSpec::descriptor). The seven manifold FFI entry points in manifold_and_posterior_ffi.rs (riemannian_gradient_step, manifold_exp_map, manifold_exp_map_vjp, manifold_log_map, manifold_metric_tensor, manifold_dimension, manifold_ambient_dimension) now call ManifoldSpec::from_descriptor, which accepts the same aliases (kind/type; Euclidean dim/d; sphere intrinsic_dim/n/dim; torus dim/d; product parts/components) and makes the same positive-dimension and k <= n refusals. So the copy and its only helper, json_positive_u64_to_usize (a private fn whose only callers were inside parse_manifold_kind), are deleted. The same-named private fn in crates/gam-models/src/fit_orchestration/descriptors.rs is a separate item and is unchanged.",
     "evidence": "The item list is the refusal of scripts/source_removal_guard.py in gx10 job 1244810 (base 3fc705bacf, exact tree d862445736, patch md5 5a5bdd91; RC_CHECK 0, RC_PYFFI 0, RC_PUBLIC_API 0): json_positive_u64_to_usize (public false, test_scoped false) and parse_manifold_kind (public false, test_scoped false). With this entry, gate8 dy5 run lc-deleg-p1 (log direct-dy5-lc-deleg-p1.log; base 818e73cfbf, exact tree d83d27f5d1, patch md5 8956c530) reports 'Source-removal guard verified 244 -> 242 Rust items; 2 guarded removals', RC_SOURCE_REMOVAL 0, RC_CHECK 0, RC_PYFFI 0, RC_PUBLIC_API 0, DONE_SENTINEL_0. At 98aa9d3e7d, git grep -n -w finds parse_manifold_kind only in manifold_and_posterior_ffi.rs: its declaration (:2038), its recursive call in the product arm (:2142) and the seven FFI calls (:2166, :2210, :2261, :2314, :2353, :2376, :2388). It finds json_positive_u64_to_usize there 9 times: the declaration (:1498) and 8 calls inside parse_manifold_kind. In the landing tree both names have 0 hits under crates/gam-pyffi. The replacement reader is covered by gam-geometry manifold::descriptor_tests (3 of 3 pass in gx10 job 1212158) and by pytest in sw0y job 1219873 (9 passed: tests/torch/test_riemannian_gradient_descent_optimizer.py and tests/test_pyffi_panic_free.py, against the release extension built from this patch at c9e5a6c8cd)."
+  },
+  {
+    "base": "207031f13beb9b70770749066cf5c377272e544e",
+    "items": [
+      "crates/gam-math/src/probability.rs:const:INV_SQRT_2PI",
+      "crates/gam-math/src/probability.rs:const:MILLS_TAYLOR_CENTERS_PER_UNIT",
+      "crates/gam-math/src/probability.rs:const:MILLS_TAYLOR_CENTER_COUNT",
+      "crates/gam-math/src/probability.rs:const:MILLS_TAYLOR_REACH",
+      "crates/gam-math/src/probability.rs:const:MILLS_TAYLOR_TERMS",
+      "crates/gam-math/src/probability.rs:fn:alternating_taylor_sum",
+      "crates/gam-math/src/probability.rs:fn:build",
+      "crates/gam-math/src/probability.rs:fn:laplace_enclosures_hold_the_deep_fraction_and_a_short_tail_end_does_not",
+      "crates/gam-math/src/probability.rs:fn:mills_correction_chains",
+      "crates/gam-math/src/probability.rs:fn:mills_correction_enclosure",
+      "crates/gam-math/src/probability.rs:fn:mills_moments",
+      "crates/gam-math/src/probability.rs:fn:mills_ratio_series",
+      "crates/gam-math/src/probability.rs:fn:mills_taylor_table_reproduces_the_double_double_series_within_both_bounds",
+      "crates/gam-math/src/probability.rs:fn:positive_series",
+      "crates/gam-math/src/probability.rs:fn:ratios",
+      "crates/gam-math/src/probability.rs:static:MILLS_TAYLOR_TABLE",
+      "crates/gam-math/src/probability.rs:struct:MillsCorrectionEnclosure",
+      "crates/gam-math/src/probability.rs:struct:MillsTaylorCenter",
+      "crates/gam-math/src/probability.rs:struct:MillsTaylorTable"
+    ],
+    "reason": "#2946/#2928 (T1 and T2a under the one-Mills-owner ruling, landed by gam-2928 for fr-kernel). Each identity against what covers it now: (1) const INV_SQRT_2PI: the one declaration in normal_density_parts (NormalDensityParts), which normal_pdf and normal_pdf_bounded now share. (2) The on-line Taylor table of R and N on (-4, 0]: const MILLS_TAYLOR_CENTERS_PER_UNIT, MILLS_TAYLOR_CENTER_COUNT, MILLS_TAYLOR_REACH, MILLS_TAYLOR_TERMS, static MILLS_TAYLOR_TABLE, struct MillsTaylorCenter, struct MillsTaylorTable and its fn build and fn ratios, fn mills_moments and fn alternating_taylor_sum: normal_left_tail_ratios now reads R = normal_table::scaled_tail(t)/INV_SQRT_2PI with bound (NORMAL_SCALED_TAIL_RELATIVE_ERROR 4.0e-16 + 1.57u) x R, and N = normal_table::positive_part_ratio(t) with bound POSITIVE_PART_RATIO_RELATIVE_ERROR 8.0e-16 x N, from Q's 16 pieces and N's own 16 pieces. (3) The Laplace continued-fraction enclosure for t >= 4: struct MillsCorrectionEnclosure, fn mills_correction_enclosure, fn mills_correction_chains: the same two table functions on [4, 8) and their reciprocal tails Q = r K(r^2), N = s K_N(s) beyond 8, under the same two constants. (4) The double-double series that certified the Taylor table, fn mills_ratio_series and fn positive_series: normal_table's test-side Taylor models of Q and N in bounded double-double, against which each piece's proof and tables_agree_with_the_certified_moments run. (5) The two tests of the removed implementation, laplace_enclosures_hold_the_deep_fraction_and_a_short_tail_end_does_not and mills_taylor_table_reproduces_the_double_double_series_within_both_bounds: scaled_tail_constant_covers_its_proof_and_is_within_twice_of_it, positive_part_ratio_constant_covers_its_proof_and_is_within_twice_of_it, tables_agree_with_the_certified_moments and normal_left_tail_ratios_read_the_tables_within_their_constants.",
+    "evidence": "source_removal_guard.py on the gate commit over main (MSI acl42, sw17 gam-2928 lane) names exactly these 19 identities (17 private production items and 2 test functions, all in crates/gam-math/src/probability.rs), and the workspace builds with them removed (root ban scanner, cargo build --workspace --lib, RC 0). gam-math suite 358+4+1 passed. Against a decimal/mpmath reference the owner's R and N sit inside their bounds at 524,079 points on [0, 38] (worst |err|/bound 0.676 and 0.553), and the proofs give 3.836e-16 for Q and 6.232e-16 for N under the published 4.0e-16 and 8.0e-16."
   }
 ]

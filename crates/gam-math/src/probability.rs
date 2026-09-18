@@ -1,7 +1,12 @@
 use libm::{erf, erfc};
-use crate::double_double::{BoundedDoubleDouble, SMALLEST_SUBNORMAL};
+use crate::double_double::SMALLEST_SUBNORMAL;
 use crate::roundoff::{UNIT_ROUNDOFF, inflated};
-use std::sync::LazyLock;
+
+mod normal_table;
+pub use normal_table::{
+    NORMAL_CDF_RELATIVE_ERROR, NORMAL_CDF_UNDERFLOW_FLOOR, NORMAL_SCALED_TAIL_RELATIVE_ERROR, normal_cdf_and_pdf,
+    normal_scaled_tail,
+};
 use statrs::function::{
     beta::{beta_reg, inv_beta_reg, ln_beta},
     gamma::gamma_ur,
@@ -279,31 +284,61 @@ fn square_residual(x: f64, rounded_square: f64) -> f64 {
     x.mul_add(x, -rounded_square)
 }
 
+/// `1/√(2π)` rounded to a double: `0.563u` from the exact value, checked at 60 digits. The density's head and the owner's
+/// `R = Q/INV_SQRT_2PI` read it.
+const INV_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
+
+/// `φ(x)`'s pieces before its fused correction: `fl(x²)`, the exponential `libm::exp(−½·fl(x²))` and the head
+/// `fl(e/√(2π))`. [`normal_pdf`] finishes them and [`normal_pdf_bounded`] bounds the same computation, so its bound
+/// covers `normal_pdf`'s value bit for bit. [`normal_cdf_and_pdf`] reuses the same exponential for `Φ`, so `φ` is
+/// computed once there and agrees with `normal_pdf` bit for bit.
+#[derive(Clone, Copy)]
+struct NormalDensityParts {
+    rounded_square: f64,
+    exponential: f64,
+    head: f64,
+}
+
+/// The libm crate's `exp` is called explicitly, not the platform's `f64::exp`, so that [`normal_pdf_bounded`]'s cited
+/// contract covers the value [`normal_pdf`] publishes.
+#[inline]
+fn normal_density_parts(x: f64) -> NormalDensityParts {
+    let rounded_square = x * x;
+    let exponential = libm::exp(-0.5 * rounded_square);
+    NormalDensityParts {
+        rounded_square,
+        exponential,
+        head: INV_SQRT_2PI * exponential,
+    }
+}
+
+/// `head·(1 − ½e)` with the exact square residual `e`, fused. Where the density underflowed or `x` was `±∞` (head
+/// `0`), or `x` was NaN, no relative correction applies, and `±∞` would feed the residual `∞ − ∞`, so the head stands.
+#[inline]
+fn finish_normal_density(x: f64, parts: NormalDensityParts) -> f64 {
+    if parts.head == 0.0 || parts.head.is_nan() {
+        return parts.head;
+    }
+    let residual = square_residual(x, parts.rounded_square);
+    parts.head.mul_add(-0.5 * residual, parts.head)
+}
+
 /// Standard normal PDF phi(x).
 ///
 /// The squared argument is carried exactly (see `square_residual`); without
 /// that, `exp(-½·fl(x*x))` degrades like `x²·ε/2` and reaches `5.7e-14`
 /// relative before `φ` underflows, against the `3.3e-16` it holds with.
+/// The exponential is `libm::exp`, so [`normal_pdf_bounded`]'s cited bound
+/// covers this value bit for bit.
 #[inline]
 pub fn normal_pdf(x: f64) -> f64 {
-    const INV_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
-    let rounded_square = x * x;
-    let head = INV_SQRT_2PI * (-0.5 * rounded_square).exp();
-    if head == 0.0 || head.is_nan() {
-        // The pdf underflowed or `x` was `±∞` (head `0`), or `x` was `NaN`.
-        // Neither admits a relative correction, and `±∞` would feed the
-        // residual an `∞ − ∞`; return the limit the plain form gives.
-        return head;
-    }
-    let residual = square_residual(x, rounded_square);
-    head.mul_add(-0.5 * residual, head)
+    finish_normal_density(x, normal_density_parts(x))
 }
 
-/// `φ(x)` computed with the libm crate's `exp`, NOT the platform's `f64::exp`, and a rigorous bound on its absolute
-/// error. [`normal_pdf`] keeps the platform exponential and carries no bound.
+/// [`normal_pdf`]`(x)` and a rigorous bound on its absolute error.
 ///
-/// The computation is [`normal_pdf`]'s: `fl(x²)` with its exact fused remainder `e` (`|e| ≤ u·x²`), the exact
-/// `−½·fl(x²)`, the exponential, the product with `1/√(2π)`, and the fused correction `head·(1 − ½e)`.
+/// The computation is `fl(x²)` with its exact fused remainder `e` (`|e| ≤ u·x²`), the exact `−½·fl(x²)`, the
+/// exponential `libm::exp`, the product with `1/√(2π)`, and the fused correction `head·(1 − ½e)`.
 /// - **The exponential** errs by less than one ulp, so by less than `2u` relative. This is a CITED contract, and it
 ///   covers `libm::exp` only: libm 0.2.16, `src/math/exp.rs:58-60`, "according to an error analysis, the error is always
 ///   less than 1 ulp", resting on the Remez bound `2**-59` at `:30`. `libm_version_matches_the_cited_error_analysis` fails
@@ -316,19 +351,17 @@ pub fn normal_pdf(x: f64) -> f64 {
 /// within that. So `φ` errs by at most `(5u + u²x⁴/8)·φ + 2η`. The charged `u·φ̂` in place of `u·φ`, and the bound's own
 /// evaluation, are absorbed by `1 + γ_{m+3}`, with `m = 11`: ten rounded operations and one charged magnitude.
 pub fn normal_pdf_bounded(x: f64) -> (f64, f64) {
-    const INV_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
-    let rounded_square = x * x;
-    let head = INV_SQRT_2PI * libm::exp(-0.5 * rounded_square);
-    if head.is_nan() {
-        return (head, head);
+    let parts = normal_density_parts(x);
+    let density = finish_normal_density(x, parts);
+    if density.is_nan() {
+        return (density, density);
     }
-    if head == 0.0 {
+    if parts.head == 0.0 {
         // The density underflowed, or the argument is infinite: the exact φ lies below η.
-        return (head, 2.0 * f64::from_bits(1));
+        return (density, 2.0 * f64::from_bits(1));
     }
-    let density = head.mul_add(-0.5 * square_residual(x, rounded_square), head);
-    let relative =
-        5.0 * UNIT_ROUNDOFF + UNIT_ROUNDOFF * UNIT_ROUNDOFF * rounded_square * rounded_square / 8.0;
+    let square = parts.rounded_square;
+    let relative = 5.0 * UNIT_ROUNDOFF + UNIT_ROUNDOFF * UNIT_ROUNDOFF * square * square / 8.0;
     (density, inflated(relative * density + 2.0 * f64::from_bits(1), 11))
 }
 
@@ -1447,13 +1480,10 @@ pub struct NormalLeftTailRatios {
 /// rigorous bound on its absolute error. No libm call enters either ratio, and every bound rests on IEEE-754 semantics.
 /// Write `t = −x`, `R = 1/λ` and `N = q/λ = 1 − t·R`.
 ///
-/// **At or below −4**, `q` comes from the Laplace continued fraction `q = 1/(t + 2/(t + 3/(…)))` for the Mills
-/// correction `λ − t`, and the entry forms `1/λ = 1/(t + q)` and `q/λ = q/(t + q)`. Its truncation and rounding are
-/// enclosed in one pass (see [`mills_correction_enclosure`]).
-///
-/// **On (−4, 0]**, `R` and `N` come from their Taylor series about the nearest of the centers `j/4` (see
-/// [`MillsTaylorTable`]), whose coefficients the double-double series [`mills_ratio_series`] certified once. Neither
-/// series subtracts: `N` has its own coefficients rather than being formed as `1 − t·R`.
+/// Both come from the table route (see [`normal_scaled_tail`] and `normal_table::positive_part_ratio`): `R = √(2π)·Q`
+/// and `N` from its own table, so `1 − t·R` is never formed. Their bounds are the published proven constants
+/// [`NORMAL_SCALED_TAIL_RELATIVE_ERROR`] and `POSITIVE_PART_RATIO_RELATIVE_ERROR` times the values, plus the constant's
+/// and the quotient's rounding. The proofs run in `normal_table`'s tests against certified double-double moments.
 ///
 /// **Argument rounding.** `x_rounding` bounds the computed argument's error, and the interval it spans must stay in
 /// `x ≤ 0`. There `|∂_x R| = N ≤ 1`, `|N′| ≤ R ≤ √(π/2)` and `|R′| = |zR − 1| ≤ 1`, so `1/λ` moves by at most
@@ -1469,28 +1499,15 @@ pub fn normal_left_tail_ratios(x: f64, x_rounding: f64) -> Result<NormalLeftTail
         return Err(NormalLeftTailError::PositiveArgument { value: x });
     }
     let t = -x;
-    let (reciprocal, reciprocal_rounding, ratio, ratio_rounding) = if x <= LEFT_CONTINUED_FRACTION_SWITCH {
-        let enclosure = mills_correction_enclosure(t, LEFT_CONTINUED_FRACTION_DEPTH);
-        let correction = enclosure.convergent;
-        let rounding = enclosure.relative_rounding;
-        let truncation = (enclosure.opposite - correction).abs() + rounding * (correction + enclosure.opposite);
-        let correction_relative = rounding + truncation / correction;
-        let slope = t + correction;
-        let slope_relative = UNIT_ROUNDOFF + correction / slope * correction_relative;
-        let reciprocal = slope.recip();
-        let ratio = correction / slope;
-        // Each relative error e enters its quotient as e/(1 − e); with the charged magnitudes and the bound's own
-        // evaluation, `m = 23`. Past `t ≈ 2⁵¹¹` a quotient can land among the subnormals, where it errs by up to
-        // `η/2` beyond its relative band, so each bound also carries `η`.
-        (
-            reciprocal,
-            inflated((UNIT_ROUNDOFF + slope_relative) * reciprocal, 23) + SMALLEST_SUBNORMAL,
-            ratio,
-            inflated((UNIT_ROUNDOFF + correction_relative + slope_relative) * ratio, 23) + SMALLEST_SUBNORMAL,
-        )
-    } else {
-        MILLS_TAYLOR_TABLE.ratios(t)
-    };
+    // R = √(2π)·Q, divided by the density's constant 0.398_942_280_401_432_7, which lies 0.563u from 1/√(2π). Past
+    // t ≈ 2⁵¹¹ N = s·K_N lands among the subnormals, where it errs by up to η beyond its relative band.
+    let tail = normal_table::scaled_tail(t);
+    let reciprocal = tail / INV_SQRT_2PI;
+    let reciprocal_rounding =
+        inflated((NORMAL_SCALED_TAIL_RELATIVE_ERROR + 1.57 * UNIT_ROUNDOFF) * reciprocal, 4);
+    let ratio = normal_table::positive_part_ratio(t);
+    let ratio_rounding =
+        inflated(normal_table::POSITIVE_PART_RATIO_RELATIVE_ERROR * ratio, 1) + 2.0 * SMALLEST_SUBNORMAL;
     // `m = 11` for each argument term: the upper values, the products and the sums, plus the charged magnitudes.
     Ok(NormalLeftTailRatios {
         cdf_over_density: reciprocal,
@@ -1504,295 +1521,6 @@ pub fn normal_left_tail_ratios(x: f64, x_rounding: f64) -> Result<NormalLeftTail
             11,
         ),
     })
-}
-
-/// The Laplace continued fraction for the Mills correction `q(t) = 1/(t + 2/(t + 3/(…)))`, `t ≥ 4`, truncated after
-/// `depth = N` levels and enclosed from both sides.
-struct MillsCorrectionEnclosure {
-    /// The chain started from the tail `0`: the convergent `q_N`.
-    convergent: f64,
-    /// The chain started from an upper bound on the tail, `(N + 1)/t`.
-    opposite: f64,
-    /// A bound on the relative rounding of either chain.
-    relative_rounding: f64,
-}
-
-/// Encloses `q(t)`, `t ≥ 4`, between the two chains of [`mills_correction_chains`], started from the ends of the
-/// interval that holds the exact tail.
-///
-/// **Truncation.** Bottom-up, `z_n = n/(t + z_{n+1})` and `q = z_1`. The exact tail `z_{N+1}` lies in `(0, (N + 1)/t)`,
-/// because every level divides a positive integer by more than `t`. Each level decreases in the one below it, so `q` is
-/// monotone in `z_{N+1}`, and it lies between the chains started from `0` and from `(N + 1)/t`. That holds at every
-/// depth; the depth only sets how tight the enclosure is. The upper end is rounded up through `inflated`.
-///
-/// **Rounding.** Each level divides an exact integer by a rounded sum, adding `2u`. It passes on the relative error of
-/// `z_{n+1}` damped by `z_{n+1}/(t + z_{n+1}) ≤ (n + 1)/(t² + n + 1)`, since `z_{n+1} ≤ (n + 1)/t`. Neither chain's
-/// start carries an error. So either chain's `q` errs by at most `2u·Σ_{k≥0} Π_{n=1}^{k} (n + 1)/(T + n + 1)` of
-/// itself, with `T = t²`.
-/// - The product is `Γ(k + 2)·Γ(T + 2)/Γ(T + k + 2)`.
-/// - The telescoping `Γ(m + 1)/Γ(m + T) − Γ(m + 2)/Γ(m + T + 1) = (T − 1)·Γ(m + 1)/Γ(m + T + 1)` sums the series to
-///   `(T + 1)/(T − 1) = 1 + 2/(T − 1)`, which is `17/15` at `t = 4` and tends to `1`.
-/// - The second-order products of the per-level errors are absorbed with the bound's own four rounded operations.
-fn mills_correction_enclosure(t: f64, depth: u32) -> MillsCorrectionEnclosure {
-    let upper_tail = inflated(f64::from(depth + 1) / t, 1);
-    let (convergent, opposite) = mills_correction_chains(t, depth, upper_tail);
-    MillsCorrectionEnclosure {
-        convergent,
-        opposite,
-        relative_rounding: inflated(2.0 * UNIT_ROUNDOFF * (1.0 + 2.0 / (t * t - 1.0)), 4),
-    }
-}
-
-/// The two bottom-up chains `z_n = n/(t + z_{n+1})` of the Laplace continued fraction, `n = N, …, 1`, started from
-/// the tails `0` and `upper_tail`. They are interleaved in one loop because their divisions are independent.
-fn mills_correction_chains(t: f64, depth: u32, upper_tail: f64) -> (f64, f64) {
-    let mut from_zero = 0.0;
-    let mut from_upper = upper_tail;
-    for level in (1..=depth).rev() {
-        let numerator = f64::from(level);
-        from_zero = numerator / (t + from_zero);
-        from_upper = numerator / (t + from_upper);
-    }
-    (from_zero, from_upper)
-}
-
-/// Taylor centers per unit of `t` for the Mills ratios on `[0, 4)`: the centers are `c_j = j/4`, so every `t` lies
-/// within [`MILLS_TAYLOR_REACH`] of one.
-const MILLS_TAYLOR_CENTERS_PER_UNIT: f64 = 4.0;
-
-/// The centers `j/4`, `j = 0, …, 16`, which cover `[0, 4)`.
-const MILLS_TAYLOR_CENTER_COUNT: usize = 17;
-
-/// The largest distance from `t` to its nearest center.
-const MILLS_TAYLOR_REACH: f64 = 0.5 / MILLS_TAYLOR_CENTERS_PER_UNIT;
-
-/// Taylor coefficients kept per center and ratio. At the reach `1/8`, the truncated tails are below `2e-21`, under
-/// `10⁻³u` of the smallest ratio on `[0, 4)`, `N(4) ≈ 0.053` (see [`MillsTaylorTable::build`] for the bound).
-const MILLS_TAYLOR_TERMS: usize = 16;
-
-/// The Taylor coefficients of both Mills ratios about one center `c`, rounded to `f64`.
-struct MillsTaylorCenter {
-    /// `M_n(c)/n!`, `n < K`, the coefficients of `R(c + h) = Σ_n (M_n(c)/n!)·(−h)ⁿ`.
-    cdf_over_density: [f64; MILLS_TAYLOR_TERMS],
-    /// `M_{n+1}(c)/n!`, the coefficients of `N(c + h) = Σ_n (M_{n+1}(c)/n!)·(−h)ⁿ`.
-    positive_part_over_density: [f64; MILLS_TAYLOR_TERMS],
-    /// `Σ_n β_n·ρⁿ` over the coefficients' own bounds `β_n`, at the reach `ρ`: what their rounding can move the sum.
-    cdf_over_density_budget: f64,
-    /// The same for `positive_part_over_density`.
-    positive_part_over_density_budget: f64,
-}
-
-/// `R(t) = Φ(−t)/φ(t)` and `N(t) = 1 − t·R(t)` on `[0, 4)` from Taylor series about the centers `j/4`.
-///
-/// Both are moments of one positive weight, `M_n(t) = ∫₀^∞ sⁿ e^{−ts − s²/2} ds`:
-/// - `R = M_0`, from `R(t) = e^{t²/2}∫_t^∞ e^{−u²/2} du` with `u = t + s`, and `N = M_1`.
-/// - `M_n′ = −M_{n+1}`, so `R(c + h) = Σ_n M_n(c)(−h)ⁿ/n!` and `N(c + h) = Σ_n M_{n+1}(c)(−h)ⁿ/n!`. Both are entire
-///   in `h`.
-/// - Integrating by parts against `d(e^{−cs − s²/2}) = −(c + s)e^{−cs − s²/2} ds` gives
-///   `M_{n+1} = n·M_{n−1} − c·M_n` for `n ≥ 1`.
-///
-/// The table is built once. At each center, [`mills_ratio_series`] gives `M_0 = R(c)`, then `M_1 = 1 − c·M_0`, and the
-/// recurrence gives the rest, all in bounded double-double. While `n ≪ c²`, `M_n ≈ n!/c^{n+1}`, so the recurrence
-/// cancels by about `c²/(n + 1)` per step: about `2¹⁶` over the table's steps at `c = 4`, against the words' `2⁻¹⁰⁶`.
-/// The running bounds certify whatever it actually loses.
-struct MillsTaylorTable {
-    centers: [MillsTaylorCenter; MILLS_TAYLOR_CENTER_COUNT],
-    /// A bound on `Σ_{n≥K} M_n(c)ρⁿ/n!` over every center, at the reach `ρ`.
-    cdf_over_density_tail: f64,
-    /// A bound on `Σ_{n≥K} M_{n+1}(c)ρⁿ/n!` over every center.
-    positive_part_over_density_tail: f64,
-}
-
-static MILLS_TAYLOR_TABLE: LazyLock<MillsTaylorTable> = LazyLock::new(MillsTaylorTable::build);
-
-impl MillsTaylorTable {
-    /// Certifies every center's coefficients and the truncation tails.
-    ///
-    /// **Coefficients.** `M_n(c)/n!` in bounded double-double; `n!` is exact in `f64` for `n ≤ 18`. Rounding each to
-    /// `f64` leaves a bound `β_n`, and at `|h| ≤ ρ` those move a sum by at most `Σ_n β_n ρⁿ`. `ρ = 1/8` makes every
-    /// `ρⁿ` exact, and the budget's own rounding is absorbed by `inflated`.
-    ///
-    /// **Tails.** `c ≥ 0`, so `M_n(c) ≤ M_n(0) = ∫₀^∞ sⁿ e^{−s²/2} ds = 2^{(n−1)/2}·Γ((n + 1)/2)`. Wendel's
-    /// inequality `Γ(y + ½) ≤ √y·Γ(y)` gives `M_{n+1}(0) ≤ √(n + 1)·M_n(0)`. So past `n = K` the tail terms fall by at
-    /// least `ρ/√(K + 1)` for `R` and `ρ·√(K + 2)/(K + 1)` for `N`, and each tail is at most its first term over one minus
-    /// that ratio. The first terms read `M_K(0)` and `M_{K+1}(0)` from the center `c = 0`, as upper values.
-    fn build() -> Self {
-        let reach = MILLS_TAYLOR_REACH;
-        let upper = |value: BoundedDoubleDouble| value.value.high.abs() + value.value.low.abs() + value.rounding;
-        let mut origin_moments = [0.0; 2];
-        let centers = std::array::from_fn(|index| {
-            let center = index as f64 / MILLS_TAYLOR_CENTERS_PER_UNIT;
-            let moments = mills_moments(center);
-            if index == 0 {
-                origin_moments = [upper(moments[MILLS_TAYLOR_TERMS]), upper(moments[MILLS_TAYLOR_TERMS + 1])];
-            }
-            let mut cdf_over_density = [0.0; MILLS_TAYLOR_TERMS];
-            let mut positive_part_over_density = [0.0; MILLS_TAYLOR_TERMS];
-            let mut cdf_over_density_budget = 0.0;
-            let mut positive_part_over_density_budget = 0.0;
-            let mut factorial = 1.0;
-            let mut power = 1.0;
-            for order in 0..MILLS_TAYLOR_TERMS {
-                if order > 0 {
-                    factorial *= order as f64;
-                    power *= reach;
-                }
-                let (value, bound) = moments[order].div_f64(factorial).to_f64();
-                cdf_over_density[order] = value;
-                cdf_over_density_budget += bound * power;
-                let (value, bound) = moments[order + 1].div_f64(factorial).to_f64();
-                positive_part_over_density[order] = value;
-                positive_part_over_density_budget += bound * power;
-            }
-            // `m = 2K`: a product and a sum per term.
-            MillsTaylorCenter {
-                cdf_over_density,
-                positive_part_over_density,
-                cdf_over_density_budget: inflated(cdf_over_density_budget, 2 * MILLS_TAYLOR_TERMS),
-                positive_part_over_density_budget: inflated(
-                    positive_part_over_density_budget,
-                    2 * MILLS_TAYLOR_TERMS,
-                ),
-            }
-        });
-        let terms = MILLS_TAYLOR_TERMS as f64;
-        let mut factorial = 1.0;
-        let mut power = 1.0;
-        for order in 1..=MILLS_TAYLOR_TERMS {
-            factorial *= order as f64;
-            power *= reach;
-        }
-        // Upper values of the decay ratios and of each tail, `m = 4` apiece: the root, the products and the quotient.
-        let cdf_decay = inflated(reach / (terms + 1.0).sqrt(), 4);
-        let positive_part_decay = inflated(reach * (terms + 2.0).sqrt() / (terms + 1.0), 4);
-        Self {
-            centers,
-            cdf_over_density_tail: inflated(origin_moments[0] * power / factorial / (1.0 - cdf_decay), 4),
-            positive_part_over_density_tail: inflated(
-                origin_moments[1] * power / factorial / (1.0 - positive_part_decay),
-                4,
-            ),
-        }
-    }
-
-    /// `(R, bound, N, bound)` at `t ∈ [0, 4)` from the center nearest `t`.
-    ///
-    /// `4t` and its rounding are exact, so the center `c = j/4` is exact, and `h = t − c` is exact by Sterbenz's lemma
-    /// (`c/2 ≤ t ≤ 2c` once `j ≥ 1`, and `h = t` at `j = 0`). Each bound adds the running Horner bound, the
-    /// coefficients' budget and the truncated tail, `m = 2` for the two sums.
-    fn ratios(&self, t: f64) -> (f64, f64, f64, f64) {
-        let scaled = (t * MILLS_TAYLOR_CENTERS_PER_UNIT).round();
-        let center = &self.centers[scaled as usize];
-        let offset = t - scaled / MILLS_TAYLOR_CENTERS_PER_UNIT;
-        let (reciprocal, reciprocal_running) = alternating_taylor_sum(&center.cdf_over_density, offset);
-        let (ratio, ratio_running) = alternating_taylor_sum(&center.positive_part_over_density, offset);
-        (
-            reciprocal,
-            inflated(
-                reciprocal_running + center.cdf_over_density_budget + self.cdf_over_density_tail,
-                2,
-            ),
-            ratio,
-            inflated(
-                ratio_running
-                    + center.positive_part_over_density_budget
-                    + self.positive_part_over_density_tail,
-                2,
-            ),
-        )
-    }
-}
-
-/// `M_0(c), …, M_{K+1}(c)` in bounded double-double: `M_0 = R(c)` from [`mills_ratio_series`], `M_1 = 1 − c·M_0`, and
-/// `M_{n+1} = n·M_{n−1} − c·M_n` (see [`MillsTaylorTable`]). Requires `0 ≤ c ≤ 4`.
-fn mills_moments(center: f64) -> [BoundedDoubleDouble; MILLS_TAYLOR_TERMS + 2] {
-    let mut moments = [BoundedDoubleDouble::exact(0.0); MILLS_TAYLOR_TERMS + 2];
-    moments[0] = mills_ratio_series(center);
-    moments[1] = BoundedDoubleDouble::exact(1.0).sub(moments[0].mul_f64(center));
-    for order in 1..=MILLS_TAYLOR_TERMS {
-        moments[order + 1] = moments[order - 1]
-            .mul_f64(order as f64)
-            .sub(moments[order].mul_f64(center));
-    }
-    moments
-}
-
-/// `Σ_n coefficients[n]·(−offset)ⁿ` by Horner's rule, with a running bound on its rounding (Higham, *Accuracy and
-/// Stability of Numerical Algorithms*, 2nd ed., §5.1). It bounds the rounding only; the coefficients' own errors and
-/// the truncation are the caller's.
-///
-/// Step `n` forms `q_n = fl(p_{n+1}·s)` and `p_n = fl(q_n + a_n)`, `s = −offset`, with a rounding `μ_n` and `α_n` each.
-/// Its error against the exact partial sum is `e_n = s·e_{n+1} + μ_n·p_{n+1}s + α_n·p_n/(1 + α_n)`, so
-/// `|e_n| ≤ |s|·|e_{n+1}| + u|p_{n+1}s| + u|p_n|/(1 − u)`. The running bound `E_n = |s|·E_{n+1} + u(|q_n| + |p_n|)`
-/// charges the computed product for the exact one. Its own three rounded operations per step and the `1/(1 − u)`
-/// factors are absorbed by `1 + γ_{3K+3}`. Near underflow each rounding can err by `η/2` more, and `|s|ⁿ ≤ 1` passes it
-/// on undamped at worst, so the bound adds `K·η`. The loop uses plain products and sums, not `mul_add`, which generic
-/// x86-64 builds lower to a library call.
-fn alternating_taylor_sum(coefficients: &[f64], offset: f64) -> (f64, f64) {
-    let step = -offset;
-    let magnitude = offset.abs();
-    let mut terms = coefficients.iter().rev();
-    let mut sum = terms.next().copied().unwrap_or(0.0);
-    let mut running = 0.0_f64;
-    for &coefficient in terms {
-        let product = sum * step;
-        sum = product + coefficient;
-        running = running * magnitude + UNIT_ROUNDOFF * (product.abs() + sum.abs());
-    }
-    let count = coefficients.len();
-    (
-        sum,
-        inflated(running, 3 * count) + count as f64 * SMALLEST_SUBNORMAL,
-    )
-}
-
-/// `R(t) = Φ(−t)/φ(t)` for `0 ≤ t ≤ 4`, in bounded double-double with no libm call:
-/// `R(t) = √(π/2)·e^{t²/2} − S(t)`, with `e^{t²/2} = Σ_k (t²/2)^k/k!` and
-/// `S(t) = e^{t²/2}·∫₀ᵗ e^{−s²/2} ds = Σ_n t^{2n+1}/(2n+1)!!`, since `S` solves `S′ = 1 + t·S` with `S(0) = 0`.
-/// Both series have positive terms (see [`positive_series`]). The subtraction cancels by at most
-/// `√(π/2)·e⁸/R(4) ≈ 1.6e4`: its carries scale with the result, and the words absorb the cancellation.
-fn mills_ratio_series(t: f64) -> BoundedDoubleDouble {
-    let floor = UNIT_ROUNDOFF * UNIT_ROUNDOFF;
-    let square = BoundedDoubleDouble::product(t, t);
-    let exponential = positive_series(BoundedDoubleDouble::exact(1.0), square.mul_f64(0.5), 1.0, 1.0, floor);
-    let odd = positive_series(BoundedDoubleDouble::exact(t), square, 3.0, 2.0, floor);
-    BoundedDoubleDouble::PI
-        .mul_f64(0.5)
-        .sqrt()
-        .mul(exponential)
-        .sub(odd)
-}
-
-/// `Σ_j T_j` with `T_0 = first` and `T_{j+1} = T_j·factor/(offset + j·step)`, for nonnegative terms whose ratios
-/// decrease. When the next ratio's upper bound `ρ` is below one, every later ratio is smaller, so the rest is at most
-/// `T_j·ρ/(1 − ρ)`. The sum stops once that tail falls below `floor` of it, and the tail joins its bound. The test runs
-/// before the next term is formed, so no term below the resolution the bound already carries is ever computed.
-fn positive_series(
-    first: BoundedDoubleDouble,
-    factor: BoundedDoubleDouble,
-    offset: f64,
-    step: f64,
-    floor: f64,
-) -> BoundedDoubleDouble {
-    let upper = |value: BoundedDoubleDouble| value.value.high.abs() + value.value.low.abs() + value.rounding;
-    let factor_upper = upper(factor);
-    let mut term = first;
-    let mut sum = first;
-    let mut divisor = offset;
-    loop {
-        let ratio = factor_upper / divisor;
-        if ratio < 1.0 {
-            // `m = 6`: the upper value, the product, the difference, the quotient and the inflation's pair.
-            let tail = inflated(upper(term) * ratio / (1.0 - ratio), 6);
-            if tail <= floor * sum.value.high {
-                sum.rounding = inflated(sum.rounding + tail, 1);
-                return sum;
-            }
-        }
-        term = term.mul(factor).div_f64(divisor);
-        sum = sum.add(term);
-        divisor += step;
-    }
 }
 
 #[inline]
@@ -2224,93 +1952,6 @@ mod tests {
             origin.cdf_over_density,
             origin.cdf_over_density_rounding
         );
-    }
-
-    #[test]
-    fn laplace_enclosures_hold_the_deep_fraction_and_a_short_tail_end_does_not() {
-        // The chains started from the two ends of the tail's interval enclose q at every depth. At shallow depths the
-        // enclosure is wide against the rounding, so whether it holds the full-depth q resolves in f64.
-        for t in [4.0, 6.0, 20.0] {
-            let deep = mills_correction_enclosure(t, LEFT_CONTINUED_FRACTION_DEPTH);
-            let deep_margin = (deep.opposite - deep.convergent).abs()
-                + deep.relative_rounding * (deep.convergent + deep.opposite);
-            let mut previous_width = f64::INFINITY;
-            for depth in 1..=6_u32 {
-                let shallow = mills_correction_enclosure(t, depth);
-                let low = shallow.convergent.min(shallow.opposite);
-                let high = shallow.convergent.max(shallow.opposite);
-                let margin = shallow.relative_rounding * high + deep_margin;
-                assert!(
-                    low - margin <= deep.convergent && deep.convergent <= high + margin,
-                    "depth {depth}, t = {t}: [{low}, {high}] misses the full-depth q = {}",
-                    deep.convergent
-                );
-                let width = high - low;
-                assert!(
-                    width > margin && width < previous_width,
-                    "depth {depth}, t = {t}: width {width:e} against margin {margin:e} and the shallower {previous_width:e}"
-                );
-                previous_width = width;
-                // Positive control: the exact tail is z_{N+1} = (N + 1)/(t + z_{N+2}) with z_{N+2} ≤ (N + 2)/t < t
-                // here, so it lies above half of (N + 1)/t, and the enclosure cut at that half misses q.
-                let (from_zero, from_half) = mills_correction_chains(t, depth, 0.5 * f64::from(depth + 1) / t);
-                let (low, high) = (from_zero.min(from_half), from_zero.max(from_half));
-                assert!(
-                    deep.convergent < low - margin || deep.convergent > high + margin,
-                    "depth {depth}, t = {t}: the half-tail enclosure [{low}, {high}] still holds q = {}",
-                    deep.convergent
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn mills_taylor_table_reproduces_the_double_double_series_within_both_bounds() {
-        // t = k/64 over [0, 4) puts points on every center and on both edges of every reach. At each, the table's R
-        // and N lie within their bounds, plus the series' own bounds, of the double-double series the table was
-        // certified from. The bounds stay within 4u of the ratios, so the route gives up almost nothing to the series.
-        let table = &*MILLS_TAYLOR_TABLE;
-        let mut edges = 0_usize;
-        for step in 0..256_u32 {
-            let t = f64::from(step) / 64.0;
-            let (reciprocal, reciprocal_bound, ratio, ratio_bound) = table.ratios(t);
-            let series = mills_ratio_series(t);
-            let series_ratio = BoundedDoubleDouble::exact(1.0).sub(series.mul_f64(t));
-            let discrepancy = |reference: BoundedDoubleDouble, value: f64| {
-                ((reference.value.high - value) + reference.value.low).abs()
-            };
-            let reciprocal_error = discrepancy(series, reciprocal);
-            let ratio_error = discrepancy(series_ratio, ratio);
-            assert!(
-                reciprocal_error <= reciprocal_bound + series.rounding,
-                "R({t}) = {reciprocal}: error {reciprocal_error:e} beyond {reciprocal_bound:e}"
-            );
-            assert!(
-                ratio_error <= ratio_bound + series_ratio.rounding,
-                "N({t}) = {ratio}: error {ratio_error:e} beyond {ratio_bound:e}"
-            );
-            assert!(
-                reciprocal_bound <= 4.0 * UNIT_ROUNDOFF * reciprocal && ratio_bound <= 4.0 * UNIT_ROUNDOFF * ratio,
-                "t = {t}: bounds {reciprocal_bound:e} on R = {reciprocal} and {ratio_bound:e} on N = {ratio} exceed 4u"
-            );
-            // Positive control at the reach's edges: the same sums cut to 8 terms, charged the same bounds, miss the
-            // series, so a table short of terms cannot pass the checks above.
-            let scaled = (t * MILLS_TAYLOR_CENTERS_PER_UNIT).round();
-            let offset = t - scaled / MILLS_TAYLOR_CENTERS_PER_UNIT;
-            if offset.abs() == MILLS_TAYLOR_REACH {
-                edges += 1;
-                let center = &table.centers[scaled as usize];
-                let (short_reciprocal, _) = alternating_taylor_sum(&center.cdf_over_density[..8], offset);
-                let (short_ratio, _) = alternating_taylor_sum(&center.positive_part_over_density[..8], offset);
-                assert!(
-                    discrepancy(series, short_reciprocal) > reciprocal_bound + series.rounding
-                        && discrepancy(series_ratio, short_ratio) > ratio_bound + series_ratio.rounding,
-                    "t = {t}: the 8-term sums {short_reciprocal}, {short_ratio} still pass"
-                );
-            }
-        }
-        // One grid point sits on each boundary between neighboring centers, and rounding sends it to the upper one.
-        assert_eq!(edges, MILLS_TAYLOR_CENTER_COUNT - 1, "reach edges on the grid");
     }
 
     #[test]
