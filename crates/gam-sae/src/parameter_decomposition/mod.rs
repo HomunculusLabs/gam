@@ -99,6 +99,9 @@ pub mod attention;
 // A whole pre-norm transformer block under masks: norm, attention, residual, norm, MLP, residual.
 pub mod block;
 
+// Mechanism programs over attention-only layers, replayed bit for bit under component masks.
+pub mod block_program;
+
 // KL oscillation bound, whole-set composition containment, conservation conditioning.
 pub mod bounds;
 

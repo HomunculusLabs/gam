@@ -835,6 +835,8 @@ pub struct AttentionLayerExecution {
 #[derive(Clone, Debug)]
 pub struct NativeAttentionLayer {
     geometry: AttentionGeometry,
+    rotary: RotaryEmbedding,
+    score_scale: f64,
     attention: RotaryCausalAttention,
     query: Array2<f64>,
     key: Array2<f64>,
@@ -856,7 +858,7 @@ impl NativeAttentionLayer {
         value: Array2<f64>,
         output: Array2<f64>,
     ) -> Result<Self, BlockError> {
-        let attention = RotaryCausalAttention::new(geometry, rotary, score_scale)?;
+        let attention = RotaryCausalAttention::new(geometry, rotary.clone(), score_scale)?;
         let (model, query_dim, kv_dim) = (
             geometry.model_dim,
             geometry.query_dim(),
@@ -878,6 +880,8 @@ impl NativeAttentionLayer {
         }
         Ok(Self {
             geometry,
+            rotary,
+            score_scale,
             attention,
             query,
             key,
@@ -888,6 +892,16 @@ impl NativeAttentionLayer {
 
     pub fn geometry(&self) -> AttentionGeometry {
         self.geometry
+    }
+
+    /// The source's rotary embedding: empty for learned absolute positions.
+    pub fn rotary(&self) -> &RotaryEmbedding {
+        &self.rotary
+    }
+
+    /// The source's score scale, `1/sqrt(head_dim)` for a standard head.
+    pub fn score_scale(&self) -> f64 {
+        self.score_scale
     }
 
     /// The stored weight of one projection.
@@ -918,6 +932,12 @@ impl NativeAttentionLayer {
 struct ProjectionFactor {
     factor: ExactFactor,
     read_transpose: Array2<f64>,
+}
+
+impl ProjectionFactor {
+    fn view(&self) -> Result<FactorView<'_>, ApplyError> {
+        FactorView::new(self.factor.write(), self.read_transpose.view())
+    }
 }
 
 /// An attention-only layer whose four projections can execute through masked
@@ -963,6 +983,13 @@ impl ComponentAttentionLayer {
     /// The exact factor `W = U R` of one projection.
     pub fn factor(&self, projection: AttentionProjection) -> &ExactFactor {
         &self.factors[projection.index()].factor
+    }
+
+    /// One projection's factors as apply.rs reads them: left `U`, right `Rᵀ`.
+    pub fn components(&self, projection: AttentionProjection) -> Result<FactorView<'_>, BlockError> {
+        self.factors[projection.index()]
+            .view()
+            .map_err(|error| BlockError::Apply { projection, error })
     }
 
     /// The layer under `reads`, over the residual rows at their absolute positions.
@@ -1055,9 +1082,7 @@ fn read_projection(
         ProjectionRead::Native => native_linear(weight, rows).map_err(refused),
         ProjectionRead::Components(mask) => {
             let factor = factor.ok_or(BlockError::NoComponentFactors { projection })?;
-            let components = FactorView::new(factor.factor.write(), factor.read_transpose.view())
-                .map_err(refused)?;
-            apply_anchored_linear(weight, 0.0, components, mask, rows).map_err(refused)
+            apply_anchored_linear(weight, 0.0, factor.view().map_err(refused)?, mask, rows).map_err(refused)
         }
         ProjectionRead::Edited(scoped) => {
             let mut row_positions = Vec::with_capacity(positions.len());
