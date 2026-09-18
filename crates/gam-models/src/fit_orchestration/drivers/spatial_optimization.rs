@@ -6507,12 +6507,14 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         // affine head) and a trial rebuild at a different representer range
         // emits it again, aborting the outer search mid-flight.
         //
-        // Align by `original_index`, which is exactly what that field is for:
-        // keep the candidates the cached topology kept, in cached order, and
-        // record the rest as dropped. Anything the cache holds that the rebuild
-        // did NOT produce is a real inconsistency — a ρ coordinate with no
-        // matrix behind it — and still refuses.
-        let cached_originals: Vec<usize> = self
+        // Align by `(original_index, source)` (`align_rebuilt_penalties`): keep the
+        // candidates the cached topology kept, in cached order, and record the
+        // rest as dropped. Anything the cache holds that the rebuild did NOT
+        // produce, or produced as a different kind of block, is a real
+        // inconsistency — a ρ coordinate with no matrix behind it, or a matrix
+        // of another penalty family — and still refuses, naming both topologies
+        // (#2953).
+        let cached_penalties: Vec<(usize, gam_terms::basis::PenaltySource)> = self
             .design
             .smooth
             .terms
@@ -6520,74 +6522,80 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
             .map(|term| {
                 term.active_penalties
                     .iter()
-                    .map(|active| active.info.original_index)
+                    .map(|active| (active.info.original_index, active.info.source.clone()))
                     .collect()
             })
             .unwrap_or_default();
-        let (active_penalties, dropped_penalties) = if cached_originals.len()
+        let (active_penalties, dropped_penalties) = if cached_penalties.len()
             == smooth_penalty_range.len()
             && active_penalties.len() != smooth_penalty_range.len()
         {
-            let mut slots: Vec<Option<gam_terms::basis::ActivePenalty>> =
-                active_penalties.into_iter().map(Some).collect();
-            let mut kept = Vec::with_capacity(cached_originals.len());
-            for original in &cached_originals {
-                let Some(found) = slots
-                    .iter_mut()
-                    .find(|slot| {
-                        slot.as_ref()
-                            .is_some_and(|active| active.info.original_index == *original)
-                    })
-                    .and_then(Option::take)
-                else {
-                    let produced = slots
+            let rebuilt_active: Vec<(usize, gam_terms::basis::PenaltySource)> = active_penalties
+                .iter()
+                .map(|active| (active.info.original_index, active.info.source.clone()))
+                .collect();
+            let rebuilt_dropped: Vec<(
+                usize,
+                gam_terms::basis::PenaltySource,
+                gam_terms::basis::PenaltyDropReason,
+            )> = dropped_penalties
+                .iter()
+                .map(|info| (info.original_index, info.source.clone(), info.reason.clone()))
+                .collect();
+            match align_rebuilt_penalties(&cached_penalties, &rebuilt_active, &rebuilt_dropped) {
+                PenaltyAlignment::Aligned { slots } => {
+                    let mut rebuilt: Vec<Option<gam_terms::basis::ActivePenalty>> =
+                        active_penalties.into_iter().map(Some).collect();
+                    let kept = slots
                         .iter()
-                        .flatten()
-                        .map(|active| active.info.original_index)
+                        .map(|&slot| {
+                            rebuilt[slot]
+                                .take()
+                                .expect("align_rebuilt_penalties hands out each rebuilt slot once")
+                        })
                         .collect::<Vec<_>>();
-                    // A cached block the rebuild DROPPED at this psi is a trial whose
-                    // rho coordinate has no matrix behind it, not a broken invariant.
-                    // The Matérn collocation Grams of odd derivative order are exactly
-                    // zero once every off-diagonal kernel value underflows, which a
-                    // length scale far below the center spacing produces. MSI job
-                    // 602008 (`y ~ matern(x, periodic=true, period=2π)`, n = 400)
-                    // reached this branch at an ARC trial with psi = 9.43, where the
-                    // rebuild kept originals [0, 2] of the 4 cached, and the InvalidInput
-                    // aborted the whole fit. The model does not exist at that trial, so
-                    // it is refused and the search shortens its step or rejects the seed.
-                    // A block missing from both lists is a real inconsistency and stays
-                    // fatal.
-                    if let Some(vacated) = dropped_penalties
-                        .iter()
-                        .find(|info| info.original_index == *original)
-                    {
-                        return Err(EstimationError::TrialPointRefused {
-                            reason: format!(
-                                "incremental realizer: cached penalty {original} ({:?}) of term \
-                                 '{name}' was dropped as {:?} at this psi and the rebuild produced \
-                                 {produced:?}, so its rho coordinate has no matrix at the trial. \
-                                 Trial: {trial_report}",
-                                vacated.source, vacated.reason
-                            ),
-                        });
-                    }
-                    return Err(EstimationError::InvalidInput(SmoothError::dimension_mismatch(format!(
-                        "incremental realizer lost cached penalty {original} for term \
-                         '{name}': the rebuild produced {produced:?}"
-                    )).to_string()));
-                };
-                kept.push(found);
-            }
-            let mut dropped = dropped_penalties;
-            dropped.extend(slots.into_iter().flatten().map(|active| {
-                gam_terms::basis::DroppedPenaltyInfo {
-                    source: active.info.source.clone(),
-                    original_index: active.info.original_index,
-                    reason: gam_terms::basis::PenaltyDropReason::ZeroMatrix,
-                    normalization_scale: active.info.normalization_scale,
+                    let mut dropped = dropped_penalties;
+                    dropped.extend(rebuilt.into_iter().flatten().map(|active| {
+                        gam_terms::basis::DroppedPenaltyInfo {
+                            source: active.info.source.clone(),
+                            original_index: active.info.original_index,
+                            reason: gam_terms::basis::PenaltyDropReason::ZeroMatrix,
+                            normalization_scale: active.info.normalization_scale,
+                        }
+                    }));
+                    (kept, dropped)
                 }
-            }));
-            (kept, dropped)
+                // A cached block the rebuild DROPPED at this psi is a trial whose
+                // rho coordinate has no matrix behind it, not a broken invariant.
+                // The Matérn collocation Grams of odd derivative order are exactly
+                // zero once every off-diagonal kernel value underflows, which a
+                // length scale far below the center spacing produces. MSI job
+                // 602008 (`y ~ matern(x, periodic=true, period=2π)`, n = 400)
+                // reached this branch at an ARC trial with psi = 9.43, where the
+                // rebuild kept originals [0, 2] of the 4 cached, and the InvalidInput
+                // aborted the whole fit. The model does not exist at that trial, so
+                // it is refused and the search shortens its step or rejects the seed.
+                PenaltyAlignment::DroppedAtTrial {
+                    original_index,
+                    source,
+                    reason,
+                } => {
+                    return Err(EstimationError::TrialPointRefused {
+                        reason: format!(
+                            "incremental realizer: cached penalty {original_index} ({source:?}) of \
+                             term '{name}' was dropped as {reason:?} at this psi and the rebuild \
+                             produced {rebuilt_active:?}, so its rho coordinate has no matrix at the \
+                             trial. Trial: {trial_report}"
+                        ),
+                    });
+                }
+                PenaltyAlignment::Inconsistent { detail } => {
+                    return Err(EstimationError::InvalidInput(SmoothError::dimension_mismatch(format!(
+                        "incremental realizer penalty topology for term '{name}' does not match the \
+                         cached topology: {detail}. Trial: {trial_report}"
+                    )).to_string()));
+                }
+            }
         } else {
             (active_penalties, dropped_penalties)
         };
@@ -7167,6 +7175,194 @@ fn exact_joint_seed_config(
         config.over_smoothing_probe_rho = None;
     }
     config
+}
+
+/// A term-local rebuild's penalty blocks against the realizer's cached topology
+/// (#2750, #2953).
+#[derive(Debug)]
+enum PenaltyAlignment {
+    /// `slots[i]` indexes the rebuilt active block kept for cached block `i`.
+    Aligned { slots: Vec<usize> },
+    /// The rebuild recorded a cached block as dropped at this psi.
+    DroppedAtTrial {
+        original_index: usize,
+        source: gam_terms::basis::PenaltySource,
+        reason: gam_terms::basis::PenaltyDropReason,
+    },
+    /// The rebuild's blocks are not the cached topology.
+    Inconsistent { detail: String },
+}
+
+/// Align a term-local rebuild's penalty blocks to the cached topology by
+/// `(original_index, source)`.
+///
+/// An `original_index` is a candidate's position in the build that produced it,
+/// so two builds agree on a block only when they agree on its position AND on
+/// what the block is. Matching the index alone pairs blocks of different penalty
+/// families that both number from zero, such as a Primary block with an
+/// OperatorMass one.
+fn align_rebuilt_penalties(
+    cached: &[(usize, gam_terms::basis::PenaltySource)],
+    rebuilt_active: &[(usize, gam_terms::basis::PenaltySource)],
+    rebuilt_dropped: &[(
+        usize,
+        gam_terms::basis::PenaltySource,
+        gam_terms::basis::PenaltyDropReason,
+    )],
+) -> PenaltyAlignment {
+    let topologies = || {
+        format!(
+            "cached active {cached:?}, rebuilt active {rebuilt_active:?}, rebuilt dropped \
+             {rebuilt_dropped:?}"
+        )
+    };
+    let mut taken = vec![false; rebuilt_active.len()];
+    let mut slots = Vec::with_capacity(cached.len());
+    for (original, source) in cached {
+        let at_index = rebuilt_active
+            .iter()
+            .enumerate()
+            .find(|(slot, (index, _))| !taken[*slot] && index == original);
+        if let Some((slot, (_, rebuilt_source))) = at_index {
+            if rebuilt_source != source {
+                return PenaltyAlignment::Inconsistent {
+                    detail: format!(
+                        "cached penalty {original} is {source:?} but the rebuild's block {original} \
+                         is {rebuilt_source:?} ({})",
+                        topologies()
+                    ),
+                };
+            }
+            taken[slot] = true;
+            slots.push(slot);
+            continue;
+        }
+        return match rebuilt_dropped.iter().find(|(index, _, _)| index == original) {
+            Some((_, dropped_source, reason)) if dropped_source == source => {
+                PenaltyAlignment::DroppedAtTrial {
+                    original_index: *original,
+                    source: source.clone(),
+                    reason: reason.clone(),
+                }
+            }
+            Some((_, dropped_source, _)) => PenaltyAlignment::Inconsistent {
+                detail: format!(
+                    "cached penalty {original} is {source:?} but the rebuild dropped block {original} \
+                     as {dropped_source:?} ({})",
+                    topologies()
+                ),
+            },
+            None => PenaltyAlignment::Inconsistent {
+                detail: format!(
+                    "cached penalty {original} ({source:?}) is neither an active nor a dropped block \
+                     of the rebuild ({})",
+                    topologies()
+                ),
+            },
+        };
+    }
+    PenaltyAlignment::Aligned { slots }
+}
+
+#[cfg(test)]
+mod penalty_alignment_2953_tests {
+    use super::*;
+    use gam_terms::basis::{PenaltyDropReason, PenaltySource};
+
+    /// md:550's shape: three cached operator blocks, a rebuild of two, and nothing
+    /// recorded as dropped. The refusal names every block on both sides.
+    #[test]
+    fn a_cached_block_the_rebuild_never_produced_names_both_topologies_2953() {
+        let cached = [
+            (0, PenaltySource::OperatorMass),
+            (1, PenaltySource::OperatorTension),
+            (2, PenaltySource::OperatorStiffness),
+        ];
+        let rebuilt = [
+            (0, PenaltySource::OperatorMass),
+            (1, PenaltySource::OperatorTension),
+        ];
+        let PenaltyAlignment::Inconsistent { detail } = align_rebuilt_penalties(&cached, &rebuilt, &[])
+        else {
+            panic!("a cached block missing from both rebuilt lists must be inconsistent");
+        };
+        assert!(
+            detail.contains("cached penalty 2 (OperatorStiffness)"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("rebuilt active [(0, OperatorMass), (1, OperatorTension)]"),
+            "{detail}"
+        );
+    }
+
+    /// A rebuild on another penalty family numbers its blocks from zero too.
+    /// Matching the index alone pairs Primary with OperatorMass; matching the
+    /// source refuses and names both.
+    #[test]
+    fn a_family_switch_refuses_instead_of_pairing_primary_with_operator_mass_2953() {
+        let cached = [
+            (0, PenaltySource::OperatorMass),
+            (1, PenaltySource::OperatorTension),
+            (2, PenaltySource::OperatorStiffness),
+        ];
+        let rebuilt = [
+            (0, PenaltySource::Primary),
+            (1, PenaltySource::DoublePenaltyNullspace),
+        ];
+        let PenaltyAlignment::Inconsistent { detail } = align_rebuilt_penalties(&cached, &rebuilt, &[])
+        else {
+            panic!("a penalty-family switch must be inconsistent");
+        };
+        assert!(
+            detail.contains("cached penalty 0 is OperatorMass but the rebuild's block 0 is Primary"),
+            "{detail}"
+        );
+    }
+
+    /// A cached block the rebuild recorded as dropped at this psi is a trial the
+    /// search steps away from, not an inconsistency (MSI 602008).
+    #[test]
+    fn a_cached_block_recorded_as_dropped_is_a_trial_refusal_2953() {
+        let cached = [
+            (0, PenaltySource::OperatorMass),
+            (1, PenaltySource::OperatorTension),
+            (2, PenaltySource::OperatorStiffness),
+            (3, PenaltySource::OperatorThirdOrder),
+        ];
+        let rebuilt = [
+            (0, PenaltySource::OperatorMass),
+            (2, PenaltySource::OperatorStiffness),
+        ];
+        let dropped = [
+            (1, PenaltySource::OperatorTension, PenaltyDropReason::ZeroMatrix),
+            (3, PenaltySource::OperatorThirdOrder, PenaltyDropReason::ZeroMatrix),
+        ];
+        assert!(matches!(
+            align_rebuilt_penalties(&cached, &rebuilt, &dropped),
+            PenaltyAlignment::DroppedAtTrial {
+                original_index: 1,
+                source: PenaltySource::OperatorTension,
+                reason: PenaltyDropReason::ZeroMatrix,
+            }
+        ));
+    }
+
+    /// A rebuild that re-emits a block the cached collection dropped keeps the
+    /// cached blocks in cached order (#2750). The caller records the extra block
+    /// as dropped.
+    #[test]
+    fn a_rebuild_re_emitting_a_cached_drop_keeps_the_cached_blocks_2953() {
+        let cached = [(0, PenaltySource::Primary)];
+        let rebuilt = [
+            (0, PenaltySource::Primary),
+            (1, PenaltySource::DoublePenaltyNullspace),
+        ];
+        let PenaltyAlignment::Aligned { slots } = align_rebuilt_penalties(&cached, &rebuilt, &[]) else {
+            panic!("the cached block is present with its own source, so the rebuild aligns");
+        };
+        assert_eq!(slots, vec![0]);
+    }
 }
 
 #[cfg(test)]
