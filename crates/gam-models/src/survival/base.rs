@@ -3453,6 +3453,10 @@ pub struct CompetingRisksCifResult {
 /// serial path. The per-row work (a `n_times`-long prefix-sum recurrence with a
 /// handful of `exp`/`exp_m1` per element) is cheap, so small panels avoid rayon
 /// fan-out overhead; large panels (the #1082 quality-test sizes) amortize it.
+///
+/// Work bound (#2469): result-invariant. Both sides run `assemble_row` for every
+/// subject and collect the rows in index order, so the assembled CIF is identical.
+/// When several subjects fail, which one's error comes back can differ.
 const COMPETING_RISKS_CIF_PARALLEL_ROW_MIN: usize = 256;
 
 pub fn assemble_competing_risks_cif(

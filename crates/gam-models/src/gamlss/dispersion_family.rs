@@ -158,6 +158,11 @@ pub const FAMILY_TWEEDIE_LOCATION_SCALE: &str = "tweedie-location-scale";
 /// oversubscription). Below it the serial map beats the fork/join overhead.
 /// Mirrors the row-chunk guard in
 /// [`row_coeff_operator`](super::gaussian::row_coeff_operator).
+///
+/// Work bound (#2469): result-invariant. Each of its four uses maps every row
+/// through the same row function on either side of it and collects the per-row
+/// values in index order, so everything downstream sees the identical `Vec`
+/// (`parallel_evaluate_matches_serial_reference` exercises the parallel side).
 const DISPERSION_PARALLEL_ROW_THRESHOLD: usize = 1024;
 
 /// Per-row working quantities for both channels at the current `(η_μ, η_d)`.
