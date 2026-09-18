@@ -1,5 +1,5 @@
 use super::*;
-use gam_problem::{StationarityRung, StationarityStandard};
+use gam_problem::{DominanceRefusalKind, StationarityRung, StationarityStandard};
 
 use super::asymptote_certificate::{
     AsymptoteSample, AsymptoteSide, AsymptoteTolerances, AsymptoteVerdict, AsymptoteWindow,
@@ -1202,11 +1202,84 @@ pub(crate) enum PlanRunOutcome {
 pub(crate) struct DominatedPlateau {
     /// The certified candidate the attempt declined to publish.
     pub(crate) plateau: OuterResult,
-    /// The lowest evaluated state of the attempt, re-evaluated at its own ρ.
+    /// The lowest evaluated state of the attempt, re-evaluated at its own ρ. A
+    /// continuation that ends lower moves it there.
     pub(crate) incumbent: OuterResult,
+    /// The plateau's value minus the incumbent's re-evaluated value, at the decline.
+    pub(crate) gap: f64,
     /// `outer_value_agreement_bound(plateau, incumbent)`, the resolution the gap
     /// was judged against.
     pub(crate) band: f64,
+    /// How the search from the incumbent ended (#2953).
+    pub(crate) continuation: DominanceContinuationStop,
+}
+
+/// How the search from the state that beat a declined certified optimum ended (#2953).
+#[derive(Clone, Debug, PartialEq)]
+pub enum DominanceContinuationStop {
+    /// No continuation ran: the attempt was itself a continuation, which starts no other.
+    NotRun,
+    /// The continuation exhausted without certifying.
+    Exhausted { final_value: f64 },
+    /// The continuation declined another certified optimum.
+    DominatedAgain { plateau_value: f64 },
+    /// The continuation certified under the screening certificate, which the terminal
+    /// certificate then refused.
+    Certified { final_value: f64 },
+    /// The continuation could not run.
+    Failed { error: String },
+}
+
+impl std::fmt::Display for DominanceContinuationStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotRun => f.write_str("was not run, because the attempt was itself a continuation"),
+            Self::Exhausted { final_value } => {
+                write!(f, "exhausted at objective {final_value:.6e} without certifying")
+            }
+            Self::DominatedAgain { plateau_value } => write!(
+                f,
+                "declined another certified optimum at objective {plateau_value:.6e}"
+            ),
+            Self::Certified { final_value } => write!(
+                f,
+                "certified at objective {final_value:.6e} under the screening certificate, which \
+                 the terminal certificate did not confirm"
+            ),
+            Self::Failed { error } => write!(f, "could not run ({error})"),
+        }
+    }
+}
+
+/// A certified optimum a plan attempt declined because an evaluated state beat it,
+/// carried on the result the plan loop returns so a terminal refusal can report it
+/// (#2953).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DominatedPlateauRecord {
+    /// Where the declined optimum sits.
+    pub plateau_rho: Array1<f64>,
+    /// The declined optimum's value.
+    pub plateau_value: f64,
+    /// `plateau_value` minus the re-evaluated value of the state that beat it.
+    pub gap: f64,
+    /// The criterion's rounding envelope the gap was judged against.
+    pub band: f64,
+    /// How the search from that state ended.
+    pub continuation: DominanceContinuationStop,
+}
+
+/// Of two declined optima, the one a refusal reports: the lower (#2953).
+pub(crate) fn lowest_dominated_plateau(
+    kept: Option<DominatedPlateauRecord>,
+    candidate: Option<DominatedPlateauRecord>,
+) -> Option<DominatedPlateauRecord> {
+    match (kept, candidate) {
+        (Some(kept), Some(candidate)) if candidate.plateau_value < kept.plateau_value => {
+            Some(candidate)
+        }
+        (Some(kept), _) => Some(kept),
+        (None, candidate) => candidate,
+    }
 }
 
 /// Which certificate concluded a CONVERGED outer run (#2235/#2241).
@@ -1577,6 +1650,11 @@ pub struct OuterResult {
     /// recorded refusal digit for digit. A seed that has NOT been started and
     /// refused is never suppressed, so no rescue path is closed.
     pub refused_seed_points: Vec<Array1<f64>>,
+    /// The lowest certified optimum a plan attempt of this search declined because an
+    /// evaluated state beat it (#2596, #2627), or `None`. When the terminal certificate
+    /// refuses this result and nothing continues it to a certified point, the refusal is
+    /// [`EstimationError::DominatedCertifiedPlateau`], which reports it (#2953).
+    pub dominated_plateau: Option<DominatedPlateauRecord>,
 }
 
 /// What a first-order search publishes when it halts where its kept rank ends (#2939): a
@@ -1638,6 +1716,7 @@ impl OuterResult {
             rank_boundary_stall: None,
             origin: OuterResultOrigin::Solver,
             refused_seed_points: Vec::new(),
+            dominated_plateau: None,
         }
     }
 
@@ -7494,6 +7573,98 @@ fn take_certify_reseed(result: &mut OuterResult) -> Option<CertifyReseed> {
     })
 }
 
+/// The kind of a dominated-plateau refusal at the refused checkpoint `result`, whose
+/// certificate published `untaken_reseed` and could not take it (#2953).
+///
+/// The checkpoint is a strict saddle whose escape could not be taken when that reseed is a
+/// saddle escape, or when its certificate measured first-order stationarity on inadmissible
+/// curvature, so that the escape declined to publish one.
+fn dominance_refusal_kind(
+    result: &OuterResult,
+    untaken_reseed: Option<CertifyReseedKind>,
+) -> DominanceRefusalKind {
+    let measured_saddle = result.criterion_certificate.as_ref().is_some_and(|certificate| {
+        certificate.is_stationary() && !certificate.curvature_not_refused()
+    });
+    if untaken_reseed == Some(CertifyReseedKind::SaddleEscape) || measured_saddle {
+        DominanceRefusalKind::IncumbentUnescapableSaddle
+    } else {
+        DominanceRefusalKind::DominanceUnresolved
+    }
+}
+
+/// Attach a certify reseed's failure to run to the refusal it leaves standing (#2953).
+fn with_reseed_failure(
+    context: &str,
+    refusal: EstimationError,
+    kind: CertifyReseedKind,
+    reseed_error: &EstimationError,
+) -> EstimationError {
+    match refusal {
+        EstimationError::RemlDidNotConverge {
+            context: refusal_context,
+            reason,
+            iterations,
+            final_value,
+            projected_grad_norm,
+            stationarity_standard,
+            rho_checkpoint,
+        } => EstimationError::RemlDidNotConverge {
+            context: refusal_context,
+            reason: format!(
+                "{reason}; the certificate's {kind:?} reseed could not run ({reseed_error})"
+            ),
+            iterations,
+            final_value,
+            projected_grad_norm,
+            stationarity_standard,
+            rho_checkpoint,
+        },
+        other => {
+            log::warn!(
+                "[OUTER] {context}: the certificate's {kind:?} reseed could not run \
+                 ({reseed_error}); the refusal from the point it started at stands: {other}"
+            );
+            other
+        }
+    }
+}
+
+/// What `run_outer` returns when its terminal certificate refuses `result` and nothing
+/// continues it (#2953). A result carrying a declined certified optimum refuses with
+/// [`EstimationError::DominatedCertifiedPlateau`], which reports that optimum beside
+/// the checkpoint that beat it. Any other result returns `refusal` as it is.
+fn dominated_plateau_refusal(
+    context: &str,
+    result: &OuterResult,
+    kind: DominanceRefusalKind,
+    refusal: EstimationError,
+) -> EstimationError {
+    let Some(plateau) = result.dominated_plateau.as_ref() else {
+        return refusal;
+    };
+    let incumbent_projected_grad_norm = match &refusal {
+        EstimationError::RemlDidNotConverge {
+            projected_grad_norm,
+            ..
+        } => *projected_grad_norm,
+        _ => None,
+    };
+    EstimationError::DominatedCertifiedPlateau {
+        context: context.to_string(),
+        kind,
+        plateau_rho: plateau.plateau_rho.to_vec(),
+        plateau_value: plateau.plateau_value,
+        incumbent_rho: result.rho.to_vec(),
+        incumbent_value: result.final_value,
+        incumbent_projected_grad_norm,
+        gap: plateau.gap,
+        band: plateau.band,
+        continuation: plateau.continuation.to_string(),
+        terminal_refusal: Box::new(refusal),
+    }
+}
+
 /// Run the outer smoothing-parameter optimization.
 ///
 /// This is the single entry point that replaces the scattered optimizer wiring
@@ -7565,6 +7736,10 @@ pub(crate) fn run_outer(
         );
         let mut polished = run_outer_uncertified(obj, &exact_config, context)?;
         polished.iterations = polished.iterations.saturating_add(pilot_iterations);
+        polished.dominated_plateau = lowest_dominated_plateau(
+            result.dominated_plateau.take(),
+            polished.dominated_plateau.take(),
+        );
         result = polished;
     }
     // Mandatory analytic optimality certificate (#934): once at the selected
@@ -7694,13 +7869,23 @@ pub(crate) fn run_outer(
             Ok(certificate) => break certificate,
             Err(refusal) => {
                 let Some(reseed) = take_certify_reseed(&mut result) else {
-                    return Err(refusal);
+                    return Err(dominated_plateau_refusal(
+                        context,
+                        &result,
+                        dominance_refusal_kind(&result, None),
+                        refusal,
+                    ));
                 };
                 // `result.final_value` is the certifying evaluation's value at the
                 // refused point.
                 let certified_value = result.final_value;
                 if !certify_reseed_admitted(last_refused_certified_value, certified_value) {
-                    return Err(refusal);
+                    return Err(dominated_plateau_refusal(
+                        context,
+                        &result,
+                        dominance_refusal_kind(&result, Some(reseed.kind)),
+                        refusal,
+                    ));
                 }
                 last_refused_certified_value = Some(certified_value);
                 let prior_iterations = result.iterations;
@@ -7779,13 +7964,30 @@ pub(crate) fn run_outer(
                 match run_outer_uncertified(obj, &retry_cfg, context) {
                     Ok(mut retried) => {
                         retried.iterations = retried.iterations.saturating_add(prior_iterations);
+                        retried.dominated_plateau = lowest_dominated_plateau(
+                            result.dominated_plateau.take(),
+                            retried.dominated_plateau.take(),
+                        );
                         result = retried;
                     }
-                    // The reseed could not even run (e.g. the checkpoint is a
-                    // hard refusal wall for the objective): surface the
-                    // certification refusal from the point we started this
-                    // iteration at, which carries the checkpoint evidence.
-                    Err(_) => return Err(refusal),
+                    // The reseed could not even run. A fatal evaluation failure is why
+                    // the fit stopped, so it propagates as it is: swallowing it published
+                    // an older refusal as the reason the fit stopped (#2953). Any other
+                    // failure (e.g. the checkpoint is a hard refusal wall for the
+                    // objective) leaves the certification refusal from the point this
+                    // iteration started at, which carries the checkpoint evidence, with
+                    // the reseed's failure attached.
+                    Err(reseed_error) if reseed_error.is_fatal_outer_evaluation() => {
+                        return Err(reseed_error);
+                    }
+                    Err(reseed_error) => {
+                        return Err(dominated_plateau_refusal(
+                            context,
+                            &result,
+                            dominance_refusal_kind(&result, Some(reseed.kind)),
+                            with_reseed_failure(context, refusal, reseed.kind, &reseed_error),
+                        ));
+                    }
                 }
             }
         }
@@ -8007,6 +8209,10 @@ pub(crate) fn run_outer_uncertified(
 
     let mut last_error: Option<EstimationError> = None;
     let mut best_checkpoint: Option<OuterResult> = None;
+    // #2953 — the lowest certified optimum an attempt declined because an evaluated
+    // state beat it. It rides on the result this loop returns, so a terminal refusal
+    // reports it instead of losing it.
+    let mut dominated_plateau: Option<DominatedPlateauRecord> = None;
     // A recoverable refusal at the point proposed by EFS says nothing against
     // the finite incumbent that proposed it.  Carry that incumbent across the
     // plan boundary exactly once; the analytic-gradient fallback must resume
@@ -8167,8 +8373,18 @@ pub(crate) fn run_outer_uncertified(
                     attempt_idx + 1,
                     dominated.plateau.final_value,
                     dominated.incumbent.final_value,
-                    dominated.plateau.final_value - dominated.incumbent.final_value,
+                    dominated.gap,
                     dominated.band,
+                );
+                dominated_plateau = lowest_dominated_plateau(
+                    dominated_plateau,
+                    Some(DominatedPlateauRecord {
+                        plateau_rho: dominated.plateau.rho,
+                        plateau_value: dominated.plateau.final_value,
+                        gap: dominated.gap,
+                        band: dominated.band,
+                        continuation: dominated.continuation,
+                    }),
                 );
                 Ok(dominated.incumbent)
             }
@@ -8211,6 +8427,8 @@ pub(crate) fn run_outer_uncertified(
             Ok(mut result) => {
                 if result.solver_claimed_convergence() {
                     result.iterations = result.iterations.saturating_add(spent_iterations);
+                    result.dominated_plateau =
+                        lowest_dominated_plateau(result.dominated_plateau.take(), dominated_plateau);
                     return Ok(result);
                 }
 
@@ -8263,6 +8481,8 @@ pub(crate) fn run_outer_uncertified(
         // `certify_outer_optimality` mints iff the point is genuinely stationary
         // (interior, railed, or flat-valley) and returns typed non-convergence
         // otherwise, so a truly divergent fit is still rejected there.
+        checkpoint.dominated_plateau =
+            lowest_dominated_plateau(checkpoint.dominated_plateau.take(), dominated_plateau);
         return Ok(checkpoint);
     }
 

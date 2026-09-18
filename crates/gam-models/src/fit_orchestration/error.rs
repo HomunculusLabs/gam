@@ -770,6 +770,52 @@ mod fit_failure_tests {
         ));
     }
 
+    /// A CTN prefit whose outer search declined a certified optimum and certified nothing
+    /// in its place used to reach its caller as `IntegrationFailed` text (#2953, at
+    /// 598f3da691). The transformation fit wraps the custom-family refusal under its
+    /// context, and the variant must survive that and the fit-model boundary by type.
+    #[test]
+    fn a_ctn_prefit_dominated_plateau_refusal_keeps_its_variant_by_type_2953() {
+        let refusal = EstimationError::DominatedCertifiedPlateau {
+            context: "custom family".to_string(),
+            kind: gam_problem::DominanceRefusalKind::IncumbentUnescapableSaddle,
+            plateau_rho: vec![0.5],
+            plateau_value: 73.02427,
+            incumbent_rho: vec![-1.25],
+            incumbent_value: 72.50521,
+            incumbent_projected_grad_norm: Some(2.632e-1),
+            gap: 9.541e-3,
+            band: 1.088e-6,
+            continuation: "declined another certified optimum at objective 7.302427e1".to_string(),
+            terminal_refusal: Box::new(EstimationError::RemlOptimizationFailed(
+                "not stationary".to_string(),
+            )),
+        };
+        let failure = FitFailure::from(CustomFamilyError::OuterSmoothingFailed {
+            reason: format!(
+                "outer smoothing optimization failed certified-fit validation after exhausting \
+                 strategy fallbacks: {refusal}"
+            ),
+            last_refusal: None,
+            search_inner_refusal: None,
+            outer_error: Arc::new(refusal),
+        })
+        .context("transformation fit failed");
+        let boundary = WorkflowError::from(failure);
+        assert_eq!(boundary.failure_category(), FailureCategory::Convergence);
+        assert_eq!(boundary.variant_name(), "EstimationError::DominatedCertifiedPlateau");
+        let WorkflowError::Fit(failure) = &boundary else {
+            panic!("the CTN prefit refusal must stay a typed fit failure: {boundary}");
+        };
+        assert!(matches!(
+            failure.estimation_error(),
+            Some(EstimationError::DominatedCertifiedPlateau {
+                kind: gam_problem::DominanceRefusalKind::IncumbentUnescapableSaddle,
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn context_and_notes_keep_the_category_and_the_old_text_2937() {
         let failure = FitFailure::from(seeds_refused())

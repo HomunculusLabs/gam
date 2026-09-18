@@ -1688,6 +1688,12 @@ pub(crate) fn outer_result_to_native(mut result: OuterResult, perm: &[usize]) ->
         .flatten()
         .chain(active_set.into_iter().flatten())
         .chain(result.refused_seed_points.iter_mut())
+        .chain(
+            result
+                .dominated_plateau
+                .as_mut()
+                .map(|plateau| &mut plateau.plateau_rho),
+        )
     {
         if point.len() == perm.len() {
             *point = permute_to_native(point, perm);
@@ -1704,8 +1710,16 @@ pub(crate) fn outer_result_to_native(mut result: OuterResult, perm: &[usize]) ->
 /// than the one the refusal reported. Every coordinate `reason` names was
 /// rendered in native order when the text was written, through
 /// [`native_coordinate`] on `OuterConfig::native_coordinate_order` (#2817), so
-/// only the checkpoint is permuted here.
+/// only the points are permuted here: the checkpoint, and a dominated-plateau
+/// refusal's declined optimum (#2953).
 pub(crate) fn outer_error_to_native(error: EstimationError, perm: &[usize]) -> EstimationError {
+    let to_native = |rho: Vec<f64>| {
+        if rho.len() == perm.len() {
+            permute_to_native(&Array1::from_vec(rho), perm).to_vec()
+        } else {
+            rho
+        }
+    };
     match error {
         EstimationError::RemlDidNotConverge {
             context,
@@ -1715,22 +1729,40 @@ pub(crate) fn outer_error_to_native(error: EstimationError, perm: &[usize]) -> E
             projected_grad_norm,
             stationarity_standard,
             rho_checkpoint,
-        } => {
-            let rho_checkpoint = if rho_checkpoint.len() == perm.len() {
-                permute_to_native(&Array1::from_vec(rho_checkpoint), perm).to_vec()
-            } else {
-                rho_checkpoint
-            };
-            EstimationError::RemlDidNotConverge {
-                context,
-                reason,
-                iterations,
-                final_value,
-                projected_grad_norm,
-                stationarity_standard,
-                rho_checkpoint,
-            }
-        }
+        } => EstimationError::RemlDidNotConverge {
+            context,
+            reason,
+            iterations,
+            final_value,
+            projected_grad_norm,
+            stationarity_standard,
+            rho_checkpoint: to_native(rho_checkpoint),
+        },
+        EstimationError::DominatedCertifiedPlateau {
+            context,
+            kind,
+            plateau_rho,
+            plateau_value,
+            incumbent_rho,
+            incumbent_value,
+            incumbent_projected_grad_norm,
+            gap,
+            band,
+            continuation,
+            terminal_refusal,
+        } => EstimationError::DominatedCertifiedPlateau {
+            context,
+            kind,
+            plateau_rho: to_native(plateau_rho),
+            plateau_value,
+            incumbent_rho: to_native(incumbent_rho),
+            incumbent_value,
+            incumbent_projected_grad_norm,
+            gap,
+            band,
+            continuation,
+            terminal_refusal: Box::new(outer_error_to_native(*terminal_refusal, perm)),
+        },
         other => other,
     }
 }

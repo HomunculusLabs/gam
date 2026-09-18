@@ -194,6 +194,14 @@ fn fit_standard_base(
 
 fn firth_can_rescue(error: &gam_solve::estimate::EstimationError) -> bool {
     use gam_solve::estimate::EstimationError;
+    // The dominance report wraps the terminal certificate's refusal, and that refusal
+    // decided whether Firth could rescue the fit before the report existed (#2953).
+    if let EstimationError::DominatedCertifiedPlateau {
+        terminal_refusal, ..
+    } = error
+    {
+        return firth_can_rescue(terminal_refusal);
+    }
     error.is_inner_solve_retreat()
         || matches!(
             error,

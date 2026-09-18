@@ -6054,6 +6054,11 @@ fn run_nonconverged_arc_returns_typed_checkpoint_without_a_budget_retry() {
 #[path = "run_plan_seed_cascade_tests.rs"]
 mod run_plan_seed_cascade_tests;
 
+// #2953: the typed refusal that reports a declined certified optimum, and the continuation
+// that publishes in its place.
+#[path = "run_plan_dominated_plateau_2953_tests.rs"]
+mod run_plan_dominated_plateau_2953_tests;
+
 fn tmp_cache_session(label: &str) -> (tempfile::TempDir, Arc<CacheSession>) {
     let dir = tempfile::tempdir().expect("the test environment provides a writable temp dir");
     let store = gam_runtime::warm_start::WarmStartStore::open(

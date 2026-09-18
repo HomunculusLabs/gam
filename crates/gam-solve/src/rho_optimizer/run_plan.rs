@@ -3174,6 +3174,7 @@ pub(crate) fn run_outer_with_plan(
     {
         let plateau = certified.into_result();
         incumbent.final_value = incumbent_value;
+        let gap = plateau.final_value - incumbent.final_value;
         log::warn!(
             "[OUTER] {context}: certified winner rho={:?} cost={:.6e} is dominated by an \
              evaluated state rho={:?} cost={:.6e} (gap {:.3e} > the criterion's rounding \
@@ -3183,9 +3184,10 @@ pub(crate) fn run_outer_with_plan(
             plateau.final_value,
             incumbent.rho.to_vec(),
             incumbent.final_value,
-            plateau.final_value - incumbent.final_value,
+            gap,
             band,
         );
+        let mut continuation = DominanceContinuationStop::NotRun;
         if allow_tail_snap_reseed {
             let mut retry_config = config.clone();
             retry_config.initial_rho = Some(incumbent.rho.clone());
@@ -3199,6 +3201,9 @@ pub(crate) fn run_outer_with_plan(
                          at cost {:.6e} without certifying (#2627)",
                         retry_checkpoint.final_value,
                     );
+                    continuation = DominanceContinuationStop::Exhausted {
+                        final_value: retry_checkpoint.final_value,
+                    };
                     if retry_checkpoint.final_value < incumbent.final_value {
                         incumbent.rho = retry_checkpoint.rho;
                         incumbent.final_value = retry_checkpoint.final_value;
@@ -3210,10 +3215,34 @@ pub(crate) fn run_outer_with_plan(
                          another dominated plateau at cost {:.6e} (#2627)",
                         retry.plateau.final_value,
                     );
+                    continuation = DominanceContinuationStop::DominatedAgain {
+                        plateau_value: retry.plateau.final_value,
+                    };
                     if retry.incumbent.final_value < incumbent.final_value {
                         incumbent.rho = retry.incumbent.rho;
                         incumbent.final_value = retry.incumbent.final_value;
                     }
+                }
+                // The continuation certified under the screening certificate. It publishes
+                // only if the terminal certificate agrees, so the declined optimum rides on
+                // it for the refusal that follows otherwise (#2953).
+                Ok(PlanRunOutcome::Converged(mut retry_result)) => {
+                    retry_result.dominated_plateau = lowest_dominated_plateau(
+                        retry_result.dominated_plateau.take(),
+                        Some(DominatedPlateauRecord {
+                            plateau_rho: plateau.rho,
+                            plateau_value: plateau.final_value,
+                            gap,
+                            band,
+                            continuation: DominanceContinuationStop::Certified {
+                                final_value: retry_result.final_value,
+                            },
+                        }),
+                    );
+                    return Ok(with_enclosing_attempt_ledger(
+                        PlanRunOutcome::Converged(retry_result),
+                        spent_seed_iterations,
+                    ));
                 }
                 Ok(outcome) => {
                     return Ok(with_enclosing_attempt_ledger(outcome, spent_seed_iterations));
@@ -3224,6 +3253,9 @@ pub(crate) fn run_outer_with_plan(
                          ({retry_error}); returning the dominated plateau with the incumbent as \
                          the resume checkpoint (#2627)"
                     );
+                    continuation = DominanceContinuationStop::Failed {
+                        error: retry_error.to_string(),
+                    };
                 }
             }
         }
@@ -3233,7 +3265,9 @@ pub(crate) fn run_outer_with_plan(
         return Ok(PlanRunOutcome::DominatedPlateau(DominatedPlateau {
             plateau,
             incumbent,
+            gap,
             band,
+            continuation,
         }));
     }
 

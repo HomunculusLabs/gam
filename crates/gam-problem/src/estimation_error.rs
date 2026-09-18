@@ -163,6 +163,35 @@ impl std::fmt::Display for FitStationarityEvidence {
     }
 }
 
+/// Why a declined certified optimum left nothing to publish (#2953).
+///
+/// Decided at runtime from how the terminal certificate's continuation ended; it is not
+/// configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DominanceRefusalKind {
+    /// The checkpoint that beat the declined optimum is a strict saddle, first-order
+    /// stationary on inadmissible curvature, and its escape could not be taken: the escape
+    /// declined, certified descent did not admit it, or the search from it could not run.
+    IncumbentUnescapableSaddle,
+    /// The checkpoint that beat the declined optimum did not certify, and no strategy
+    /// change its certificate published moved it to a point that does.
+    DominanceUnresolved,
+}
+
+impl std::fmt::Display for DominanceRefusalKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::IncumbentUnescapableSaddle => {
+                "the checkpoint that beat it is a strict saddle whose escape could not be taken"
+            }
+            Self::DominanceUnresolved => {
+                "the checkpoint that beat it did not certify, and no strategy change moved it \
+                 to a point that does"
+            }
+        })
+    }
+}
+
 /// Fixed-lambda solver stage that owns a resumable coefficient checkpoint.
 ///
 /// The multinomial fitter has two distinct objectives: the ordinary softmax
@@ -814,6 +843,54 @@ pub enum EstimationError {
         rho_checkpoint: Vec<f64>,
     },
 
+    /// A certified optimum that an evaluated state of the same search beats beyond the
+    /// criterion's rounding envelope, with nothing certified in its place (#2953).
+    ///
+    /// The plan runner declines such an optimum and continues the search from the state
+    /// that beats it (#2596, #2627): a certificate says a point is stationary, not that it
+    /// is the best point the search measured. When no plan attempt and no continuation of
+    /// the terminal certificate certifies, no fit is published. The declined optimum is not
+    /// the best point measured and the better checkpoint is not stationary, so this refusal
+    /// carries both.
+    #[error(
+        "Outer smoothing-parameter optimization declined a certified optimum that an \
+         evaluated state beats, and certified nothing in its place ({context}): {kind}. The \
+         declined optimum has objective {plateau_value:.6e} at rho {plateau_rho:?}; a state \
+         {gap:.3e} below it, beyond the criterion's rounding envelope {band:.3e}, resumed the \
+         search, and that continuation {continuation}. The best checkpoint has objective \
+         {incumbent_value:.6e} and projected gradient norm {}; resume by seeding the outer \
+         search at rho_checkpoint = {incumbent_rho:?}. Its terminal certificate refused: \
+         {terminal_refusal}",
+        .incumbent_projected_grad_norm.map_or_else(|| "unmeasured".to_string(), |g| format!("{g:.3e}")),
+    )]
+    DominatedCertifiedPlateau {
+        /// Fit context label (the same string the outer runner logs under).
+        context: String,
+        /// Why nothing certified in the declined optimum's place.
+        kind: DominanceRefusalKind,
+        /// Where the declined certified optimum sits.
+        plateau_rho: Vec<f64>,
+        /// The declined optimum's objective.
+        plateau_value: f64,
+        /// The checkpoint the terminal certificate refused, and the resume point.
+        incumbent_rho: Vec<f64>,
+        /// The objective the terminal certificate evaluated at `incumbent_rho`.
+        incumbent_value: f64,
+        /// KKT-projected gradient norm at `incumbent_rho`, when the terminal
+        /// certificate measured one.
+        incumbent_projected_grad_norm: Option<f64>,
+        /// The declined optimum's objective minus the re-evaluated objective of the
+        /// state that beat it, measured when the optimum was declined.
+        gap: f64,
+        /// `outer_value_agreement_bound` of those two values: the resolution the gap
+        /// was judged against.
+        band: f64,
+        /// How the search from the state that beat the optimum ended.
+        continuation: String,
+        /// The terminal certificate's own refusal at `incumbent_rho`.
+        terminal_refusal: Box<EstimationError>,
+    },
+
     #[error(
         "Fit assembly rejected a non-converged optimization state: inner status \
          {inner_status}, outer status {outer_status}, after {outer_iterations} outer \
@@ -1109,6 +1186,7 @@ impl EstimationError {
             | Self::StartupSeedsRefused { .. }
             | Self::OuterObjectiveEvaluationFailed { .. }
             | Self::RemlDidNotConverge { .. }
+            | Self::DominatedCertifiedPlateau { .. }
             | Self::FitDidNotConverge { .. }
             | Self::GradientUnavailable { .. }
             | Self::LayoutError { .. }
@@ -1269,6 +1347,7 @@ impl EstimationError {
             | Self::RemlOptimizationFailed(_)
             | Self::TrialPointRefused { .. }
             | Self::RemlDidNotConverge { .. }
+            | Self::DominatedCertifiedPlateau { .. }
             | Self::FitDidNotConverge { .. }
             // The exact Tweedie series refusing its term budget is a
             // convergence-class refusal of the likelihood evaluation.
@@ -1378,6 +1457,9 @@ impl EstimationError {
                 "EstimationError::OuterObjectiveEvaluationFailed"
             }
             Self::RemlDidNotConverge { .. } => "EstimationError::RemlDidNotConverge",
+            Self::DominatedCertifiedPlateau { .. } => {
+                "EstimationError::DominatedCertifiedPlateau"
+            }
             Self::FitDidNotConverge { .. } => "EstimationError::FitDidNotConverge",
             Self::GradientUnavailable { .. } => "EstimationError::GradientUnavailable",
             Self::LayoutError(_) => "EstimationError::LayoutError",
