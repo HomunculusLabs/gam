@@ -5127,17 +5127,17 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // `objective_change` compares the augmented objective at the new vs old
         // β consistently (gam#826/#872).
         lastobjective = -current_log_likelihood + current_penalty;
-        let new_phi = if !jeffreys_skippable_this_cycle {
+        let (new_phi, new_jeffreys_roundoff) = if !jeffreys_skippable_this_cycle {
             joint_jeffreys_subspace
                 .as_ref()
                 .map(|z_joint| {
                     custom_family_joint_jeffreys_value(family, &states, specs, &ranges, z_joint)
-                        .map(|value| value.phi)
+                        .map(|value| (value.phi, value.roundoff))
                 })
                 .transpose()?
-                .unwrap_or(0.0)
+                .unwrap_or((0.0, 0.0))
         } else {
-            0.0
+            (0.0, 0.0)
         };
         let accepted_step_inf = states
             .iter()
@@ -6061,7 +6061,52 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     .fold(0.0_f64, f64::max)
                     .max(1.0);
                 let fixed_point_floor = 64.0 * f64::EPSILON * beta_scale;
-                let objective_floor = 64.0 * f64::EPSILON * (1.0 + lastobjective.abs());
+                // The objective is at its numerical floor when the change between
+                // the two endpoint evaluations is inside the rounding they can carry:
+                // the accumulation ceiling over both endpoints (gam#2748). The literal
+                // `64·ε·(1 + |f|)` this replaces had no derivation, and it refused the
+                // CTN order-0 power-9 fixture's fixed point at |Δobjective| = 3.382e-12
+                // against 2.445e-12 (gam#2959).
+                //
+                // The penalty half is what each endpoint's `½βᵀS_λβ` really summed,
+                // `½Σ|β_i S_ij β_j|` from one explicit pass. The trust loop's early exit
+                // charges the cruder `max|S_λ|·‖β‖₁²`, which on that fixture would put
+                // this floor at 0.307. The data half is `|f_old| + |f_new|`: per-row
+                // log-likelihood terms can cancel, so it is at most `Σ|ℓ_i|` and the
+                // floor errs small, which only declines more. Where the floor is still
+                // loose, the step and exact-model arms carry the guarantee
+                // (`constrained_numerical_fixed_point_failures`).
+                let accepted_beta: Vec<Array1<f64>> =
+                    states.iter().map(|state| state.beta.clone()).collect();
+                let old_penalty_accumulation =
+                    crate::blockwise_solve::total_quadratic_penalty_with_accumulation(
+                        &old_beta,
+                        &s_lambdas,
+                        joint_bundle,
+                    )
+                    .1;
+                let accepted_penalty_accumulation =
+                    crate::blockwise_solve::total_quadratic_penalty_with_accumulation(
+                        &accepted_beta,
+                        &s_lambdas,
+                        joint_bundle,
+                    )
+                    .1;
+                // Every summand charged: the likelihood's rows and each penalty
+                // entry the explicit pass accumulated.
+                let penalty_entries = s_lambdas.iter().map(|s_lambda| s_lambda.len()).sum::<usize>()
+                    + joint_bundle.map_or(0, |bundle| {
+                        bundle.specs().iter().map(|spec| spec.matrix.len()).sum::<usize>()
+                    });
+                let objective_floor = ObjectiveAccumulation {
+                    summed_terms: total_joint_n + penalty_entries,
+                    magnitude: old_objective.abs()
+                        + (lastobjective - new_phi).abs()
+                        + old_penalty_accumulation
+                        + accepted_penalty_accumulation,
+                    logdet_roundoff: old_jeffreys.roundoff + new_jeffreys_roundoff,
+                }
+                .roundoff_ceiling();
                 // `step_at_eps_floor` records whether the accepted step also reached
                 // its OWN machine-eps floor, used only to label the log line with
                 // which stationarity witness fired (strict eps step vs the gam#2358
@@ -6129,7 +6174,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     if hpen_nullity == Some(0) {
                         log::info!(
                             "[PIRLS/joint-Newton convergence] cycle {:>3} | constrained fixed-point certificate ({}): \
-                             |Δobjective|={:.3e} ≤ objective_floor={:.3e} (objective at machine-eps floor), accepted_step_inf={:.3e} (eps_floor={:.3e}, step_tol={:.3e}), \
+                             |Δobjective|={:.3e} ≤ objective_floor={:.3e} (objective change within its evaluations' rounding), accepted_step_inf={:.3e} (eps_floor={:.3e}, step_tol={:.3e}), \
                              scalar_relerr={:.3e}, linearized_rel={:.3e}; H_pen has no numerical null space so the \
                              residual={:.3e} is an active-constraint Lagrange multiplier (the QP under-identified the \
                              binding rows), projected out of the KKT residual by the active-constraint-aware IFT \

@@ -2341,11 +2341,12 @@ pub(crate) fn joint_objective_roundoff_slack(
 ///
 /// # The ceiling, which is not a chosen constant
 ///
-/// Rounding in a sum of `m` terms is bounded by `m·ε·Σ|terms|` — the textbook
-/// forward-error bound for the summation the evaluation performs. Both factors
-/// are facts about this evaluation: `m` is the number of rows it sums over, and
-/// `Σ|terms|` is bounded by the magnitudes the objective accumulates. So no
-/// rounding claim above `m·ε·Σ|terms|` can be true, whatever a ladder appears
+/// Rounding in a sum of `m` terms is bounded by `γ_m·Σ|terms|`, with
+/// `γ_m = m·u/(1 − m·u)` — the textbook forward-error bound for the summation
+/// the evaluation performs, in the roundoff owner's denomination. Both factors
+/// are facts about this evaluation: `m` is the number of summands it charges,
+/// and `Σ|terms|` is bounded by the magnitudes the objective accumulates. So no
+/// rounding claim above `γ_m·Σ|terms|` can be true, whatever a ladder appears
 /// to show.
 ///
 /// The accumulation is NOT `|F|`, which is the whole content of gam#2612: the
@@ -2357,7 +2358,8 @@ pub(crate) fn joint_objective_roundoff_slack(
 /// orders.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct ObjectiveAccumulation {
-    /// Number of terms the likelihood summation accumulates.
+    /// Number of summands charged: the likelihood's rows, plus the penalty entries
+    /// when a caller charges an explicit accumulation of `½βᵀS_λβ`.
     pub(crate) summed_terms: usize,
     /// An upper bound on `Σ|terms|` over everything the evaluation accumulates:
     /// the objective values themselves plus the penalty's own cancellation
@@ -2377,8 +2379,15 @@ pub(crate) struct ObjectiveAccumulation {
 }
 
 impl ObjectiveAccumulation {
-    /// `m·ε·(1 + Σ|terms|) + logdet_roundoff` — the largest rounding one
-    /// evaluation can carry.
+    /// `γ_m·Σ|terms| + logdet_roundoff` — the largest rounding one evaluation can
+    /// carry, with `γ_m = m·u/(1 − m·u)` from the roundoff owner
+    /// ([`gam_linalg::roundoff::accumulation_growth`]).
+    ///
+    /// `m` is the number of summands charged. Any parenthesization of an
+    /// `m`-term sum rounds by at most `γ_m·Σ|terms|`, so one `γ_m` covers a
+    /// sequential and a tree reduction alike. The magnitude carries no additive
+    /// constant: a sum whose summands are all zero is exact, and a `+1` inside
+    /// would set a floor unrelated to what was summed (gam#2959).
     ///
     /// Non-finite or absurd inputs yield `f64::INFINITY`, i.e. no ceiling: this
     /// guard exists to refuse an impossible measurement, never to suppress a
@@ -2387,8 +2396,11 @@ impl ObjectiveAccumulation {
         if !self.magnitude.is_finite() || !self.logdet_roundoff.is_finite() {
             return f64::INFINITY;
         }
-        let terms = (self.summed_terms.max(1) as f64).max(1.0);
-        terms * f64::EPSILON * (1.0 + self.magnitude.abs()) + self.logdet_roundoff.max(0.0)
+        let growth = gam_linalg::roundoff::accumulation_growth(self.summed_terms.max(1));
+        if !(growth.is_finite() && growth >= 0.0) {
+            return f64::INFINITY;
+        }
+        growth * self.magnitude.abs() + self.logdet_roundoff.max(0.0)
     }
 }
 
@@ -5810,6 +5822,17 @@ pub(crate) fn constrained_stationary_certificate_decision(
 /// `linearized_rel ≥ 0.5` (the feasible Newton step leaves the residual, so it is
 /// constraint-normal multiplier mass, not resolvable descent) before accepting.
 ///
+/// The caller's `objective_floor` is the rounding the two endpoint evaluations can
+/// carry (`ObjectiveAccumulation::roundoff_ceiling`, gam#2959). That ceiling can sit
+/// far above the change a flat objective actually shows, and there the objective
+/// arm cannot fire. The other two arms carry the guarantee: under an exact local
+/// model, a step within `step_tol` predicts a decrease no larger than the gradient
+/// against that step, so a representable descent cannot hide under a loose floor.
+/// Each arm has a pin that fails when the arm is removed:
+/// `rejects_when_objective_still_descending_above_eps_floor`,
+/// `rejects_when_accepted_step_exceeds_step_tol` and
+/// `rejects_when_local_model_is_inexact`.
+///
 /// Returns the conditions that fail, each with its value and bound. The fixed
 /// point is reached exactly when the list is empty, so the certificate and its
 /// refusal message cannot disagree about which condition decided.
@@ -6142,5 +6165,41 @@ mod constrained_numerical_fixed_point_tests {
             "{step_verdict}"
         );
         assert!(constrained_fixed_point_declining_conditions(false, &[], None).is_empty());
+    }
+
+    // gam#2959. The objective ceiling is denominated in its summands: the roundoff
+    // owner's `γ_m` over `Σ|terms|`, with no additive constant. Doubling the charged
+    // magnitude doubles the ceiling, and a sum of zero-magnitude summands, which is
+    // exact, has a zero ceiling. The former `m·ε·(1 + Σ|terms|)` fails both.
+    #[test]
+    fn objective_ceiling_is_denominated_in_its_summands_2959() {
+        let charged = super::ObjectiveAccumulation {
+            summed_terms: 240,
+            magnitude: 1.0e-6,
+            logdet_roundoff: 0.0,
+        };
+        let doubled = super::ObjectiveAccumulation {
+            magnitude: 2.0e-6,
+            ..charged
+        };
+        let empty = super::ObjectiveAccumulation {
+            magnitude: 0.0,
+            ..charged
+        };
+        assert_eq!(
+            charged.roundoff_ceiling(),
+            gam_linalg::roundoff::accumulation_growth(240) * 1.0e-6,
+            "the ceiling is γ_m over the charged magnitude"
+        );
+        assert_eq!(
+            doubled.roundoff_ceiling(),
+            2.0 * charged.roundoff_ceiling(),
+            "an additive constant would stop the ceiling scaling with what was summed"
+        );
+        assert_eq!(
+            empty.roundoff_ceiling(),
+            0.0,
+            "a sum of zero-magnitude summands is exact and carries no rounding"
+        );
     }
 }
