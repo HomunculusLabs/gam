@@ -1969,6 +1969,42 @@ fn nuclear_norm_tie_guard_refuses_only_an_unresolved_gap_2469() {
     assert!(err.contains("splits a tied"), "got: {err}");
 }
 
+/// #2469: a row joins the wide-block joint row-space basis when its residual is
+/// resolved above `gram_schmidt_residual_band`, not above `1e-13·‖row‖`. In
+/// `d = 40`, `T = e₀` and `V = e₀ + 5e-14·e₁` leave `V` a residual of `5e-14`. That
+/// is above the band for one direction (`2·γ₄₄ ≈ 9.8e-15`) and below the replaced
+/// cutoff, so the basis has two directions. A row exactly in the span (`V = 3·e₀`)
+/// adds none, and a zero row is skipped.
+#[test]
+fn nuclear_norm_joint_row_space_basis_admits_a_residual_above_its_band_2469() {
+    use crate::analytic_penalties::nuclear_norm::joint_row_space_basis;
+    let d = 40usize;
+    let gap = 5.0e-14_f64;
+    let band = gam_math::roundoff::gram_schmidt_residual_band(
+        gam_math::roundoff::GRAM_SCHMIDT_PASSES,
+        1,
+        d,
+        1.0,
+    );
+    assert!(
+        gap > band && gap < 1.0e-13,
+        "fixture premise: the residual {gap:.1e} sits between the band {band:.3e} and the \
+         replaced 1e-13 cutoff"
+    );
+    let mut t = Array2::<f64>::zeros((1, d));
+    t[[0, 0]] = 1.0;
+    let mut v = Array2::<f64>::zeros((2, d));
+    v[[0, 0]] = 1.0;
+    v[[0, 1]] = gap;
+    let basis = joint_row_space_basis(t.view(), v.view());
+    assert_eq!(basis.len(), 2, "the resolved residual is a second direction");
+    assert!((basis[1][1].abs() - 1.0).abs() <= band);
+
+    let mut in_span = Array2::<f64>::zeros((1, d));
+    in_span[[0, 0]] = 3.0;
+    assert_eq!(joint_row_space_basis(t.view(), in_span.view()).len(), 1);
+}
+
 #[test]
 fn nuclear_norm_hvp_truncated_rank_matches_gradient_directional_derivative() {
     let n_eff = 4usize;

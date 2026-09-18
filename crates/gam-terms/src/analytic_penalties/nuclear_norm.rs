@@ -64,6 +64,45 @@ fn frechet_route_balance() -> f64 {
     (64.0 / 5.0 * f64::EPSILON).cbrt()
 }
 
+/// Orthonormal basis `S` of the joint row space of `T` and `V`, by reorthogonalized
+/// modified Gram–Schmidt over their stacked rows in order. It is deterministic.
+///
+/// A row joins the basis when its residual after
+/// `gam_math::roundoff::GRAM_SCHMIDT_PASSES` passes exceeds
+/// `gam_math::roundoff::gram_schmidt_residual_band` for its own norm and the
+/// directions already collected (#2469). A zero row is skipped, and the first
+/// nonzero row always joins.
+pub(crate) fn joint_row_space_basis(t: ArrayView2<'_, f64>, v: ArrayView2<'_, f64>) -> Vec<Array1<f64>> {
+    let d = t.ncols();
+    let mut basis: Vec<Array1<f64>> = Vec::with_capacity(t.nrows() + v.nrows());
+    for source in [&t, &v] {
+        for row in source.rows() {
+            let scale = row.iter().fold(0.0_f64, |a, &x| a + x * x).sqrt();
+            if scale <= 0.0 {
+                continue;
+            }
+            let band = gam_math::roundoff::gram_schmidt_residual_band(
+                gam_math::roundoff::GRAM_SCHMIDT_PASSES,
+                basis.len(),
+                d,
+                scale,
+            );
+            let mut r = row.to_owned();
+            for _ in 0..gam_math::roundoff::GRAM_SCHMIDT_PASSES {
+                for b in &basis {
+                    let proj = b.dot(&r);
+                    r.scaled_add(-proj, b);
+                }
+            }
+            let norm = r.iter().fold(0.0_f64, |a, &x| a + x * x).sqrt();
+            if norm > band {
+                basis.push(r / norm);
+            }
+        }
+    }
+    basis
+}
+
 struct NuclearSvdCache {
     u: Array2<f64>,
     singular: Array1<f64>,
@@ -250,32 +289,7 @@ impl NuclearNormPenalty {
             let (rf, rfd) = self.right_spectral_inverse_sqrt_derivative(t, v)?;
             return Ok((v.dot(&rf), t.dot(&rfd)));
         }
-        // Joint row-space basis S (d × s) by modified Gram-Schmidt over the
-        // 2m stacked rows of T and V. Deterministic; relative drop tolerance.
-        let mut basis: Vec<Array1<f64>> = Vec::with_capacity(2 * m);
-        for source in [&t, &v] {
-            for row in source.rows() {
-                let scale = row.iter().fold(0.0_f64, |a, &x| a + x * x).sqrt();
-                if scale <= 0.0 {
-                    continue;
-                }
-                let mut r = row.to_owned();
-                for b in &basis {
-                    let proj = b.dot(&r);
-                    r.scaled_add(-proj, b);
-                }
-                // Re-orthogonalize once (classical MGS twice-is-enough) so the
-                // basis stays orthonormal to working precision.
-                for b in &basis {
-                    let proj = b.dot(&r);
-                    r.scaled_add(-proj, b);
-                }
-                let norm = r.iter().fold(0.0_f64, |a, &x| a + x * x).sqrt();
-                if norm > 1.0e-13 * scale {
-                    basis.push(r / norm);
-                }
-            }
-        }
+        let basis = joint_row_space_basis(t, v);
         let s_dim = basis.len();
         if s_dim == 0 {
             // T = V = 0: R is the constant f₀ filter and dR vanishes.
