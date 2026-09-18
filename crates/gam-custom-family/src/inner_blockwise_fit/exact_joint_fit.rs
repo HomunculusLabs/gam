@@ -258,6 +258,95 @@ fn indefinite_returned_mode_refusal(lambda_min: f64, numerical_floor: f64) -> Cu
     ))
 }
 
+/// The constrained joint-Newton candidate `β + δ`: the linear-constraint QP
+/// `min ½δᵀHδ − rhsᵀδ` subject to the constraints shifted to the increment,
+/// `Aδ ≥ b − Aβ`.
+///
+/// The QP is solved for the increment, never for the new iterate. Posed as
+/// `min ½xᵀHx − (Hβ + rhs)ᵀx`, it is the same problem in exact arithmetic, but
+/// its solution carries the arithmetic error of `Hβ`, of order `ε·‖H‖·‖β‖`,
+/// which does not shrink as the iterate converges, while the error of `δ`
+/// shrinks with `δ`. On the gnomon#2359 calibration fit (the sex ridge railed at
+/// ρ = 22.78, so λ_max(H) = 3.27e9 against λ_min = 0.29, and |β|∞ = 1.45) every
+/// step of the new-iterate form left the stationarity residual on a three-row
+/// score-warp face between 4e-8 and 3e-7, however small the step, against a
+/// gradient whose own rounding band is 3.5e-12; the certificate refused those
+/// modes, and which trial points certified depended on which step path each
+/// cycle took. The exact-face step, already in increment form, took the same
+/// iterates to 5e-14 in one cycle.
+fn constrained_newton_candidate(
+    hessian: &Array2<f64>,
+    rhs: &Array1<f64>,
+    beta: &Array1<f64>,
+    constraints: &ConstraintSet,
+    warm_active_set: Option<&[usize]>,
+) -> Result<(Array1<f64>, Vec<usize>), CustomFamilyError> {
+    let delta_constraints =
+        crate::blockwise_solve::shift_linear_constraints_to_delta(constraints, beta)?;
+    let (delta, active_set) = gam_solve::active_set::solve_quadratic_with_constraint_set(
+        hessian,
+        rhs,
+        &Array1::<f64>::zeros(beta.len()),
+        &delta_constraints,
+        warm_active_set,
+    )
+    .map_err(|error| CustomFamilyError::trial_point(error.to_string()))?;
+    Ok((beta + &delta, active_set))
+}
+
+#[cfg(test)]
+mod constrained_newton_candidate_tests {
+    use super::constrained_newton_candidate;
+    use gam_problem::{ConstraintSet, LinearInequalityConstraints};
+    use ndarray::array;
+
+    /// gnomon#2359: on a Hessian whose stiffest curvature is 3e9 and an iterate
+    /// of order one sitting on a constraint wall, the candidate's stationarity
+    /// on its face must be within a backward-stable solve's `c·ε·‖H‖·‖δ‖` of the
+    /// STEP, not the `ε·‖H‖·‖β‖` of `Hβ` that the new-iterate form of the same QP
+    /// carries. Measured: 7.8e-13 for the increment, 3.3e-8 for the new iterate,
+    /// against a bound of 5.2e-11.
+    #[test]
+    fn constrained_newton_candidate_is_accurate_to_its_step_2359() {
+        let hessian = array![[3.27e9, 5.0, 2.0], [5.0, 50.0, 3.0], [2.0, 3.0, 20.0]];
+        let beta = array![8.9e-10, 1.45, -0.8];
+        let a = array![[0.0, 1.0, 1.0]];
+        let b = array![a.row(0).dot(&beta)];
+        let constraints =
+            ConstraintSet::Dense(LinearInequalityConstraints::new(a.clone(), b).expect("one row"));
+        // A residual pushing into the wall by more than the QP's feasibility tolerance.
+        let rhs = array![2.0e-4, -3.0e-4, -1.0e-4];
+        let (candidate, active) =
+            constrained_newton_candidate(&hessian, &rhs, &beta, &constraints, None)
+                .expect("the constrained Newton QP solves");
+        assert_eq!(
+            active,
+            vec![0],
+            "the pushed-into wall is active at the candidate"
+        );
+        let delta = &candidate - &beta;
+        let after = &rhs - &hessian.dot(&delta);
+        let normal = a.row(0);
+        let multiplier = normal.dot(&after) / normal.dot(&normal);
+        let face_residual = (&after - &(&normal * multiplier))
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let hessian_norm = hessian
+            .rows()
+            .into_iter()
+            .map(|row| row.iter().map(|value| value.abs()).sum::<f64>())
+            .fold(0.0_f64, f64::max);
+        let delta_norm = delta.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let bound = 4.0 * 3.0 * f64::EPSILON * hessian_norm * delta_norm;
+        assert!(
+            face_residual <= bound,
+            "face stationarity {face_residual:.3e} exceeds the step's rounding {bound:.3e}; \
+             the new-iterate form carries eps*|H|*|beta| = {:.3e}",
+            f64::EPSILON * hessian_norm * 1.45
+        );
+    }
+}
+
 #[cfg(test)]
 mod rounding_tests {
     use super::joint_stationarity_rounding_band;
@@ -2121,8 +2210,8 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 // with the original indefinite curvature or the bare gradient
                 // makes release and entry contradict each other (gam#979).
                 let lhs = constrained_geometry.matrix;
-                let rhs_beta = &lhs.dot(&beta_joint) + &rhs_step;
                 if let Some(bounds) = lower_bounds.as_ref() {
+                    let rhs_beta = &lhs.dot(&beta_joint) + &rhs_step;
                     solve_quadratic_with_simple_lower_bounds(
                         &lhs,
                         &rhs_beta,
@@ -2131,14 +2220,13 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         warm_joint_active.as_deref(),
                     )
                 } else {
-                    gam_solve::active_set::solve_quadratic_with_constraint_set(
+                    constrained_newton_candidate(
                         &lhs,
-                        &rhs_beta,
+                        &rhs_step,
                         &beta_joint,
                         constraints,
                         warm_joint_active.as_deref(),
                     )
-                    .map_err(|error| CustomFamilyError::trial_point(error.to_string()))
                 }
             };
             drop(metric_projection_scope);
