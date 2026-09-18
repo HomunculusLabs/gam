@@ -1081,6 +1081,11 @@ pub struct SurvivalMarginalSlopeInputs<'a> {
     /// finite law the index was anchored on. Replayed by the shared
     /// marginal-slope predictor through the same anchoring equation.
     pub latent_measure: LatentMeasureKind,
+    /// The declared atoms a compressed fit was certified against, and the
+    /// compression's ledger (gam#2928); both `None` for a law anchored as
+    /// declared.
+    pub declared_latent_law: Option<crate::bms::EmpiricalZGrid>,
+    pub declared_latent_law_compression: Option<crate::inference::model::SavedDeclaredLawCompression>,
     pub baseline_slope: f64,
     /// Frozen nonlinear time-wiggle authority, including the raw fitted tail.
     pub timewiggle: Option<SurvivalTimewiggle>,
@@ -1181,6 +1186,8 @@ pub fn assemble_survival_marginal_slope_payload(
     // the marginal identity on. The pair below is the pre-transform applied to z
     // before either kernel.
     payload.latent_measure = Some(inputs.latent_measure);
+    payload.declared_latent_law = inputs.declared_latent_law;
+    payload.declared_latent_law_compression = inputs.declared_latent_law_compression;
     payload.latent_z_rank_int_calibration = inputs.latent_z_rank_int_calibration;
     payload.latent_z_conditional_calibration = inputs.latent_z_conditional_calibration;
     payload.baseline_slope = Some(inputs.baseline_slope);
@@ -2200,6 +2207,11 @@ fn payload_for_survival_marginal_slope(
             latent_z_rank_int_calibration: persisted_rank_int,
             latent_z_conditional_calibration: persisted_conditional,
             latent_measure: ms_result.latent_measure.clone(),
+            declared_latent_law: ms_result.declared_latent_law.clone(),
+            declared_latent_law_compression: ms_result
+                .latent_law_compression
+                .as_ref()
+                .map(crate::inference::model::SavedDeclaredLawCompression::from),
             baseline_slope: ms_result.baseline_slope,
             timewiggle,
             score_warp_runtime: ms_result.score_warp_runtime.as_ref(),

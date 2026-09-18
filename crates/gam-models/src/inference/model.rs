@@ -276,6 +276,30 @@ impl From<FittedModelError> for crate::survival::predict::SurvivalPredictError {
     }
 }
 
+/// The ledger of a survival marginal-slope fit anchored on the certified
+/// compression of a declared law with many atoms (gam#2928): the law's size
+/// before and after, and the certified anchor error at every converged row
+/// against its target `10⁻³·SE_α`, beside measured errors on an audit sample
+/// re-solved on the declared atoms. `None` entries are errors that could not
+/// be certified (JSON has no infinity).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedDeclaredLawCompression {
+    pub atoms: usize,
+    pub bins: usize,
+    pub nodes: usize,
+    pub anchors_checked: usize,
+    pub anchors_meeting_target: usize,
+    pub max_certified_error: Option<f64>,
+    pub max_certified_error_over_standard_error: Option<f64>,
+    /// `[min, median, max]` of certified error / target over every converged
+    /// anchor.
+    pub certified_error_over_target: [Option<f64>; 3],
+    /// `[min, median, max]` of measured / certified error over the audit
+    /// sample, extreme-tail anchors in both tails included.
+    pub measured_error_over_certified: [Option<f64>; 3],
+    pub anchors_audited: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedLatentZNormalization {
     pub mean: f64,
@@ -515,6 +539,17 @@ pub struct FittedModelPayload {
     pub latent_score_contract: Option<SavedLatentScoreContract>,
     #[serde(default)]
     pub latent_measure: Option<LatentMeasureKind>,
+    /// The declared atoms of a survival marginal-slope fit anchored on the
+    /// certified compression of its declared law (gam#2928). `latent_measure`
+    /// is then the compressed law prediction replays, and this the law it was
+    /// certified against. `None` (and absent from the file) for a law anchored
+    /// as declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_latent_law: Option<crate::bms::EmpiricalZGrid>,
+    /// The compression's ledger beside [`Self::declared_latent_law`]
+    /// (gam#2928); `None` and absent from the file otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_latent_law_compression: Option<SavedDeclaredLawCompression>,
     /// Optional rank-INT calibration for the latent score (BMS family).
     /// When `Some`, the marginal-slope predictor routes the input `z`
     /// through [`LatentZRankIntCalibration::apply_at_predict`] before the
@@ -906,6 +941,8 @@ impl FittedModelPayload {
             latent_z_normalization: None,
             latent_score_contract: None,
             latent_measure: None,
+            declared_latent_law: None,
+            declared_latent_law_compression: None,
             latent_z_rank_int_calibration: None,
             latent_z_conditional_calibration: None,
             marginal_baseline: None,

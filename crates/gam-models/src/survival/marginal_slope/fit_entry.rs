@@ -1,6 +1,7 @@
 //! The public fitting entry point `fit_survival_marginal_slope_terms`.
 
 use super::*;
+use crate::latent_law_compression::{CompressedLaw, DesignPoint, default_design};
 
 /// Recover the terminal hyperparameter vector from the optimizer that owned
 /// each coordinate.
@@ -63,15 +64,73 @@ pub(crate) fn fit_survival_marginal_slope_terms(
     // and the seed-screening cascade budget), not by wall-clock time (#2055):
     // clipping a fit by elapsed time is non-deterministic and machine-dependent,
     // so a slow-to-converge fit is fixed or bounded by work, never by a timer.
-    fit_survival_marginal_slope_terms_impl(data, spec, options, kappa_options)
+    //
+    // A declared law with many atoms is fit on its certified compression
+    // (gam#2928), designed first over the default operating range. Where a
+    // converged row's anchor misses the target, the compression is refined at
+    // that row's inputs and the fit is repeated on the refined law, a bounded
+    // number of times.
+    // Only a declared law can be compressed; whether it is, is the certified
+    // compression's own decision (`CompressedLaw::compress`).
+    if spec.declared_latent_law.is_none() {
+        return fit_survival_marginal_slope_terms_impl(data, spec, options, kappa_options, &[])
+            .map(|(result, _)| result);
+    }
+    let mut design = default_design();
+    let mut refinements = 0usize;
+    loop {
+        let (result, missed) =
+            fit_survival_marginal_slope_terms_impl(data, spec.clone(), options, kappa_options, &design)?;
+        if missed.is_empty() {
+            return Ok(result);
+        }
+        let record = result.latent_law_compression.as_ref().ok_or_else(|| {
+            "survival marginal-slope declared law compression reported missed anchors without \
+             its record"
+                .to_string()
+        })?;
+        if refinements == DECLARED_LAW_COMPRESSION_REFINEMENTS {
+            return Err(format!(
+                "survival marginal-slope declared latent law of {} atoms: after {refinements} \
+                 refinements its certified compression ({} bins, {} nodes) still misses \
+                 10⁻³ of the anchor's sampling standard error at {} of {} converged anchors \
+                 (largest certified error {:e} standard errors) (gam#2928)",
+                record.atoms,
+                record.bins,
+                record.nodes,
+                record.anchors_checked - record.anchors_meeting_target,
+                record.anchors_checked,
+                record.max_delta_over_standard_error,
+            ));
+        }
+        refinements += 1;
+        log::info!(
+            "[survival-marginal-slope latent-z] declared law compression refinement {refinements}: \
+             {} of {} converged anchors missed 10⁻³·SE (largest {:e}); refining at {} of their \
+             inputs and refitting (gam#2928)",
+            record.anchors_checked - record.anchors_meeting_target,
+            record.anchors_checked,
+            record.max_delta_over_standard_error,
+            missed.len(),
+        );
+        design.extend(missed);
+    }
 }
 
+/// Refinements of a declared law's compression a fit may run before it
+/// refuses (gam#2928).
+const DECLARED_LAW_COMPRESSION_REFINEMENTS: usize = 3;
+
+/// The fit itself, on `compression_design` for a declared law with many atoms
+/// (gam#2928). Returns the anchors of the converged fit whose certified error
+/// missed its target, which the caller refines at.
 pub(crate) fn fit_survival_marginal_slope_terms_impl(
     data: ArrayView2<'_, f64>,
     spec: SurvivalMarginalSlopeTermSpec,
     options: &BlockwiseFitOptions,
     kappa_options: &SpatialLengthScaleOptimizationOptions,
-) -> Result<SurvivalMarginalSlopeFitResult, String> {
+    compression_design: &[DesignPoint],
+) -> Result<(SurvivalMarginalSlopeFitResult, Vec<DesignPoint>), String> {
     let fit_started = std::time::Instant::now();
     let mut spec = spec;
     validate_spec(&spec)?;
@@ -322,6 +381,35 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // seed, the score covariance Σ, the score-warp seed basis, every design and
     // every kernel evaluation — is therefore sequenced after it, so no consumer
     // can see the uncalibrated axis.
+    // gam#2928: a declared law with many atoms is anchored on its certified
+    // compression, designed over `compression_design`. The compressed law is
+    // what the gate below persists as the fit's latent measure, and every
+    // converged anchor is certified against the declared atoms after the solve.
+    let declared_law_compression = match spec.declared_latent_law.as_ref() {
+        Some(law) => CompressedLaw::compress(&law.nodes, &law.weights, compression_design)?,
+        None => None,
+    };
+    // The declared atoms, kept for the saved model beside the compressed law.
+    let declared_latent_law = if declared_law_compression.is_some() {
+        spec.declared_latent_law.clone()
+    } else {
+        None
+    };
+    if let Some(compressed) = declared_law_compression.as_ref() {
+        let grid = compressed.grid();
+        log::info!(
+            "[survival-marginal-slope latent-z] declared latent law of {} atoms compressed to {} \
+             nodes in {} bins for the anchor (gam#2928)",
+            compressed.atoms(),
+            grid.nodes.len(),
+            compressed.bins(),
+        );
+        spec.declared_latent_law = Some(crate::bms::EmpiricalZGrid::new(
+            grid.nodes.clone(),
+            grid.weights.clone(),
+            "survival marginal-slope compressed declared latent law",
+        )?);
+    }
     let latent_calibration = resolve_survival_latent_score_calibration(&mut spec, &marginal_design)?;
     // gam#2766: `Σ` in this family's defining identity is `Var(z | a)`, so the
     // pooled matrix above is only the right object when that conditional
@@ -1947,6 +2035,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         solved.certified_outer.as_ref(),
     )?;
     let final_sigma = sigma_from_theta(&certified_theta)?;
+    let mut compression_outcome = None;
     let (baseline_offset_residuals, baseline_offset_curvatures, final_baseline_config, fitted_exit_index) = {
         let final_family = make_family(
             &solved.designs[0],
@@ -1988,6 +2077,46 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                     .map(|values| values.q1)
             })
             .collect::<Result<Vec<f64>, String>>()?;
+        // gam#2928: certify every anchor the converged fit solves on a
+        // compressed declared law against the declared atoms — each row's entry
+        // and exit anchor at its converged `(q, b)`. The anchored frame's slope
+        // is time-constant, so both anchors read the exit slope channel.
+        if let Some(compressed) = declared_law_compression.as_ref() {
+            let probit_scale = final_family.probit_frailty_scale();
+            let mut anchors = Vec::with_capacity(2 * n);
+            for row in 0..n {
+                let q = final_family.row_dynamic_q_values(row, &solved.fit.block_states)?;
+                let slope = final_family.row_slope_channels(row, &solved.fit.block_states)?;
+                let observed_slope = probit_scale * slope.exit;
+                anchors.push((q.q0, observed_slope));
+                anchors.push((q.q1, observed_slope));
+            }
+            anchors.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            anchors.dedup();
+            let (record, missed) = compressed.certify_anchors(&anchors)?;
+            log::info!(
+                "[survival-marginal-slope latent-z] declared law compression ledger: {} atoms, {} \
+                 bins, {} nodes; {} of {} converged anchors certified within 10⁻³ of their \
+                 sampling standard error; largest certified error {:e} ({:e} standard errors); \
+                 certified error / target min {:e} median {:e} max {:e}; measured / certified \
+                 on {} audited anchors min {:e} median {:e} max {:e} (gam#2928)",
+                record.atoms,
+                record.bins,
+                record.nodes,
+                record.anchors_meeting_target,
+                record.anchors_checked,
+                record.max_delta,
+                record.max_delta_over_standard_error,
+                record.bound_over_target[0],
+                record.bound_over_target[1],
+                record.bound_over_target[2],
+                record.anchors_audited,
+                record.measured_over_bound[0],
+                record.measured_over_bound[1],
+                record.measured_over_bound[2],
+            );
+            compression_outcome = Some((record, missed));
+        }
         (
             residuals,
             curvatures,
@@ -2055,7 +2184,11 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             conditioning.view(),
         )?;
     }
-    Ok(SurvivalMarginalSlopeFitResult {
+    let (latent_law_compression, missed_anchors) = match compression_outcome {
+        Some((record, missed)) => (Some(record), missed),
+        None => (None, Vec::new()),
+    };
+    Ok((SurvivalMarginalSlopeFitResult {
         fit: solved_fit,
         marginalspec_resolved: resolved_specs.remove(0),
         slopespec_resolved: resolved_specs.remove(0),
@@ -2076,6 +2209,8 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         fitted_exit_index,
         z_normalization,
         latent_measure: latent_calibration.primary_measure().clone(),
+        latent_law_compression,
+        declared_latent_law,
         latent_z_calibrations: latent_calibration.per_score,
         latent_conditioning_reproducible,
         score_covariance: score_covariance.pooled_covariance().to_dense(),
@@ -2094,5 +2229,5 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             .as_ref()
             .map(|z_tilde| z_tilde.ncols()),
         influence_absorber_design: influence_absorber_residualized,
-    })
+    }, missed_anchors))
 }

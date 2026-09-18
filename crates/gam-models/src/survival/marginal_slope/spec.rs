@@ -209,6 +209,18 @@ pub struct SurvivalMarginalSlopeFitResult {
     /// `latent_measure`, which the shared marginal-slope predictor already
     /// replays by the same anchoring equation.
     pub latent_measure: crate::bms::LatentMeasureKind,
+    /// The certified compression the fit anchored on in place of a declared law
+    /// with many atoms (gam#2928): atoms, bins and nodes, and the certified
+    /// anchor error at every row's converged inputs against the anchor's
+    /// sampling error. [`Self::latent_measure`] is then the compressed law, which
+    /// is what the coefficients are defined against. `None` for a law anchored
+    /// as declared.
+    pub(crate) latent_law_compression:
+        Option<crate::latent_law_compression::DeclaredLawCompressionRecord>,
+    /// The declared atoms a compressed fit was certified against (gam#2928),
+    /// persisted beside the compressed law it anchored on; `None` for a law
+    /// anchored as declared, which [`Self::latent_measure`] already is.
+    pub(crate) declared_latent_law: Option<crate::bms::EmpiricalZGrid>,
     /// Whether the conditioning span `a(C)` the conditional calibration was fit
     /// against is the span prediction will rebuild (gam#2768).
     ///

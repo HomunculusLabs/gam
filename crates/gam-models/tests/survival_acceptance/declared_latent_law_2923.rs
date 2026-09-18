@@ -601,3 +601,130 @@ fn declared_law_is_persisted_and_replayed_at_prediction_2923() {
         "the replayed index must not be the closed form on a skewed law; worst gap {worst_closed_form:.3e}"
     );
 }
+
+/// A declared law of one atom per training row (gam#2928): standardized
+/// log-normal mid-quantiles (skewness about one), equal weights.
+fn one_atom_per_row() -> Law {
+    let raw: Vec<f64> = (0..N)
+        .map(|k| (0.32 * normal_quantile((k as f64 + 0.5) / N as f64)).exp())
+        .collect();
+    let mean = raw.iter().sum::<f64>() / N as f64;
+    let sd = (raw.iter().map(|u| (u - mean).powi(2)).sum::<f64>() / N as f64).sqrt();
+    Law {
+        nodes: raw.iter().map(|u| (u - mean) / sd).collect(),
+        weights: vec![1.0 / N as f64; N],
+    }
+}
+
+#[test]
+fn many_atom_declared_law_is_compressed_persisted_and_replayed_bitwise_2928() {
+    super::initialize_cpu_fitting();
+    gam_runtime::test_support::install_diagnostic_logger();
+    #[cfg(target_os = "macos")]
+    gam_gpu::configure_global_policy(gam_gpu::GpuPolicy::Off);
+
+    let atoms = one_atom_per_row();
+    let (data, _, _) = build_dataset(&Law::skewed(), 0x2928_0000_0001, false);
+    let config = FitConfig {
+        declared_latent_law: Some(atoms.declared()),
+        ..base_config()
+    };
+    let payload = fit_formula_to_payload("Surv(time, event) ~ 1".to_string(), &data, &config)
+        .expect("fit a many-atom declared law to a saved payload");
+
+    let declared = payload
+        .declared_latent_law
+        .as_ref()
+        .expect("the saved model must carry the declared atoms");
+    assert_eq!(declared.nodes, atoms.nodes, "the persisted atoms must be the declared nodes");
+    assert_eq!(declared.weights, atoms.weights, "the persisted atoms must be the declared weights");
+    let compressed = match payload.latent_measure.as_ref() {
+        Some(gam_models::bms::LatentMeasureKind::GlobalEmpirical { grid }) => grid.clone(),
+        other => panic!(
+            // SAFETY (test): the persisted measure is the property under test.
+            "the saved model must carry the compressed law as its latent measure; got {other:?}"
+        ),
+    };
+    let ledger = payload
+        .declared_latent_law_compression
+        .clone()
+        .expect("the saved model must carry the compression ledger");
+    eprintln!("[2928 persist] n={N} ledger {ledger:?}");
+    assert_eq!(ledger.atoms, N);
+    assert_eq!(ledger.nodes, compressed.nodes.len());
+    assert!(
+        2 * ledger.nodes <= N,
+        "a compressed law must at least halve the atoms: {} of {N}",
+        ledger.nodes
+    );
+    assert_eq!(
+        ledger.anchors_meeting_target, ledger.anchors_checked,
+        "every converged anchor must meet its certified target"
+    );
+    for statistic in ledger.certified_error_over_target {
+        assert!(
+            statistic.is_some_and(|value| value <= 1.0),
+            "certified error / target {statistic:?} must be certified and at most one"
+        );
+    }
+    for statistic in ledger.measured_error_over_certified {
+        assert!(
+            statistic.is_some_and(|value| value <= 1.0),
+            "measured / certified error {statistic:?} must be certified and at most one"
+        );
+    }
+
+    // The on-disk representation round-trips, and a model loaded from it
+    // predicts bit-identically to the model built from the fit in memory.
+    let text = serde_json::to_string(&payload).expect("serialize the saved model");
+    let reloaded: gam_models::inference::model::FittedModelPayload =
+        serde_json::from_str(&text).expect("deserialize the saved model");
+    assert_eq!(reloaded.latent_measure, payload.latent_measure);
+    assert_eq!(reloaded.declared_latent_law, payload.declared_latent_law);
+    assert_eq!(
+        reloaded.declared_latent_law_compression,
+        payload.declared_latent_law_compression
+    );
+    let col_map: HashMap<String, usize> = data
+        .headers
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.clone(), index))
+        .collect();
+    let zeros = Array1::<f64>::zeros(data.values.nrows());
+    let predict = |model: &FittedModel| {
+        predict_survival(
+            SurvivalPredictRequest {
+                model,
+                data: data.values.view(),
+                col_map: &col_map,
+                training_headers: Some(&data.headers),
+                primary_offset: &zeros,
+                noise_offset: &zeros,
+                time_grid: None,
+                with_uncertainty: false,
+                estimand: SurvivalPredictEstimand::Plugin,
+            },
+            SurvivalPredictionCovarianceMode::Conditional,
+        )
+        .expect("survival marginal-slope prediction at the training rows")
+    };
+    let in_memory = predict(&FittedModel::from_payload(payload));
+    let loaded = predict(&FittedModel::from_payload(reloaded));
+    assert!(
+        in_memory
+            .linear_predictor
+            .iter()
+            .zip(loaded.linear_predictor.iter())
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "the loaded model's linear predictor must match the in-memory model's bit for bit"
+    );
+    assert!(
+        in_memory
+            .survival
+            .iter()
+            .zip(loaded.survival.iter())
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "the loaded model's survival must match the in-memory model's bit for bit"
+    );
+}
