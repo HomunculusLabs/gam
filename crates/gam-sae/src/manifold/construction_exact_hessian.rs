@@ -860,7 +860,7 @@ pub(crate) struct EvidenceRootCounters {
     band_skips: std::sync::atomic::AtomicUsize,
     solve_failures: std::sync::atomic::AtomicUsize,
     negative_curvature_no_steps: std::sync::atomic::AtomicUsize,
-    ridge_escalation_no_steps: std::sync::atomic::AtomicUsize,
+    unfactorable_no_steps: std::sync::atomic::AtomicUsize,
     uncertified_refinements: std::sync::atomic::AtomicUsize,
 }
 
@@ -875,9 +875,9 @@ pub(crate) struct EvidenceRootCounts {
     pub(crate) solve_failures: usize,
     /// The dense pencil resolved a negative curvature, so no root step was taken.
     pub(crate) negative_curvature_no_steps: usize,
-    /// The arrow exact-A solve escalated its ridge, so its step was not the Newton step and
+    /// The arrow exact-A system does not factor at ridge 0, so it has no exact Newton step and
     /// none was taken.
-    pub(crate) ridge_escalation_no_steps: usize,
+    pub(crate) unfactorable_no_steps: usize,
     /// A refinement moved the state and recurred, but the refined root did not certify, so
     /// the accepted state was priced.
     pub(crate) uncertified_refinements: usize,
@@ -894,7 +894,7 @@ impl EvidenceRootTelemetry {
                 .0
                 .negative_curvature_no_steps
                 .load(Ordering::Relaxed),
-            ridge_escalation_no_steps: self.0.ridge_escalation_no_steps.load(Ordering::Relaxed),
+            unfactorable_no_steps: self.0.unfactorable_no_steps.load(Ordering::Relaxed),
             uncertified_refinements: self.0.uncertified_refinements.load(Ordering::Relaxed),
         }
     }

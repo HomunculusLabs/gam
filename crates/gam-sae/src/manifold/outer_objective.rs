@@ -529,8 +529,8 @@ pub struct OuterProbeTelemetry {
     pub root_solve_failures: usize,
     /// Dense root steps not taken because the pencil resolved a negative curvature.
     pub root_negative_curvature_no_steps: usize,
-    /// Arrow root steps not taken because the exact-A solve escalated its ridge.
-    pub root_ridge_escalation_no_steps: usize,
+    /// Arrow root steps not taken because the exact-A system does not factor at ridge 0.
+    pub root_unfactorable_no_steps: usize,
     /// Refined roots that did not certify, so the accepted state was priced instead.
     pub root_uncertified_refinements: usize,
 }
@@ -1644,7 +1644,7 @@ impl SaeManifoldOuterObjective {
             root_band_skips: root.band_skips,
             root_solve_failures: root.solve_failures,
             root_negative_curvature_no_steps: root.negative_curvature_no_steps,
-            root_ridge_escalation_no_steps: root.ridge_escalation_no_steps,
+            root_unfactorable_no_steps: root.unfactorable_no_steps,
             root_uncertified_refinements: root.uncertified_refinements,
             ..self.probe_telemetry
         }

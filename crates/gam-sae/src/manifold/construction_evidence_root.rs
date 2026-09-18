@@ -21,8 +21,8 @@ impl SaeManifoldTerm {
     /// The residual still resolves the root. Each step is the exact Newton step on
     /// the route the polish takes (the dense geometry's pseudoinverse, on the
     /// operator and null band the value prices, for ordered Beta–Bernoulli, and none
-    /// where that pencil resolves a negative curvature; the arrow exact-A solve with
-    /// neither a ridge escalation nor the Newton–Schur clamp otherwise). A step
+    /// where that pencil resolves a negative curvature; the arrow exact-A system factored
+    /// once at ridge 0, without the Newton–Schur clamp, otherwise). A step
     /// commits only if it strictly contracts the gate norm and does not raise the
     /// penalized objective past its round-off cushion. On a nonsingular `A` the
     /// contraction is quadratic and the phase ends at the first step round-off cannot
@@ -185,14 +185,14 @@ impl SaeManifoldTerm {
             };
             match Self::arrow_exact_root_step(&exact, options) {
                 Ok(ArrowRootSolve::Newton(step)) => step,
-                Ok(ArrowRootSolve::RidgeEscalated(escalations)) => {
+                Ok(ArrowRootSolve::Unfactorable(reason)) => {
                     self.evidence_root_telemetry
                         .0
-                        .ridge_escalation_no_steps
+                        .unfactorable_no_steps
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     log::info!(
-                        "[SAE-ROOT] no root step: the arrow exact-A solve escalated its ridge \
-                         {escalations} time(s), so its step is not the Newton step"
+                        "[SAE-ROOT] no root step: the arrow exact-A system does not factor at \
+                         ridge 0, so it has no exact Newton step: {reason}"
                     );
                     return Ok(None);
                 }
@@ -215,15 +215,23 @@ impl SaeManifoldTerm {
     }
 
     /// #2228 — the arrow route's root step: the exact Newton step `Δ = −A⁻¹g` of the exact-A
-    /// system, or the ridge escalations the solve needed instead.
+    /// system at ridge 0, or why that system does not factor there.
     ///
     /// The evidence factor's Newton–Schur Tikhonov clamps a collapsed Schur eigenvalue up to
     /// `floor·λmax(S)` so the inner step's `Δβ` stays stable. A clamped solve is not `A⁻¹g`: on
     /// the #2234 pin at ae0d368e20 (am12, job 1163931) 2221 of 2655 arrow trials clamped one
     /// Schur eigenvalue, exactly those were inexact (`‖A·step + g‖` 10³–10⁷ above band), and
     /// without the clamp (am10 U, job 1162145) all 415 stepped trials were exact. The root step
-    /// takes the exact Newton step or none, so this solve runs without the clamp, and a Schur
-    /// the clamp would have repaired escalates the ridge instead.
+    /// takes the exact Newton step or none, so this solve runs without the clamp.
+    ///
+    /// It is one factorization at ridge 0, never a ridge ladder. Every refusal the ladder
+    /// escalates past (a non-PD or ill-conditioned row block or Schur complement, a stalled
+    /// or negatively curved iterative solve) means ridge 0 has no exact Newton step, and a step
+    /// found at a larger ridge is not one, so escalating only buys factorizations whose step
+    /// is discarded. Through fe351790d4 the escalation ran anyway. On
+    /// `planted_circle_multi_atom_threshold_gate_clears_startup_validation_1782` under an 1800 s
+    /// kill, 2233 arrow no-steps paid 16865 escalated factorizations (sw4s 1269414); as one
+    /// attempt they pay none and reach the same outer state (1269415).
     fn arrow_exact_root_step(
         exact: &ArrowSchurSystem,
         options: &ArrowSolveOptions,
@@ -231,17 +239,20 @@ impl SaeManifoldTerm {
         let mut exact_options = options.clone();
         exact_options.sae_resident_frame = None;
         exact_options.newton_schur_tikhonov_rel_floor = None;
-        let (delta_t, delta_beta, diagnostics) =
-            gam_solve::arrow_schur::solve_with_lm_escalation_inner(exact, 0.0, 0.0, &exact_options)
-                .map_err(|err| err.to_string())?;
-        Ok(if diagnostics.ridge_escalations == 0 {
-            ArrowRootSolve::Newton(SaeArrowVector {
+        match gam_solve::arrow_schur::solve_arrow_newton_step_core(exact, 0.0, 0.0, &exact_options) {
+            Ok((delta_t, delta_beta, _)) => Ok(ArrowRootSolve::Newton(SaeArrowVector {
                 t: delta_t,
                 beta: delta_beta,
-            })
-        } else {
-            ArrowRootSolve::RidgeEscalated(diagnostics.ridge_escalations)
-        })
+            })),
+            Err(
+                err @ (ArrowSchurError::PerRowFactorFailed { .. }
+                | ArrowSchurError::PerRowFactorIllConditioned { .. }
+                | ArrowSchurError::SchurFactorFailed { .. }
+                | ArrowSchurError::PcgFailed { .. }
+                | ArrowSchurError::UnboundedNegativeCurvature { .. }),
+            ) => Ok(ArrowRootSolve::Unfactorable(err.to_string())),
+            Err(err) => Err(err.to_string()),
+        }
     }
 
     /// #2822 — remove from every row's coordinate gradient each direction the evidence
@@ -687,8 +698,8 @@ struct EvidenceRootStep {
 enum ArrowRootSolve {
     /// The exact Newton step `Δ = −A⁻¹g`.
     Newton(SaeArrowVector),
-    /// The solve escalated its ridge this many times, so its step is not the Newton step.
-    RidgeEscalated(usize),
+    /// The system does not factor at ridge 0, for this reason, so it has no exact Newton step.
+    Unfactorable(String),
 }
 
 #[cfg(test)]
@@ -960,8 +971,8 @@ mod evidence_root_gauge_projection_2822_tests {
                     "a definite system's root step must be A⁻¹g: ‖AΔ + g‖∞ {residual:.3e} > {bar:.3e}"
                 );
             }
-            ArrowRootSolve::RidgeEscalated(escalations) => {
-                panic!("a definite system must not escalate the ridge ({escalations} time(s))")
+            ArrowRootSolve::Unfactorable(reason) => {
+                panic!("a definite system must factor at ridge 0: {reason}")
             }
         }
 
@@ -976,9 +987,9 @@ mod evidence_root_gauge_projection_2822_tests {
             clamped.ridge_escalations
         );
         assert!(
-            !matches!(
+            matches!(
                 SaeManifoldTerm::arrow_exact_root_step(&system(0.5), &options),
-                Ok(ArrowRootSolve::Newton(_))
+                Ok(ArrowRootSolve::Unfactorable(_))
             ),
             "an indefinite Schur complement leaves no arrow root step"
         );
