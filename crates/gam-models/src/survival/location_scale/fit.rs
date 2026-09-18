@@ -849,6 +849,7 @@ pub(crate) fn fit_survival_location_scale_terms(
         analytic_joint_hessian_available,
         true,
         None,
+        None,
         outer_policy,
         // The final fit: the solver's error is carried whole (#2937). Its link and
         // spec are rebuilt at a theta the driver produced, from specs validated

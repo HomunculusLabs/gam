@@ -415,8 +415,9 @@ pub(crate) fn fit_transformation_normal(
     // the first derivative-bearing evaluation freezes the selected mode's
     // INPUT as the branch anchor. Every later trial restarts from that fixed
     // anchor, making the profile independent of rejected-trial cache history.
+    let walk_signals = crate::exact_mode_branch::OuterWalkSignals::default();
     let exact_mode_branch: RefCell<ExactCoefficientModeBranch> =
-        RefCell::new(ExactCoefficientModeBranch::default());
+        RefCell::new(ExactCoefficientModeBranch::new(walk_signals.clone()));
 
     // The ρ domain of the CTN tensor penalties by the #2812 resolvability law the
     // non-spatial `fit_custom_family` route applies to the same block. The driver
@@ -573,6 +574,7 @@ pub(crate) fn fit_transformation_normal(
         // exhaust the 2400-second command budget before marginal-slope began.
         true,
         None,
+        Some(walk_signals),
         outer_derivative_policy,
         // fit_fn
         |theta,

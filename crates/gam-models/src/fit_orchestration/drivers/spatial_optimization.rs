@@ -7729,6 +7729,7 @@ pub fn optimize_spatial_length_scale_exact_joint<FitOut, Mode, FitFn, ExactFn, E
     analytic_joint_hessian_available: bool,
     disable_fixed_point: bool,
     screening_cap: Option<Arc<AtomicUsize>>,
+    walk_signals: Option<crate::exact_mode_branch::OuterWalkSignals>,
     outer_derivative_policy: gam_model_api::families::custom_family::OuterDerivativePolicy,
     mut fit_fn: FitFn,
     exact_fn: ExactFn,
@@ -7767,6 +7768,7 @@ where
         analytic_joint_hessian_available,
         disable_fixed_point,
         screening_cap,
+        walk_signals,
         outer_derivative_policy,
         |theta: &Array1<f64>,
          specs: &[TermCollectionSpec],
@@ -7802,6 +7804,7 @@ pub fn optimize_spatial_length_scale_exact_joint_typed<
     analytic_joint_hessian_available: bool,
     disable_fixed_point: bool,
     screening_cap: Option<Arc<AtomicUsize>>,
+    walk_signals: Option<crate::exact_mode_branch::OuterWalkSignals>,
     outer_derivative_policy: gam_model_api::families::custom_family::OuterDerivativePolicy,
     mut fit_fn: FitFn,
     mut exact_fn: ExactFn,
@@ -8120,6 +8123,8 @@ where
         // certificate, so retain its family-specific seed cascade.
         false,
     )?;
+    let problem =
+        crate::exact_mode_branch::OuterWalkSignals::subscribe(walk_signals.as_ref(), problem);
 
     // Helper: collect specs and designs from cache into owned Vecs for closure calls.
     fn collect_specs(cache: &ExactJointDesignCache<'_>) -> Vec<TermCollectionSpec> {
@@ -8338,7 +8343,9 @@ where
             |ctx: &mut &mut NBlockExactJointState<'_, Mode>,
              theta: &Array1<f64>,
              order: OuterEvalOrder| { eval_outer(ctx, theta, order) },
-            None::<fn(&mut &mut NBlockExactJointState<'_, Mode>)>,
+            walk_signals
+                .as_ref()
+                .map(|signals| signals.reset_counter::<&mut NBlockExactJointState<'_, Mode>>()),
             Some(
                 |ctx: &mut &mut NBlockExactJointState<'_, Mode>, theta: &Array1<f64>| {
                     ctx.ensure_theta(theta)?;
@@ -8413,9 +8420,9 @@ where
             // Hessian, and this problem declares `DeclaredHessianForm::Either`
             // from the same `analytic_outer_hessian_available` flag.
             //
-            // No `reset_fn` is added on purpose: `reset()` fires AFTER
-            // finalization, so a reset that dropped the memo would re-open the
-            // hole this closes.
+            // The `reset_fn` above only advances the walk-reset counter. `reset()`
+            // fires AFTER finalization, so a reset that dropped the memo would
+            // re-open the hole this closes.
             .with_terminal_eval_order(if analytic_outer_hessian_available {
                 OuterEvalOrder::ValueGradientHessian
             } else {

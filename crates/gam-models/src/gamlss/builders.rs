@@ -3215,6 +3215,7 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                 analytic_joint_derivatives_available,
                 gamlss_disable_fixed_point,
                 None,
+                None,
                 outer_policy,
                 // The final coefficient fit: the solver's error is carried whole
                 // (#2937). Its blocks are built from designs the engine built

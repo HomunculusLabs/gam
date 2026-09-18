@@ -1015,8 +1015,10 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 .fold(0.0_f64, |a, v| a.max(v.abs())),
         );
     }
-    let exact_mode_branch =
-        RefCell::new(crate::exact_mode_branch::ExactCoefficientModeBranch::default());
+    let walk_signals = crate::exact_mode_branch::OuterWalkSignals::default();
+    let exact_mode_branch = RefCell::new(crate::exact_mode_branch::ExactCoefficientModeBranch::new(
+        walk_signals.clone(),
+    ));
     // Outer ρ-cache β-seed staging slot. The spatial-joint optimizer fires
     // `seed_inner_beta_fn` on a cache hit before any eval has run at the
     // restored ρ. Per-block widths are only known once `build_blocks(rho,…)`
@@ -1829,6 +1831,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         analytic_joint_hessian_available,
         true,
         None,
+        Some(walk_signals),
         outer_policy,
         |theta, specs: &[TermCollectionSpec], designs: &[TermCollectionDesign], provenance| {
             assert_eq!(

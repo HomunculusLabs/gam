@@ -2251,6 +2251,7 @@ pub(super) fn run_two_block_exact_joint_optimize(
         true,
         false,
         None,
+        None,
         policy,
         |theta, specs, designs, _| {
             assert_eq!(theta.len(), theta_dim);

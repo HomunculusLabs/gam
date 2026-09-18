@@ -2642,7 +2642,8 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         None => setup,
     };
     let final_sigma_cell = std::cell::Cell::new(initial_sigma);
-    let exact_mode_branch = RefCell::new(ExactCoefficientModeBranch::default());
+    let walk_signals = crate::exact_mode_branch::OuterWalkSignals::default();
+    let exact_mode_branch = RefCell::new(ExactCoefficientModeBranch::new(walk_signals.clone()));
     let runaway_error = RefCell::new(None::<String>);
     // Outer ρ-cache β-seed staging slot. On a cache hit the spatial-joint
     // optimizer invokes `seed_inner_beta_fn` before the first eval at the
@@ -2917,6 +2918,7 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         analytic_joint_hessian_available,
         true,
         None,
+        Some(walk_signals),
         outer_policy,
         |theta, specs: &[TermCollectionSpec], designs: &[TermCollectionDesign], provenance| {
             if let Some(err) = runaway_error.borrow().as_ref().cloned() {

@@ -1064,8 +1064,10 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
     // backtracking probe toward shape 0.01 then started from that trial's mode.
     // The profiled criterion depended on probe order, the way #2668 and #2765
     // measured on the other exact-joint drivers.
-    let exact_mode_branch =
-        std::cell::RefCell::new(crate::exact_mode_branch::ExactCoefficientModeBranch::default());
+    let walk_signals = crate::exact_mode_branch::OuterWalkSignals::default();
+    let exact_mode_branch = std::cell::RefCell::new(
+        crate::exact_mode_branch::ExactCoefficientModeBranch::new(walk_signals.clone()),
+    );
     // Outer ρ-cache β-seed staging slot: promoted once the per-block widths of the
     // realized blocks are known (the survival location-scale contract).
     let pending_beta_seed = std::cell::RefCell::new(None::<Array1<f64>>);
@@ -1111,6 +1113,7 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
         analytic_outer_hessian_available,
         true,
         None,
+        Some(walk_signals),
         outer_policy,
         // The final fit: the solver's error is carried whole (#2937). The family
         // and blocks are realized at a theta the driver produced on the chart
