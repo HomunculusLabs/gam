@@ -778,5 +778,15 @@
     ],
     "reason": "#2951 mpd-program binding step B3: every value the mechanism program's executor forms is reserved before it is formed (SPEC: never out of memory). The private two-variant enum NodeValue { Governed, Plain } kept executor-formed values as plain, uncounted arrays, with its Deref/DerefMut impls (fn deref, fn deref_mut, type Target) and fn governed, which reserved a plain value only at the output. Every node value is now a governed array, so the enum and its impls are replaced by `type NodeValue = Governed<Array2<f64>>`, whose Deref is the owner's, and by admit/governed_copy, which reserve before forming. All five were private to program.rs.",
     "evidence": "source_removal_guard.py without this entry, on the probe commit of B3's program.rs patch (md5 2d1f2f52) at cd4e4d3662 (sw-status/mpd-program-b3-guards/removal.txt), names exactly these five items, each private and not test-scoped, all in program.rs; public_api_census.py returned RC 0 on the same probe. The landing's full gate, dx2 run mpd-program-b3w-c51e30d0, applies this entry with the patch, and sw-land2's pre-push guard checks the landing commit."
+  },
+  {
+    "base": "7540fb6a8b7f3a077aca18af9266fd7536f4653b",
+    "items": [
+      "crates/gam-geometry/src/manifolds/sphere.rs:const:UNIT_TOL",
+      "crates/gam-geometry/src/manifolds/sphere.rs:fn:normalize_sphere_matrix",
+      "tests/manifolds/manifolds/sphere_exp_map_vjp_matches_finite_difference.rs:fn:sphere_exp_map_accepts_nonunit_point_verbatim"
+    ],
+    "reason": "#2469: SphereManifold accepted a point within the hand tolerance UNIT_TOL = 1e-6 of unit norm, and normalize_sphere_matrix silently normalized the rows of the sphere response geometry and sphere_frechet_mean. Both now apply one entry rule: |‖p‖² − 1| may not exceed gam_math::roundoff::unit_normalization_band, the band an f64 normalization leaves, and a wider point is refused with the measured defect. normalize_sphere_matrix becomes require_unit_sphere_rows, which checks instead of normalizing. The sphere exponential now normalizes its image, so the test that pinned the un-normalized image, sphere_exp_map_accepts_nonunit_point_verbatim, is restated as sphere_exp_map_takes_a_nonunit_point_and_returns_its_normalized_image.",
+    "evidence": "At base be3343133604d5e5374cde0406cc728d847e2d23, git grep -n -w UNIT_TOL finds only its declaration at crates/gam-geometry/src/manifolds/sphere.rs:17 and its one use in require_unit at :35, which now compares against unit_normalization_band. git grep -n -w normalize_sphere_matrix finds its declaration at sphere.rs:441 and its five callers at :467, :469, :536, :907 and :1017, all in sphere.rs, all rewritten to require_unit_sphere_rows. git grep -n -w sphere_exp_map_accepts_nonunit_point_verbatim finds only its declaration at tests/manifolds/manifolds/sphere_exp_map_vjp_matches_finite_difference.rs:123."
   }
 ]

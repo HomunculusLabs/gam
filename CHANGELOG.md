@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **Sphere points must be unit-norm to f64 precision** (#2469). Unit-sphere points were
+  accepted within `1e-6` of `‖p‖² = 1` by `SphereManifold` (and so by `stiefel(k=1)` and
+  `grassmann(k=1)`), and the `"sphere"` response geometry and `sphere_frechet_mean`
+  normalized their rows silently. Both now apply one rule: `|‖p‖² − 1|` may not exceed the
+  band an f64 normalization leaves, `γ_{2d+6}` (about `1.3e-15` for `d = 3`). A wider
+  point is refused with the measured defect and the fix, and is never normalized. This
+  deliberately refuses points normalized in f32 or rounded to about six digits.
+  **Migration:** normalize each point in f64 before passing it, e.g. `p / np.linalg.norm(p)`.
+  The sphere exponential now normalizes its output, so iterates stay inside that band
+  however many steps they take.
 - **The Bernoulli marginal-slope Jeffreys prior uses the expected Fisher information** (#2922).
   The binary marginal-slope family priced its Jeffreys/Firth term from the observed
   joint Hessian. Away from the mode that matrix is indefinite (smallest eigenvalue down

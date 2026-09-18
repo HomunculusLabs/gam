@@ -50,6 +50,18 @@ pub enum GeometryError {
         seed_spread: f64,
         uniqueness_radius: f64,
     },
+    /// A point that must lie on the unit sphere is off it by more than an f64
+    /// normalization can leave it: `squared_norm_defect = |‖p‖² − 1|` exceeds
+    /// [`unit_normalization_band`](gam_math::roundoff::unit_normalization_band).
+    /// Iterates stay inside that band by construction (the sphere exponential
+    /// normalizes its output), so this names an input that was never normalized
+    /// in f64, or not normalized at all. It is refused rather than normalized
+    /// silently, so a wrong vector passed as a point is caught where it enters.
+    PointOffUnitSphere {
+        context: &'static str,
+        squared_norm_defect: f64,
+        band: f64,
+    },
 }
 
 impl fmt::Display for GeometryError {
@@ -95,6 +107,16 @@ impl fmt::Display for GeometryError {
                 "{context}: the weighted support spreads {seed_spread:.6e} from its seed, \
                  at least twice the global-uniqueness radius {uniqueness_radius:.6e}, so no \
                  stationary point can be certified as the unique global mean"
+            ),
+            Self::PointOffUnitSphere {
+                context,
+                squared_norm_defect,
+                band,
+            } => write!(
+                f,
+                "{context}: the point is not unit-norm in f64: |‖p‖² − 1| = \
+                 {squared_norm_defect:.3e} exceeds {band:.3e}, the widest an f64 normalization \
+                 leaves it; normalize the point in f64 before passing it, e.g. p / ‖p‖"
             ),
         }
     }

@@ -4324,5 +4324,13 @@
     },
     "reason": "#2902 item 15 (i2902, reviewed by ad-spec): an exact-joint setup carries a required rho domain that its builder derives over the realized blocks (realized_blocks_rho_domain). The driver's term-collection derivation, which kept the precision box on a count mismatch, and the optional with_rho_domain installer are deleted.",
     "evidence": "git grep -n -w at eead230646 finds joint_rho_resolvability_domain_over_blocks only in spatial_optimization.rs (its definition, its test and the driver call), and with_rho_domain in spatial_optimization.rs, marginal_slope/fit_setup.rs and transformation_normal/fit.rs, whose callers now pass the domain to ExactJointHyperSetup::new. No example, Python or FFI source names them."
+  },
+  {
+    "base": "7540fb6a8b7f3a077aca18af9266fd7536f4653b",
+    "removed": {
+      "crates/gam-geometry/src/manifolds/sphere.rs::normalize_sphere_matrix": 1
+    },
+    "reason": "#2469: the pub(crate) normalize_sphere_matrix silently divided every row of the sphere response geometry and of sphere_frechet_mean by its norm, a second entry rule beside SphereManifold's UNIT_TOL. It becomes require_unit_sphere_rows, which refuses a row whose |‖y‖² − 1| exceeds gam_math::roundoff::unit_normalization_band, the band SphereManifold::require_unit now applies too, with the measured defect and the fix in the message.",
+    "evidence": "At base be3343133604d5e5374cde0406cc728d847e2d23, git grep -n -w normalize_sphere_matrix finds its declaration at crates/gam-geometry/src/manifolds/sphere.rs:441 and its five callers at :467, :469, :536, :907 and :1017, all inside sphere.rs, all rewritten to require_unit_sphere_rows; nothing outside gam-geometry can name a pub(crate) item. Gate job 1271657 on gx4 (base 880d26d69a, exact tree a548e8bcdc) had public_api_census.py refuse exactly this removal, and source_removal_guard.py verified the three removals this commit's source-removal entry acknowledges."
   }
 ]

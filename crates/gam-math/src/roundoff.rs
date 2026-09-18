@@ -35,6 +35,19 @@ pub fn inflated(value: f64, operations: usize) -> f64 {
     value * (1.0 + accumulation_growth(operations + 3))
 }
 
+/// Rounding band on `|‖x̂‖² − 1|` for a length-`dim` vector normalized in f64, `x̂ = x/‖x‖`, and then measured in
+/// f64. It is the widest a correctly normalized vector can read off the unit sphere, so a larger defect was not
+/// normalized in f64.
+///
+/// First order in `u`, with `γ_n` from [`accumulation_growth`]:
+/// - `‖x‖²` sums `dim` rounded squares, so it errs by `γ_dim` relative, and its square root by `γ_dim/2 + u`.
+/// - Each coordinate then takes at most two more roundings (a quotient `xᵢ/‖x‖`, or a product with a rounded
+///   reciprocal), so the exact `‖x̂‖²` is `1` within `γ_dim + 6u = γ_{dim+6}`.
+/// - Measuring `‖x̂‖²` sums `dim` rounded squares again, adding `γ_dim`, and `γ_{dim+6} + γ_dim ≤ γ_{2·dim+6}`.
+pub fn unit_normalization_band(dim: usize) -> f64 {
+    accumulation_growth(dim.saturating_mul(2).saturating_add(6))
+}
+
 /// Passes a reorthogonalized Gram–Schmidt append makes over its basis. Twice is enough: after a second pass of
 /// classical or modified Gram–Schmidt the residual is orthogonal to the basis to working precision, and a third pass
 /// changes nothing resolvable (Giraud, Langou and Rozložník, *Numer. Math.* 101, 2005). An append that runs these
