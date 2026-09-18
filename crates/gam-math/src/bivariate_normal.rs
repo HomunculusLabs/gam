@@ -66,8 +66,12 @@
 //!   near `±1` never enters.
 //! - **Projection.** Every result is projected onto `[0, 1]`, which contains the truth, so the projection never
 //!   increases the error.
-//! - **Relative accuracy.** It is not claimed for `Φ₂ ≲ ε`. The sum `Φ(h)Φ(k) + T` cancels when `ρ < 0` in the
-//!   lower tails, and so do the `ρ < −½` difference and the negative-correlation pieces of `ρ > ½`.
+//! - **Relative accuracy.** The core does not claim it for `Φ₂ ≲ ε`. The sum `Φ(h)Φ(k) + T` cancels when `ρ < 0` in
+//!   the lower tails, and so do the `ρ < −½` difference and the negative-correlation pieces of `ρ > ½`.
+//!   [`bivariate_normal_cdf_with_complement_bounded`] certifies a relative bound where `ρ ≤ 0` and both constraints are
+//!   active, through the positive form of `positive_form`.
+
+mod positive_form;
 
 use crate::probability::{normal_cdf, normal_pdf};
 use crate::roundoff::{UNIT_ROUNDOFF, accumulation_growth};
@@ -143,6 +147,26 @@ pub struct BivariateNormalPartials {
     pub d_h_rounding: f64,
     pub d_k_rounding: f64,
     pub d_rho_rounding: f64,
+}
+
+/// Which guarantee a [`BoundedProbability`]'s `rounding` carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoundingContract {
+    /// The value and its rounding come from a certified enclosure of `Φ₂` with a positive lower end, so `rounding`
+    /// scales with the value and `rounding/value` bounds its relative error.
+    Relative,
+    /// `rounding` is [`BIVARIATE_NORMAL_CDF_ERROR_BOUND`], the core's absolute contract. It certifies no relative digit
+    /// of a value at or below it.
+    Absolute,
+}
+
+/// A probability with a bound on its error at the computed arguments.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoundedProbability {
+    pub value: f64,
+    /// A bound on `|value − Φ₂|`, absolute whatever `contract` says.
+    pub rounding: f64,
+    pub contract: RoundingContract,
 }
 
 /// The largest `|asin ρ|` the core rule evaluates: `asin ½`.
@@ -412,6 +436,46 @@ pub fn bivariate_normal_cdf_with_complement(
         Correlation::from_complement(rho, complement),
         &CORE_RULE,
     ))
+}
+
+/// `Φ₂(h, k; ρ)` from a caller-resolved `1 − ρ²`, as in [`bivariate_normal_cdf_with_complement`], with the smaller of
+/// two derived error bounds.
+///
+/// - **Certified region:** `ρ ≤ 0`, finite `h` and `k`, `complement > 0`, and `α₁ = −(h − ρk)/c` and
+///   `α₂ = −(k − ρh)/c` both resolved nonnegative (the apex is the design point). There the positive form (module
+///   `positive_form`) encloses `Φ₂` with no cancellation, and its bound scales with the value.
+/// - **Choice:** that bound is returned as [`RoundingContract::Relative`] when it is below
+///   [`BIVARIATE_NORMAL_CDF_ERROR_BOUND`].
+/// - **Outside the certified region**, or where the certificate declines (no admissible ellipse, a subnormal density, a
+///   failed enclosure) or its bound is the larger: the value is exactly [`bivariate_normal_cdf_with_complement`]'s,
+///   with `rounding = BIVARIATE_NORMAL_CDF_ERROR_BOUND` and [`RoundingContract::Absolute`]. That bound rests on one ulp
+///   per `sin`, `asin` and `erfc` call, a measurement of the platform library rather than a derivation.
+///
+/// Neither bound includes the caller's argument error. In particular `complement` is taken as `1 − ρ²` of the same
+/// correlation.
+pub fn bivariate_normal_cdf_with_complement_bounded(
+    h: f64,
+    k: f64,
+    rho: f64,
+    complement: f64,
+) -> Result<BoundedProbability, BivariateNormalError> {
+    validate(&[("h", h), ("k", k)], rho)?;
+    validate_complement(complement)?;
+    if let Some(bounded) = positive_form::relative_orthant(h, k, rho, complement)
+        && bounded.rounding < BIVARIATE_NORMAL_CDF_ERROR_BOUND
+    {
+        return Ok(bounded);
+    }
+    Ok(BoundedProbability {
+        value: cdf_on_rule(
+            h,
+            k,
+            Correlation::from_complement(rho, complement),
+            &CORE_RULE,
+        ),
+        rounding: BIVARIATE_NORMAL_CDF_ERROR_BOUND,
+        contract: RoundingContract::Absolute,
+    })
 }
 
 /// `P(X ≤ h, lower ≤ Y ≤ upper)`.
