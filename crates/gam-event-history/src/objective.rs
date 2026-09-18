@@ -1,6 +1,8 @@
 //! Total derivatives of the reference-normalised likelihood.
 use super::*;
-use crate::scalar::Mixed;
+use crate::scalar::{Rows, TANGENT_WIDTH};
+use gam_model_api::families::custom_family::ExactNewtonJointHessianWorkspace;
+use gam_problem::EvalMode;
 
 impl EventHistoryFamily {
     fn reference_values<S: JetField>(
@@ -111,6 +113,96 @@ impl EventHistoryFamily {
         Ok(pairwise_sum(&results?, &beta[0].constant_like(0.0)))
     }
 
+    /// The value, the gradient along `coordinates` and the row-major Hessian
+    /// over them of the computed log-likelihood, every entry carrying the
+    /// directions `beta` is seeded with.
+    ///
+    /// One path evaluation over `Rows<Rows<S, TANGENT_WIDTH>, TANGENT_WIDTH>`
+    /// returns the block of second derivatives between one block of
+    /// `TANGENT_WIDTH` coordinates and another, with the gradient along the
+    /// second. The lower triangle of blocks costs `b(b + 1)/2` path evaluations
+    /// over `b = ⌈m / TANGENT_WIDTH⌉` blocks of `m` coordinates, where seeding
+    /// one coordinate pair per evaluation cost `m(m + 1)/2` (#2965). Each entry
+    /// is still the exact derivative of the same computed value, with reference
+    /// evolution and grid placement included.
+    pub(super) fn coordinate_hessian<S: JetField + Send + Sync>(
+        &self, states: &[ParameterBlockState], beta: &[S], coordinates: &[usize],
+    ) -> Result<(S, Vec<S>, Vec<S>), EventHistoryError> {
+        let width = coordinates.len();
+        if width == 0 {
+            return Ok((self.path_value(states, beta)?, Vec::new(), Vec::new()));
+        }
+        let zero = beta[0].constant_like(0.0);
+        let mut value = zero.clone();
+        let mut gradient = vec![zero.clone(); width];
+        let mut hessian = vec![zero; width * width];
+        let tangents = |q: usize, start: usize| -> [f64; TANGENT_WIDTH] {
+            std::array::from_fn(|k| f64::from(coordinates.get(start + k) == Some(&q)))
+        };
+        for a in 0..width.div_ceil(TANGENT_WIDTH) {
+            let rows = a * TANGENT_WIDTH;
+            for b in 0..=a {
+                let columns = b * TANGENT_WIDTH;
+                let seeded: Vec<Rows<Rows<S, TANGENT_WIDTH>, TANGENT_WIDTH>> = beta.iter().enumerate()
+                    .map(|(q, coefficient)| Rows::seed(
+                        Rows::seed(coefficient.clone(), tangents(q, columns)), tangents(q, rows)))
+                    .collect();
+                let result = self.path_value(states, &seeded)?;
+                for l in 0..TANGENT_WIDTH.min(width - columns) {
+                    gradient[columns + l] = result.base.rows[l].clone();
+                }
+                for k in 0..TANGENT_WIDTH.min(width - rows) {
+                    let i = rows + k;
+                    // Within a diagonal block only `j ≤ i` is read, so each
+                    // mirrored pair comes from one channel.
+                    for l in 0..TANGENT_WIDTH.min(width - columns).min(i + 1 - columns) {
+                        let j = columns + l;
+                        hessian[i * width + j] = result.rows[k].rows[l].clone();
+                        hessian[j * width + i] = result.rows[k].rows[l].clone();
+                    }
+                }
+                value = result.base.base;
+            }
+        }
+        Ok((value, gradient, hessian))
+    }
+
+    /// The value, the gradient and `H v` of the computed log-likelihood along
+    /// one direction `v`. One path evaluation over
+    /// `Rows<Rows<f64, 1>, TANGENT_WIDTH>` per block of coefficients: the inner
+    /// level carries `v`, the outer level the block's coordinates, and the
+    /// mixed channel is `∂(∇ℓ · v)/∂θ_q`. A product costs `⌈p / TANGENT_WIDTH⌉`
+    /// evaluations, where a dense Hessian costs `b(b + 1)/2` over the same
+    /// `b = ⌈p / TANGENT_WIDTH⌉` blocks (#2965).
+    pub(super) fn hessian_vector_product(
+        &self, states: &[ParameterBlockState], v: &[f64],
+    ) -> Result<(f64, Vec<f64>, Vec<f64>), EventHistoryError> {
+        let values: Vec<f64> = states.iter().flat_map(|s| s.beta.iter().copied()).collect();
+        let total = values.len();
+        if v.len() != total || v.iter().any(|x| !x.is_finite()) {
+            return Err(EventHistoryError::InvalidInput {
+                reason: "invalid event-history Hessian-vector direction".to_string(),
+            });
+        }
+        let mut value = 0.0;
+        let mut gradient = vec![0.0; total];
+        let mut product = vec![0.0; total];
+        for start in (0..total).step_by(TANGENT_WIDTH) {
+            let seeded: Vec<Rows<Rows<f64, 1>, TANGENT_WIDTH>> = values.iter().zip(v).enumerate()
+                .map(|(q, (coefficient, along))| Rows::seed(
+                    Rows::seed(*coefficient, [*along]),
+                    std::array::from_fn(|k| f64::from(q == start + k))))
+                .collect();
+            let result = self.path_value(states, &seeded)?;
+            for k in 0..TANGENT_WIDTH.min(total - start) {
+                gradient[start + k] = result.rows[k].base;
+                product[start + k] = result.rows[k].rows[0];
+            }
+            value = result.base.base;
+        }
+        Ok((value, gradient, product))
+    }
+
     pub(super) fn computed_joint<S: Directional>(
         &self, states: &[ParameterBlockState], u: Option<&Array1<f64>>,
         v: Option<&Array1<f64>>, derivatives: bool,
@@ -127,22 +219,87 @@ impl EventHistoryFamily {
         if !derivatives {
             return Ok((self.path_value(states, &beta)?, Vec::new(), Vec::new()));
         }
-        let zero = beta[0].constant_like(0.0);
-        let mut value = zero.clone();
-        let mut gradient = vec![zero.clone(); total];
-        let mut hessian = vec![zero; total * total];
-        for i in 0..total {
-            for j in 0..=i {
-                let seeded: Vec<Mixed<S>> = beta.iter().enumerate().map(|(q, b)|
-                    Mixed::seed(b.clone(), f64::from(q == i), f64::from(q == j))).collect();
-                let result = self.path_value(states, &seeded)?;
-                value = result.base;
-                gradient[i] = result.u;
-                hessian[i * total + j] = result.uv.clone();
-                hessian[j * total + i] = result.uv;
-            }
+        let coordinates: Vec<usize> = (0..total).collect();
+        Ok(self.coordinate_hessian(states, &beta, &coordinates)?)
+    }
+
+    /// Whether the coefficient derivatives come from the computed path: a
+    /// reference law differentiated through its evolution, or a static atom
+    /// integrated on a grid placed by the whole history. The Louis sweep of
+    /// `subject_marginal` covers neither.
+    pub(super) fn differentiates_the_computed_path(&self) -> bool {
+        self.atoms > 0 && (self.reference.is_some() || self.held_rates.contains(&Some(0.0)))
+    }
+}
+
+/// The coefficient-Hessian workspace of a family whose derivatives come from
+/// the computed path, at one state (#2965).
+///
+/// Every intent, the inner solve included, takes the block sweep's dense
+/// Hessian, which the family caches on the state. The workspace keeps the
+/// trait's dense preference because streaming the inner solve through `H v`
+/// took more inner cycles and more time on this route (#2965). A matrix-free
+/// consumer gets `H v` from [`EventHistoryFamily::hessian_vector_product`],
+/// `⌈p / TANGENT_WIDTH⌉` path evaluations a product. Every representation is
+/// the negative log-likelihood Hessian of the same computed value, the
+/// engine's convention.
+pub(super) struct ComputedHessianWorkspace {
+    family: EventHistoryFamily,
+    states: Vec<ParameterBlockState>,
+    gradient: std::sync::OnceLock<Result<(f64, Array1<f64>), String>>,
+}
+
+impl ComputedHessianWorkspace {
+    pub(super) fn new(family: EventHistoryFamily, states: Vec<ParameterBlockState>) -> Self {
+        Self { family, states, gradient: std::sync::OnceLock::new() }
+    }
+
+    /// The value and exact gradient at the workspace's state, formed once.
+    fn value_and_gradient(&self) -> Result<(f64, Array1<f64>), String> {
+        self.gradient.get_or_init(|| {
+            let value = self.family.log_likelihood(&self.states)?;
+            Ok((value, Array1::from(self.family.exact_gradient(&self.states)?)))
+        }).clone()
+    }
+}
+
+impl ExactNewtonJointHessianWorkspace for ComputedHessianWorkspace {
+    fn warm_up_outer_caches_for_mode(&self, eval_mode: EvalMode) -> Result<(), String> {
+        match eval_mode {
+            EvalMode::ValueOnly | EvalMode::ValueAndGradient | EvalMode::ValueGradientHessian => Ok(()),
         }
-        Ok((value, gradient, hessian))
+    }
+
+    fn hessian_dense(&self) -> Result<Option<Array2<f64>>, String> {
+        Ok(Some(self.family.joint_evaluation(&self.states)?.hessian.clone()))
+    }
+
+    fn joint_log_likelihood_evaluation(&self) -> Result<Option<f64>, String> {
+        Ok(Some(self.value_and_gradient()?.0))
+    }
+
+    fn joint_gradient_evaluation(&self) -> Result<Option<ExactNewtonJointGradientEvaluation>, String> {
+        let (log_likelihood, gradient) = self.value_and_gradient()?;
+        Ok(Some(ExactNewtonJointGradientEvaluation { log_likelihood, gradient }))
+    }
+
+    fn hessian_matvec_available(&self) -> bool {
+        true
+    }
+
+    fn hessian_matvec(&self, arr: &Array1<f64>) -> Result<Option<Array1<f64>>, String> {
+        let (_, _, product) = self.family.hessian_vector_product(&self.states, &arr.to_vec())?;
+        Ok(Some(Array1::from_iter(product.into_iter().map(|x| -x))))
+    }
+
+    fn directional_derivative(&self, d_beta_flat: &Array1<f64>) -> Result<Option<Array2<f64>>, String> {
+        Ok(Some(self.family.directional_hessian(&self.states, d_beta_flat)?))
+    }
+
+    fn second_directional_derivative(
+        &self, arr: &Array1<f64>, arr2: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        Ok(Some(self.family.second_directional_hessian(&self.states, arr, arr2)?))
     }
 }
 
@@ -337,8 +494,12 @@ mod tests {
         let mut curvatures = Vec::new();
         for event_time in [0.1, 0.5, 0.9] {
             let (family, states) = recurrent_family(event_time, vec![Some(0.0), Some(0.0)], 33);
-            let beta = vec![Mixed::seed(0.0, 0.0, 0.0), Mixed::seed(2.0, 0.0, 0.0), Mixed::seed(0.0, 1.0, 1.0)];
-            let curvature = family.path_value(&states, &beta).unwrap().uv;
+            let beta = vec![
+                Rows::seed(Rows::seed(0.0, [0.0]), [0.0]),
+                Rows::seed(Rows::seed(2.0, [0.0]), [0.0]),
+                Rows::seed(Rows::seed(0.0, [1.0]), [1.0]),
+            ];
+            let curvature = family.path_value(&states, &beta).unwrap().rows[0].rows[0];
             let h = 1e-3;
             let eval = |a: f64| family.path_value(&states, &[0.0, 2.0, a]).unwrap();
             let finite = (eval(h) + eval(-h) - 2.0 * eval(0.0)) / (h * h);
@@ -477,5 +638,182 @@ mod tests {
                 assert!((fd - joint.hessian[[j, slot + 1]]).abs() < 1e-5);
             }
         }
+    }
+
+    /// Four subjects on one once-only mark, a reference law on 24 equal steps,
+    /// `columns` cosine time columns in the mark block, and a near-static held
+    /// atom: a reference-centred fixture of any width.
+    fn wide_reference_family(columns: usize) -> (EventHistoryFamily, Vec<ParameterBlockState>) {
+        let subjects: Vec<SubjectHistory> = (0..4).map(|i| {
+            let exit = 6.0 - 0.75 * i as f64;
+            SubjectHistory {
+                id: format!("s{i}"), entry: 0.0, exit,
+                events: if i % 2 == 0 { vec![Event { time: exit, mark: 0 }] } else { Vec::new() },
+                segments: vec![CovariateSegment { start: 0.0, row: 0 }],
+            }
+        }).collect();
+        let mut cohort = EventHistoryCohort {
+            mark_names: vec!["disease".to_string()], mark_kinds: vec![MarkKind::Once],
+            covariate_names: Vec::new(), covariate_levels: Vec::new(),
+            covariates: Array2::zeros((1, 0)), subjects,
+        };
+        cohort.validate().unwrap();
+        let nodes = Arc::new(expand_nodes(&cohort, 3, 1).unwrap());
+        let intervals = 24;
+        let times: Vec<f64> = (0..=intervals).map(|n| 6.0 * n as f64 / intervals as f64).collect();
+        let grid = ReferenceGrid { gaps: times.windows(2).map(|w| w[1] - w[0]).collect(), times };
+        let basis = |t: f64| -> Vec<f64> {
+            (0..columns).map(|j| (j as f64 * std::f64::consts::PI * t / 6.0).cos()).collect()
+        };
+        let node_times: Vec<f64> = nodes.subjects.iter().flat_map(|s| s.times.iter().copied()).collect();
+        let mut design = Array2::<f64>::zeros((nodes.total_nodes, columns));
+        for (row, &t) in node_times.iter().enumerate() {
+            for (j, x) in basis(t).into_iter().enumerate() {
+                design[[row, j]] = x;
+            }
+        }
+        let mut reference_design = Array2::<f64>::zeros((grid.len(), columns));
+        for (row, &t) in grid.times.iter().enumerate() {
+            for (j, x) in basis(t).into_iter().enumerate() {
+                reference_design[[row, j]] = x;
+            }
+        }
+        let locations: Vec<(usize, f64)> = node_times.iter().map(|&t| grid.locate(t).unwrap()).collect();
+        let tables = ReferenceTables {
+            designs: vec![Arc::new(reference_design)],
+            offsets: vec![Array1::zeros(grid.len())], kinds: vec![MarkKind::Once],
+            profiles: Array2::zeros((1, 0)), strata: 1,
+            node_stratum: vec![0; nodes.total_nodes],
+            node_lower: locations.iter().map(|x| x.0).collect(),
+            node_weight: locations.iter().map(|x| x.1).collect(), grid,
+        };
+        let beta = Array1::from_iter((0..columns).map(|j| {
+            if j == 0 { -1.2 } else { 0.3 * (-1.0_f64).powi(j as i32) / (j * j) as f64 }
+        }));
+        let eta = design.dot(&beta);
+        let states = vec![
+            ParameterBlockState { beta, eta },
+            ParameterBlockState { beta: array![0.9], eta: Array1::zeros(nodes.total_nodes) },
+        ];
+        let family = EventHistoryFamily::new(nodes.clone(), vec![Arc::new(design)], 1, 9, 1.0, vec![Some(1e-8)])
+            .unwrap().with_reference(Some(Arc::new(tables)));
+        (family, states)
+    }
+
+    /// One path evaluation seeded with one coefficient direction per level:
+    /// `outer` on the outer level, `inner` on the inner, over the directions `u`
+    /// and `v` carries. Every channel of `Rows` is formed from the same operands
+    /// in the same order at any width, so this is, bit for bit, the channel a
+    /// block sweep or a Hessian-vector product forms for the same pair of
+    /// coordinates. The comparisons against it need no bar.
+    fn pair_channel<S: Directional>(
+        family: &EventHistoryFamily, states: &[ParameterBlockState],
+        u: Option<&Array1<f64>>, v: Option<&Array1<f64>>, outer: usize, inner: usize,
+    ) -> Rows<Rows<S, 1>, 1> {
+        let values: Vec<f64> = states.iter().flat_map(|s| s.beta.iter().copied()).collect();
+        let seeded: Vec<Rows<Rows<S, 1>, 1>> = values.iter().enumerate().map(|(q, value)| Rows::seed(
+            Rows::seed(S::seeded(*value, u.map_or(0.0, |x| x[q]), v.map_or(0.0, |x| x[q])), [f64::from(q == inner)]),
+            [f64::from(q == outer)],
+        )).collect();
+        family.path_value(states, &seeded).unwrap()
+    }
+
+    /// The coefficient-pair replay the block sweeps replaced (#2965): one path
+    /// evaluation per coefficient pair `j ≤ i`, `i` outer and `j` inner, which
+    /// is the orientation `coordinate_hessian` reads in its lower triangle.
+    fn pair_replay<S: Directional>(
+        family: &EventHistoryFamily, states: &[ParameterBlockState],
+        u: Option<&Array1<f64>>, v: Option<&Array1<f64>>,
+    ) -> (S, Vec<S>, Vec<S>) {
+        let total = family.total_width();
+        let mut value = None;
+        let mut gradient = Vec::with_capacity(total);
+        let mut hessian: Vec<Option<S>> = vec![None; total * total];
+        for i in 0..total {
+            for j in 0..=i {
+                let result = pair_channel::<S>(family, states, u, v, i, j);
+                if j == i {
+                    gradient.push(result.base.rows[0].clone());
+                }
+                hessian[i * total + j] = Some(result.rows[0].rows[0].clone());
+                hessian[j * total + i] = Some(result.rows[0].rows[0].clone());
+                value = Some(result.base.base);
+            }
+        }
+        (value.expect("at least one coefficient"), gradient,
+            hessian.into_iter().map(|entry| entry.expect("every pair is replayed")).collect())
+    }
+
+    /// Block sweeps return the pair replay's value, gradient and Hessian, and
+    /// the Hessian's first and second directional derivatives, bit for bit
+    /// (#2965). Seventeen coefficients make three blocks, the last holding one
+    /// coefficient, so a partial block and every off-diagonal block pair are
+    /// read. Every compared Hessian entry is nonzero, so equality tests the
+    /// seeding and the read-back rather than two zeros.
+    #[test]
+    fn block_sweeps_reproduce_the_pair_replay_2965() {
+        let (family, states) = wide_reference_family(16);
+        let total = family.total_width();
+        assert_eq!(total, 17);
+        let u = Array1::from_iter((0..total).map(|q| 1.0 / (q + 1) as f64));
+        let v = Array1::from_iter((0..total).map(|q| if q % 2 == 0 { 0.5 } else { -0.25 }));
+        let (value, gradient, hessian) = family.computed_joint::<f64>(&states, None, None, true).unwrap();
+        let (oracle_value, oracle_gradient, oracle_hessian) = pair_replay::<f64>(&family, &states, None, None);
+        assert_eq!(value, oracle_value);
+        assert_eq!(gradient, oracle_gradient);
+        assert_eq!(hessian, oracle_hessian);
+        assert!(oracle_hessian.iter().all(|entry| *entry != 0.0), "every Hessian entry must be material");
+
+        let (_, _, first) = family.computed_joint::<OneSeed<0>>(&states, Some(&u), None, true).unwrap();
+        let (_, _, oracle_first) = pair_replay::<OneSeed<0>>(&family, &states, Some(&u), None);
+        let first: Vec<f64> = first.iter().map(Directional::eps).collect();
+        let oracle_first: Vec<f64> = oracle_first.iter().map(Directional::eps).collect();
+        assert_eq!(first, oracle_first);
+        assert!(oracle_first.iter().all(|entry| *entry != 0.0), "every first directional derivative entry must be material");
+
+        let (_, _, second) = family.computed_joint::<TwoSeed<0>>(&states, Some(&u), Some(&v), true).unwrap();
+        let (_, _, oracle_second) = pair_replay::<TwoSeed<0>>(&family, &states, Some(&u), Some(&v));
+        let second: Vec<f64> = second.iter().map(Directional::eps_del).collect();
+        let oracle_second: Vec<f64> = oracle_second.iter().map(Directional::eps_del).collect();
+        assert_eq!(second, oracle_second);
+        assert!(oracle_second.iter().all(|entry| *entry != 0.0), "every second directional derivative entry must be material");
+    }
+
+    /// The workspace's representations are the block sweep's, bit for bit
+    /// (#2965). The dense matrix a factorising consumer takes is the negated
+    /// pair replay. The matrix-free product along each unit direction `e_j` is
+    /// the negated pair channel (outer `q`, inner `j`) in every row `q`, which
+    /// is the orientation its outer block level carries. The gradient and value
+    /// are the joint evaluation's. A sign slip between representations would
+    /// break an equality.
+    #[test]
+    fn the_computed_workspace_streams_the_block_sweep_curvature_2965() {
+        let (family, states) = wide_reference_family(16);
+        let total = family.total_width();
+        assert!(family.differentiates_the_computed_path());
+        let workspace = ComputedHessianWorkspace::new(family.clone(), states.clone());
+        let joint = family.joint_evaluation(&states).unwrap();
+        let dense = workspace.hessian_dense().unwrap().expect("a dense Hessian for factorising consumers");
+        let (_, _, oracle) = pair_replay::<f64>(&family, &states, None, None);
+        for q in 0..total {
+            for r in 0..total {
+                assert_eq!(dense[[q, r]], -oracle[q * total + r], "dense [{q}, {r}] against the negated pair replay");
+            }
+        }
+        assert!(oracle.iter().all(|entry| *entry != 0.0), "every Hessian entry must be material");
+        for j in 0..total {
+            let mut unit = Array1::zeros(total);
+            unit[j] = 1.0;
+            let product = workspace.hessian_matvec(&unit).unwrap().expect("a Hessian-vector product");
+            for q in 0..total {
+                let channel = pair_channel::<f64>(&family, &states, None, None, q, j).rows[0].rows[0];
+                assert_eq!(product[q], -channel, "H e_{j} [{q}] against the pair channel (outer {q}, inner {j})");
+            }
+        }
+        let evaluation = workspace.joint_gradient_evaluation().unwrap().expect("a gradient");
+        for q in 0..total {
+            assert_eq!(evaluation.gradient[q], joint.gradient[q], "gradient [{q}]");
+        }
+        assert_eq!(evaluation.log_likelihood, joint.log_likelihood);
     }
 }

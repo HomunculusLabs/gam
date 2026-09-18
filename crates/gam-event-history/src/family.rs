@@ -516,7 +516,7 @@ impl EventHistoryFamily {
         derivatives: bool,
     ) -> Result<(S, Vec<S>, Vec<S>), String> {
         self.validate_states(states)?;
-        if self.atoms > 0 && (self.reference.is_some() || self.held_rates.contains(&Some(0.0))) {
+        if self.differentiates_the_computed_path() {
             return self.computed_joint(states, u, v, derivatives);
         }
         let marks = self.marks();
@@ -734,7 +734,7 @@ impl EventHistoryFamily {
         self.clear_reference_refusal();
         let total = self.total_width();
         let mut gradient = vec![0.0; total];
-        self.exact_gradient_chunks::<8>(states, &mut gradient)?;
+        self.exact_gradient_chunks::<{ super::scalar::TANGENT_WIDTH }>(states, &mut gradient)?;
         Ok(gradient)
     }
 
@@ -1038,6 +1038,30 @@ impl CustomFamily for EventHistoryFamily {
 
     fn has_explicit_joint_hessian(&self) -> bool {
         true
+    }
+
+    /// A family whose derivatives come from the computed path streams its
+    /// inner Newton curvature as Hessian-vector products, and hands the matrix
+    /// only to the consumers that factor or read it (#2965).
+    fn inner_coefficient_hessian_hvp_available(&self, specs: &[ParameterBlockSpec]) -> bool {
+        specs.len() == self.marks() + usize::from(self.has_latent_block())
+            && self.differentiates_the_computed_path()
+    }
+
+    fn inner_joint_workspace_gradient_available(&self, specs: &[ParameterBlockSpec]) -> bool {
+        self.inner_coefficient_hessian_hvp_available(specs)
+    }
+
+    fn exact_newton_joint_hessian_workspace(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+    ) -> Result<Option<Arc<dyn gam_model_api::families::custom_family::ExactNewtonJointHessianWorkspace>>, String> {
+        if !self.inner_coefficient_hessian_hvp_available(specs) {
+            return Ok(None);
+        }
+        self.validate_states(block_states)?;
+        Ok(Some(Arc::new(objective::ComputedHessianWorkspace::new(self.clone(), block_states.to_vec()))))
     }
 
     fn requires_joint_outer_hyper_path(&self) -> bool {
@@ -2493,24 +2517,16 @@ fn added_atom_curvature(fit: &EventHistoryFit, log_rate: f64, tolerance: f64) ->
     added_factor_curvature_pair(&probe, &states, tolerance)
 }
 
+/// The curvature over the added atom's loadings, one per mark: the block of
+/// the computed Hessian those coordinates span, from block sweeps rather than
+/// one path evaluation per pair of marks (#2965).
 fn loading_curvature(probe: &EventHistoryFamily, states: &[ParameterBlockState]) -> Result<Array2<f64>, EventHistoryError> {
-    use super::scalar::Mixed;
     let marks = probe.marks();
     let values: Vec<f64> = states.iter().flat_map(|s| s.beta.iter().copied()).collect();
     let offset = probe.block_offsets()[marks];
-    let mut curvature = Array2::zeros((marks, marks));
-    for d in 0..marks {
-        for e in 0..=d {
-            let qd = offset + d * probe.atoms + probe.atoms - 1;
-            let qe = offset + e * probe.atoms + probe.atoms - 1;
-            let beta: Vec<Mixed<f64>> = values.iter().enumerate().map(|(q, &value)|
-                Mixed::seed(value, f64::from(q == qd), f64::from(q == qe))).collect();
-            let value = probe.path_value(states, &beta)?.uv;
-            curvature[[d, e]] = value;
-            curvature[[e, d]] = value;
-        }
-    }
-    Ok(curvature)
+    let coordinates: Vec<usize> = (0..marks).map(|d| offset + d * probe.atoms + probe.atoms - 1).collect();
+    let (_, _, hessian) = probe.coordinate_hessian(states, &values, &coordinates)?;
+    Ok(Array2::from_shape_fn((marks, marks), |(d, e)| hessian[d * marks + e]))
 }
 
 /// A correct derivative of an unresolved integral is still unresolved, so the
