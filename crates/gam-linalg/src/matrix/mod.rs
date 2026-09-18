@@ -3629,6 +3629,13 @@ impl DenseDesignOperator for CoefficientTransformOperator {
     /// measured a 2.5-9% higher RMS error than `apply`'s gemv reductions on the
     /// gauged J·F fixtures (gnomon#2337). A materialized `X·T` is read directly,
     /// as the default would.
+    ///
+    /// The compensated products are deliberate; do not trade them back for a
+    /// faster plain GEMM. The accuracy bar ruled for this path (gnomon#2337) is a
+    /// gauged J·F RMS error no worse than the former per-column build's plus
+    /// u/√N, and meeting it costs 2.7× the former build's task-clock (4.5× its
+    /// instructions) here, on the path taken only when the design memo is
+    /// refused.
     fn row_chunk_matmul_into(
         &self,
         rows: Range<usize>,
