@@ -1094,5 +1094,13 @@
     ],
     "reason": "#2627: owed_1440's meta-guard asserted that three FD sites stay enumerated in SANCTIONED_FD_FILES and that the allowlist is non-empty. Since d7ec08b5cf (SPEC rule 2) the allowlist is `&[];`: 1bc46ac508 replaced the runner's FD audit (run_plan.rs Ridders probe, outer_eval_capture.rs certificate store) with an analytic seed probe, and d7ec08b5cf removed the last entry, run.rs, when opt dropped the set_finite_difference_bounds hook. The test is restated as no_production_file_is_sanctioned_for_finite_differences, which requires the parsed allowlist to be empty; the parser now reads the one-line empty literal and refuses any other shape.",
     "evidence": "git grep -n -w known_sanctioned_fd_sites_stay_enumerated at 0c7b46de6d finds it only at its declaration in tests/misc/misc/owed_1440.rs (a root test file, no production occurrence). Gate dy3 i2939-tests-g1 (direct-dy3-i2939-tests-g1.log) ran source_removal_guard.py on this change without the entry and named exactly this item, test_scoped true, production_occurrences 0. The test's census red is sw4l job 1230477 at 95115c8a1f (panic 'the FD allowlist must remain a closed literal list', job 1244874)."
+  },
+  {
+    "base": "c28ea344067e7311c24337a9d96d36cb9eedb1b8",
+    "items": [
+      "crates/gam-solve/src/spline_scan.rs:const:GLOBALLY_BOUNDED_FROM"
+    ],
+    "reason": "#2469: GLOBALLY_BOUNDED_FROM = 4 counted how many entries of the per-node divergence scan's eight-accumulator list to read (.take(4)): the value and first-derivative accumulators, the only ones without a closed-form global bound. The list now holds exactly those four and the count is gone. The scan reads the same four balls in the same order, so behaviour is unchanged. Nothing else read the const, so it is deleted.",
+    "evidence": "git grep -n -w GLOBALLY_BOUNDED_FROM at 24fc249b29 finds its declaration in crates/gam-solve/src/spline_scan.rs and its one use, the .take() in the divergence scan. Gate job 1270017 at 24fc249b29 (exact tree ec991437) ran: workspace --all-targets check RC 0; gam-solve spline_scan 24/24; gam-terms nuclear_norm 10/10; pyffi RC 0; public_api_census RC 0. The source-removal guard named exactly this const (production_occurrences 2) before this entry existed."
   }
 ]

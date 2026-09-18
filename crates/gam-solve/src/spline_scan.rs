@@ -78,6 +78,10 @@ struct PooledNode {
 /// has none, `m = 2` has node 0, `m = 3` has {0, 1}. Order 3 (the quintic
 /// smoothing spline, #1044) is the current cap; bumping it further only needs a
 /// wider `mat_inv` branch and the (already order-general) leading-block solve.
+///
+/// Structural (#2469): the capacity of the fixed-size matrix buffers below and the
+/// largest order `mat_inv` inverts. It is a supported-order limit, not a tolerance,
+/// and no result depends on it beyond which orders are accepted.
 const MAX_ORDER: usize = 3;
 
 /// Row-major `m × m` matrix stored in a fixed `MAX_ORDER`-capacity buffer; only
@@ -1099,15 +1103,6 @@ fn ball_cholesky(covariance: &BallMat, order: usize) -> Option<BallMat> {
     }
     Some(factor)
 }
-
-/// How many accumulators the per-node divergence check scans.
-///
-/// The second- and third-order accumulators are ordered last and left OUT of
-/// the scan: each has a closed-form global bound the certificate substitutes
-/// (see [`BoundSource`]), so neither can justify discarding a value and slope
-/// that are finite. Divergence in the VALUE or in the FIRST derivative still
-/// refuses, at the node it happened — those have no substitute.
-const GLOBALLY_BOUNDED_FROM: usize = 4;
 
 /// Number of columns in the prediction prearray `[F·L, L_Q]`.
 const PREARRAY_COLUMNS: usize = 2 * MAX_ORDER;
@@ -3177,24 +3172,19 @@ fn run_filter_ball_traced(
             // non-finite and nothing more, which is what made #2614 expensive:
             // two exact repairs were aimed at the wrong term because the
             // refusal could not say WHICH accumulator went, WHERE, or how wide
-            // it was. Checking here costs eight `is_finite` calls per proper
+            // it was. Checking here costs four `is_finite` calls per proper
             // node and turns the refusal into the measurement.
             if let Some((accumulator, ball, contribution)) = [
                 ("sum_log_f", sum_log_f, f_star.ln_positive()),
                 ("sum_log_f_d1", sum_log_f_d1, logf_d1),
                 ("sum_v2_over_f", sum_v2_over_f, t0),
                 ("sum_v2_over_f_d1", sum_v2_over_f_d1, t1),
-                // Second and third order last, and deliberately outside the
-                // scan below: each has a closed-form global bound the
-                // certificate substitutes, so neither can justify discarding a
-                // value and slope that are finite.
-                ("sum_log_f_d2", sum_log_f_d2, logf_d2),
-                ("sum_v2_over_f_d2", sum_v2_over_f_d2, t2),
-                ("sum_log_f_d3", sum_log_f_d3, logf_d3),
-                ("sum_v2_over_f_d3", sum_v2_over_f_d3, t3),
+                // The second- and third-order accumulators are deliberately
+                // not scanned: each has a closed-form global bound the
+                // certificate substitutes (see [`BoundSource`]), so neither can
+                // justify discarding a value and slope that are finite.
             ]
             .into_iter()
-            .take(GLOBALLY_BOUNDED_FROM)
             .find(|(_, ball, _)| !ball.is_finite())
             {
                 return Err(SplineScoreProofError::AccumulatorDiverged {

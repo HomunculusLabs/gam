@@ -61,6 +61,8 @@ pub struct NuclearNormPenalty {
 /// are equal at `|Δλ|/λ̄ = ∛(64ε/5)`, and each route is the more accurate one
 /// on its own side of that gap.
 fn frechet_route_balance() -> f64 {
+    // Derived (#2469): `64/5` and the cube root come from equating the two error
+    // bounds above, so the crossover follows from the rounding counts, not a choice.
     (64.0 / 5.0 * f64::EPSILON).cbrt()
 }
 
