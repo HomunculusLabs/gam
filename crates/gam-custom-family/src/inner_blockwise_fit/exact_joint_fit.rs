@@ -1025,8 +1025,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             let escape_block_constraints =
                 collect_block_linear_constraints(family, &states, specs)?;
             let escape_objective_tol = inner_tol * (1.0 + lastobjective.abs());
-            let decrement_resolution = joint_objective_roundoff_slack(
-                lastobjective,
+            let decrement_resolution = returned_mode_decrement_resolution(
                 lastobjective,
                 objective_resolution_witness.measured(),
             );
@@ -1241,24 +1240,72 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // and, on a strict saddle, escape along it (gam#979). Anything that
         // certifies convergence must inherit that — which is exactly why the
         // stall-guard site calls this instead of assigning `converged` itself.
+        //
+        // A mark asks the settlement's residual arm first (#2977). The head
+        // judges exactly the residual and target recorded here, so a mark above
+        // its target is a revoke paid in advance: nothing moves between the two.
+        // Each such mark also ended its cycle before the stall accounting below
+        // the certificates, so a solve parked above its target at a fixed point
+        // marked, was revoked and marked again until the cycle budget. gam-2930's
+        // AoU-shaped survival fit spent 1,200 cycles and ~75 s on each of three
+        // refused trial points this way: 4,726 constrained revokes, every one at
+        // residual `1.726e-4` against `1.639e-5`. A mark the settlement cannot
+        // accept is not made, and its site continues as if its certificate had
+        // declined. Where the workspace measures its row summands, a site that
+        // passes it records the band-shrunk residual (#2976), as the
+        // unconstrained head judges it.
         macro_rules! finish_post_step_convergence {
             ($residual:expr, $residual_target:expr) => {{
-                // The marked state's projected stationarity residual and the
-                // target at that state. The head that settles this mark judges
-                // exactly these; nothing moves between the mark and that head
-                // (#2627).
-                tentative_mark_kkt = Some(($residual, $residual_target));
-                converged = true;
-                if joint_constraints.is_none() {
-                    returned_mode_curvature_pending = true;
+                let marked_residual: f64 = $residual;
+                finish_post_step_convergence!(@mark marked_residual, $residual_target)
+            }};
+            ($residual:expr, $residual_target:expr, $workspace:expr, $kkt_gradient:expr) => {{
+                let marked_residual: f64 = $residual;
+                let marked_target: f64 = $residual_target;
+                let settling_residual = if marked_residual > marked_target {
+                    returned_mode_band_shrunk_residual(
+                        $workspace,
+                        $kkt_gradient,
+                        &states,
+                        specs,
+                        options,
+                        &s_lambdas,
+                        joint_bundle,
+                        &block_constraints,
+                        &cached_active_sets,
+                        joint_lower_bounds.as_ref(),
+                    )?
+                    .unwrap_or(marked_residual)
+                } else {
+                    marked_residual
+                };
+                finish_post_step_convergence!(@mark settling_residual, marked_target)
+            }};
+            (@mark $residual:expr, $residual_target:expr) => {{
+                let (marked_residual, marked_target): (f64, f64) = ($residual, $residual_target);
+                if joint_inner_kkt_converged(marked_residual, marked_target) {
+                    // The marked state's projected stationarity residual and the
+                    // target at that state. The head that settles this mark judges
+                    // exactly these; nothing moves between the mark and that head
+                    // (#2627).
+                    tentative_mark_kkt = Some((marked_residual, marked_target));
+                    converged = true;
+                    if joint_constraints.is_none() {
+                        returned_mode_curvature_pending = true;
+                        continue 'joint_newton_cycles;
+                    }
+                    // Every constrained first-order convergence event is
+                    // tentative until the next cycle head certifies M_true on
+                    // the numerically-tight active-face tangent. Jeffreys modes
+                    // are not a separate objective or a certificate exemption.
+                    returned_constrained_mode_pending = true;
                     continue 'joint_newton_cycles;
                 }
-                // Every constrained first-order convergence event is
-                // tentative until the next cycle head certifies M_true on
-                // the numerically-tight active-face tangent. Jeffreys modes
-                // are not a separate objective or a certificate exemption.
-                returned_constrained_mode_pending = true;
-                continue 'joint_newton_cycles;
+                log::info!(
+                    "[PIRLS/joint-Newton convergence] cycle {cycle:>3} | mark declined: residual \
+                     {marked_residual:.3e} above its target {marked_target:.3e}, which the \
+                     settlement cannot accept (#2977)"
+                );
             }};
         }
         if cycle_log && cycle == 0 {
@@ -2849,8 +2896,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // 1e-3 priced the rho 0 LAML slope at 6.954 (0.083 before the
             // correction). Solved to r -> 0, the same probes give 0.7519732223,
             // the analytic gradient to nine digits.
-            let decrement_resolution = joint_objective_roundoff_slack(
-                lastobjective,
+            let decrement_resolution = returned_mode_decrement_resolution(
                 lastobjective,
                 objective_resolution_witness.measured(),
             );
@@ -4523,7 +4569,10 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     states[b].beta.assign(old);
                 }
                 refresh_all_block_etas(family, specs, &mut states)?;
-                last_joint_math = Some(joint_math);
+                // The floor accepts only at a residual within its target, so the
+                // mark below is declined only at a non-finite target, and the
+                // attempt then reads `joint_math` again (#2977).
+                last_joint_math = Some(joint_math.clone());
                 // A trust-floor accept is a common saddle signature
                 // (negative curvature keeps every step rejected), so it
                 // routes through the same M_true certificate as every other
@@ -4767,7 +4816,12 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // than fail the outer "inner solve did not converge"
             // panic on a fully resolved fit.
             if last_cycle_residual_below_tol && last_cycle_obj_change_below_tol {
-                finish_post_step_convergence!(current_kkt_norm, residual_tol);
+                finish_post_step_convergence!(
+                    current_kkt_norm,
+                    residual_tol,
+                    cached_joint_workspace.as_ref(),
+                    head_kkt_gradient.as_ref().unwrap_or(&grad_joint)
+                );
             }
             // Fully-rejected stall guard. See the constant declaration
             // at the top of this function for the full rationale. The
@@ -4866,11 +4920,15 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 // non-converged exactly as before, so a stuck solve cannot be
                 // laundered into a certificate by stalling.
                 //
-                // `objective_tol` is rebuilt from `lastobjective` with the same
-                // formula the certificate site uses. On a fully-rejected cycle β
-                // is reverted and `lastobjective` is unchanged by construction,
-                // so both sites are evaluating the tolerance at the same iterate.
-                let stall_objective_tol = inner_tol * (1.0 + lastobjective.abs());
+                // The decrement is judged at the settlement's own resolution
+                // (#2977): the head that settles this mark asks exactly that, and a
+                // looser bar here only marks states the head revokes. On a
+                // fully-rejected cycle β is reverted and `lastobjective` is
+                // unchanged by construction, so both read the same iterate.
+                let stall_decrement_resolution = returned_mode_decrement_resolution(
+                    lastobjective,
+                    objective_resolution_witness.measured(),
+                );
                 let stall_decrement = joint_spectrum
                     .as_ref()
                     .map(|spectrum| spectrum.newton_decrement());
@@ -4888,7 +4946,8 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 log::debug!(
                     "[PIRLS/joint-Newton convergence] cycle {cycle:>3} | #2485 stall-certificate \
                      spectrum={} decrement={stall_decrement:?} weak={stall_weak_decrement:?} \
-                     null_score={stall_numerical_null_stationarity:?} objective_tol={stall_objective_tol:.3e}",
+                     null_score={stall_numerical_null_stationarity:?} \
+                     resolution={stall_decrement_resolution:.3e}",
                     joint_spectrum.is_some()
                 );
                 if head_jeffreys_term.is_some()
@@ -4915,14 +4974,14 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     decrement,
                     weak_decrement,
                     null_score,
-                    stall_objective_tol,
+                    stall_decrement_resolution,
                     residual_tol,
                 ) {
                     log::info!(
                         "[PIRLS/joint-Newton convergence] cycle {cycle:>3} | #2485 fully-rejected \
                          stall certified: radius={joint_trust_radius:.3e}, decrement={decrement:.3e}, \
                          weak={weak_decrement:.3e}, null_score={null_score:.3e}, \
-                         objective_tol={stall_objective_tol:.3e}; no resolvable descent remains"
+                         resolution={stall_decrement_resolution:.3e}; no resolvable descent remains"
                     );
                     // Same exit every other certificate takes — so this one is
                     // ALSO tentative until the next cycle head has certified the
@@ -4930,30 +4989,16 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     // revokes it and resets every stall counter, so certifying
                     // here cannot short-circuit the gam#979 escape and cannot
                     // spin: the guard's streak starts over. β is back at the head
-                    // state, so the mark carries that state's head residual and target.
-                    // The constrained head settles on this record, so it carries the
-                    // residual band-shrunk where the workspace measures its row
-                    // summands, as the unconstrained head judges it (#2976).
-                    let stall_mark_residual = if joint_constraints.is_some()
-                        && current_kkt_norm > residual_tol
-                    {
-                        returned_mode_band_shrunk_residual(
-                            hessian_workspace_for_cycle.as_ref(),
-                            head_kkt_gradient.as_ref().unwrap_or(&grad_joint),
-                            &states,
-                            specs,
-                            options,
-                            &s_lambdas,
-                            joint_bundle,
-                            &block_constraints,
-                            &cached_active_sets,
-                            joint_lower_bounds.as_ref(),
-                        )?
-                        .unwrap_or(current_kkt_norm)
-                    } else {
-                        current_kkt_norm
-                    };
-                    finish_post_step_convergence!(stall_mark_residual, residual_tol);
+                    // state, so the mark carries that state's head residual and
+                    // target, band-shrunk where the head's workspace (handed back to
+                    // `cached_joint_workspace` above) measures its row summands.
+                    // Above its target the mark is declined and the guard refuses below.
+                    finish_post_step_convergence!(
+                        current_kkt_norm,
+                        residual_tol,
+                        cached_joint_workspace.as_ref(),
+                        head_kkt_gradient.as_ref().unwrap_or(&grad_joint)
+                    );
                 }
                 let last_math_summary = last_joint_math
                     .as_ref()
@@ -5727,7 +5772,14 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // Conditioning-robust safety (gam#1449) and the raw decrement bound are
         // BOTH in `joint_newton_decrement_certifies`, which is also what the
         // fully-rejected stall guard consults before conceding (#2485) — one
-        // stopping rule, one place, so the two sites cannot disagree again.
+        // stopping rule, one place, so the two sites cannot disagree again. Its
+        // bar is the settlement's own decrement resolution (#2977): the head that
+        // settles this mark asks exactly that, and `objective_tol` here marked
+        // states whose decrement the head then revoked.
+        let decrement_resolution = returned_mode_decrement_resolution(
+            lastobjective,
+            objective_resolution_witness.measured(),
+        );
         if decrement_precondition
             && let Some(decrement) = joint_spectrum
                 .as_ref()
@@ -5740,7 +5792,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 decrement,
                 weak_decrement,
                 null_score,
-                objective_tol,
+                decrement_resolution,
                 residual_tol,
             )
         {
@@ -5774,7 +5826,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 cycles_since_residual_improved,
                 objective_change,
                 decrement,
-                objective_tol,
+                decrement_resolution,
                 null_score,
                 residual_tol,
             );
@@ -5786,27 +5838,12 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             if residual.is_finite() {
                 min_certified_residual = min_certified_residual.min(residual);
             }
-            // The constrained head settles on this record, so it carries the
-            // residual band-shrunk where the workspace measures its row summands,
-            // as the unconstrained head judges it (#2976).
-            let decrement_mark_residual = if joint_constraints.is_some() && residual > residual_tol {
-                returned_mode_band_shrunk_residual(
-                    cached_joint_workspace.as_ref(),
-                    residual_gradient,
-                    &states,
-                    specs,
-                    options,
-                    &s_lambdas,
-                    joint_bundle,
-                    &block_constraints,
-                    &cached_active_sets,
-                    joint_lower_bounds.as_ref(),
-                )?
-                .unwrap_or(residual)
-            } else {
-                residual
-            };
-            finish_post_step_convergence!(decrement_mark_residual, residual_tol);
+            finish_post_step_convergence!(
+                residual,
+                residual_tol,
+                cached_joint_workspace.as_ref(),
+                residual_gradient
+            );
         }
 
         // Noise-floor KKT certificate.
@@ -6028,7 +6065,12 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         geometric_tail_bound.unwrap_or(objective_change),
                         objective_tol,
                     );
-                    finish_post_step_convergence!(residual, residual_tol);
+                    finish_post_step_convergence!(
+                        residual,
+                        residual_tol,
+                        cached_joint_workspace.as_ref(),
+                        residual_gradient
+                    );
                 }
                 // Constrained exact-fixed-point acceptance (gam#797).
                 //
@@ -6189,7 +6231,12 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                             linearized_rel,
                             residual,
                         );
-                        finish_post_step_convergence!(residual, residual_tol);
+                        finish_post_step_convergence!(
+                            residual,
+                            residual_tol,
+                            cached_joint_workspace.as_ref(),
+                            residual_gradient
+                        );
                     }
                 }
                 // Still-converging guard (gam#787 duchon centers≥20). The
@@ -6343,7 +6390,12 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         residual_tol,
                         linearized_rel,
                     );
-                    finish_post_step_convergence!(residual, residual_tol);
+                    finish_post_step_convergence!(
+                        residual,
+                        residual_tol,
+                        cached_joint_workspace.as_ref(),
+                        residual_gradient
+                    );
                 }
                 // Structured per-block + per-spectrum refusal report.
                 // The legacy one-line refusal log printed only aggregate

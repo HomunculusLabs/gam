@@ -158,6 +158,16 @@ impl CustomFamily for CancellingRowSumFamily {
 
 /// Fit from `start` under a cycle budget, returning `(converged, β̂)`.
 fn fit(family: &CancellingRowSumFamily, start: f64, inner_max_cycles: usize) -> (bool, f64) {
+    let result = fit_result(family, start, inner_max_cycles);
+    (result.converged, result.block_states[0].beta[0])
+}
+
+/// Fit from `start` under a cycle budget, returning the whole inner result.
+fn fit_result(
+    family: &CancellingRowSumFamily,
+    start: f64,
+    inner_max_cycles: usize,
+) -> BlockwiseInnerResult {
     let spec = ParameterBlockSpec {
         name: "location".to_string(),
         design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
@@ -178,9 +188,8 @@ fn fit(family: &CancellingRowSumFamily, start: f64, inner_max_cycles: usize) -> 
         compute_covariance: false,
         ..BlockwiseFitOptions::default()
     };
-    let result = inner_blockwise_fit(family, &[spec], &[Array1::zeros(0)], &options, None)
-        .expect("a cancelling row-sum solve ends with an inner result, not a refusal");
-    (result.converged, result.block_states[0].beta[0])
+    inner_blockwise_fit(family, &[spec], &[Array1::zeros(0)], &options, None)
+        .expect("a cancelling row-sum solve ends with an inner result, not a refusal")
 }
 
 /// (a) The stalled mode settles. Its residual is above the caller's target and
@@ -234,8 +243,7 @@ fn a_mark_above_the_summand_band_is_still_revoked_2976() {
 }
 
 /// (c) Positive control: the same stalled mode from a workspace that measures no
-/// summands keeps the assembled-gradient band, and every mark is revoked until the
-/// budget ends the solve.
+/// summands keeps the assembled-gradient band, and no mark settles it.
 #[test]
 fn a_workspace_that_measures_no_summands_keeps_revoking_the_stalled_mode_2976() {
     let family = CancellingRowSumFamily::new(1.0, false);
@@ -253,7 +261,54 @@ fn a_workspace_that_measures_no_summands_keeps_revoking_the_stalled_mode_2976() 
     );
     assert!(
         !converged,
-        "without a summand measurement the stalled mode must stay revoked: residual \
+        "without a summand measurement the stalled mode must not settle: residual \
          {residual:.3e} against {caller_target:.3e}"
+    );
+}
+
+/// #2977 — pin (c)'s stalled mode under the production cycle budget refuses by
+/// name, well inside the budget.
+///
+/// The residual floors above its target at a roundoff step, so no mark can
+/// settle. Before #2977 each cycle marked the state anyway, the next head revoked
+/// it, and the marked cycle never reached the stall accounting, so the solve
+/// cycled until the budget ended it (`termination=cycle budget`). A mark now asks
+/// the settlement's residual arm first, the declined certificate lets the stall
+/// accounting run, and the solve leaves on a typed stall or refusal reason.
+#[test]
+fn a_mode_parked_above_its_target_refuses_by_name_before_the_cycle_budget_2977() {
+    let family = CancellingRowSumFamily::new(1.0, false);
+    let budget = BlockwiseFitOptions::default().inner_max_cycles;
+    let result = fit_result(&family, family.mode() + 0.5, budget);
+    let beta = result.block_states[0].beta[0];
+    let residual = family.row_sum(beta).gradient.abs();
+    let caller_target = INNER_TOL * (1.0 + residual);
+    let reason = match result.terminal_convergence_state.as_ref() {
+        Some(gam_problem::InnerConvergenceTerminalState::JointNewton {
+            termination_reason, ..
+        }) => termination_reason.clone(),
+        other => panic!("the joint-Newton solve must record its terminal state, got {other:?}"),
+    };
+    println!(
+        "[2977] parked above its target: converged={} cycles={}/{budget} residual={residual:.3e} \
+         caller_target={caller_target:.3e} reason={reason:?}",
+        result.converged, result.cycles
+    );
+    assert!(
+        residual > caller_target,
+        "the fixture must park above the caller's target: residual {residual:.3e} against \
+         {caller_target:.3e}"
+    );
+    assert!(!result.converged, "a mode above its target must not settle");
+    assert!(
+        !matches!(reason, gam_problem::JointNewtonTerminalReason::CycleBudget),
+        "a solve parked above its target must refuse by a named stall or refusal, not by \
+         spending its budget: cycles {}/{budget}, reason {reason:?}",
+        result.cycles
+    );
+    assert!(
+        result.cycles < budget,
+        "the named refusal must come before the budget: cycles {}/{budget}",
+        result.cycles
     );
 }

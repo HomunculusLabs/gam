@@ -3215,19 +3215,35 @@ pub(crate) fn joint_inner_kkt_converged(residual: f64, residual_tol: f64) -> boo
 /// the strictly weaker premise — and the guard is sequenced first, so on a
 /// roundoff-floor optimum the certificate never ran. Restating a stopping rule in
 /// two places is what let them disagree; keep it in one.
+///
+/// Both sites pass the settling head's decrement resolution (#2977): each marks a
+/// state tentative for a head that settles on
+/// [`joint_newton_decrements_at_resolution`], and a looser bar here only marks
+/// states that head revokes.
 pub(crate) fn joint_newton_decrement_certifies(
     decrement: f64,
     weakly_identified_decrement: f64,
     numerical_null_stationarity: f64,
-    objective_tol: f64,
+    decrement_resolution: f64,
     residual_tol: f64,
 ) -> bool {
-    decrement.is_finite()
-        && decrement <= objective_tol
-        && weakly_identified_decrement.is_finite()
-        && weakly_identified_decrement <= objective_tol
+    joint_newton_decrements_at_resolution(decrement, weakly_identified_decrement, decrement_resolution)
         && numerical_null_stationarity.is_finite()
         && numerical_null_stationarity <= residual_tol
+}
+
+/// Whether the Newton decrements over the identified and the weakly identified
+/// modes are both within `decrement_resolution`: the decrement arm of the
+/// returned-mode settlement, and of the certificates that mark states for it.
+pub(crate) fn joint_newton_decrements_at_resolution(
+    decrement: f64,
+    weakly_identified_decrement: f64,
+    decrement_resolution: f64,
+) -> bool {
+    decrement.is_finite()
+        && decrement <= decrement_resolution
+        && weakly_identified_decrement.is_finite()
+        && weakly_identified_decrement <= decrement_resolution
 }
 
 /// Per-iterate diagnostic snapshot assembled when the joint Newton inner solve

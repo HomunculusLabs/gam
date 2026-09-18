@@ -2614,6 +2614,12 @@ enum ConstrainedModeResolution {
 /// same state, and the Newton decrement the local model still promises, over the
 /// identified and the weakly identified modes, must be within the objective's
 /// resolution. Each site passes the decrements of its own spectrum.
+///
+/// Its two arms have one owner each, and the sites that mark a state tentative
+/// ask the same ones (#2977): the residual arm is [`joint_inner_kkt_converged`],
+/// which every mark asks of the residual and target it records, and the
+/// decrement arm is [`joint_newton_decrements_at_resolution`] at
+/// [`returned_mode_decrement_resolution`], which both decrement certificates ask.
 fn returned_mode_settles(
     residual: f64,
     residual_target: f64,
@@ -2621,12 +2627,21 @@ fn returned_mode_settles(
     weakly_identified_decrement: f64,
     decrement_resolution: f64,
 ) -> bool {
-    residual.is_finite()
-        && residual <= residual_target
-        && newton_decrement.is_finite()
-        && newton_decrement <= decrement_resolution
-        && weakly_identified_decrement.is_finite()
-        && weakly_identified_decrement <= decrement_resolution
+    joint_inner_kkt_converged(residual, residual_target)
+        && joint_newton_decrements_at_resolution(
+            newton_decrement,
+            weakly_identified_decrement,
+            decrement_resolution,
+        )
+}
+
+/// The objective resolution a returned mode's Newton decrements settle within:
+/// the change one evaluation of the objective at `objective` resolves, with the
+/// solve's own measurement `measured_resolution` when it has one (#2695). One
+/// owner for the two settling heads and the two decrement certificates that
+/// mark states for them (#2977).
+fn returned_mode_decrement_resolution(objective: f64, measured_resolution: f64) -> f64 {
+    joint_objective_roundoff_slack(objective, objective, measured_resolution)
 }
 
 /// Second-order certification of a constrained first-order KKT point, with a
