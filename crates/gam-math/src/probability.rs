@@ -1,4 +1,6 @@
 use libm::{erf, erfc};
+use crate::double_double::BoundedDoubleDouble;
+use crate::roundoff::{UNIT_ROUNDOFF, inflated};
 use statrs::function::{
     beta::{beta_reg, inv_beta_reg, ln_beta},
     gamma::gamma_ur,
@@ -294,6 +296,39 @@ pub fn normal_pdf(x: f64) -> f64 {
     }
     let residual = square_residual(x, rounded_square);
     head.mul_add(-0.5 * residual, head)
+}
+
+/// `φ(x)` computed with the libm crate's `exp`, NOT the platform's `f64::exp`, and a rigorous bound on its absolute
+/// error. [`normal_pdf`] keeps the platform exponential and carries no bound.
+///
+/// The computation is [`normal_pdf`]'s: `fl(x²)` with its exact fused remainder `e` (`|e| ≤ u·x²`), the exact
+/// `−½·fl(x²)`, the exponential, the product with `1/√(2π)`, and the fused correction `head·(1 − ½e)`.
+/// - **The exponential** errs by less than one ulp, so by less than `2u` relative. This is a CITED contract, and it
+///   covers `libm::exp` only: libm 0.2.16, `src/math/exp.rs:58-60`, "according to an error analysis, the error is always
+///   less than 1 ulp", resting on the Remez bound `2**-59` at `:30`. `libm_version_matches_the_cited_error_analysis` fails
+///   once Cargo.lock moves libm off that version.
+/// - **The constant.** The double `0.398_942_280_401_432_7` lies `0.563u` from `1/√(2π)`.
+/// - **The product and the fused correction** each round by `u`.
+/// - **The dropped term.** The correction drops `exp(−½e) − (1 − ½e) ≤ (½e)²·(1 + ε)/2 ≤ u²x⁴/8` of `φ`.
+///
+/// Near underflow the rounded steps add at most `2η` absolute, with `η = 2⁻¹⁰⁷⁴`, and an underflowed density is zero
+/// within that. So `φ` errs by at most `(5u + u²x⁴/8)·φ + 2η`. The charged `u·φ̂` in place of `u·φ`, and the bound's own
+/// evaluation, are absorbed by `1 + γ_{m+3}`, with `m = 11`: ten rounded operations and one charged magnitude.
+pub fn normal_pdf_bounded(x: f64) -> (f64, f64) {
+    const INV_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
+    let rounded_square = x * x;
+    let head = INV_SQRT_2PI * libm::exp(-0.5 * rounded_square);
+    if head.is_nan() {
+        return (head, head);
+    }
+    if head == 0.0 {
+        // The density underflowed, or the argument is infinite: the exact φ lies below η.
+        return (head, 2.0 * f64::from_bits(1));
+    }
+    let density = head.mul_add(-0.5 * square_residual(x, rounded_square), head);
+    let relative =
+        5.0 * UNIT_ROUNDOFF + UNIT_ROUNDOFF * UNIT_ROUNDOFF * rounded_square * rounded_square / 8.0;
+    (density, inflated(relative * density + 2.0 * f64::from_bits(1), 11))
 }
 
 /// Standard normal CDF Phi(x) evaluated via the exact special-function identity
@@ -1293,6 +1328,13 @@ struct MillsCorrectionDerivatives {
 /// continued fraction rather than from `erfcx`. Equivalently `t = −x ≥ 4`.
 const LEFT_CONTINUED_FRACTION_SWITCH: f64 = -4.0;
 
+/// Levels of the Laplace continued fraction for the left-tail Mills correction, read by
+/// [`mills_correction_continued_fraction`] and [`normal_left_tail_ratios`].
+const LEFT_CONTINUED_FRACTION_DEPTH: u32 = 64;
+
+/// An upper bound on `√(π/2) = 1.2533…`, the largest Mills ratio `R(t)` over `t ≥ 0`.
+const HALF_PI_ROOT_UPPER: f64 = 1.26;
+
 /// The Laplace continued-fraction **correction** to the left-tail Mills ratio,
 ///
 /// `q(t) = λ(−t) − t = 1/(t + 2/(t + 3/(...)))`,   `λ(x) = φ(x)/Φ(x)`,
@@ -1344,7 +1386,7 @@ fn mills_correction_continued_fraction(t: f64) -> MillsCorrectionDerivatives {
     // 12 at `t = 20`) that one constant sized for the edge is safe everywhere
     // above it. The extra levels are pure convergence — every step divides
     // positive quantities — so they cannot destabilise a large `t`.
-    for n in (1..=64).rev() {
+    for n in (1..=LEFT_CONTINUED_FRACTION_DEPTH).rev() {
         let denominator = t + q.value;
         let inv_denominator = denominator.recip();
         let value = f64::from(n) / denominator;
@@ -1374,6 +1416,172 @@ fn normal_logcdf_derivatives_left_tail(x: f64) -> [f64; 5] {
         q.second,
         -q.third,
     ]
+}
+
+/// Why [`normal_left_tail_ratios`] refused its arguments.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NormalLeftTailError {
+    /// The argument is NaN or infinite.
+    NonFiniteArgument { value: f64 },
+    /// The argument, within its rounding, may lie right of the origin, outside the left tail these ratios describe.
+    PositiveArgument { value: f64 },
+    /// The argument's rounding bound is negative, NaN or infinite.
+    InvalidArgumentRounding { bound: f64 },
+}
+
+/// The left tail's two Mills ratios at `x ≤ 0`, each with a rigorous bound on its absolute error.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NormalLeftTailRatios {
+    /// `Φ(x)/φ(x) = 1/λ(x)` with `λ = φ/Φ`: Mills' ratio `R` at `−x`.
+    pub cdf_over_density: f64,
+    /// Bound on the absolute error of `cdf_over_density`.
+    pub cdf_over_density_rounding: f64,
+    /// `E[(x + E)₊]/φ(x) = 1 + x·Φ(x)/φ(x) = q(x)/λ(x)`, with `q = λ + x` and `E ~ N(0, 1)`.
+    pub positive_part_over_density: f64,
+    /// Bound on the absolute error of `positive_part_over_density`.
+    pub positive_part_over_density_rounding: f64,
+}
+
+/// `Φ(x)/φ(x)` and `E[(x + E)₊]/φ(x)` for `x ≤ 0`, each without subtracting nearly equal quantities and with a
+/// rigorous bound on its absolute error. No libm call enters either ratio, and every bound rests on IEEE-754 semantics.
+/// Write `t = −x`, `R = 1/λ` and `N = q/λ = 1 − t·R`.
+///
+/// **At or below −4**, `q` comes from the Laplace continued fraction `q = 1/(t + 2/(t + 3/(…)))` for the Mills
+/// correction `λ − t`, and the entry forms `1/λ = 1/(t + q)` and `q/λ = q/(t + q)`.
+/// - **Truncation.** The fraction's elements are positive, so its denominators are positive. The determinant formula
+///   `q_n − q_{n−1} = (−1)^{n+1}·n!/(B_n·B_{n−1})` then makes consecutive convergents alternate about the limit, and
+///   `|q − q_64| ≤ |q_64 − q_63|`.
+/// - **Rounding.** See [`mills_correction_convergent`].
+///
+/// **On (−4, 0]**, `R` comes from positive series (see [`mills_ratio_series`]), and `N = 1 − t·R` is formed in the same
+/// bounded double-double.
+///
+/// **Argument rounding.** `x_rounding` bounds the computed argument's error, and the interval it spans must stay in
+/// `x ≤ 0`. There `|∂_x R| = N ≤ 1`, `|N′| ≤ R ≤ √(π/2)` and `|R′| = |zR − 1| ≤ 1`, so `1/λ` moves by at most
+/// `(N + √(π/2)·δ)·δ` and `q/λ` by at most `(R + δ)·δ`.
+pub fn normal_left_tail_ratios(x: f64, x_rounding: f64) -> Result<NormalLeftTailRatios, NormalLeftTailError> {
+    if !x.is_finite() {
+        return Err(NormalLeftTailError::NonFiniteArgument { value: x });
+    }
+    if !(x_rounding.is_finite() && x_rounding >= 0.0) {
+        return Err(NormalLeftTailError::InvalidArgumentRounding { bound: x_rounding });
+    }
+    if x + x_rounding > 0.0 {
+        return Err(NormalLeftTailError::PositiveArgument { value: x });
+    }
+    let t = -x;
+    let (reciprocal, reciprocal_rounding, ratio, ratio_rounding) = if x <= LEFT_CONTINUED_FRACTION_SWITCH {
+        let (correction, rounding) = mills_correction_convergent(t, LEFT_CONTINUED_FRACTION_DEPTH);
+        let (previous, previous_rounding) = mills_correction_convergent(t, LEFT_CONTINUED_FRACTION_DEPTH - 1);
+        let truncation = (correction - previous).abs() + rounding * correction + previous_rounding * previous;
+        let correction_relative = rounding + truncation / correction;
+        let slope = t + correction;
+        let slope_relative = UNIT_ROUNDOFF + correction / slope * correction_relative;
+        let reciprocal = slope.recip();
+        let ratio = correction / slope;
+        // Each relative error e enters its quotient as e/(1 − e); with the charged magnitudes and the bound's own
+        // evaluation, `m = 23`.
+        (
+            reciprocal,
+            inflated((UNIT_ROUNDOFF + slope_relative) * reciprocal, 23),
+            ratio,
+            inflated((UNIT_ROUNDOFF + correction_relative + slope_relative) * ratio, 23),
+        )
+    } else {
+        let series = mills_ratio_series(t);
+        let (reciprocal, reciprocal_rounding) = series.to_f64();
+        let (ratio, ratio_rounding) = BoundedDoubleDouble::exact(1.0).sub(series.mul_f64(t)).to_f64();
+        (reciprocal, reciprocal_rounding, ratio, ratio_rounding)
+    };
+    // `m = 11` for each argument term: the upper values, the products and the sums, plus the charged magnitudes.
+    Ok(NormalLeftTailRatios {
+        cdf_over_density: reciprocal,
+        cdf_over_density_rounding: inflated(
+            reciprocal_rounding + (ratio + ratio_rounding + HALF_PI_ROOT_UPPER * x_rounding) * x_rounding,
+            11,
+        ),
+        positive_part_over_density: ratio,
+        positive_part_over_density_rounding: inflated(
+            ratio_rounding + (reciprocal + reciprocal_rounding + x_rounding) * x_rounding,
+            11,
+        ),
+    })
+}
+
+/// The convergent `q_N(t) = 1/(t + 2/(t + 3/(… + N/t)))` of the Laplace continued fraction for the Mills correction,
+/// `t > 0`, with a rigorous bound on its relative rounding.
+///
+/// Bottom-up, `q_n = n/(t + q_{n+1})` from `q_{N+1} = 0`. Each level divides an exact integer by a rounded sum, adding
+/// `2u`, and passes on the relative error of `q_{n+1}` damped by `q_{n+1}/(t + q_{n+1}) ≤ (n + 1)/(t² + n + 1)`, since
+/// `q_{n+1} < (n + 1)/t`. So `q_1` errs by at most `2u·Σ_{k=0}^{N−1} Π_{n=1}^{k} (n + 1)/(t² + n + 1)` of itself, which is
+/// below `2.27u` once `t ≥ 4`. The second-order products of the per-level errors, and the bound's own evaluation in four
+/// rounded operations per level, are absorbed by `1 + γ_{4N+3}`.
+fn mills_correction_convergent(t: f64, depth: u32) -> (f64, f64) {
+    let mut correction = 0.0;
+    for level in (1..=depth).rev() {
+        correction = f64::from(level) / (t + correction);
+    }
+    let square = t * t;
+    let mut damping = 1.0;
+    let mut accumulated = 1.0;
+    for level in 1..depth {
+        damping *= f64::from(level + 1) / (square + f64::from(level + 1));
+        accumulated += damping;
+    }
+    let operations = 4 * depth as usize;
+    (
+        correction,
+        inflated(2.0 * UNIT_ROUNDOFF * accumulated, operations),
+    )
+}
+
+/// `R(t) = Φ(−t)/φ(t)` for `0 ≤ t < 4`, in bounded double-double with no libm call:
+/// `R(t) = √(π/2)·e^{t²/2} − S(t)`, with `e^{t²/2} = Σ_k (t²/2)^k/k!` and
+/// `S(t) = e^{t²/2}·∫₀ᵗ e^{−s²/2} ds = Σ_n t^{2n+1}/(2n+1)!!`, since `S` solves `S′ = 1 + t·S` with `S(0) = 0`.
+/// Both series have positive terms (see [`positive_series`]). The subtraction cancels by at most
+/// `√(π/2)·e⁸/R(4) ≈ 1.6e4`: its carries scale with the result, and the words absorb the cancellation.
+fn mills_ratio_series(t: f64) -> BoundedDoubleDouble {
+    let floor = UNIT_ROUNDOFF * UNIT_ROUNDOFF;
+    let square = BoundedDoubleDouble::product(t, t);
+    let exponential = positive_series(BoundedDoubleDouble::exact(1.0), square.mul_f64(0.5), 1.0, 1.0, floor);
+    let odd = positive_series(BoundedDoubleDouble::exact(t), square, 3.0, 2.0, floor);
+    BoundedDoubleDouble::PI
+        .mul_f64(0.5)
+        .sqrt()
+        .mul(exponential)
+        .sub(odd)
+}
+
+/// `Σ_j T_j` with `T_0 = first` and `T_{j+1} = T_j·factor/(offset + j·step)`, for nonnegative terms whose ratios
+/// decrease. When the next ratio's upper bound `ρ` is below one, every later ratio is smaller, so the rest is at most
+/// `T_j·ρ/(1 − ρ)`. The sum stops once that tail falls below `floor` of it, and the tail joins its bound. The test runs
+/// before the next term is formed, so no term below the resolution the bound already carries is ever computed.
+fn positive_series(
+    first: BoundedDoubleDouble,
+    factor: BoundedDoubleDouble,
+    offset: f64,
+    step: f64,
+    floor: f64,
+) -> BoundedDoubleDouble {
+    let upper = |value: BoundedDoubleDouble| value.value.high.abs() + value.value.low.abs() + value.rounding;
+    let factor_upper = upper(factor);
+    let mut term = first;
+    let mut sum = first;
+    let mut divisor = offset;
+    loop {
+        let ratio = factor_upper / divisor;
+        if ratio < 1.0 {
+            // `m = 6`: the upper value, the product, the difference, the quotient and the inflation's pair.
+            let tail = inflated(upper(term) * ratio / (1.0 - ratio), 6);
+            if tail <= floor * sum.value.high {
+                sum.rounding = inflated(sum.rounding + tail, 1);
+                return sum;
+            }
+        }
+        term = term.mul(factor).div_f64(divisor);
+        sum = sum.add(term);
+        divisor += step;
+    }
 }
 
 #[inline]
@@ -1764,6 +1972,107 @@ mod tests {
     use super::*;
 
     const TOL: f64 = 1e-12;
+
+    #[test]
+    fn normal_left_tail_ratios_refuse_what_they_do_not_describe() {
+        assert_eq!(
+            normal_left_tail_ratios(0.5, 0.0),
+            Err(NormalLeftTailError::PositiveArgument { value: 0.5 })
+        );
+        // An argument whose rounding reaches past the origin is refused, not extrapolated.
+        assert_eq!(
+            normal_left_tail_ratios(-1.0e-17, 1.0e-16),
+            Err(NormalLeftTailError::PositiveArgument { value: -1.0e-17 })
+        );
+        assert!(matches!(
+            normal_left_tail_ratios(f64::NAN, 0.0),
+            Err(NormalLeftTailError::NonFiniteArgument { .. })
+        ));
+        assert_eq!(
+            normal_left_tail_ratios(f64::NEG_INFINITY, 0.0),
+            Err(NormalLeftTailError::NonFiniteArgument { value: f64::NEG_INFINITY })
+        );
+        assert_eq!(
+            normal_left_tail_ratios(-1.0, -1.0e-16),
+            Err(NormalLeftTailError::InvalidArgumentRounding { bound: -1.0e-16 })
+        );
+        // Positive control: the origin is inside the domain, where N = q/λ = 1 exactly and 1/λ = √(π/2) within its
+        // bound.
+        let origin = normal_left_tail_ratios(0.0, 0.0).expect("the origin is in the left tail's domain");
+        let half_pi_root = (0.5 * std::f64::consts::PI).sqrt();
+        assert!(
+            (origin.positive_part_over_density - 1.0).abs() <= origin.positive_part_over_density_rounding,
+            "q/λ(0) = {} against 1 within {:e}",
+            origin.positive_part_over_density,
+            origin.positive_part_over_density_rounding
+        );
+        assert!(
+            (origin.cdf_over_density - half_pi_root).abs()
+                <= origin.cdf_over_density_rounding + UNIT_ROUNDOFF * half_pi_root,
+            "1/λ(0) = {} against √(π/2) = {half_pi_root} within {:e}",
+            origin.cdf_over_density,
+            origin.cdf_over_density_rounding
+        );
+    }
+
+    #[test]
+    fn laplace_convergents_bracket_their_limit_alternately() {
+        // With positive elements, consecutive convergents close on q from opposite sides: odd depths overshoot and
+        // even depths undershoot. At shallow depths the steps dwarf the rounding, so the alternation resolves in f64
+        // against the full depth.
+        for t in [4.0, 6.0, 20.0] {
+            let (limit, limit_rounding) = mills_correction_convergent(t, LEFT_CONTINUED_FRACTION_DEPTH);
+            let mut sides = [0_usize; 2];
+            for depth in 1..=6_u32 {
+                let (convergent, rounding) = mills_correction_convergent(t, depth);
+                let margin = rounding * convergent + limit_rounding * limit;
+                let step = convergent - limit;
+                assert!(
+                    step.abs() > margin,
+                    "q_{depth}({t}) = {convergent} lies within rounding {margin:e} of the limit {limit}, so its side is unresolved"
+                );
+                assert_eq!(
+                    step > 0.0,
+                    depth % 2 == 1,
+                    "q_{depth}({t}) = {convergent} lies on the wrong side of {limit}"
+                );
+                sides[usize::from(step > 0.0)] += 1;
+            }
+            assert!(sides[0] > 0 && sides[1] > 0, "t = {t}: sides {sides:?}");
+        }
+    }
+
+    #[test]
+    fn libm_version_matches_the_cited_error_analysis() {
+        // normal_pdf_bounded computes with libm::exp and cites libm 0.2.16's exp error analysis
+        // (src/math/exp.rs:58-60). A lockfile that moves libm off that version invalidates the citation until it is
+        // re-read.
+        let lock = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"));
+        let versions = |package: &str| {
+            let header = format!("name = \"{package}\"");
+            let mut found = Vec::new();
+            let mut lines = lock.lines();
+            while let Some(line) = lines.next() {
+                if line == header {
+                    if let Some(version) = lines
+                        .next()
+                        .and_then(|next| next.strip_prefix("version = \""))
+                        .and_then(|rest| rest.strip_suffix('"'))
+                    {
+                        found.push(version);
+                    }
+                }
+            }
+            found
+        };
+        // Positive control: the parser finds this crate's own entry at its own version.
+        assert_eq!(versions("gam-math"), vec![env!("CARGO_PKG_VERSION")]);
+        assert_eq!(
+            versions("libm"),
+            vec!["0.2.16"],
+            "Cargo.lock's libm moved off the version normal_pdf_bounded cites"
+        );
+    }
 
     #[test]
     fn normal_log_quantile_remains_finite_for_extreme_log_probabilities() {

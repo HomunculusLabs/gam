@@ -53,24 +53,28 @@
 //! [`gaussian_hermite_coefficients`] returns next to every coefficient a
 //! first-order bound on its absolute error, by running error analysis of the
 //! evaluation itself under the standard model: every `+ − × ÷ √` rounds by at
-//! most `u = ε/2` of its result, and a libm `exp` or `erfc` by at most one ulp.
+//! most `u = ε/2` of its result.
 //! - The standardized argument `x = t/s` (or `t/√(1 + s²)`) carries its own
 //!   rounding, which moves `φ(x) h_j(x)` by at most `φ (√j |h_{j−1}| + |x| |h_j|)`
 //!   per unit of argument error.
-//! - `φ` rounds by at most `5u` of itself; `Φ = ½ erfc(−x/√2)` by
-//!   `2u Φ + 2u |x| φ`, the second term from the rounding of `−x/√2`.
-//! - The left-tail forms read `λ` and `q` from the log-CDF owner; `1/λ` carries
-//!   `10u` of itself and `q/λ` at most `33u q/λ + 9u` (derived at
-//!   `bounded_left_tail_mills`).
+//! - `φ` comes from the probability owner's `normal_pdf_bounded`, computed with
+//!   `libm::exp` and within `(5u + u²x⁴/8) φ`, resting on libm 0.2.16's cited `exp`
+//!   error analysis.
+//!   `Φ = ½ erfc(−x/√2)` rounds by `2u Φ + 2u |x| φ`, the second term from the
+//!   rounding of `−x/√2`. The `erfc` ulp is a measurement (see `bounded_normal_cdf`).
+//! - The left-tail forms read `1/λ` and `q/λ` from the probability owner's
+//!   `normal_left_tail_ratios`, whose bounds are derived without any libm call.
 //! - Each orthonormal step adds `3u (|x h_k| + √k |h_{k−1}|)/√(k+1) + 2u |h_{k+1}|`
 //!   to the propagated `(|x| e_k + √k e_{k−1})/√(k+1)`.
 //! - Where `φ(x)` underflows, the coefficients of order ≥ 2 are returned as zero
 //!   with Cramér's inequality `|h_j(x)| e^{−x²/4} ≤ 1.0865`, so
 //!   `φ |h_j| ≤ 1.0865 (2π)^{−1/4} √φ` with `φ` below the smallest subnormal.
 //!
-//! It relies on its owners' contracts: `erfcx` within `5e-16`, `exp` and `erfc`
-//! within one ulp, and a continued fraction that only divides positive
-//! quantities.
+//! It relies on its owners' contracts:
+//! - the cited libm 0.2.16 `exp` error analysis, through `normal_pdf_bounded`;
+//! - the measured `erfc` ulp, for `Φ` in the direct forms;
+//! - the measured `atan2` ulp, for the zero-mean kernels' orthant angle;
+//! - the derived bounds of `normal_left_tail_ratios`, which rest on IEEE-754 semantics only.
 //!
 //! # Pair kernel
 //!
@@ -119,7 +123,8 @@ use crate::bivariate_normal::{
     BIVARIATE_NORMAL_CDF_ERROR_BOUND, BivariateNormalError,
     bivariate_normal_cdf_partials_with_complement, bivariate_normal_cdf_with_complement,
 };
-use crate::probability::{normal_cdf, normal_logcdf_derivatives, normal_pdf};
+use crate::probability::{normal_cdf, normal_left_tail_ratios, normal_pdf_bounded};
+use crate::roundoff::UNIT_ROUNDOFF;
 use std::f64::consts::TAU;
 use std::fmt;
 
@@ -557,10 +562,6 @@ fn relu_smoothing(
     Ok(())
 }
 
-/// `u = ε/2`: under round-to-nearest every `+ − × ÷ √` errs by at most `u` of its
-/// result, and a libm `exp` or `erfc` by at most one ulp, `2u`.
-const UNIT_ROUNDOFF: f64 = f64::EPSILON / 2.0;
-
 /// Cramér's inequality `|h_n(x)| e^{−x²/4} ≤ K` for the orthonormal Hermite
 /// polynomials: Abramowitz and Stegun 22.14.17 give `K ≈ 1.086435`, rounded up.
 const CRAMER_BOUND: f64 = 1.0865;
@@ -626,65 +627,51 @@ impl Bounded {
     }
 }
 
-/// The rounding of `normal_pdf` at its computed argument: the `exp` ulp (`2u`),
-/// the constant and its product (`2u`), and the fused square-residual correction
-/// (`u`).
-fn density_rounding(density: f64) -> f64 {
-    5.0 * UNIT_ROUNDOFF * density
-}
-
-/// `φ(x)`, with the argument's bound entering through `|φ'(x)| = |x| φ(x)`.
+/// `φ(x)` from the probability owner's certified [`normal_pdf_bounded`], computed with
+/// `libm::exp`. The argument's bound enters through `|φ'(x)| = |x| φ(x)`.
 fn bounded_normal_pdf(argument: Bounded) -> Bounded {
-    let value = normal_pdf(argument.value);
+    let (value, rounding) = normal_pdf_bounded(argument.value);
     Bounded {
         value,
-        bound: density_rounding(value) + value * argument.value.abs() * argument.bound,
+        bound: rounding + value * argument.value.abs() * argument.bound,
     }
 }
 
 /// `Φ(x) = ½ erfc(−x/√2)`: the `erfc` ulp, and the two rounded operations forming
-/// `−x/√2` (`2u` relative), which move `Φ` by at most `2u |x| φ(x)`.
+/// `−x/√2` (`2u` relative), which move `Φ` by at most `2u |x| φ(x)`. The `erfc` ulp is
+/// a MEASUREMENT, not a contract: libm 0.2.16 states less than one ulp only for `erf`,
+/// "by some experiment" (`src/math/erf.rs:43-44`). Until `Φ` routes through
+/// [`normal_left_tail_ratios`], this bound rests on that measured link.
 fn bounded_normal_cdf(argument: Bounded) -> Bounded {
     let value = normal_cdf(argument.value);
-    let density = normal_pdf(argument.value);
+    let (density, density_rounding) = normal_pdf_bounded(argument.value);
     Bounded {
         value,
         bound: 2.0 * UNIT_ROUNDOFF * value
-            + density * (2.0 * UNIT_ROUNDOFF * argument.value.abs() + argument.bound),
+            + (density + density_rounding)
+                * (2.0 * UNIT_ROUNDOFF * argument.value.abs() + argument.bound),
     }
 }
 
-/// `(1/λ(x), q(x)/λ(x))` of [`left_tail_mills`] for `x < 0`, with bounds.
-///
-/// On `(−4, 0)` the log-CDF owner forms `λ = √(2/π)/erfcx(−x/√2)`:
-/// - `erfcx` errs by less than `5e-16 < 5u`;
-/// - the rounding of its argument (`2u` relative) moves it by at most `2u`,
-///   because `|z ∂_z ln erfcx(z)| = 2z |1/(√π erfcx(z)) − z| ≤ 1` for `z ≥ 0`;
-/// - the constant and the division add `2u`.
-///
-/// So `λ` carries `ρ = 9u`. Then `q = λ + x` errs by `9uλ + uq`, and `f'' = −λq`
-/// by `9uλ² + 11uλq`. `1/λ` errs by `10u/λ`, and the two products forming
-/// `q/λ = −f''/λ²` leave at most `33u q/λ + 9u`.
-///
-/// Below `−4` the owner takes `q` from the Laplace continued fraction, whose every
-/// level divides positive quantities. Its values err by a few `u` of themselves,
-/// and `f'' = −(1 + q')` by under `2u`, inside the same bounds.
-///
-/// The argument's bound enters through `∂_x(1/λ) = q/λ` and
-/// `∂_x(q/λ) = 1/λ + x q/λ`.
-fn bounded_left_tail_mills(argument: Bounded) -> (Bounded, Bounded) {
-    let (reciprocal_slope, correction) = left_tail_mills(argument.value);
-    (
-        Bounded {
-            value: reciprocal_slope,
-            bound: 10.0 * UNIT_ROUNDOFF * reciprocal_slope + correction * argument.bound,
-        },
-        Bounded {
-            value: correction,
-            bound: UNIT_ROUNDOFF * (33.0 * correction + 9.0)
-                + (reciprocal_slope + argument.value.abs() * correction) * argument.bound,
-        },
-    )
+/// `(1/λ(x), q(x)/λ(x))` at a bounded argument, from the log-CDF owner's
+/// [`normal_left_tail_ratios`]. Its bounds are derived without libm and already carry the
+/// argument's bound. `None` where the owner refuses, which is right of the origin within
+/// the argument's bound; there the direct forms apply.
+fn bounded_left_tail_ratios(argument: Bounded) -> Option<(Bounded, Bounded)> {
+    normal_left_tail_ratios(argument.value, argument.bound)
+        .ok()
+        .map(|ratios| {
+            (
+                Bounded {
+                    value: ratios.cdf_over_density,
+                    bound: ratios.cdf_over_density_rounding,
+                },
+                Bounded {
+                    value: ratios.positive_part_over_density,
+                    bound: ratios.positive_part_over_density_rounding,
+                },
+            )
+        })
 }
 
 /// What a Hermite coefficient loses when `φ(x)` underflows to zero: by Cramér's
@@ -762,14 +749,13 @@ fn write_bounded(values: &mut [f64], bounds: &mut [f64], order: usize, entry: Bo
     }
 }
 
-/// ReLU at scale `s > 0`: `x = t/s`, `T = t Φ(x) + s φ(x)` and `T' = Φ(x)`, and for
-/// `x < 0` the left-tail forms `T = s φ q/λ` and `T' = φ/λ`.
+/// ReLU at scale `s > 0`: `x = t/s`, `T = t Φ(x) + s φ(x)` and `T' = Φ(x)`, and in the
+/// left tail the forms `T = s φ q/λ` and `T' = φ/λ`.
 fn relu_smoothed_unit(t: f64, spread: Bounded) -> SmoothedUnit {
     let location = Bounded::exact(t);
     let argument = location.div(spread);
     let density = bounded_normal_pdf(argument);
-    let (value, slope) = if argument.value < 0.0 {
-        let (reciprocal, corrected) = bounded_left_tail_mills(argument);
+    let (value, slope) = if let Some((reciprocal, corrected)) = bounded_left_tail_ratios(argument) {
         (spread.mul(density).mul(corrected), density.mul(reciprocal))
     } else {
         let probability = bounded_normal_cdf(argument);
@@ -830,25 +816,12 @@ fn relu_hermite_coefficients(t: f64, scale: f64, coefficients: &mut [f64], bound
             * argument_bound;
         *bound = scale
             * (density * recurrence.current_error
-                + recurrence.current.abs() * density_rounding(density)
+                + recurrence.current.abs() * normal_pdf_bounded(argument).1
                 + argument_term)
             / normalizer
             + 4.0 * UNIT_ROUNDOFF * value.abs();
         recurrence.advance();
     }
-}
-
-/// `(1/λ(u), q(u)/λ(u))` for `u < 0`, with the log-CDF slope `λ = φ/Φ` and its
-/// correction `q = λ + u`, read from `f'' = −λ q` of the log-CDF owner. Both
-/// carry full relative precision however deep the tail, so `Φ(u) = φ(u)/λ` and
-/// `1 + u/λ = q/λ` need no subtraction.
-fn left_tail_mills(u: f64) -> (f64, f64) {
-    let log_cdf_derivatives = normal_logcdf_derivatives(u);
-    let reciprocal_slope = log_cdf_derivatives[1].recip();
-    (
-        reciprocal_slope,
-        -log_cdf_derivatives[2] * reciprocal_slope * reciprocal_slope,
-    )
 }
 
 /// `derivatives[k] = (−1)ᵏ He_{k−2}(u) φ(u)/sᵏ⁻¹` for `k ≥ 2`.
@@ -888,8 +861,8 @@ fn exact_gelu_smoothing(t: f64, variance: f64, derivatives: &mut [f64]) {
 }
 
 /// The exact GELU with `A = 1 + v`, `S = √A` and `x = t/S`:
-/// `T = t Φ(x) + (v/S) φ(x)` and `T' = Φ(x) + x φ(x)/A`, and for `x < 0` the
-/// left-tail forms `T = S φ (q/λ − 1/A)` and `T' = φ (1/λ + x/A)`. Returns the
+/// `T = t Φ(x) + (v/S) φ(x)` and `T' = Φ(x) + x φ(x)/A`, and in the left tail the
+/// forms `T = S φ (q/λ − 1/A)` and `T' = φ (1/λ + x/A)`. Returns the
 /// unit together with `A` and `S`.
 fn exact_gelu_smoothed_unit(t: f64, variance: Bounded) -> (SmoothedUnit, Bounded, Bounded) {
     let location = Bounded::exact(t);
@@ -897,8 +870,7 @@ fn exact_gelu_smoothed_unit(t: f64, variance: Bounded) -> (SmoothedUnit, Bounded
     let root_total = total.sqrt();
     let argument = location.div(root_total);
     let density = bounded_normal_pdf(argument);
-    let (value, slope) = if argument.value < 0.0 {
-        let (reciprocal, corrected) = bounded_left_tail_mills(argument);
+    let (value, slope) = if let Some((reciprocal, corrected)) = bounded_left_tail_ratios(argument) {
         (
             root_total
                 .mul(density)
@@ -1068,7 +1040,9 @@ fn bounded_tau() -> Bounded {
 }
 
 /// `atan2(y, −r)/(2π)` for `y ≥ 0`: the `atan2` ulp, the height's bound through
-/// `|∂_y atan2(y, x)| = |x|/(x² + y²)`, and the rounding of `2π` and the division.
+/// `|∂_y atan2(y, x)| = |x|/(x² + y²)`, and the rounding of `2π` and the division. The
+/// `atan2` ulp is a MEASUREMENT, not a contract: this is the platform's `f64::atan2`, and
+/// neither the platform nor libm 0.2.16 documents an error analysis for atan2.
 fn bounded_orthant(height: Bounded, covariance: f64) -> Bounded {
     let angle = height.value.atan2(-covariance);
     Bounded {
@@ -1356,6 +1330,7 @@ fn exact_gelu_biased_pair_kernel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probability::normal_pdf;
     use crate::quadrature::{
         GaussHermiteRule, gauss_hermite_rule, symmetric_tridiagonal_eigen_first_components,
     };
@@ -3482,7 +3457,7 @@ mod tests {
         // and |R_N − R_2N| bounds the reference's truncation.
         const DEPTH: usize = 4096;
         let mut largest_discrepancy = 0.0_f64;
-        let left_arguments: [f64; 8] = [-37.0, -30.0, -17.0, -8.0, -4.1, -3.9, -1.7, -0.5];
+        let left_arguments: [f64; 9] = [-37.0, -30.0, -17.0, -8.0, -4.1, -4.0, -3.9, -1.7, -0.5];
         for argument in left_arguments {
             let magnitude = -argument;
             let refined = double_double_mills_ratio(magnitude, 2 * DEPTH);
@@ -3493,25 +3468,35 @@ mod tests {
             let correction =
                 DoubleDouble::from(1.0).add(DoubleDouble::from(magnitude).mul(refined).negated());
             let density = double_double_normal_pdf(argument);
-            let computed_density = normal_pdf(argument);
+            let (computed_density, density_bound) = normal_pdf_bounded(argument);
             let density_error = double_double_discrepancy(computed_density, density);
             assert!(
-                density_error <= density_rounding(computed_density),
-                "φ({argument}): error {density_error:e} beyond 5u = {:e}",
-                density_rounding(computed_density)
+                density_error <= density_bound,
+                "φ({argument}): error {density_error:e} beyond its bound {density_bound:e}"
             );
-            let (reciprocal, corrected) = bounded_left_tail_mills(Bounded::exact(argument));
-            let reciprocal_error = double_double_discrepancy(reciprocal.value, refined);
-            let corrected_error = double_double_discrepancy(corrected.value, correction);
+            let ratios = normal_left_tail_ratios(argument, 0.0)
+                .expect("left-tail ratios at a finite negative argument");
+            let reciprocal_error = double_double_discrepancy(ratios.cdf_over_density, refined);
+            let corrected_error =
+                double_double_discrepancy(ratios.positive_part_over_density, correction);
             assert!(
-                reciprocal_error <= reciprocal.bound + truncation,
+                reciprocal_error <= ratios.cdf_over_density_rounding + truncation,
                 "1/λ({argument}): error {reciprocal_error:e} beyond its bound {:e}",
-                reciprocal.bound
+                ratios.cdf_over_density_rounding
             );
             assert!(
-                corrected_error <= corrected.bound + magnitude * truncation,
+                corrected_error <= ratios.positive_part_over_density_rounding + magnitude * truncation,
                 "q/λ({argument}): error {corrected_error:e} beyond its bound {:e}",
-                corrected.bound
+                ratios.positive_part_over_density_rounding
+            );
+            // Resolution control: the reference's own truncation lies below each certified bound, so an error at
+            // the bound's scale would be visible here.
+            assert!(
+                truncation < ratios.cdf_over_density_rounding
+                    && magnitude * truncation < ratios.positive_part_over_density_rounding,
+                "argument {argument}: reference truncation {truncation:e} does not resolve the bounds {:e}, {:e}",
+                ratios.cdf_over_density_rounding,
+                ratios.positive_part_over_density_rounding
             );
             // ReLU at s = 1: a_0 = φ q/λ and a_1 = φ/λ. Exact GELU at s = 0: a_0 = φ (q/λ − 1).
             let mut coefficients = [f64::NAN; 2];

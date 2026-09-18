@@ -178,5 +178,16 @@
     ],
     "reason": "#2972. catch_cudarc recovered cudarc's loader panic (\"Unable to dynamically load\") through catch_unwind, which never runs in a panic = \"abort\" consumer, so the probe aborted any fit on a host without libcuda. Every cudarc entry point that can reach one of cudarc's lazy loaders is now preceded by driver::require_cudarc_library, which walks cudarc's own candidate names through the same libloading call and returns a typed error instead of panicking: the probe runs it for libcuda before its first cudarc call and for cudart, cuBLAS and cuSOLVER before admitting the runtime; cuda_context_for runs it for libcuda before CudaContext::new and for libcudart before cudaSetDevice; the NVRTC compile entries run it for libnvrtc. No loader panic is left to recover, so catch_cudarc with its RecoveryScope guard (the fn drop identity), install_cudarc_panic_filter with HOOK_INSTALLED, panic_message and CUDARC_RECOVERY_ACTIVE are deleted, together with the #2819 subprocess test that pinned exactly that recovery (cudarc_loader_panic_diagnostics_follow_recovery_scope with CHILD_MODE_PREFIX and LOADER_PANIC). probe_devices is split into probe, probe_after_driver_preflight and probe_loaded_driver. The replacement pins are missing_driver_library_is_absence_before_any_cudarc_call_2972 and crates/gam-gpu/tests/probe_under_panic_abort.rs.",
     "evidence": "@@LEDGER_EVIDENCE@@"
+  },
+  {
+    "base": "f58b6715beec370d7450b9ad9ba0a456b722104c",
+    "items": [
+      "crates/gam-math/src/gaussian_activation.rs:const:UNIT_ROUNDOFF",
+      "crates/gam-math/src/gaussian_activation.rs:fn:bounded_left_tail_mills",
+      "crates/gam-math/src/gaussian_activation.rs:fn:density_rounding",
+      "crates/gam-math/src/gaussian_activation.rs:fn:left_tail_mills"
+    ],
+    "reason": "#2946 (fr-kernel): one owner for the bounded left-tail Mills ratios and for the rounding of phi. The ratios move to gam_math::probability::normal_left_tail_ratios. Its bounds are derived without libm: at or below -4 from the Laplace continued fraction with the consecutive-convergent bracket, and on (-4, 0] from positive series in running-error double-double (gam_math::double_double), instead of resting on erfc's measured ulp. density_rounding becomes gam_math::probability::normal_pdf_rounding, which cites libm 0.2.16's exp error analysis and pins the version. UNIT_ROUNDOFF is read from gam_math::roundoff.",
+    "evidence": "FILL AT GATE: source_removal_guard.py identities at the base, gate job ids, test counts. The base field is a placeholder: .git/sw/ledger-append.py overwrites every entry's base with the attempt's parent (no 'keep' argument)."
   }
 ]
