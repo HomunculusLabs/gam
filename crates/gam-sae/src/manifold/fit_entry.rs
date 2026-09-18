@@ -1010,6 +1010,11 @@ mod vanished_stage_tests {
             if atom == 0 && live_first {
                 decoder[[0, 0]] = 1.0;
             }
+            // #2822 — the dead atom keeps a nonzero decoder, so it passes the entry refusal of an
+            // identically zero decoder and vanishes the way production does: through occupancy.
+            if atom == 1 {
+                decoder[[0, 1]] = 1.0;
+            }
             let evaluator = Arc::new(
                 EuclideanPatchEvaluator::new(1, 0).expect("degree-zero Euclidean evaluator"),
             );
@@ -1029,7 +1034,10 @@ mod vanished_stage_tests {
         }
         let mut logits = Array2::<f64>::zeros((n, k));
         if k > 1 {
-            logits.column_mut(1).fill(-40.0);
+            // `softmax_row` is a plain exp((logit − max)/τ): at −800 atom 1's weight underflows to
+            // exactly 0.0 on every row, so its occupancy is 0.0 and the vanished-atom certificate's
+            // occupancy branch fires at the fitted state. At −40 the weight is ~4e-18, not zero.
+            logits.column_mut(1).fill(-800.0);
         }
         let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
             logits,
@@ -1043,9 +1051,18 @@ mod vanished_stage_tests {
         (term, rho)
     }
 
+    /// #2822 — the stage route end to end: a live atom and a dead one whose occupancy is exactly
+    /// zero, both with nonzero decoders. The fixed-rho criterion returns `VanishedAtoms` at the
+    /// fitted state, the stage compacts to K=1, and the restart certifies. This is the test that
+    /// pins the vanished-atom certificate's step to a `VanishedAtoms` verdict inside
+    /// `fit_outer_stage_to_boundary`.
     #[test]
     fn committed_k2_boundary_compacts_and_fixed_rho_restart_certifies_k1() {
         let (term, rho) = fixed_boundary_term(2, true);
+        eprintln!(
+            "[#2822 k2] per-atom occupancy {:?}",
+            term.per_atom_effective_sample_size()
+        );
         let mut target = Array2::<f64>::zeros((8, 2));
         target.column_mut(0).fill(1.0);
         let registry = AnalyticPenaltyRegistry::new();
@@ -1077,29 +1094,26 @@ mod vanished_stage_tests {
         assert!(fitted.penalized_quasi_laplace_criterion.is_finite());
     }
 
+    /// #2822 — the all-vanished disposition, pinned on the boundary state the stage hands it. A
+    /// committed K=1 boundary is reached only through the criterion's vanished-atom verdict at a
+    /// fitted state; a zero-seeded term entering `fit_outer_stage_to_boundary` is refused at entry
+    /// ("seed the decoder from the data"), and no seeded K=1 softmax state can vanish (its gate
+    /// cannot close, and this target makes a seeded decoder live). So the test builds the boundary
+    /// state itself and asserts the disposition returns the exact Tier-0 null, not a restart.
     #[test]
     fn committed_k1_boundary_returns_exact_tier0_null_not_manifold_fit() {
         let (term, rho) = fixed_boundary_term(1, false);
         let target = Array2::<f64>::ones((8, 2));
-        let registry = AnalyticPenaltyRegistry::new();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let stage = fit_outer_stage_to_boundary(
-            term,
-            &target,
-            &registry,
-            rho,
-            0,
-            1.0,
-            1.0e-6,
-            1.0e-6,
-            false,
-            SaeFitStage::Primary,
-            &cancel,
-            "Euclidean",
-        )
-        .expect("all-vanished state must be an exact structural result");
-        let SaeStageFit::Null(report) = stage else {
-            panic!("K=1 vanished boundary must not mint a manifold fit");
+        let atoms = VanishedAtoms::from_slots([0]).expect("one vanished slot");
+        let state = super::super::SaeVanishedStageState { term, rho, atoms };
+        let disposition = vanished_disposition(state, &target, "Euclidean")
+            .expect("all-vanished state must be an exact structural result");
+        let report = match disposition {
+            SaeBoundaryDisposition::Null(report) => report,
+            SaeBoundaryDisposition::Restart { term, .. } => panic!(
+                "K=1 vanished boundary must not restart a manifold fit (restart K={})",
+                term.k_atoms()
+            ),
         };
         assert_eq!(report.vanished_atoms.iter().collect::<Vec<_>>(), vec![0]);
         assert_eq!(report.tier0.mean, Array1::<f64>::zeros(2));
