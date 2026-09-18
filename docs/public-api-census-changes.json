@@ -4249,5 +4249,16 @@
     "reason": "#2234 item 2: the dense exact-A criterion now integrates every closure-certified circle orbit alone in its connected block of A and Φ, not one, so the crate-private one-orbit pricer price_compact_orbit is replaced by price_compact_orbits, which prices each eliminated orbit off the same stiffened decomposition and forms the joint correction −log det N − 2·Σ log I_k + K·log 2π.",
     "evidence": "The removed map is the census's own output: scripts/public_api_census.py in direct lane dy5 run i2234-item2d (base 8473989829, exact tree 50344beb, patch md5 16372d8d) refused exactly this item. At that base, git grep -n -w price_compact_orbit finds the pub(crate) declaration (construction_orbit_elimination.rs:254) and its two callers only: the value site in construction_exact_hessian.rs (:4697) and compact_orbit_differential (construction_orbit_elimination.rs:572). This landing moves both to price_compact_orbits.",
     "base": "cd4e4d3662be44e5bfa4e8f3e0047b1941cf3aa8"
+  },
+  {
+    "base": "5f8f3080558ccb3f851f22afe09d5b5b6d9d3af5",
+    "removed": {
+      "crates/gam-event-history/src/saved.rs::read_saved_model_file": 1,
+      "crates/gam-event-history/src/saved.rs::read_saved_model_text": 1,
+      "crates/gam-event-history/src/saved.rs::saved_model_text": 1,
+      "crates/gam-event-history/src/saved.rs::write_saved_model": 1
+    },
+    "reason": "#2966 (gam-21 and lead ruling): the saved-model envelope functions move from gam-event-history's saved.rs to gam_model_api::saved_model (public there, with docs), so both event engines and gam-models share one owner. The kind becomes an owner-named &'static str, and write_saved_model's temporary name gains a per-call counter.",
+    "evidence": "Guard-only job 1212841 (base 22f30c2e61, tree 208cc2b8 with the saved.rs deletion appended) reported exactly these 4 unacknowledged removals. The same four names are declared in crates/gam-model-api/src/saved_model.rs in the same commit, and joint/model.rs calls them there. At origin/main dca31ddc96, `git grep -w` over crates, src, tests, gamfit, examples, scripts and bench finds the gam-event-history versions called only from saved.rs itself and joint/model.rs (:13-14, :137-154)."
   }
 ]

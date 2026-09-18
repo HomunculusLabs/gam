@@ -23,7 +23,6 @@ mod formula;
 pub mod joint;
 mod marginal;
 mod preserve;
-mod saved;
 mod scalar;
 mod static_state;
 
@@ -43,7 +42,6 @@ pub use forecast::{
     population_forecast, predictive_pit, baseline_log_rates,
 };
 pub use preserve::{ReferenceGrid, ReferenceStrata};
-pub use saved::{SavedModelError, SavedModelKind};
 
 #[cfg(test)]
 mod tests;

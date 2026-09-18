@@ -453,5 +453,21 @@
     ],
     "reason": "#2576 (SPEC: no iteration caps as stop rules): SaeSupportSparseTerm::solve_fixed_point stops on its certificate or on a proven stall, not on a cycle count, so the engine's inner cycle budget SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER and the max_inner_iter fields that carried it are deleted. insufficient_inner_budget_returns_error_instead_of_a_tiered_report_2023 pinned the refusal a one-cycle budget produced; with no budget that input does not exist, and the stall refusal is pinned by a_state_no_cycle_moves_refuses_as_a_proven_stall_2576.",
     "evidence": "At the base, git grep -n finds SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER at its definition in crates/gam-sae/src/manifold/support_outer.rs and in crates/gam-sae/src/tiered/fit.rs, crates/gam-sae/src/tiered/code_space.rs, crates/gam-pyffi/src/manifold/support_sparse_sae_ffi.rs, crates/gam-sae/examples/issue_2572_repro.rs and crates/gam-sae/examples/tiered_k2000_measure.rs, and this commit removes every use. The deleted test fn is named only by its own definition. Guard job 1200615 (pool-gx3, acn12) at 645a27b743 reported 2 guarded removals and exited 0 with this entry, and pre-push job 1251163 (pool-gx2) did the same at 95e51dadb2 on this commit's exact tree (source_removal_guard RC 0, 363 -> 364 Rust items, 2 guarded removals)."
+  },
+  {
+    "base": "5f8f3080558ccb3f851f22afe09d5b5b6d9d3af5",
+    "items": [
+      "crates/gam-event-history/src/saved.rs:enum:SavedModelError",
+      "crates/gam-event-history/src/saved.rs:enum:SavedModelKind",
+      "crates/gam-event-history/src/saved.rs:fn:envelopes_refuse_other_kinds_versions_and_non_finite_floats",
+      "crates/gam-event-history/src/saved.rs:fn:name",
+      "crates/gam-event-history/src/saved.rs:fn:read_saved_model_file",
+      "crates/gam-event-history/src/saved.rs:fn:read_saved_model_text",
+      "crates/gam-event-history/src/saved.rs:fn:saved_model_text",
+      "crates/gam-event-history/src/saved.rs:fn:write_saved_model",
+      "crates/gam-event-history/src/saved.rs:struct:Envelope"
+    ],
+    "reason": "#2966 (gam-21 and lead ruling): the saved-model envelope {kind, version, model} and SavedModelError have ONE owner, gam_model_api::saved_model, which gam-event-history and gam-models both depend on. gam-event-history's saved.rs is deleted rather than kept beside it. SavedModelKind is replaced by an owner-named &'static str kind, so adding a kind edits nothing shared. saved_model_text, read_saved_model_text, write_saved_model and read_saved_model_file move with their bodies; write_saved_model's temporary name gains a per-call counter. The test moves as documents_refuse_other_kinds_versions_and_non_finite_floats, with an added adversarial f64 round trip. Envelope and name were private helpers of the enum-kind design.",
+    "evidence": "Guard-only job 1212841 (base 22f30c2e61, tree 208cc2b8 == the kit's DRY_RUN tree with the deletion appended) listed exactly these 9 identities as guarded removals, each with removed_declarations 1. At origin/main dca31ddc96, `git grep -w` over crates, src, tests, gamfit, examples, scripts and bench finds SavedModelKind, SavedModelError and the four functions only in crates/gam-event-history/src/saved.rs, crates/gam-event-history/src/lib.rs:43 (the re-export, removed in the same commit) and crates/gam-event-history/src/joint/model.rs (import :13-14; save/load :137-154; test asserts :252-265). model.rs now imports gam_model_api::saved_model::{SavedModelError, read_saved_model_file, read_saved_model_text, saved_model_text, write_saved_model}. No CLI, pyffi or gamfit source names any of them; they call JointEventModel::save/load."
   }
 ]

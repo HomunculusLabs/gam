@@ -10,9 +10,9 @@
 use super::law::JointLikelihood;
 use super::constant_rate_inference::ConstantRatePosterior;
 use super::law::{JointSpecification, invalid};
-use crate::saved::{
-    SavedModelError, SavedModelKind, read_saved_model_file, read_saved_model_text,
-    saved_model_text, write_saved_model,
+use gam_model_api::saved_model::{
+    SavedModelError, read_saved_model_file, read_saved_model_text, saved_model_text,
+    write_saved_model,
 };
 use crate::{EventHistoryError, MarkKind, SubjectHistory};
 use ndarray::Array2;
@@ -22,6 +22,9 @@ use std::path::Path;
 /// Version of the saved joint event model. Version 2 saves the full law
 /// specification, so version 1 payloads are refused.
 const JOINT_EVENT_MODEL_VERSION: u64 = 2;
+
+/// Kind of the saved joint event model in the shared saved-model envelope.
+const JOINT_EVENT_MODEL_KIND: &str = "joint";
 
 /// The posterior a model integrates when it forecasts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -153,13 +156,14 @@ impl JointEventModel {
     }
 
     fn saved_text(&self) -> Result<String, SavedModelError> {
-        saved_model_text(SavedModelKind::Joint, JOINT_EVENT_MODEL_VERSION, self)
+        saved_model_text(JOINT_EVENT_MODEL_KIND, JOINT_EVENT_MODEL_VERSION, self)
     }
 
     fn from_saved_text(text: &str) -> Result<Self, SavedModelError> {
         let model: Self =
-            read_saved_model_text(text, SavedModelKind::Joint, JOINT_EVENT_MODEL_VERSION)?;
-        let inconsistent = |reason| SavedModelError::Inconsistent { reason };
+            read_saved_model_text(text, JOINT_EVENT_MODEL_KIND, JOINT_EVENT_MODEL_VERSION)?;
+        let inconsistent =
+            |reason: EventHistoryError| SavedModelError::Inconsistent { reason: Box::new(reason) };
         let specification =
             JointSpecification::new(model.specification.marks.clone()).map_err(inconsistent)?;
         // A rank-zero law holds exactly the rank-zero specification of its marks.
@@ -340,5 +344,63 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(error.contains("at least one subject"), "{error}");
+    }
+
+    #[test]
+    fn a_shared_horizon_forecast_is_bit_identical_whatever_other_horizons_are_requested() {
+        // #2963 (A8): horizons are evaluation points, never accuracy controls.
+        let model = competing_model();
+        let conditioned = model.condition(&subject("new", 0.0, 2.0, &[])).unwrap();
+        let single = conditioned.forecast(&[7.0]).unwrap();
+        let several = conditioned.forecast(&[0.5, 7.0, 40.0, 400.0]).unwrap();
+        assert_eq!(single.survival[0].to_bits(), several.survival[1].to_bits());
+        for d in 0..model.mark_kinds().len() {
+            assert_eq!(single.incidence[[0, d]].to_bits(), several.incidence[[1, d]].to_bits());
+            assert_eq!(
+                single.incidence_error[[0, d]].to_bits(),
+                several.incidence_error[[1, d]].to_bits()
+            );
+        }
+        // The diagnosis goes through the bracket, so its error term is live in the comparison.
+        assert!(single.incidence_error[[0, 0]] > 0.0);
+        // Positive control: a different horizon changes the values this test compares.
+        assert_ne!(single.survival[0].to_bits(), several.survival[2].to_bits());
+        assert_ne!(single.incidence[[0, 0]].to_bits(), several.incidence[[2, 0]].to_bits());
+    }
+
+    #[test]
+    fn extending_a_history_after_the_assessment_time_never_changes_its_forecast() {
+        // #2962 (A7): a forecast made at s sees exactly what was known at s.
+        let model = competing_model();
+        let kinds = model.mark_kinds().to_vec();
+        let horizons = [0.5, 4.0, 30.0];
+        // Alive, undiagnosed, with one visit, at the assessment time 3.
+        let at_cutoff = model
+            .condition(&subject("p", 0.0, 3.0, &[(1.5, 3)]))
+            .unwrap()
+            .forecast(&horizons)
+            .unwrap();
+        for later in [
+            subject("p", 0.0, 5.0, &[(1.5, 3)]),
+            subject("p", 0.0, 6.0, &[(1.5, 3), (4.0, 0), (4.5, 3)]),
+            subject("p", 0.0, 9.0, &[(1.5, 3), (4.0, 0), (9.0, 2)]),
+        ] {
+            let cut = later.prefix(3.0, &kinds).unwrap();
+            let forecast = model.condition(&cut).unwrap().forecast(&horizons).unwrap();
+            assert_eq!(bits(&forecast), bits(&at_cutoff));
+        }
+        // Positive controls. A diagnosis AT the cutoff is part of H_s and closes that mark's risk.
+        let diagnosed_at_cutoff = subject("p", 0.0, 6.0, &[(1.5, 3), (3.0, 0)]).prefix(3.0, &kinds).unwrap();
+        let closed = model
+            .condition(&diagnosed_at_cutoff)
+            .unwrap()
+            .forecast(&horizons)
+            .unwrap();
+        assert!(closed.incidence.column(0).iter().all(|&p| p == 0.0));
+        assert_ne!(bits(&closed), bits(&at_cutoff));
+        // A later cutoff adds exposure, so the comparison does see conditioning.
+        let later_cut = subject("p", 0.0, 6.0, &[(1.5, 3), (4.0, 0)]).prefix(3.5, &kinds).unwrap();
+        let moved = model.condition(&later_cut).unwrap().forecast(&horizons).unwrap();
+        assert_ne!(bits(&moved), bits(&at_cutoff));
     }
 }
