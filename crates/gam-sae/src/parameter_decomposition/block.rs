@@ -81,10 +81,23 @@
 //!
 //! Queries, keys and values go through the tensor-free attention core
 //! ([`RotaryCausalAttention::attend_projected`]). Its head-mixed rows feed the
-//! output read, and its forward-error radii are against the exact attention of the
-//! rows it was handed. Every mask on Q, K, V and O is a real mask on the summed
-//! read: the softmax and the value mix see the masked rows, never a sum of
-//! per-component patterns.
+//! output read. Every mask on Q, K, V and O is a real mask on the summed read: the
+//! softmax and the value mix see the masked rows, never a sum of per-component
+//! patterns.
+//!
+//! # Radii
+//!
+//! Every stage of [`AttentionLayerExecution`] carries a forward-error radius against
+//! the exact layer at the given residual rows under the same reads, so a receipt
+//! against another executor can use it as that side's band. Each read's rounding band
+//! (`read_band`: `γ_n |A| |x|` for apply.rs's kernel, with `n` the operations of the
+//! read's product) enters the attention core as that read's input radius, so the
+//! core's score, pattern and mixed radii cover the exact attention of the exact reads
+//! (first order in the core's trigonometric error). The write adds the output read's
+//! band and `|A_O|` times the mixed radius; the output adds the residual addition's
+//! rounding. Every magnitude is computed one output column at a time, so no `|A|` is
+//! formed, and each computed bound is divided by the factor its own arithmetic could
+//! have lost.
 
 use super::apply::{ApplyError, FactorView, apply_anchored_linear, native_linear};
 use super::attention::{
@@ -100,6 +113,7 @@ use super::occurrence::PositionScope;
 use super::rewrite::{
     ComponentMlp, ComponentRead, ExactFactor, FactorRefusal, MlpMask, NativeMlp, RewriteError,
 };
+use gam_linalg::roundoff::{UNIT_ROUNDOFF, accumulation_growth};
 use gam_runtime::resource::Governed;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use std::fmt;
@@ -136,6 +150,78 @@ impl NativeNorm {
                 bias: bias.view(),
             },
         }
+    }
+
+    /// The normalized rows, as [`MaskedNorm::apply`] computes them, and their rounding
+    /// band against the exact normalization of the same rows: `|fl(N(h)) − N(h)|`
+    /// entrywise, for a receipt that compares this stage at its own input.
+    ///
+    /// - **RMSNorm.** `fl(N(h))` passes the squares, `d − 1` additions, the mean,
+    ///   `+ ε`, the square root, the reciprocal and the products with the row and the
+    ///   gain, `γ_(d+6)` relative, so the band is `γ_(d+6) |fl(N(h))| / (1 − γ_(d+6))`.
+    /// - **LayerNorm.** The centred row `ĉ = fl(h − fl(mean h))` carries an absolute
+    ///   error `e_j ≤ γ_d mean|h| + u |ĉ_j| / (1 − u)`, which no relative bound covers
+    ///   near a constant row. It passes through the normalization, whose Jacobian has
+    ///   spectral norm `ρ(x) = (‖x‖²/d + ε)^(-1/2)`, so it adds `|w_i| sup ρ ‖e‖₂` by the
+    ///   mean value inequality. On the segment `sup ρ ≤ ((‖ĉ‖/2)²/d + ε)^(-1/2)` once
+    ///   `4 ‖e‖₂ ≤ ‖ĉ‖`, and `sup ρ ≤ ε^(-1/2)` always. The row's own rounding at `ĉ`
+    ///   is `γ_(d+7) (|w_i ĉ_i ν̂| + |b_i|)`, the bias addition included.
+    ///
+    /// Every band is divided by `1 − γ_k` for its own arithmetic: `k = d + 12` for an RMSNorm
+    /// band, and `k = 2d + 20` for a LayerNorm band, whose slope and error norm each take a
+    /// sum of `d` squares and a square root before their product. A LayerNorm row
+    /// with `ε = 0` whose error is not below a quarter of its norm has no bound and is
+    /// refused.
+    pub fn apply_with_band(&self, rows: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array2<f64>), BlockError> {
+        let normalized = self.as_masked_norm().apply(rows)?;
+        let width = rows.ncols();
+        let band = match self {
+            Self::Rms { .. } => {
+                let dominance = 1.0 - accumulation_growth(width + 12);
+                let growth = accumulation_growth(width + 6);
+                normalized.mapv(|value| growth * value.abs() / (1.0 - growth) / dominance)
+            }
+            Self::Layer { epsilon, gain, bias } => {
+                let (mean_growth, own_growth) = (accumulation_growth(width), accumulation_growth(width + 7));
+                let dominance = 1.0 - accumulation_growth(2 * width + 20);
+                let mut band = Array2::<f64>::zeros(rows.raw_dim());
+                for (row, (values, mut band_row)) in rows.rows().into_iter().zip(band.rows_mut()).enumerate() {
+                    let mean = values.sum() / width as f64;
+                    let centred = values.mapv(|value| value - mean);
+                    let mean_abs = values.iter().map(|value| value.abs()).sum::<f64>() / width as f64;
+                    let error_norm = centred
+                        .iter()
+                        .map(|&value| {
+                            let error = mean_growth * mean_abs + UNIT_ROUNDOFF * value.abs() / (1.0 - UNIT_ROUNDOFF);
+                            error * error
+                        })
+                        .sum::<f64>()
+                        .sqrt();
+                    let centred_norm = centred.iter().map(|value| value * value).sum::<f64>().sqrt();
+                    let slope = if 4.0 * error_norm <= centred_norm {
+                        let half = centred_norm / 2.0;
+                        (half * half / width as f64 + epsilon).sqrt().recip()
+                    } else if *epsilon > 0.0 {
+                        epsilon.sqrt().recip()
+                    } else {
+                        return Err(BlockError::NormBandUnbounded { row });
+                    };
+                    let inverse_root = (centred.iter().map(|value| value * value).sum::<f64>() / width as f64
+                        + epsilon)
+                        .sqrt()
+                        .recip();
+                    for (((slot, &weight), &offset), &value) in
+                        band_row.iter_mut().zip(gain.iter()).zip(bias.iter()).zip(centred.iter())
+                    {
+                        let own = own_growth * ((weight * value * inverse_root).abs() + offset.abs())
+                            / (1.0 - own_growth);
+                        *slot = (own + weight.abs() * slope * error_norm) / dominance;
+                    }
+                }
+                band
+            }
+        };
+        Ok((normalized, band))
     }
 }
 
@@ -207,6 +293,9 @@ pub enum BlockError {
         projection: AttentionProjection,
         position: usize,
     },
+    /// A LayerNorm row with `ε = 0` whose centring error is not below a quarter of its
+    /// norm: its normalization has no finite slope bound.
+    NormBandUnbounded { row: usize },
 }
 
 impl From<SwigluError> for BlockError {
@@ -282,6 +371,10 @@ impl fmt::Display for BlockError {
             } => write!(
                 formatter,
                 "the {projection} edit declares position {position}, which no row of the layer holds"
+            ),
+            Self::NormBandUnbounded { row } => write!(
+                formatter,
+                "LayerNorm row {row} with zero epsilon has a centring error too large for a slope bound"
             ),
         }
     }
@@ -812,22 +905,34 @@ impl AttentionLayerReads<'_> {
     }
 }
 
-/// Every stage of one executed attention-only layer. Rows are positions.
+/// Every stage of one executed attention-only layer, each with its forward-error
+/// radius against the exact layer at the given residual rows under the same reads.
+/// Rows are positions.
 #[derive(Debug)]
 pub struct AttentionLayerExecution {
     /// `x W_Qᵀ` under the query read, `tokens × n_heads·head_dim`.
     pub queries: Governed<Array2<f64>>,
+    /// The query read's rounding band ([`NativeAttentionLayer::read_band`]).
+    pub query_radius: Array2<f64>,
     /// `x W_Kᵀ` under the key read, `tokens × n_kv_heads·head_dim`.
     pub keys: Governed<Array2<f64>>,
+    pub key_radius: Array2<f64>,
     /// `x W_Vᵀ` under the value read, `tokens × n_kv_heads·head_dim`.
     pub values: Governed<Array2<f64>>,
-    /// The scores, the attention pattern and the head-mixed rows `concat_h z_h`, each
-    /// with its forward-error radius against the exact attention of the rows above.
+    pub value_radius: Array2<f64>,
+    /// The scores, the attention pattern and the head-mixed rows `concat_h z_h`. The
+    /// three reads' radii enter the owner's attention as its input radii, so each
+    /// radius here is against the exact attention of the exact reads.
     pub attention: ProjectedAttention,
     /// `concat_h(z_h) W_Oᵀ` under the output read: the layer's write, no residual.
     pub write: Governed<Array2<f64>>,
+    /// The output read's rounding band plus `|W_O|` (under the read) times the mixed
+    /// radius.
+    pub write_radius: Array2<f64>,
     /// `h + write`, the residual stream after the layer.
     pub output: Array2<f64>,
+    /// The write radius plus the residual addition's rounding.
+    pub output_radius: Array2<f64>,
 }
 
 /// A norm-free, MLP-free, bias-free decoder layer `h' = h + concat_h(z_h) W_Oᵀ` on
@@ -924,6 +1029,19 @@ impl NativeAttentionLayer {
     ) -> Result<AttentionLayerExecution, BlockError> {
         execute_attention_layer(self, None, reads, residual, positions)
     }
+
+    /// The rounding band of one linear read of `rows` at their absolute positions:
+    /// `|fl(A x) − A x|` for the map `A` that `read` applies, entrywise, where `fl`
+    /// is apply.rs's kernel ([`read_band`]). A component read is refused.
+    pub fn read_band(
+        &self,
+        projection: AttentionProjection,
+        read: ProjectionRead<'_>,
+        rows: ArrayView2<'_, f64>,
+        positions: &[i64],
+    ) -> Result<Array2<f64>, BlockError> {
+        read_band(self.weight(projection), None, projection, read, rows, positions)
+    }
 }
 
 /// The exact factor `W = U R` of one projection, with `Rᵀ` held in the column layout
@@ -1001,6 +1119,25 @@ impl ComponentAttentionLayer {
     ) -> Result<AttentionLayerExecution, BlockError> {
         execute_attention_layer(&self.native, Some(&self.factors), reads, residual, positions)
     }
+
+    /// The rounding band of one linear read of `rows` at their absolute positions
+    /// ([`read_band`]).
+    pub fn read_band(
+        &self,
+        projection: AttentionProjection,
+        read: ProjectionRead<'_>,
+        rows: ArrayView2<'_, f64>,
+        positions: &[i64],
+    ) -> Result<Array2<f64>, BlockError> {
+        read_band(
+            self.native.weight(projection),
+            Some(&self.factors[projection.index()]),
+            projection,
+            read,
+            rows,
+            positions,
+        )
+    }
 }
 
 fn execute_attention_layer(
@@ -1018,54 +1155,95 @@ fn execute_attention_layer(
         });
     }
     let factor = |projection: AttentionProjection| factors.map(|all| &all[projection.index()]);
-    let queries = read_projection(
-        layer.weight(AttentionProjection::Query),
-        factor(AttentionProjection::Query),
-        AttentionProjection::Query,
-        reads.query,
-        residual,
-        positions,
-    )?;
-    let keys = read_projection(
-        layer.weight(AttentionProjection::Key),
-        factor(AttentionProjection::Key),
-        AttentionProjection::Key,
-        reads.key,
-        residual,
-        positions,
-    )?;
-    let values = read_projection(
-        layer.weight(AttentionProjection::Value),
-        factor(AttentionProjection::Value),
-        AttentionProjection::Value,
-        reads.value,
-        residual,
-        positions,
-    )?;
+    let read_with_radius = |projection: AttentionProjection, read: ProjectionRead<'_>, rows: ArrayView2<'_, f64>| {
+        let weight = layer.weight(projection);
+        let values = read_projection(weight, factor(projection), projection, read, rows, positions)?;
+        let radius = read_band(weight, factor(projection), projection, read, rows, positions)?;
+        Ok::<_, BlockError>((values, radius))
+    };
+    let (queries, query_radius) = read_with_radius(AttentionProjection::Query, reads.query, residual)?;
+    let (keys, key_radius) = read_with_radius(AttentionProjection::Key, reads.key, residual)?;
+    let (values, value_radius) = read_with_radius(AttentionProjection::Value, reads.value, residual)?;
     let attention = layer.attention.attend_projected(
-        ProjectedRows::exact(queries.view()),
-        ProjectedRows::exact(keys.view()),
-        ProjectedRows::exact(values.view()),
+        ProjectedRows {
+            values: queries.view(),
+            radius: query_radius.view(),
+        },
+        ProjectedRows {
+            values: keys.view(),
+            radius: key_radius.view(),
+        },
+        ProjectedRows {
+            values: values.view(),
+            radius: value_radius.view(),
+        },
         positions,
     )?;
-    let write = read_projection(
+    let (write, rounding) = read_with_radius(AttentionProjection::Output, reads.output, attention.mixed.view())?;
+    // The exact write at the exact mixed rows `z*` differs from the computed write by the
+    // read's rounding plus `|A| |ẑ − z*| ≤ |A| r`, with `r` the mixed radius.
+    let carried = read_magnitude(
         layer.weight(AttentionProjection::Output),
         factor(AttentionProjection::Output),
         AttentionProjection::Output,
         reads.output,
-        attention.mixed.view(),
+        attention.mixed_radius.view(),
         positions,
     )?;
+    let write_radius = sum_of_bounds(rounding, carried.dominated());
     let mut output = residual.to_owned();
     output += &*write;
+    // `|fl(h + w) − (h + w)| ≤ u |fl(h + w)| / (1 − u)`, and the stream is exact.
+    let addition = output.mapv(|value| UNIT_ROUNDOFF * value.abs() / (1.0 - UNIT_ROUNDOFF));
+    let output_radius = sum_of_bounds(write_radius.clone(), addition);
     Ok(AttentionLayerExecution {
         queries,
+        query_radius,
         keys,
+        key_radius,
         values,
+        value_radius,
         attention,
         write,
+        write_radius,
         output,
+        output_radius,
     })
+}
+
+/// The rows of `positions` that an edit scoped at `scoped` reaches, refusing a
+/// negative position and a declared position no row holds.
+fn reached_rows(
+    projection: AttentionProjection,
+    scoped: &ScopedEdit<'_>,
+    positions: &[i64],
+) -> Result<Vec<usize>, BlockError> {
+    let mut row_positions = Vec::with_capacity(positions.len());
+    for &position in positions {
+        row_positions.push(
+            usize::try_from(position)
+                .ok()
+                .ok_or(BlockError::NegativePosition {
+                    projection,
+                    position,
+                })?,
+        );
+    }
+    if let Some(&absent) = scoped
+        .positions
+        .positions()
+        .and_then(|declared| declared.iter().find(|position| !row_positions.contains(position)))
+    {
+        return Err(BlockError::EditPositionAbsent {
+            projection,
+            position: absent,
+        });
+    }
+    Ok(row_positions
+        .iter()
+        .enumerate()
+        .filter_map(|(row, position)| scoped.positions.reaches(*position).then_some(row))
+        .collect())
 }
 
 /// One linear read of `rows`, whose row `r` sits at absolute position `positions[r]`.
@@ -1085,33 +1263,8 @@ fn read_projection(
             apply_anchored_linear(weight, 0.0, factor.view().map_err(refused)?, mask, rows).map_err(refused)
         }
         ProjectionRead::Edited(scoped) => {
-            let mut row_positions = Vec::with_capacity(positions.len());
-            for &position in positions {
-                row_positions.push(
-                    usize::try_from(position)
-                        .ok()
-                        .ok_or(BlockError::NegativePosition {
-                            projection,
-                            position,
-                        })?,
-                );
-            }
-            if let Some(&absent) = scoped
-                .positions
-                .positions()
-                .and_then(|declared| declared.iter().find(|position| !row_positions.contains(position)))
-            {
-                return Err(BlockError::EditPositionAbsent {
-                    projection,
-                    position: absent,
-                });
-            }
+            let reached = reached_rows(projection, &scoped, positions)?;
             let mut written = native_linear(weight, rows).map_err(refused)?;
-            let reached: Vec<usize> = row_positions
-                .iter()
-                .enumerate()
-                .filter_map(|(row, position)| scoped.positions.reaches(*position).then_some(row))
-                .collect();
             if reached.is_empty() {
                 return Ok(written);
             }
@@ -1125,6 +1278,158 @@ fn read_projection(
             Ok(written)
         }
     }
+}
+
+/// `|M| r` for nonnegative rows `r` (`tokens × n`) and a matrix `M` (`outputs × n`), one
+/// output column at a time, so `|M|` is never formed.
+fn abs_map(matrix: ArrayView2<'_, f64>, rows: ArrayView2<'_, f64>) -> Array2<f64> {
+    let mut out = Array2::<f64>::zeros((rows.nrows(), matrix.nrows()));
+    for (column, entries) in matrix.outer_iter().enumerate() {
+        out.column_mut(column).assign(&rows.dot(&entries.mapv(f64::abs)));
+    }
+    out
+}
+
+/// `|A| r` for nonnegative rows `r`, with `A` the map a read applies to each row, and the
+/// rounded operations of that read's product (`n`) and of this magnitude (`k`), per row.
+struct ReadMagnitude {
+    magnitude: Array2<f64>,
+    read_operations: Vec<usize>,
+    magnitude_operations: Vec<usize>,
+}
+
+impl ReadMagnitude {
+    /// The magnitude itself as a bound on `|A| r`. Its `k` operations on nonnegative
+    /// terms each scale by `1 + δ`, `|δ| ≤ u`, so the exact value is at most
+    /// `M̂ / (1 − γ_k)`, and the division adds one more.
+    fn dominated(self) -> Array2<f64> {
+        let mut bound = self.magnitude;
+        for (mut row, &operations) in bound.outer_iter_mut().zip(&self.magnitude_operations) {
+            let dominance = 1.0 - accumulation_growth(operations + 1);
+            row.mapv_inplace(|value| value / dominance);
+        }
+        bound
+    }
+
+    /// `γ_n |A| |x| ≤ γ_n M̂ / (1 − γ_(k+3))` per row: the forward error of a product with `n`
+    /// rounded operations per entry in any summation order (Higham ASNA Lemma 3.1), from a
+    /// magnitude of `k` operations, with 3 more for this arithmetic (`γ_n` itself and the
+    /// product and quotient).
+    fn rounding(self) -> Array2<f64> {
+        let mut band = self.magnitude;
+        for ((mut row, &read), &operations) in band
+            .outer_iter_mut()
+            .zip(&self.read_operations)
+            .zip(&self.magnitude_operations)
+        {
+            let (growth, dominance) = (accumulation_growth(read), 1.0 - accumulation_growth(operations + 3));
+            row.mapv_inplace(|value| growth * value / dominance);
+        }
+        band
+    }
+}
+
+/// `a + b` for two nonnegative bounds, rounded up: the exact sum is at most the computed
+/// one divided by `1 − u`.
+fn sum_of_bounds(first: Array2<f64>, second: Array2<f64>) -> Array2<f64> {
+    (first + &second).mapv(|value| value / (1.0 - UNIT_ROUNDOFF))
+}
+
+fn expect_read_shape(
+    projection: AttentionProjection,
+    operand: &'static str,
+    expected: (usize, usize),
+    found: (usize, usize),
+) -> Result<(), BlockError> {
+    if expected == found {
+        Ok(())
+    } else {
+        Err(BlockError::Apply {
+            projection,
+            error: ApplyError::Shape {
+                operand,
+                expected,
+                found,
+            },
+        })
+    }
+}
+
+/// `|A| r` for the map `read` applies ([`ReadMagnitude`]), never forming `|A|`:
+/// - `Native`: `|W| r`, the read taking `n = d` operations (the inner product);
+/// - `Components(m)`: `|U| diag|m| |R| r`, the read taking `n = C + d + 2` (the products
+///   `R x`, the scale, the `C`-term product with `U` and the accumulation into the tile);
+/// - `Edited`: `|W| r` on every row, plus `|L| |Rᵀ| r` on the rows the edit reaches, whose
+///   read takes `n = T + d + 2` (the native product, then the `T` edit terms the same way).
+fn read_magnitude(
+    weight: ArrayView2<'_, f64>,
+    factor: Option<&ProjectionFactor>,
+    projection: AttentionProjection,
+    read: ProjectionRead<'_>,
+    rows: ArrayView2<'_, f64>,
+    positions: &[i64],
+) -> Result<ReadMagnitude, BlockError> {
+    let (tokens, width) = rows.dim();
+    expect_read_shape(projection, "band input rows", (tokens, weight.ncols()), (tokens, width))?;
+    match read {
+        ProjectionRead::Native => Ok(ReadMagnitude {
+            magnitude: abs_map(weight, rows),
+            read_operations: vec![width; tokens],
+            magnitude_operations: vec![width; tokens],
+        }),
+        ProjectionRead::Components(mask) => {
+            let factor = &factor.ok_or(BlockError::NoComponentFactors { projection })?.factor;
+            let components = factor.components();
+            expect_read_shape(projection, "band component mask", (components, 1), (mask.len(), 1))?;
+            let coordinates = abs_map(factor.read(), rows) * &mask.mapv(f64::abs);
+            Ok(ReadMagnitude {
+                magnitude: abs_map(factor.write(), coordinates.view()),
+                read_operations: vec![components + width + 2; tokens],
+                magnitude_operations: vec![components + width + 1; tokens],
+            })
+        }
+        ProjectionRead::Edited(scoped) => {
+            let terms = scoped.edit.term_count();
+            expect_read_shape(
+                projection,
+                "band edit factors",
+                (weight.nrows(), width),
+                (scoped.edit.output_dim(), scoped.edit.input_dim()),
+            )?;
+            let reached = reached_rows(projection, &scoped, positions)?;
+            let mut magnitude = ReadMagnitude {
+                magnitude: abs_map(weight, rows),
+                read_operations: vec![width; tokens],
+                magnitude_operations: vec![width; tokens],
+            };
+            if !reached.is_empty() {
+                let selected = rows.select(Axis(0), &reached);
+                let edit = abs_map(scoped.edit.left(), abs_map(scoped.edit.right().t(), selected.view()).view());
+                for (index, &row) in reached.iter().enumerate() {
+                    let mut target = magnitude.magnitude.row_mut(row);
+                    target += &edit.row(index);
+                    magnitude.read_operations[row] = terms + width + 2;
+                    magnitude.magnitude_operations[row] = terms + width + 1;
+                }
+            }
+            Ok(magnitude)
+        }
+    }
+}
+
+/// The rounding band of one read of `rows`: `|fl(A x) − A x| ≤ γ_n |A| |x|` entrywise, with
+/// `fl` apply.rs's kernel and `n` and `|A|` as in [`read_magnitude`]. Rows the read leaves
+/// unedited get the native band.
+fn read_band(
+    weight: ArrayView2<'_, f64>,
+    factor: Option<&ProjectionFactor>,
+    projection: AttentionProjection,
+    read: ProjectionRead<'_>,
+    rows: ArrayView2<'_, f64>,
+    positions: &[i64],
+) -> Result<Array2<f64>, BlockError> {
+    let magnitude = rows.mapv(f64::abs);
+    Ok(read_magnitude(weight, factor, projection, read, magnitude.view(), positions)?.rounding())
 }
 
 #[cfg(test)]
@@ -1824,6 +2129,117 @@ mod tests {
         }
     }
 
+    /// `NativeNorm::apply_with_band` returns `MaskedNorm::apply`'s rows, and its band covers
+    /// the double-double normalization of the same rows, for RMSNorm and for LayerNorm,
+    /// including a LayerNorm row near a constant, where the centring error dominates.
+    /// Positive control: on that row the norm's own rounding alone, without the centring
+    /// term, is exceeded. A zero-epsilon LayerNorm row whose centring error reaches a quarter
+    /// of its norm is refused, typed.
+    #[test]
+    fn a_normalization_band_covers_the_double_double_normalization() {
+        use qd::Quad;
+        let mut rng = StdRng::seed_from_u64(2997);
+        let gain = eighths_vector(&mut rng, LAYER_WIDTH);
+        let bias = eighths_vector(&mut rng, LAYER_WIDTH);
+        let mut rows = Array2::from_shape_simple_fn((LAYER_TOKENS, LAYER_WIDTH), || {
+            rng.random_range(-48..=48) as f64 / 24.0
+        });
+        // The last row sits near 1024: its centred values are about 1e-6, so fl(mean h) has an
+        // error far above the centred row's own rounding.
+        let near_constant = LAYER_TOKENS - 1;
+        for (column, slot) in rows.row_mut(near_constant).iter_mut().enumerate() {
+            *slot = 1024.0 + (column as f64 - 3.5) * 1.0e-6;
+        }
+        let quad = Quad::from_f64;
+        let reference = |norm: &NativeNorm, row: usize| -> Vec<Quad> {
+            let values: Vec<Quad> = rows.row(row).iter().map(|&value| quad(value)).collect();
+            let width = quad(LAYER_WIDTH as f64);
+            let (epsilon, centred): (f64, Vec<Quad>) = match norm {
+                NativeNorm::Rms { epsilon, .. } => (*epsilon, values.clone()),
+                NativeNorm::Layer { epsilon, .. } => {
+                    let mean = values.iter().fold(quad(0.0), |sum, &value| sum + value) / width;
+                    (*epsilon, values.iter().map(|&value| value - mean).collect())
+                }
+            };
+            let square = centred.iter().fold(quad(0.0), |sum, &value| sum + value * value);
+            let inverse_root = quad(1.0) / (square / width + quad(epsilon)).sqrt();
+            centred
+                .iter()
+                .enumerate()
+                .map(|(column, &value)| match norm {
+                    NativeNorm::Rms { gain, .. } => quad(gain[column]) * value * inverse_root,
+                    NativeNorm::Layer { gain, bias, .. } => {
+                        quad(gain[column]) * value * inverse_root + quad(bias[column])
+                    }
+                })
+                .collect()
+        };
+        let excess = |computed: &Array2<f64>, band: &Array2<f64>, norm: &NativeNorm, row: usize| {
+            let exact = reference(norm, row);
+            (0..LAYER_WIDTH)
+                .filter(|&column| {
+                    (quad(computed[[row, column]]) - exact[column]).0.abs() > band[[row, column]]
+                })
+                .count()
+        };
+        let norms = [
+            NativeNorm::Rms {
+                epsilon: RMS_EPSILON,
+                gain: gain.clone(),
+            },
+            NativeNorm::Layer {
+                epsilon: LAYER_EPSILON,
+                gain: gain.clone(),
+                bias: bias.clone(),
+            },
+        ];
+        for norm in &norms {
+            let (normalized, band) = norm.apply_with_band(rows.view()).expect("finite rows");
+            let owner = norm.as_masked_norm().apply(rows.view()).expect("finite rows");
+            assert!(bits(&normalized) == bits(&owner), "the band's rows must be the owner's normalized rows");
+            for row in 0..LAYER_TOKENS {
+                assert_eq!(
+                    excess(&normalized, &band, norm, row),
+                    0,
+                    "{norm:?}: row {row} left its rounding band around the double-double normalization"
+                );
+            }
+        }
+
+        // Positive control: the LayerNorm row's own rounding at the computed centred row,
+        // without the centring term, does not cover the near-constant row.
+        let layer = &norms[1];
+        let normalized = layer.apply_with_band(rows.view()).expect("finite rows").0;
+        let own_growth = accumulation_growth(LAYER_WIDTH + 7);
+        let own_only = Array2::from_shape_fn(normalized.dim(), |(row, column)| {
+            own_growth * (normalized[[row, column]].abs() + bias[column].abs()) / (1.0 - own_growth)
+        });
+        assert!(
+            excess(&normalized, &own_only, layer, near_constant) > 0,
+            "positive control: the centring error must exceed the norm's own rounding on the near-constant row"
+        );
+
+        // Refusal: with zero epsilon, a row within a few ulps of a constant has a centring error
+        // above a quarter of its norm, and no slope bound.
+        let mut flat = Array2::from_elem((1, LAYER_WIDTH), 3.0);
+        for (column, slot) in flat.row_mut(0).iter_mut().enumerate() {
+            *slot += column as f64 * 2.0_f64.powi(-51);
+        }
+        let zero_epsilon = NativeNorm::Layer {
+            epsilon: 0.0,
+            gain: gain.clone(),
+            bias: bias.clone(),
+        };
+        assert!(
+            matches!(zero_epsilon.apply_with_band(flat.view()), Err(BlockError::NormBandUnbounded { row: 0 })),
+            "a zero-epsilon row near a constant must be refused"
+        );
+        assert!(
+            zero_epsilon.apply_with_band(rows.slice(ndarray::s![0..1, ..])).is_ok(),
+            "control: a zero-epsilon row far from a constant has a band"
+        );
+    }
+
     /// Shapes are refused by the owner that reads them, typed by sublayer.
     #[test]
     fn a_block_refuses_a_normalization_of_another_width_and_positions_of_another_length() {
@@ -2021,70 +2437,24 @@ mod tests {
         }
     }
 
-    /// Rounding of `A diag(m) B x` through the matrix-free kernel on either route. The
-    /// factored route passes each term through the products `b_c x` (`d` operations), the
-    /// scale, the product with `a_c` and `C − 1` sums, and the accumulation into the tile:
-    /// `C + d + 2`. The edited tensor's native product takes `d` operations over terms
-    /// bounded entrywise by the same magnitudes.
-    fn component_rounding(
-        factor: &ExactFactor,
-        mask: ArrayView1<'_, f64>,
-        rows: ArrayView2<'_, f64>,
-    ) -> Array2<f64> {
-        let growth = accumulation_growth(factor.components() + factor.read().ncols() + 2);
-        magnitude(factor, mask, rows.mapv(f64::abs).view()).mapv(|value| growth * value / (1.0 - growth))
-    }
-
-    /// Per output entry, a bound on one route's distance from the exact layer with the
-    /// edited tensors. Each read's rounding band enters the owner's attention radius as that
-    /// read's input radius (first order), so the mixed radius covers the exact attention at the
-    /// exact reads. The output read adds its own rounding and `|U| |m| |R|` times the mixed
-    /// radius, and the residual addition rounds once.
-    fn attention_layer_route_band(
-        layer: &ComponentAttentionLayer,
-        masks: &LayerMasks,
-        fixture: &LayerFixture,
-        execution: &AttentionLayerExecution,
-    ) -> Array2<f64> {
-        let radius = |projection: AttentionProjection| {
-            dominate(component_rounding(
-                layer.factor(projection),
-                masks.of(projection),
-                fixture.residual.view(),
-            ))
+    /// Each stage of two executions with its radius, paired, for the checks that two routes
+    /// to one exact layer agree within the sum of their radii.
+    fn stage_radii<'a>(
+        left: &'a AttentionLayerExecution,
+        right: &'a AttentionLayerExecution,
+    ) -> Vec<(&'static str, (&'a Array2<f64>, &'a Array2<f64>), (&'a Array2<f64>, &'a Array2<f64>))> {
+        let stages = |execution: &'a AttentionLayerExecution| {
+            [
+                ("queries", (&*execution.queries, &execution.query_radius)),
+                ("keys", (&*execution.keys, &execution.key_radius)),
+                ("values", (&*execution.values, &execution.value_radius)),
+                ("mixed rows", (&execution.attention.mixed, &execution.attention.mixed_radius)),
+                ("write", (&*execution.write, &execution.write_radius)),
+                ("output", (&execution.output, &execution.output_radius)),
+            ]
         };
-        let (query_radius, key_radius, value_radius) = (
-            radius(AttentionProjection::Query),
-            radius(AttentionProjection::Key),
-            radius(AttentionProjection::Value),
-        );
-        let attention = RotaryCausalAttention::new(layer_geometry(), no_rotary(), LAYER_SCORE_SCALE)
-            .expect("the fixture attention core");
-        let with_radius = attention
-            .attend_projected(
-                ProjectedRows {
-                    values: execution.queries.view(),
-                    radius: query_radius.view(),
-                },
-                ProjectedRows {
-                    values: execution.keys.view(),
-                    radius: key_radius.view(),
-                },
-                ProjectedRows {
-                    values: execution.values.view(),
-                    radius: value_radius.view(),
-                },
-                &fixture.positions,
-            )
-            .expect("finite projected rows");
-        assert!(
-            bits(&with_radius.mixed) == bits(&execution.attention.mixed),
-            "the radius arithmetic must leave the mixed rows' bits alone"
-        );
-        let output = layer.factor(AttentionProjection::Output);
-        component_rounding(output, masks.output.view(), execution.attention.mixed.view())
-            + &magnitude(output, masks.output.view(), with_radius.mixed_radius.view())
-            + &addition_rounding(&execution.output)
+        let (first, second) = (stages(left), stages(right));
+        (0..first.len()).map(|stage| (first[stage].0, first[stage].1, second[stage].1)).collect()
     }
 
     fn layer_stage_bits(execution: &AttentionLayerExecution) -> Vec<u64> {
@@ -2128,17 +2498,18 @@ mod tests {
                 .edited(&layer, &masks)
                 .execute(AttentionLayerReads::native(), fixture.residual.view(), &fixture.positions)
                 .expect("edited-tensor layer");
-            let band = dominate(
-                attention_layer_route_band(&layer, &masks, &fixture, &component)
-                    + &attention_layer_route_band(&layer, &masks, &fixture, &edited),
-            );
-            assert_eq!(
-                violations(&component.output, &edited.output, &band),
-                0,
-                "{kind} masks: the component layer left the derived band around the edited-tensor layer"
-            );
+            // Both routes compute the same exact layer, so at every stage they differ by at most
+            // the sum of their production radii.
+            for (stage, (left, left_radius), (right, right_radius)) in stage_radii(&component, &edited) {
+                assert_eq!(
+                    violations(left, right, &sum_of_bounds(left_radius.clone(), right_radius.clone())),
+                    0,
+                    "{kind} masks: the component layer's {stage} left the sum of the two routes' radii"
+                );
+            }
 
-            // Positive controls: a value mask and an output mask moved by 1e-9 each leave the band.
+            // Positive controls: a value mask and an output mask moved by 1e-9 each leave the
+            // output band, and the value move leaves the band at the values stage already.
             let mut moved_value = masks.clone();
             moved_value.value[2] += 1.0e-9;
             let mut moved_output = masks.clone();
@@ -2148,14 +2519,18 @@ mod tests {
                     .edited(&layer, &moved)
                     .execute(AttentionLayerReads::native(), fixture.residual.view(), &fixture.positions)
                     .expect("perturbed edited-tensor layer");
-                let control_band = dominate(
-                    attention_layer_route_band(&layer, &masks, &fixture, &component)
-                        + &attention_layer_route_band(&layer, &moved, &fixture, &perturbed),
-                );
+                let band = sum_of_bounds(component.output_radius.clone(), perturbed.output_radius.clone());
                 assert!(
-                    violations(&component.output, &perturbed.output, &control_band) > 0,
-                    "{kind} masks: the band must resolve a {control} mask move"
+                    violations(&component.output, &perturbed.output, &band) > 0,
+                    "{kind} masks: the output radii must resolve a {control} mask move"
                 );
+                if control.starts_with("value") {
+                    let band = sum_of_bounds(component.value_radius.clone(), perturbed.value_radius.clone());
+                    assert!(
+                        violations(&component.values, &perturbed.values, &band) > 0,
+                        "{kind} masks: the value radii must resolve a {control} mask move"
+                    );
+                }
             }
         }
     }
@@ -2271,16 +2646,10 @@ mod tests {
             bits(&dense.attention.mixed) == bits(&scoped_hidden.attention.mixed),
             "the edit reaches only the output read, so the mixed rows keep their bits"
         );
-        // The scoped route forms `W_O x` (`H` operations) plus the terms `left (rightᵀ x)`
-        // (`d + 1 + H + 1`), the dense route `W_O' x` (`H`); `H = d` here.
-        let mixed_abs = dense.attention.mixed.mapv(f64::abs);
-        let growth = accumulation_growth(2 * LAYER_WIDTH + 2);
-        let band = dominate(
-            (mixed_abs.dot(&output_weight.mapv(f64::abs).t())
-                + &mixed_abs.dot(&right.mapv(f64::abs)).dot(&left.mapv(f64::abs).t())
-                + &mixed_abs.dot(&ablated.mapv(f64::abs).t()))
-            .mapv(|value| growth * value / (1.0 - growth)),
-        );
+        // Both routes reach the same exact write at the same mixed rows, so they differ by at
+        // most the sum of their production write radii: the scoped route's `W_O x` plus the
+        // terms `left (rightᵀ x)` on the declared row, the dense route's `W_O' x`.
+        let band = sum_of_bounds(scoped_hidden.write_radius.clone(), dense.write_radius.clone());
         let row_violations = |left_rows: &Array2<f64>, right_rows: &Array2<f64>, row: usize| {
             (0..LAYER_WIDTH)
                 .filter(|&column| (left_rows[[row, column]] - right_rows[[row, column]]).abs() > band[[row, column]])
@@ -2311,9 +2680,13 @@ mod tests {
             )
             .expect("globally edited layer 0");
         assert_eq!(
-            violations(&global.write, &dense.write, &band),
+            violations(
+                &global.write,
+                &dense.write,
+                &sum_of_bounds(global.write_radius.clone(), dense.write_radius.clone())
+            ),
             0,
-            "an output edit at every position must equal the dense edited layer within the derived band"
+            "an output edit at every position must equal the dense edited layer within the sum of the write radii"
         );
     }
 
@@ -2435,6 +2808,76 @@ mod tests {
             "an output weight of another shape must be refused at construction"
         );
         assert_eq!(output.dim(), (LAYER_WIDTH, LAYER_WIDTH), "control: the fixture weight has the geometry's shape");
+
+        // The pub read band is the radius an execution carries, and it refuses what the read
+        // refuses.
+        let components = layer
+            .execute(
+                AttentionLayerReads {
+                    query: ProjectionRead::Components(ones.view()),
+                    ..AttentionLayerReads::native()
+                },
+                fixture.residual.view(),
+                &fixture.positions,
+            )
+            .expect("component query read");
+        let band = layer
+            .read_band(
+                AttentionProjection::Query,
+                ProjectionRead::Components(ones.view()),
+                fixture.residual.view(),
+                &fixture.positions,
+            )
+            .expect("component query band");
+        assert!(
+            bits(&band) == bits(&components.query_radius),
+            "the execution's query radius must be the pub read band"
+        );
+        assert!(
+            matches!(
+                native.read_band(
+                    AttentionProjection::Query,
+                    ProjectionRead::Components(ones.view()),
+                    fixture.residual.view(),
+                    &fixture.positions,
+                ),
+                Err(BlockError::NoComponentFactors {
+                    projection: AttentionProjection::Query
+                })
+            ),
+            "a component band on a layer without factors must be refused"
+        );
+        assert!(
+            matches!(
+                layer.read_band(
+                    AttentionProjection::Key,
+                    ProjectionRead::Components(short.view()),
+                    fixture.residual.view(),
+                    &fixture.positions,
+                ),
+                Err(BlockError::Apply {
+                    projection: AttentionProjection::Key,
+                    error: ApplyError::Shape { operand: "band component mask", .. }
+                })
+            ),
+            "a band mask of another length must be refused"
+        );
+        let narrow = fixture.residual.select(Axis(1), &[0, 1, 2]);
+        assert!(
+            matches!(
+                native.read_band(
+                    AttentionProjection::Value,
+                    ProjectionRead::Native,
+                    narrow.view(),
+                    &fixture.positions,
+                ),
+                Err(BlockError::Apply {
+                    projection: AttentionProjection::Value,
+                    error: ApplyError::Shape { operand: "band input rows", .. }
+                })
+            ),
+            "band rows of another width must be refused"
+        );
     }
 
     /// Eighths in `[-3/2, 3/2]` for each gated-MLP factor.
