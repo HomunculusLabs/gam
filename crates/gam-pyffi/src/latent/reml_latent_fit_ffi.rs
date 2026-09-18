@@ -985,41 +985,6 @@ fn latent_analytic_penalty_registry(
     build_analytic_penalty_registry_from_json(Some(&latent_payload), descriptors.as_ref())
 }
 
-/// The registry energy a latent REML score adds, at descriptor-pinned weights
-/// (ρ = 0 on every owned axis).
-///
-/// #2933 F02 — these fits declare only the latent block `t` and install no
-/// decoder jets. A β-tier penalty would be priced on the fitted coefficients,
-/// whose layout none of the β-tier kinds describes here (each self-disables to
-/// 0 on the mismatch), so it is refused instead of scored as zero; an isometry
-/// penalty has no `J` and refuses through the registry precondition.
-fn latent_analytic_penalty_value(
-    registry: &AnalyticPenaltyRegistry,
-    t: ArrayView1<'_, f64>,
-) -> Result<f64, String> {
-    if let Some((_, _, name)) = registry
-        .rho_layout()
-        .into_iter()
-        .find(|(_, tier, _)| matches!(tier, PenaltyTier::Beta))
-    {
-        return Err(format!(
-            "analytic penalty `{name}` is β-tier, but a latent REML fit declares only the latent \
-             block t, so it has no coefficient block to price; refused instead of scored as zero"
-        ));
-    }
-    registry.isometry_evaluation_precondition(IsometryEvaluationOrder::Value, t.len())?;
-    let rho = Array1::<f64>::zeros(registry.total_rho_count());
-    registry.validate_rho(rho.view())?;
-    let mut value = 0.0_f64;
-    for (penalty, (rho_slice, tier, _name)) in registry.penalties.iter().zip(registry.rho_layout())
-    {
-        if matches!(tier, PenaltyTier::Psi) {
-            value += penalty.value(t, rho.slice(s![rho_slice]));
-        }
-    }
-    Ok(value)
-}
-
 /// `∂/∂t` of [`latent_analytic_penalty_value`], which both latent backward
 /// companions add into `grad_t` so it stays the gradient of the reported
 /// `reml_score` (#2933 F02).
@@ -1162,7 +1127,7 @@ fn glm_reml_fit_latent_backward_impl(
     if let Some(precisions) = dim_selection_precision {
         for n in 0..n_obs {
             for a in 0..latent_dim {
-                let prec = precisions.physical[a];
+                let prec = precisions.physical()[a];
                 grad_t[n * latent_dim + a] += grad_reml_score * prec * t_mat[[n, a]];
             }
         }

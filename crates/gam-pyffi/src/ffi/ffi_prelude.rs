@@ -10,8 +10,6 @@ pub(crate) use csv::StringRecord;
 
 pub(crate) use faer::Side;
 
-pub(crate) use gam::terms::basis::create_duchon_basis_1d_derivative_dense;
-
 pub(crate) use gam::solver::estimate::{
     EstimationError, ExternalOptimOptions,
     optimize_external_designwith_heuristic_log_lambdas,
@@ -102,19 +100,17 @@ pub(crate) use gam::terms::basis::{
     DuchonOperatorPenaltySpec, MaternBasisSpec, MaternIdentifiability, MaternLengthScale, MaternNu,
     OneDimensionalBoundary, OperatorPenaltySpec, PeriodicBSplineBasisSpec, SpatialIdentifiability,
     SphereMethod, SphereWahbaKernel, SphericalSplineBasisSpec, SphericalSplineIdentifiability,
-    SplineScratch, auto_centers_1d_equal_mass, auto_knot_vector_1d_quantile,
+    auto_centers_1d_equal_mass, auto_knot_vector_1d_quantile,
     bspline_derivative_penalty_matrix, bspline_tensor_first_derivative, build_duchon_basis,
     build_duchon_basis_mixed_periodicity_auto, build_duchon_basis_spec_chart,
     build_duchon_operator_penalty_matrices,
-    build_matern_basis, build_matern_basis_literal_aniso, build_periodic_bspline_basis_1d,
+    build_matern_basis_literal_aniso, build_periodic_bspline_basis_1d,
     build_spherical_spline_basis, build_thin_plate_penalty_matrix, create_basis,
     cyclic_bspline_derivative_penalty_matrix, duchon_cubic_default,
-    duchon_effective_nullspace_order, duchon_kernel_constraint_nullspace,
-    duchon_nullspace_order_from_m, duchon_polynomial_first_derivative_nd,
-    duchon_pure_kernel_amplification, duchon_radial_first_derivative_nd,
+    duchon_nullspace_order_from_m,
     duchon_sae_atom_basis_with_jet,
-    evaluate_bspline_basis_scalar, matern_input_location_hessian_nd, matern_input_location_jet_nd,
-    matern_radial_first_derivative_nd, periodic_bspline_derivative_nd,
+    matern_input_location_hessian_nd, matern_input_location_jet_nd,
+    periodic_bspline_derivative_nd,
     periodic_bspline_first_derivative_nd,
     resolve_duchon_orders, select_spherical_farthest_point_centers, sphere_first_derivative_nd,
     spherical_spline_design_hessian, spherical_spline_design_jet,
@@ -132,6 +128,9 @@ pub(crate) use gam::terms::decoders::interchange_decoder::{
 };
 
 pub(crate) use gam::terms::latent::{AuxPriorFamily, aux_prior_targets};
+pub(crate) use gam::terms::basis::latent_design::{latent_basis_kind, latent_input_location_jet, periodic_bspline_basis_dense_via_spec, build_latent_duchon_design, build_latent_forward_design};
+pub(crate) use gam::terms::latent::{LatentAuxStrengthState, latent_aux_prior_stats, ValidatedDimSelectionPrecisions, latent_prior_score_and_aux_state_for_t, latent_analytic_penalty_value};
+pub(crate) use gam::families::latent_outer::{LatentOuterProblem, LatentOuterObjective, latent_manifold_periodic_descriptor, build_latent_outer_manifold, latent_spectral_seed_start, gaussian_reml_weight_vector_local, latent_scalar_weights_with_fisher, latent_row_weights, validate_dense_fisher_w, gaussian_reml_fit_latent_impl};
 
 pub(crate) use gam::terms::dictionary::{
     LinearDictionaryAssignment, LinearDictionaryConfig, LinearDictionaryError,

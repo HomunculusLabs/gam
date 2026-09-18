@@ -40,6 +40,7 @@ mod duchon_radial_profile;
 mod duchon_thinplate;
 mod implicit_psi_derivative;
 pub mod input_loc_derivatives;
+pub mod latent_design;
 pub mod ispline_boundary;
 pub mod ispline_ramp;
 mod internal;

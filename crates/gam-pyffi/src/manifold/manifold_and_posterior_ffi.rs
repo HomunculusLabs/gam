@@ -2910,28 +2910,6 @@ fn string_records_from_rows(
         .collect()
 }
 
-fn periodic_bspline_basis_dense_via_spec(
-    t: ArrayView1<'_, f64>,
-    domain: (f64, f64),
-    degree: usize,
-    num_basis: usize,
-) -> Result<Array2<f64>, String> {
-    let (left, right) = domain;
-    let period = right - left;
-    if !(period.is_finite() && period > 0.0) {
-        return Err(format!(
-            "periodic B-spline domain must be a finite ordered interval; got ({left}, {right})"
-        ));
-    }
-    // The FFI returns only the dense value basis, but the shared periodic spec
-    // validator requires a realizable derivative order. Use curvature when
-    // the polynomial degree supports it and slope roughness otherwise.
-    let penalty_order = degree.min(2);
-    let spec = PeriodicBSplineBasisSpec::new(degree, num_basis, period, left, penalty_order);
-    build_periodic_bspline_basis_1d(t, &spec)
-        .map_err(|err| format!("failed to evaluate periodic B-spline basis: {err}"))
-}
-
 /// Dense `(N, K)` periodic cyclic B-spline derivative of the requested
 /// `order`, on the closed parameter circle `domain = (left, right)` with
 /// `num_basis` cyclic control points.
