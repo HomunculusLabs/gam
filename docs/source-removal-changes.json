@@ -160,5 +160,23 @@
     ],
     "reason": "#2951: decide_proposal migrates from codec's DecodedArtifactScore / code_saving_at_declared_fidelity to code_saving_at_proven_fidelity((u64, &DecodedFidelity)) (mpd-codec step 1, 91473e08eb; step 2 of add, migrate, delete). score was the private helper in fit.rs's bare #[cfg(test)] mod proposal_tests that built DecodedArtifactScore literals for the proposal tests. The migrated tests build their decoded evidence through precision::decode_then_evaluate instead, with a trivial DecodableArtifact (the new helper decoded()). Nothing else read score, so it is deleted.",
     "evidence": "At the landing parent, score is a private fn inside fit.rs's bare #[cfg(test)] mod proposal_tests: its declaration plus its call sites in the four proposal tests. The source-removal guard reports it as test_scoped true, public false, production_occurrences 0. In the landing tree fit.rs names `fn score` 0 times and `score(` 0 times (grep). Gate: direct lane dx2, tag mpd-fit-migrate-b, at base 6a19a69ab2 (tip in base): workspace --all-targets check RC 0, `parameter_decomposition::fit::` TESTS_PASSED=15 (the four migrated proposal tests included), assertionless RC 0, DONE_SENTINEL_0."
+  },
+  {
+    "base": "ea7ea52c56a5130658c016262d93fc2c01ea9b91",
+    "items": [
+      "crates/gam-gpu/src/device_runtime.rs:const:CHILD_MODE_PREFIX",
+      "crates/gam-gpu/src/device_runtime.rs:const:LOADER_PANIC",
+      "crates/gam-gpu/src/device_runtime.rs:fn:catch_cudarc",
+      "crates/gam-gpu/src/device_runtime.rs:fn:cudarc_loader_panic_diagnostics_follow_recovery_scope",
+      "crates/gam-gpu/src/device_runtime.rs:fn:drop",
+      "crates/gam-gpu/src/device_runtime.rs:fn:install_cudarc_panic_filter",
+      "crates/gam-gpu/src/device_runtime.rs:fn:panic_message",
+      "crates/gam-gpu/src/device_runtime.rs:fn:probe_devices",
+      "crates/gam-gpu/src/device_runtime.rs:static:CUDARC_RECOVERY_ACTIVE",
+      "crates/gam-gpu/src/device_runtime.rs:static:HOOK_INSTALLED",
+      "crates/gam-gpu/src/device_runtime.rs:struct:RecoveryScope"
+    ],
+    "reason": "#2972. catch_cudarc recovered cudarc's loader panic (\"Unable to dynamically load\") through catch_unwind, which never runs in a panic = \"abort\" consumer, so the probe aborted any fit on a host without libcuda. Every cudarc entry point that can reach one of cudarc's lazy loaders is now preceded by driver::require_cudarc_library, which walks cudarc's own candidate names through the same libloading call and returns a typed error instead of panicking: the probe runs it for libcuda before its first cudarc call and for cudart, cuBLAS and cuSOLVER before admitting the runtime; cuda_context_for runs it for libcuda before CudaContext::new and for libcudart before cudaSetDevice; the NVRTC compile entries run it for libnvrtc. No loader panic is left to recover, so catch_cudarc with its RecoveryScope guard (the fn drop identity), install_cudarc_panic_filter with HOOK_INSTALLED, panic_message and CUDARC_RECOVERY_ACTIVE are deleted, together with the #2819 subprocess test that pinned exactly that recovery (cudarc_loader_panic_diagnostics_follow_recovery_scope with CHILD_MODE_PREFIX and LOADER_PANIC). probe_devices is split into probe, probe_after_driver_preflight and probe_loaded_driver. The replacement pins are missing_driver_library_is_absence_before_any_cudarc_call_2972 and crates/gam-gpu/tests/probe_under_panic_abort.rs.",
+    "evidence": "@@LEDGER_EVIDENCE@@"
   }
 ]

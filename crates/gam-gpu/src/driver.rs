@@ -57,11 +57,7 @@ fn already_resident_cuda_driver() -> Option<Library> {
     None
 }
 
-fn load_library_names(candidates: &[String]) -> Result<Library, GpuError> {
-    #[cfg(target_os = "linux")]
-    if let Some(resident) = already_resident_cuda_driver() {
-        return Ok(resident);
-    }
+pub(crate) fn load_library_names(candidates: &[String]) -> Result<Library, GpuError> {
     let mut load_faults = Vec::new();
     for candidate in candidates {
         // SAFETY: Library::new runs the library's loader initializer; we
@@ -133,7 +129,16 @@ fn load_failure_is_candidate_absence(
 fn load_static_cuda_driver_library() -> Result<&'static Library, GpuError> {
     static LIBRARY: OnceLock<Result<Library, GpuError>> = OnceLock::new();
     LIBRARY
-        .get_or_init(|| load_library_names(&cuda_library_candidate_names()))
+        .get_or_init(|| {
+            // Only libcuda may be answered by the resident driver. Inside the shared
+            // candidate walk it answered every compute-library probe with libcuda
+            // once libcuda was loaded, so a host without cuBLAS passed admission.
+            #[cfg(target_os = "linux")]
+            if let Some(resident) = already_resident_cuda_driver() {
+                return Ok(resident);
+            }
+            load_library_names(&cuda_library_candidate_names())
+        })
         .as_ref()
         .map_err(Clone::clone)
 }
@@ -146,6 +151,82 @@ pub fn preload_cuda_driver() -> Result<(), GpuError> {
             Ok(())
         })
         .clone()
+}
+
+/// A CUDA library that cudarc opens lazily, the first time one of its entry
+/// points needs it.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CudarcLibrary {
+    Driver,
+    Runtime,
+    Blas,
+    Solver,
+    Nvrtc,
+}
+
+#[cfg(target_os = "linux")]
+impl CudarcLibrary {
+    /// The names cudarc's generated `culib()` expands into candidates for this
+    /// library (cudarc 0.19.8 `src/{driver,runtime,cublas,cusolver,nvrtc}/sys/mod.rs`),
+    /// and the slot that keeps gam's opened handle resident.
+    fn cudarc_names_and_slot(
+        self,
+    ) -> (
+        &'static [&'static str],
+        &'static OnceLock<Result<Library, GpuError>>,
+    ) {
+        static DRIVER: OnceLock<Result<Library, GpuError>> = OnceLock::new();
+        static RUNTIME: OnceLock<Result<Library, GpuError>> = OnceLock::new();
+        static BLAS: OnceLock<Result<Library, GpuError>> = OnceLock::new();
+        static SOLVER: OnceLock<Result<Library, GpuError>> = OnceLock::new();
+        static NVRTC: OnceLock<Result<Library, GpuError>> = OnceLock::new();
+        match self {
+            Self::Driver => (&["cuda", "nvcuda"], &DRIVER),
+            Self::Runtime => (&["cudart"], &RUNTIME),
+            Self::Blas => (&["cublas"], &BLAS),
+            Self::Solver => (&["cusolver"], &SOLVER),
+            Self::Nvrtc => (&["nvrtc"], &NVRTC),
+        }
+    }
+
+    /// cudarc's primary name for this library, for refusal messages.
+    pub(crate) fn name(self) -> &'static str {
+        self.cudarc_names_and_slot().0[0]
+    }
+}
+
+/// Open `library` the way cudarc's lazy loader will, returning a typed error
+/// where cudarc would panic.
+///
+/// cudarc's `culib()` tries `libloading::Library::new` on each
+/// `get_lib_name_candidates` name in order and calls `panic_no_lib_found` when
+/// none opens (cudarc 0.19.8 `src/driver/sys/mod.rs:16119`). Nothing recovers
+/// that panic in a `panic = "abort"` build, so every cudarc call that can reach
+/// the loader must pass this walk first (#2972). The walk tries the same names in
+/// the same order and keeps the opened handle resident, so cudarc's own walk
+/// opens that same library and nothing else is mapped. gam's wider candidate
+/// list in [`preload_cuda_driver`] must not stand in for it before cudarc's
+/// primary context exists: opening that list first left cuBLAS/cuSOLVER handles
+/// NOT_INITIALIZED on a T4 (#1017, cf746561f8).
+///
+/// `get_lib_name_candidates` is compiled because cudarc's build script turns
+/// `fallback-dynamic-loading` into `dynamic-loading`, which is also the only mode
+/// whose loader can panic.
+#[cfg(target_os = "linux")]
+pub(crate) fn require_cudarc_library(library: CudarcLibrary) -> Result<(), GpuError> {
+    let (names, slot) = library.cudarc_names_and_slot();
+    let opened = slot.get_or_init(|| {
+        let candidates: Vec<String> = names
+            .iter()
+            .flat_map(|name| cudarc::get_lib_name_candidates(name))
+            .collect();
+        load_library_names(&candidates)
+    });
+    match opened {
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.clone()),
+    }
 }
 
 #[cfg(test)]
@@ -255,7 +336,8 @@ fn preload_cuda_userspace_libraries() -> Result<(), String> {
 ///
 /// `GpuRuntime::probe()` calls this for every compute library it depends on;
 /// failure retains the exact stack-selection or loader error in the typed GPU
-/// refusal and keeps cudarc's panic completely off the call path.
+/// refusal. What keeps cudarc's loader panic off the call path is the probe's
+/// separate walk over cudarc's own names (`require_cudarc_library`).
 pub fn require_cuda_compute_library(stem: &str) -> Result<(), String> {
     // Cache the probe per stem and KEEP the loaded handle alive for the process
     // lifetime. Dropping the `Library` here dlclose's it; that dlopen+dlclose
