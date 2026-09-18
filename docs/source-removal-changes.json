@@ -567,5 +567,43 @@
     ],
     "reason": "#2469: the function-local const CONTEXT inside response_frechet_mean held the refusal context string. The descent moves out into karcher_descent, and both functions need the string, so it becomes the module const FRECHET_MEAN_CONTEXT with the same value. Every use is rewritten to it.",
     "evidence": "At base 90a88caa111aeb60d43c2617afeb2457cb942af2, git grep -n -w CONTEXT in crates/gam-geometry/src/response_geometry.rs finds the declaration at :850 and its three uses at :942, :1017 and :1031, all inside response_frechet_mean. The other production occurrences the guard counts are other files' own CONTEXT items. This commit rewrites the three uses to FRECHET_MEAN_CONTEXT, declared once at module scope with the identical string. Gate job 1259190 on gx4 (base 90a88caa11, exact tree f3f227d645, patch md5 071dcd51): workspace --all-targets check RC 0, cargo check -p gam-pyffi --all-targets RC 0, cargo test -p gam-geometry 284 + 1 passed including karcher_descent_below_its_rounding_floor_refuses_by_stall, public_api_census.py RC 0, and source_removal_guard.py listed exactly this identity."
+  },
+  {
+    "items": [
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:const:ALL",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:const:HIDDEN",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:const:READ_IN_COMPONENTS",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:const:ROWS",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:const:WIDTH",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:const:WRITE_OUT_COMPONENTS",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:enum:MlpBindingError",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:enum:MlpMaskError",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:enum:MlpParameter",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:all_on_or_components",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:apply_linear",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:bitwise_equal",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:bound_parameter",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:execute_program",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:fmt",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:from",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:from_slot",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:mask_assignment",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:mask_family",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:name",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:positions",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:program",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:random_block",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:slot",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:the_all_on_program_runs_the_native_tensors_and_a_masked_one_runs_the_factors",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:the_binding_applies_each_tensor_in_its_orientation_and_refuses_what_the_block_does_not_hold",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:the_mechanism_program_executes_the_component_block_bit_for_bit",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:uniform",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:uniform_vector",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:fn:vector",
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs:type:Error"
+    ],
+    "reason": "#2951 P5, lead gam-dd's cycle-break ruling: a pure move, with no behaviour change. 76eb14931f put ComponentMlp's mechanism program in rewrite.rs, which made rewrite.rs import program.rs and lift.rs in production. That closed the module cycle program -> gated_rewrite -> rewrite -> program and widened the drift closure of every module that reaches rewrite. MlpParameter, MlpMaskError, MlpBindingError, ComponentMlp::program and mask_assignment, bound_parameter, and impl ParameterSource for ComponentMlp (with its fmt/from/Error/apply_linear/vector members) move to the new downstream module parameter_decomposition/rewrite_program.rs. Their three tests and test helpers (all_on_or_components, positions, execute_program) move with them. The seeded fixture those tests share with rewrite's own tests (WIDTH, HIDDEN, READ_IN_COMPONENTS, WRITE_OUT_COMPONENTS, ROWS, uniform, uniform_vector, random_block, mask_family, bitwise_equal) moves once, unchanged, to test_support::component_mlp, and both test modules import it, so it is not copied. rewrite.rs keeps the rewrite, the NativeMlp views and a pub(super) check.",
+    "evidence": "source_removal_guard.py without this entry, on object-only probe commit 2496d95fcc (base 5f8f308055 + move patch md5 43544105, tree 16b027a347) through the dx2 lane object store with a5venv python3.12, blocked exactly these 31 identities: production_occurrences 0 for every renamed pub item, the fixture and program tests test_scoped, and fmt, from, vector, apply_linear and Error trait members whose names occur elsewhere. git grep -l -w at cd4e4d3662be44e5bfa4e8f3e0047b1941cf3aa8 finds MlpParameter, MlpMaskError, MlpBindingError, mask_assignment, from_slot, bound_parameter, execute_program and all_on_or_components only in crates/gam-sae/src/parameter_decomposition/rewrite.rs, so no call site changes. This commit redeclares every item, in rewrite_program.rs or test_support.rs.",
+    "base": "19143a151111c307d64fc49a3f99347306c416c3"
   }
 ]

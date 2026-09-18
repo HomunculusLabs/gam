@@ -4293,5 +4293,17 @@
     },
     "reason": "#2502: replaced by stored_span and stored_spans, which return each block's inverse Gram with tr(UU^T) and the Frobenius norm of the inverse, so the span coordinates' rounding band carries the stored frame's conditioning, and which refuse by name a nonzero frame its f32 storage cannot resolve.",
     "evidence": "Replacement: stored_spans and StoredSpans::coordinate_rounding in crates/gam-sae/src/sparse_dict/block.rs. git grep -n stored_span_inverse_gram at db6a3680d8 finds 22 lines, all in crates/gam-sae/src/sparse_dict, each rewritten in this commit. Gate gx1 job 1260605 at db6a3680d8: public_api_census refused exactly these two removals before this entry."
+  },
+  {
+    "removed": {
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs::from_slot": 1,
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs::mask_assignment": 1,
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs::name": 1,
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs::program": 1,
+      "crates/gam-sae/src/parameter_decomposition/rewrite.rs::slot": 1
+    },
+    "reason": "#2951 P5, cycle-break pure move (lead gam-dd): MlpParameter::{slot, from_slot, name}, ComponentMlp::program and ComponentMlp::mask_assignment move unchanged from rewrite.rs to the new downstream module parameter_decomposition/rewrite_program.rs, so rewrite.rs no longer imports program.rs.",
+    "evidence": "public_api_census.py without this entry, on object-only probe commit 2496d95fcc (base 5f8f308055 + move patch md5 43544105) through the dx2 lane object store, refused exactly these five removals (all five reappear in rewrite_program.rs). git grep -l -w at cd4e4d3662be44e5bfa4e8f3e0047b1941cf3aa8 finds mask_assignment and from_slot only in rewrite.rs; ComponentMlp::program is declared at rewrite.rs:823 and called only from rewrite.rs's tests.",
+    "base": "19143a151111c307d64fc49a3f99347306c416c3"
   }
 ]

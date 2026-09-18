@@ -148,6 +148,9 @@ pub mod program;
 // Exact component-coordinate MLP program under masks.
 pub mod rewrite;
 
+// The component MLP block as a mechanism program, bound to its own tensors.
+pub mod rewrite_program;
+
 // Exact initial decomposition from native tensors through rank-revealing reads.
 pub mod seed;
 
