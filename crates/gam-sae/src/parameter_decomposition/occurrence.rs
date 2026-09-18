@@ -177,7 +177,9 @@ impl PositionScope {
 /// whose call made the read and the op that made it, such as `("embed_out", "F.linear")`
 /// for a tied unembedding read outside any module call. Discovery reports it beside the
 /// read's use site. A use-specific edit carries it so that a runner can refuse an ordinal
-/// that addresses another read.
+/// that addresses another read. The module is the innermost executing module's qualified
+/// name, which is empty for a read in the root module's own forward. So only the op must
+/// be non-empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadLabel {
     pub module: String,
@@ -296,7 +298,7 @@ impl ParameterEditRecord {
     /// - A use-specific record is one use-site change at its read's ordinal.
     ///
     /// A use-site change names its read by `labels`, which discovery reported for the
-    /// read, so a read without a non-empty module and op is refused. A change carries at
+    /// read, so a read with no label, or with an empty op, is refused. A change carries at
     /// most `min(rows, cols)` terms, so a record with more is refused, not refactored.
     /// The plan carrying the changes must declare, as its forward path, the discovery
     /// pass this registry holds: an ordinal addresses a read only on that path, which is
@@ -347,7 +349,7 @@ impl ParameterEditRecord {
                     }
                     let label = labels
                         .get(use_site)
-                        .filter(|label| !label.module.is_empty() && !label.op.is_empty())
+                        .filter(|label| !label.op.is_empty())
                         .ok_or_else(|| OccurrenceError::UnlabelledRead(use_site.clone()))?;
                     scopes.push(ParameterEditScope::UseSite {
                         ordinal,
@@ -620,7 +622,7 @@ pub enum OccurrenceError {
         rows: usize,
         cols: usize,
     },
-    /// Discovery gave no non-empty module and op for a read a use-site change names, so
+    /// Discovery gave no label, or an empty op, for a read a use-site change names, so
     /// a runner could not check that the change's ordinal addresses that read.
     UnlabelledRead(UseSiteId),
 }
@@ -755,7 +757,7 @@ impl fmt::Display for OccurrenceError {
             ),
             Self::UnlabelledRead(use_site) => write!(
                 f,
-                "occurrence: discovery gave no module and op for read {}, which a use-site parameter edit must name",
+                "occurrence: discovery gave no label, or an empty op, for read {}, which a use-site parameter edit must name",
                 use_site.0
             ),
         }
@@ -1812,8 +1814,28 @@ mod tests {
         assert_eq!(cached_plan.experiments()[0].clean_pass(), CleanPass::SameBatch);
         assert_eq!(cached_plan.experiments()[0].edited_positions(), vec![3, 4, 5]);
 
-        // A read discovery did not label, or labelled with an empty op, is refused.
+        // The root module's name is empty, so a read in its own forward, such as a tied
+        // head applied through F.linear, is named by its op alone.
         let use_specific = record(EditScope::UseSite(uses[1].clone()), PositionScope::every());
+        let mut in_root = labels.clone();
+        in_root.insert(
+            uses[1].clone(),
+            ReadLabel {
+                module: String::new(),
+                op: "F.linear".to_string(),
+            },
+        );
+        assert_eq!(
+            use_specific.intervention_changes(&registry, &in_root),
+            Ok(vec![carried(ParameterEditScope::UseSite {
+                ordinal: 1,
+                read_module: String::new(),
+                read_op: "F.linear".to_string(),
+                positions: None,
+            })])
+        );
+
+        // A read discovery did not label, or labelled with an empty op, is refused.
         assert_eq!(
             use_specific.intervention_changes(&registry, &BTreeMap::new()),
             Err(OccurrenceError::UnlabelledRead(uses[1].clone()))
