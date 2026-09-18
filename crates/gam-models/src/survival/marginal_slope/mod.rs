@@ -140,6 +140,8 @@ mod follow_up_domain_tests;
 mod generated_regressor;
 mod hessian;
 mod intercept;
+#[cfg(test)]
+mod jacobian_tile_tests;
 mod joint_eval;
 mod joint_latent_law;
 mod joint_workspace;
