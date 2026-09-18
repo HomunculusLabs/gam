@@ -14,6 +14,9 @@
 //! - The well again, where the objective refuses to re-evaluate the checkpoint that beats the
 //!   flat top: the flat top is still declined on the checkpoint's stored value. The fit refuses
 //!   with `DominanceUnresolved`, unless a later plan attempt certifies below the checkpoint.
+//! - The well where a search cannot restart from a stored state: a continuation that certifies
+//!   the flat top it was started to replace, or a later plan attempt that certifies it again,
+//!   declines it on the state it started from instead of publishing it.
 
 use super::*;
 use gam_problem::DominanceRefusalKind;
@@ -722,5 +725,314 @@ fn a_later_attempt_that_certifies_below_the_refused_checkpoint_publishes_2953() 
         ),
         "the BFGS attempt must have declined on the checkpoint it could not re-evaluate: {}",
         record.continuation
+    );
+}
+
+// The continuation fixture: the re-entry well, where a search cannot restart from a stored state,
+// under a shallow bowl centred at the neutral seed, so the flat top is a genuine local minimum that
+// every certificate accepts. The objective refuses once, as an infeasible trial, a derivative
+// evaluation at a point it evaluated before its latest reset; value-only evaluations always price.
+// So the dominance re-evaluation of the checkpoint prices it, and the continuation's first step from
+// that checkpoint is refused. The continuation's cascade then certifies the bowl's minimum: the very
+// optimum it was started to replace. Below `SECOND_ORDER_EDGE` every second-order evaluation is
+// refused as well, so an ARC attempt cannot search the well either.
+
+/// The bowl's curvature: small against the well's, so the well's centre stays far below the bowl's
+/// minimum, and positive, so the bowl's minimum certifies at every order.
+const BOWL_CURVATURE: f64 = 1.0e-3;
+const SECOND_ORDER_EDGE: f64 = -1.0;
+const SECOND_ORDER_MARKER: &str =
+    "the #2953 continuation fixture refuses a second-order evaluation inside the well";
+
+fn bowl_value(x: f64) -> f64 {
+    well_value(x) + 0.5 * BOWL_CURVATURE * x * x
+}
+
+fn bowl_derivative(x: f64) -> f64 {
+    well_derivative(x) + BOWL_CURVATURE * x
+}
+
+fn bowl_curvature(x: f64) -> f64 {
+    well_curvature(x) + BOWL_CURVATURE
+}
+
+struct ContinuationState {
+    reentry: ReentryState,
+    refuse_second_order: bool,
+    second_order_refusals: Arc<AtomicUsize>,
+}
+
+fn second_order_refusal(state: &ContinuationState, rho: &Array1<f64>) -> Result<(), EstimationError> {
+    if state.refuse_second_order && rho[0] < SECOND_ORDER_EDGE {
+        state.second_order_refusals.fetch_add(1, Ordering::Relaxed);
+        return Err(EstimationError::TrialPointRefused {
+            reason: SECOND_ORDER_MARKER.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn bowl_eval(rho: &Array1<f64>, hessian: HessianValue) -> OuterEval {
+    OuterEval {
+        cost: bowl_value(rho[0]),
+        gradient: array![bowl_derivative(rho[0])],
+        hessian,
+        inner_beta_hint: None,
+    }
+}
+
+fn well_eval(rho: &Array1<f64>, hessian: HessianValue) -> OuterEval {
+    OuterEval {
+        cost: well_value(rho[0]),
+        gradient: array![well_derivative(rho[0])],
+        hessian,
+        inner_beta_hint: None,
+    }
+}
+
+macro_rules! continuation_objective {
+    ($problem:expr, $refusals_left:expr, $refuse_second_order:expr, $reentry_refusals:expr,
+     $second_order_refusals:expr) => {
+        $problem.build_objective_with_eval_order(
+            ContinuationState {
+                reentry: ReentryState {
+                    earlier: Vec::new(),
+                    since_reset: Vec::new(),
+                    refusals_left: $refusals_left,
+                    refusals: $reentry_refusals,
+                },
+                refuse_second_order: $refuse_second_order,
+                second_order_refusals: $second_order_refusals,
+            },
+            |state: &mut ContinuationState, rho: &Array1<f64>| {
+                state.reentry.since_reset.push(rho.clone());
+                Ok(bowl_value(rho[0]))
+            },
+            |state: &mut ContinuationState, rho: &Array1<f64>| {
+                second_order_refusal(state, rho)?;
+                reentry_refusal(&mut state.reentry, rho)?;
+                Ok(bowl_eval(rho, HessianValue::Dense(array![[bowl_curvature(rho[0])]])))
+            },
+            |state: &mut ContinuationState, rho: &Array1<f64>, order: OuterEvalOrder| {
+                match order {
+                    OuterEvalOrder::Value => state.reentry.since_reset.push(rho.clone()),
+                    OuterEvalOrder::ValueAndGradient => reentry_refusal(&mut state.reentry, rho)?,
+                    OuterEvalOrder::ValueGradientHessian => {
+                        second_order_refusal(state, rho)?;
+                        reentry_refusal(&mut state.reentry, rho)?;
+                    }
+                }
+                Ok(bowl_eval(
+                    rho,
+                    match order {
+                        OuterEvalOrder::ValueGradientHessian => {
+                            HessianValue::Dense(array![[bowl_curvature(rho[0])]])
+                        }
+                        OuterEvalOrder::Value | OuterEvalOrder::ValueAndGradient => {
+                            HessianValue::Unavailable
+                        }
+                    },
+                ))
+            },
+            Some(|state: &mut ContinuationState| {
+                let since_reset = std::mem::take(&mut state.reentry.since_reset);
+                state.reentry.earlier.extend(since_reset);
+            }),
+            None::<fn(&mut ContinuationState, &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+        )
+    };
+}
+
+/// The iterations an unbounded BFGS search of the bowl-and-well takes to certify the well's centre
+/// from inside its core, with nothing refused.
+fn continuation_calibration() -> Result<usize, EstimationError> {
+    let label = "continuation calibration #2953";
+    let (_cache_dir, problem) = reentry_problem(200, true, FallbackPolicy::Disabled, label);
+    let mut objective = continuation_objective!(
+        problem,
+        0,
+        false,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0))
+    );
+    Ok(problem.run(&mut objective, label)?.iterations)
+}
+
+struct ContinuationRun {
+    outcome: Result<OuterResult, EstimationError>,
+    reentry_refusals: usize,
+    second_order_refusals: usize,
+}
+
+/// The continuation fixture under a BFGS budget one iteration short of its unbounded search.
+fn run_continuation_fixture(
+    fallback: FallbackPolicy,
+    label: &str,
+) -> Result<ContinuationRun, EstimationError> {
+    let bfgs_iterations = continuation_calibration()?;
+    let reentry_refusals = Arc::new(AtomicUsize::new(0));
+    let second_order_refusals = Arc::new(AtomicUsize::new(0));
+    let (_cache_dir, problem) =
+        reentry_problem(bfgs_iterations.saturating_sub(1).max(1), true, fallback, label);
+    let mut objective = continuation_objective!(
+        problem,
+        1,
+        true,
+        Arc::clone(&reentry_refusals),
+        Arc::clone(&second_order_refusals)
+    );
+    let outcome = problem.run(&mut objective, label);
+    Ok(ContinuationRun {
+        outcome,
+        reentry_refusals: reentry_refusals.load(Ordering::Relaxed),
+        second_order_refusals: second_order_refusals.load(Ordering::Relaxed),
+    })
+}
+
+#[test]
+fn a_continuation_cannot_publish_the_optimum_it_was_started_to_replace_2953() {
+    let bfgs_iterations = continuation_calibration()
+        .expect("an unbounded BFGS search of the well from inside its core certifies its centre");
+    assert!(
+        bfgs_iterations >= 2,
+        "the BFGS search must take at least two iterations for a budget to split it; took \
+         {bfgs_iterations}"
+    );
+    let run = run_continuation_fixture(FallbackPolicy::Disabled, "continuation dominance #2953")
+        .expect("the continuation fixture's calibration certifies the well's centre");
+    let error = run.outcome.expect_err(
+        "the continuation re-certified the bowl's minimum it was started to replace, and that \
+         minimum must not publish over the state the continuation started from",
+    );
+    let EstimationError::DominatedCertifiedPlateau {
+        plateau_rho,
+        incumbent_rho,
+        continuation,
+        ..
+    } = error
+    else {
+        panic!("expected the typed dominated-plateau refusal, got {error}");
+    };
+    assert!(
+        plateau_rho[0] > SECOND_ORDER_EDGE,
+        "the declined optimum must be the bowl's minimum, outside the well; rho={plateau_rho:?}"
+    );
+    assert!(
+        (incumbent_rho[0] - CENTER).abs() < WIDTH,
+        "the checkpoint that beat the bowl's minimum must be the capped search's, inside the \
+         well; rho={incumbent_rho:?}"
+    );
+    assert!(
+        continuation.starts_with("declined another certified optimum at objective"),
+        "the continuation must have declined the bowl's minimum it certified again: {continuation}"
+    );
+    assert_eq!(
+        run.reentry_refusals, 1,
+        "the continuation's first step from the checkpoint must have been the one re-entry refusal"
+    );
+}
+
+#[test]
+fn a_later_attempt_cannot_publish_the_optimum_an_earlier_attempt_declined_2953() {
+    let bfgs_iterations = continuation_calibration()
+        .expect("an unbounded BFGS search of the well from inside its core certifies its centre");
+    assert!(
+        bfgs_iterations >= 2,
+        "the BFGS search must take at least two iterations for a budget to split it; took \
+         {bfgs_iterations}"
+    );
+    let run = run_continuation_fixture(FallbackPolicy::Automatic, "cross-attempt dominance #2953")
+        .expect("the continuation fixture's calibration certifies the well's centre");
+    let error = run.outcome.expect_err(
+        "the bowl's minimum that the BFGS attempt declined for a state in the well must not \
+         publish when the ARC attempt certifies it again",
+    );
+    let EstimationError::DominatedCertifiedPlateau {
+        plateau_rho,
+        incumbent_rho,
+        gap,
+        band,
+        ..
+    } = error
+    else {
+        panic!("expected the typed dominated-plateau refusal, got {error}");
+    };
+    assert!(
+        plateau_rho[0] > SECOND_ORDER_EDGE,
+        "the declined optimum must be the bowl's minimum, outside the well; rho={plateau_rho:?}"
+    );
+    assert!(
+        (incumbent_rho[0] - CENTER).abs() < WIDTH,
+        "the checkpoint that beat the bowl's minimum must be the BFGS attempt's, inside the well; \
+         rho={incumbent_rho:?}"
+    );
+    assert!(
+        band > 0.0 && gap > DEPTH / 2.0 && gap > band,
+        "gap {gap:e} against band {band:e}"
+    );
+    assert_eq!(
+        run.reentry_refusals, 1,
+        "the BFGS continuation's first step must have been the one re-entry refusal"
+    );
+    assert!(
+        run.second_order_refusals > 0,
+        "the ARC attempt's second-order evaluations inside the well must have been refused"
+    );
+}
+
+/// A carried checkpoint is compared at the current criterion's value, not at the value an earlier
+/// attempt stored. The carried state claims a stored value twice the well's depth below the flat
+/// top, as a criterion another attempt priced differently would. Under this attempt's criterion it
+/// is the flat top, well above the centre this attempt certifies, so the centre publishes. The
+/// objective is evaluated at the carried ρ exactly once: the re-evaluation that priced it.
+#[test]
+fn a_carried_checkpoint_is_repriced_under_the_current_criterion_before_it_declines_anything_2953() {
+    let label = "carried checkpoint repriced #2953";
+    let (_cache_dir, problem) = reentry_problem(200, true, FallbackPolicy::Disabled, label);
+    let carried_rho = array![0.0];
+    let evaluations_at_carried_rho = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&evaluations_at_carried_rho);
+    let count_at = move |rho: &Array1<f64>| {
+        if rho[0] == 0.0 {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    };
+    let count_at_eval = count_at.clone();
+    let mut objective = problem.build_objective(
+        (),
+        move |_: &mut (), rho: &Array1<f64>| {
+            count_at(rho);
+            Ok(well_value(rho[0]))
+        },
+        move |_: &mut (), rho: &Array1<f64>| {
+            count_at_eval(rho);
+            Ok(well_eval(rho, HessianValue::Dense(array![[well_curvature(rho[0])]])))
+        },
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let capability = objective.capability();
+    let the_plan = plan(&capability);
+    let mut config = problem.config();
+    let stale_value = 2.0 * well_value(CENTER);
+    config.carried_checkpoint =
+        Some(OuterResult::new(carried_rho.clone(), stale_value, 0, false, the_plan));
+    let outcome = run_outer_with_plan(&mut objective, &config, label, &capability, &the_plan, true)
+        .expect("the well search from inside its core must run");
+    let PlanRunOutcome::Converged(result) = outcome else {
+        panic!(
+            "the certified centre must publish: under this criterion the carried state is the flat \
+             top, not the stored value {stale_value:e}"
+        );
+    };
+    assert!(
+        (result.rho[0] - CENTER).abs() < 1.0e-3,
+        "the published optimum must be the well's centre; rho={:?}",
+        result.rho
+    );
+    assert_eq!(
+        evaluations_at_carried_rho.load(Ordering::Relaxed),
+        1,
+        "the carried state must be re-evaluated at its own rho exactly once before it is compared"
     );
 }

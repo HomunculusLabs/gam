@@ -736,8 +736,8 @@ pub(crate) fn run_outer_with_plan(
     // The lowest evaluated state that did not certify: refused certifications and
     // budget-exhausted iterates alike. It is the resume checkpoint, and it is
     // what a certified winner is compared against before it publishes (#2596,
-    // #2627).
-    let mut best_checkpoint: Option<OuterResult> = None;
+    // #2627). An earlier plan attempt's lowest state starts it (#2953).
+    let mut best_checkpoint: Option<OuterResult> = config.carried_checkpoint.clone();
     // First confirmed-tail snapped reseed published by a refused certification
     // (#2348 Inc 2b). Consumed once, after the seed cascade, for a single
     // polishing retry pinned at the snapped rail point.
@@ -3208,6 +3208,9 @@ pub(crate) fn run_outer_with_plan(
         };
         if allow_tail_snap_reseed && reevaluated {
             let mut retry_config = config.clone();
+            // The continuation judges what it certifies against the state it starts from, so it
+            // cannot publish the optimum that state just beat (#2953).
+            retry_config.carried_checkpoint = Some(carried_checkpoint_of(&incumbent));
             retry_config.initial_rho = Some(incumbent.rho.clone());
             retry_config.screen_initial_rho = false;
             retry_config.seed_config.max_seeds = 1;

@@ -148,6 +148,16 @@ pub(crate) struct OuterConfig {
     /// cold-entry-leg refusal. Empty on every non-resume path, so the ordinary
     /// cascade is unchanged.
     pub(crate) previously_refused_seed_points: Vec<Array1<f64>>,
+    /// The lowest state an earlier plan attempt of this search evaluated: that attempt's
+    /// resume checkpoint (#2953).
+    ///
+    /// Set only by the plan loop, which hands its best checkpoint to the next attempt with its
+    /// iteration count zeroed (the loop has already counted that work). The plan runner starts
+    /// from it as its own lowest evaluated state, so a candidate the next attempt certifies is
+    /// judged against it before it publishes (#2596, #2627), exactly as a state of its own search
+    /// would be. It is in the runner's own coordinate order, since the plan loop runs inside
+    /// the canonical frame. `None` on the first attempt and on every path outside the plan loop.
+    pub(crate) carried_checkpoint: Option<OuterResult>,
     pub(crate) initial_inner_seed: Option<BoundInnerSeed>,
     pub(crate) fallback_policy: FallbackPolicy,
     pub(crate) screening_cap: Option<Arc<AtomicUsize>>,
@@ -343,6 +353,7 @@ impl Default for OuterConfig {
             initial_rho: None,
             initial_rho_candidates: Vec::new(),
             previously_refused_seed_points: Vec::new(),
+            carried_checkpoint: None,
             initial_inner_seed: None,
             fallback_policy: FallbackPolicy::Automatic,
             screening_cap: None,
@@ -788,6 +799,7 @@ impl OuterProblem {
             initial_rho: self.initial_rho.clone(),
             initial_rho_candidates: self.initial_rho_candidates.clone(),
             previously_refused_seed_points: Vec::new(),
+            carried_checkpoint: None,
             initial_inner_seed: None,
             fallback_policy: self.fallback_policy,
             screening_cap: self.screening_cap.clone(),
@@ -1268,6 +1280,14 @@ pub struct DominatedPlateauRecord {
     pub band: f64,
     /// How the search from that state ended.
     pub continuation: DominanceContinuationStop,
+}
+
+/// A checkpoint as a later search carries it: the same state, with its iteration count
+/// zeroed because the search that produced it has already counted that work (#2953).
+pub(crate) fn carried_checkpoint_of(checkpoint: &OuterResult) -> OuterResult {
+    let mut carried = checkpoint.clone();
+    carried.iterations = 0;
+    carried
 }
 
 /// Of two declined optima, the one a refusal reports: the lower (#2953).
@@ -8264,6 +8284,11 @@ pub(crate) fn run_outer_uncertified(
         obj.reset();
 
         let mut attempt_config = config.clone();
+        // The lowest state an earlier attempt evaluated is this attempt's first checkpoint, so a
+        // candidate this attempt certifies above it is declined as one its own search beat
+        // would be. Otherwise this attempt could publish the optimum an earlier attempt declined
+        // (#2953).
+        attempt_config.carried_checkpoint = best_checkpoint.as_ref().map(carried_checkpoint_of);
         if let Some(checkpoint) = fixed_point_continuation.take() {
             if !matches!(the_plan.solver, Solver::Bfgs) {
                 return Err(EstimationError::RemlOptimizationFailed(format!(
