@@ -1367,38 +1367,55 @@ pub(crate) fn all_axes_symmetric_tensor_pullback<const P: usize, R: RowKernel<P>
                         expected: (end - start, P * p),
                     });
                 }
+                // Row-major slices and one pass per output entry: each sum runs over
+                // its primaries in index order from zero, as a zero-filled target
+                // accumulated one primary at a time would, with no per-segment view
+                // set-up in the inner loops.
+                let jacobian = jacobian.as_standard_layout();
+                let jacobian_flat = jacobian
+                    .as_slice()
+                    .expect("a standard-layout J·I tile is contiguous");
+                let weights_flat = weights
+                    .as_slice_mut()
+                    .expect("the owned weight buffer is contiguous");
+                let stacked_flat = stacked
+                    .as_slice_mut()
+                    .expect("the owned stacked-row buffer is contiguous");
                 for local in 0..end - start {
-                    let row = jacobian.row(local);
+                    let row = &jacobian_flat[local * P * p..][..P * p];
                     let tensor = &tensors[start + local];
+                    let primary_rows: [&[f64]; P] =
+                        std::array::from_fn(|primary| &row[primary * p..][..p]);
                     for beta in 0..P {
                         for gamma in 0..P {
                             let target = &mut contracted[(beta * P + gamma) * p..][..p];
-                            target.fill(0.0);
-                            for alpha in 0..P {
-                                let t = tensor[alpha][beta][gamma];
-                                let j_alpha = row.slice(s![alpha * p..(alpha + 1) * p]);
-                                for (value, &jacobian_entry) in target.iter_mut().zip(j_alpha) {
-                                    *value += t * jacobian_entry;
+                            for (a, value) in target.iter_mut().enumerate() {
+                                let mut sum = 0.0;
+                                for alpha in 0..P {
+                                    sum += tensor[alpha][beta][gamma] * primary_rows[alpha][a];
                                 }
+                                *value = sum;
                             }
                         }
                     }
                     for gamma in 0..P {
                         let stacked_row = local * P + gamma;
-                        stacked
-                            .row_mut(stacked_row)
-                            .assign(&row.slice(s![gamma * p..(gamma + 1) * p]));
-                        let mut weight_row = weights.row_mut(stacked_row);
+                        stacked_flat[stacked_row * p..][..p].copy_from_slice(primary_rows[gamma]);
+                        let weight_row = &mut weights_flat[stacked_row * pairs..][..pairs];
                         for a in 0..p {
-                            let base = pair_offset(a);
-                            let mut target = weight_row.slice_mut(s![base..base + p - a]);
-                            target.fill(0.0);
-                            for beta in 0..P {
-                                let v = contracted[(beta * P + gamma) * p + a];
-                                let j_beta = row.slice(s![beta * p + a..(beta + 1) * p]);
-                                target.zip_mut_with(&j_beta, |value, &jacobian_entry| {
-                                    *value += v * jacobian_entry
-                                });
+                            let len = p - a;
+                            let v: [f64; P] =
+                                std::array::from_fn(|beta| contracted[(beta * P + gamma) * p + a]);
+                            let tails: [&[f64]; P] =
+                                std::array::from_fn(|beta| &primary_rows[beta][a..][..len]);
+                            for (offset, value) in
+                                weight_row[pair_offset(a)..][..len].iter_mut().enumerate()
+                            {
+                                let mut sum = 0.0;
+                                for beta in 0..P {
+                                    sum += v[beta] * tails[beta][offset];
+                                }
+                                *value = sum;
                             }
                         }
                     }
