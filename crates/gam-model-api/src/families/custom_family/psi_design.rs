@@ -4,7 +4,9 @@
 //! the ψ design/second-design actions and linear-map refs, the joint ψ operator,
 //! and the exact-Newton joint-ψ term carriers + workspace traits.
 
-use crate::families::custom_family::family_trait::ExactNewtonJointGradientEvaluation;
+use crate::families::custom_family::family_trait::{
+    ExactNewtonJointGradientEvaluation, GradientAccumulation,
+};
 use gam_problem::{CustomFamilyError, DenseMatrixHyperOperator, EvalMode, HyperOperator};
 use ndarray::{Array1, Array2};
 use std::sync::Arc;
@@ -122,6 +124,15 @@ pub trait ExactNewtonJointHessianWorkspace: Send + Sync {
     fn joint_gradient_evaluation(
         &self,
     ) -> Result<Option<ExactNewtonJointGradientEvaluation>, String> {
+        Ok(None)
+    }
+
+    /// Return the absolute row summands behind [`Self::joint_gradient_evaluation`]'s
+    /// gradient, for the rounding band of that sum (#2976).
+    ///
+    /// `Ok(None)` means the workspace does not measure the terms its gradient sums;
+    /// `Err` reports evaluation failure.
+    fn joint_gradient_accumulation(&self) -> Result<Option<GradientAccumulation>, String> {
         Ok(None)
     }
 

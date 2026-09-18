@@ -98,6 +98,20 @@ pub struct ExactNewtonJointGradientEvaluation {
     pub gradient: Array1<f64>,
 }
 
+/// The absolute row summands behind a workspace's joint gradient (#2976).
+///
+/// A gradient summed from rows carries the rounding of that sum, which scales with
+/// the summands' magnitudes and not with the assembled result: near a mode each
+/// row's term is `O(1)` while their sum is small.
+pub struct GradientAccumulation {
+    /// The sequential depth of the floating-point reduction that sums the terms:
+    /// the `m` of the `γ_m` that bands the sum.
+    pub accumulation_depth: usize,
+    /// `Σ |terms|` per coordinate in flattened coefficient-block order: every
+    /// product the reduction adds into that coordinate, in absolute value.
+    pub absolute_sums: Array1<f64>,
+}
+
 /// Batched per-θ_j contributions to the analytic outer gradient.
 ///
 /// Used by [`CustomFamily::batched_outer_gradient_terms`] to amortize the

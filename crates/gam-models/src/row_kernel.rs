@@ -18,7 +18,7 @@
 //! derivatives — is then generic over any `RowKernel<K>`.
 
 use crate::custom_family::{
-    ExactNewtonJointGradientEvaluation, ExactNewtonJointHessianWorkspace,
+    ExactNewtonJointGradientEvaluation, ExactNewtonJointHessianWorkspace, GradientAccumulation,
     JointHessianSourcePreference, MaterializationIntent,
 };
 use crate::util::loop_progress::LoopProgress;
@@ -983,6 +983,52 @@ pub fn row_kernel_gradient<const K: usize>(
         },
     );
     Array1::from_vec(out)
+}
+
+/// The absolute summands behind [`row_kernel_gradient`], and the depth of the
+/// reduction that sums them (#2976).
+///
+/// `absolute_sums[j]` is `Σ_i Σ_a |(Jᵢᵀ e_a)_j · w_i g_{i,a}|`: every product the
+/// adjoint action adds into coordinate `j`, in absolute value, so cancellation
+/// inside a row does not hide its rounding. The gradient's reduction folds each
+/// `ARROW_ROW_CHUNK` tile sequentially, adding up to `K` products per row into a
+/// coordinate, and then combines the tile partials in tile order, so its sequential
+/// depth is at most `K · min(rows, ARROW_ROW_CHUNK) + tiles`.
+pub fn row_kernel_gradient_accumulation<const K: usize>(
+    kern: &(impl RowKernel<K> + ?Sized),
+    cache: &RowKernelCache<K>,
+    rows: &RowSet,
+) -> GradientAccumulation {
+    let p = cache.p;
+    let (absolute_sums, _scratch, row_count) = rows.par_reduce_fold(
+        cache.n,
+        || (vec![0.0_f64; p], vec![0.0_f64; p], 0_usize),
+        |(mut acc, mut product, count), row, w| {
+            let g = &cache.gradients[row];
+            for a in 0..K {
+                let mut axis = [0.0_f64; K];
+                axis[a] = w * g[a];
+                product.iter_mut().for_each(|value| *value = 0.0);
+                kern.jacobian_transpose_action(row, &axis, &mut product);
+                for (total, value) in acc.iter_mut().zip(&product) {
+                    *total += value.abs();
+                }
+            }
+            (acc, product, count + 1)
+        },
+        |(mut a, scratch, a_count), (b, _, b_count)| {
+            for (total, value) in a.iter_mut().zip(&b) {
+                *total += value;
+            }
+            (a, scratch, a_count + b_count)
+        },
+    );
+    let tile = row_count.min(gam_problem::outer_subsample::ARROW_ROW_CHUNK);
+    GradientAccumulation {
+        accumulation_depth: K * tile
+            + gam_problem::outer_subsample::arrow_row_chunk_count(row_count),
+        absolute_sums: Array1::from_vec(absolute_sums),
+    }
 }
 
 /// Log-likelihood from cached row kernels: ℓ = -Σ_i w_i · nll_i over `rows`.
@@ -2181,6 +2227,14 @@ impl<const K: usize, T: RowKernel<K> + 'static> ExactNewtonJointHessianWorkspace
         }))
     }
 
+    fn joint_gradient_accumulation(&self) -> Result<Option<GradientAccumulation>, String> {
+        Ok(Some(row_kernel_gradient_accumulation(
+            &*self.kern,
+            &self.cache,
+            &self.rows,
+        )))
+    }
+
     fn hessian_dense(&self) -> Result<Option<Array2<f64>>, String> {
         // The cached row-kernel state already encodes everything needed to
         // accumulate the dense joint Hessian in one row pass via
@@ -2519,6 +2573,67 @@ mod gram_inner_contraction_tests {
                 diag[j] += acc;
             }
         }
+    }
+
+    #[test]
+    fn gradient_accumulation_sums_each_rows_formed_term_in_absolute_value_2976() {
+        let (n, p) = (64, 8);
+        // The synthetic designs draw every entry from [−0.5, 0), and on this kernel
+        // every product then shares a sign within its coordinate: absolute and
+        // signed sums agreed to rounding (job 1219893). Alternating the design's sign
+        // across rows and columns gives each coordinate products of both signs.
+        let mut kernel = SyntheticKernel::new(n, p, 0x2976);
+        for design in kernel.designs.iter_mut() {
+            for ((row, column), entry) in design.indexed_iter_mut() {
+                if (row + column) % 2 == 0 {
+                    *entry = -*entry;
+                }
+            }
+        }
+        let rows = RowSet::All;
+        let cache = build_row_kernel_cache(&kernel, &rows).expect("row-kernel cache");
+        let gradient = row_kernel_gradient(&kernel, &cache, &rows);
+        let accumulation = row_kernel_gradient_accumulation(&kernel, &cache, &rows);
+        // Independent reference: every product through the four design rows, in
+        // absolute value, summed serially.
+        let mut reference = vec![0.0_f64; p];
+        for row in 0..n {
+            let g = cache.gradients[row];
+            for (j, total) in reference.iter_mut().enumerate() {
+                for (axis, design) in kernel.designs.iter().enumerate() {
+                    *total += (design[[row, j]] * g[axis]).abs();
+                }
+            }
+        }
+        // 64 rows fit one tile: four products per row, then one tile partial.
+        assert_eq!(accumulation.accumulation_depth, 4 * n + 1);
+        for (j, &expected) in reference.iter().enumerate() {
+            // Two orderings of the same non-negative products: each carries at most
+            // its own accumulation band.
+            let gap = (accumulation.absolute_sums[j] - expected).abs();
+            assert!(
+                gap <= 2.0 * gam_linalg::roundoff::accumulation_band(4 * n, expected),
+                "coordinate {j}: accumulation {} against the serial reference {expected} \
+                 (gap {gap:.3e})",
+                accumulation.absolute_sums[j]
+            );
+        }
+        // The rows cancel, so the absolute sum exceeds the assembled gradient's
+        // magnitude: a signed sum would equal it.
+        assert!(
+            (0..p).any(|j| {
+                accumulation.absolute_sums[j] - gradient[j].abs()
+                    > gam_linalg::roundoff::accumulation_band(n, accumulation.absolute_sums[j])
+            }),
+            "no coordinate's absolute sum exceeds its assembled gradient"
+        );
+        let workspace = RowKernelHessianWorkspace::new(kernel).expect("workspace");
+        let published = workspace
+            .joint_gradient_accumulation()
+            .expect("the row-kernel workspace measures its summands")
+            .expect("the row-kernel workspace publishes an accumulation");
+        assert_eq!(published.accumulation_depth, accumulation.accumulation_depth);
+        assert_eq!(published.absolute_sums, accumulation.absolute_sums);
     }
 
     #[test]

@@ -28,28 +28,50 @@ fn joint_stationarity_rounding_band(
     data_gradient_inf: f64,
     total_n: usize,
 ) -> f64 {
+    let (local_bands, joint_bands) = penalty_rounding_bands(s_lambdas, block_betas, joint_bundle);
+    let largest = |bands: &[f64]| bands.iter().copied().fold(0.0_f64, f64::max);
+    let penalty_band = largest(&local_bands) + largest(&joint_bands);
+    let data_band =
+        gam_linalg::roundoff::accumulation_growth(total_n.max(1)) * data_gradient_inf.abs();
+    data_band + penalty_band
+}
+
+/// The rounding band of the penalty product `Sβ` per coefficient in flattened
+/// block order, returned as the local penalties' band and the full-width joint
+/// penalty's band.
+///
+/// Each local penalty product accumulates `p_k` terms; each full-width joint
+/// penalty accumulates `p` terms followed by strength scaling and summation
+/// across penalties. Both are charged on their absolute summand magnitudes.
+fn penalty_rounding_bands(
+    s_lambdas: &[Array2<f64>],
+    block_betas: &[&Array1<f64>],
+    joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
+) -> (Vec<f64>, Vec<f64>) {
+    let total_p: usize = block_betas.iter().map(|beta| beta.len()).sum();
     // `accumulation_growth` is Wilkinson's `γ_k = k·u/(1 − k·u)`: the unit
     // roundoff is inside it already (#2668 found the same `γ·u` in P-IRLS).
-    let mut penalty_band = 0.0_f64;
+    let mut local_bands = vec![0.0_f64; total_p];
+    let mut offset = 0usize;
     for (s_lambda, beta) in s_lambdas.iter().zip(block_betas.iter()) {
         let p_k = beta.len();
-        if p_k == 0 || s_lambda.nrows() != p_k || s_lambda.ncols() != p_k {
-            continue;
-        }
-        let growth = gam_linalg::roundoff::accumulation_growth(p_k + 1);
-        for j in 0..p_k {
-            let mut magnitude = 0.0_f64;
-            for l in 0..p_k {
-                magnitude += (s_lambda[[j, l]] * beta[l]).abs();
+        if p_k > 0 && s_lambda.nrows() == p_k && s_lambda.ncols() == p_k {
+            let growth = gam_linalg::roundoff::accumulation_growth(p_k + 1);
+            for j in 0..p_k {
+                let mut magnitude = 0.0_f64;
+                for l in 0..p_k {
+                    magnitude += (s_lambda[[j, l]] * beta[l]).abs();
+                }
+                local_bands[offset + j] = growth * magnitude;
             }
-            penalty_band = penalty_band.max(growth * magnitude);
         }
+        offset += p_k;
     }
+    let mut joint_bands = vec![0.0_f64; total_p];
     if let Some(bundle) = joint_bundle {
         let beta: Vec<f64> = block_betas.iter().flat_map(|b| b.iter().copied()).collect();
-        let mut joint_magnitudes = vec![0.0_f64; beta.len()];
         for (spec, lambda) in bundle.specs().iter().zip(bundle.lambdas()) {
-            for (row, magnitude) in joint_magnitudes.iter_mut().enumerate() {
+            for (row, magnitude) in joint_bands.iter_mut().enumerate() {
                 *magnitude += lambda.abs()
                     * spec.matrix.row(row).iter().zip(&beta)
                         .map(|(entry, coefficient)| (entry * coefficient).abs())
@@ -59,11 +81,99 @@ fn joint_stationarity_rounding_band(
         let growth = gam_linalg::roundoff::accumulation_growth(
             beta.len() + bundle.specs().len() + 2,
         );
-        penalty_band += growth * joint_magnitudes.into_iter().fold(0.0_f64, f64::max);
+        joint_bands.iter_mut().for_each(|magnitude| *magnitude *= growth);
     }
-    let data_band =
-        gam_linalg::roundoff::accumulation_growth(total_n.max(1)) * data_gradient_inf.abs();
-    data_band + penalty_band
+    (local_bands, joint_bands)
+}
+
+/// The stationarity residual a returned mode settles on where the workspace
+/// measures the row summands of its gradient (#2976).
+///
+/// Near a mode the assembled gradient is small while every row's term is not, so
+/// `residual_tol`'s band, built on the assembled gradient, sits below what the row
+/// sum resolves. An anchored survival marginal-slope seed at n = 3e5 stalled at
+/// residual 2.98e-11 against a target of 1.03e-11, and 1469 of its 1625 cycles
+/// marked "no model-resolvable descent remains" only for the head to revoke the
+/// mark, until the cycle budget ended the seed.
+///
+/// A computed coordinate `r̂ⱼ = rⱼ + eⱼ` with `|eⱼ| ≤ bⱼ` is what any true residual
+/// within `bⱼ` of it could have produced. So the settlement measures
+/// `r′ⱼ = sign(r̂ⱼ)·(|r̂ⱼ| − bⱼ)₊` through the certificate's own KKT projection, by
+/// handing that projection the gradient that yields `r′`. If the projected `r′`
+/// meets the caller's target, a residual consistent with the arithmetic meets it,
+/// whatever the projection. The band enters per coordinate and never through a
+/// norm, which would let one coordinate settle on another's rounding. `bⱼ` is the
+/// data term `γ_depth · Σ|products|ⱼ` plus the penalty product's band
+/// ([`penalty_rounding_bands`]). It omits each row term's formation and the
+/// Jeffreys score's rounding, so it can only fail to settle a state.
+///
+/// Only a returned-mode settlement reads it, where the Newton decrement is also at
+/// the objective's resolution; every residual-only exit keeps its residual. `None`
+/// means the workspace measures nothing, and the caller keeps its residual.
+fn returned_mode_band_shrunk_residual(
+    workspace: Option<&Arc<dyn ExactNewtonJointHessianWorkspace>>,
+    kkt_gradient: &Array1<f64>,
+    states: &[ParameterBlockState],
+    specs: &[ParameterBlockSpec],
+    options: &BlockwiseFitOptions,
+    s_lambdas: &[Array2<f64>],
+    joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
+    block_constraints: &[Option<ConstraintSet>],
+    block_active_sets: &[Option<Vec<usize>>],
+    joint_lower_bounds: Option<&Array1<f64>>,
+) -> Result<Option<f64>, CustomFamilyError> {
+    let Some(workspace) = workspace else {
+        return Ok(None);
+    };
+    let Some(accumulation) = workspace.joint_gradient_accumulation()? else {
+        return Ok(None);
+    };
+    let total_p = kkt_gradient.len();
+    if accumulation.absolute_sums.len() != total_p {
+        return Err(CustomFamilyError::DimensionMismatch { reason: format!(
+            "joint Newton gradient accumulation has {} coordinates for {total_p} coefficients",
+            accumulation.absolute_sums.len()
+        ) });
+    }
+    if !accumulation.absolute_sums.iter().all(|value| value.is_finite()) {
+        return Err(CustomFamilyError::trial_point(
+            "joint Newton gradient accumulation is not finite at the returned mode".to_string(),
+        ));
+    }
+    let joint_score = joint_penalty_stationarity_score(options, specs, states);
+    let mut residual =
+        exact_newton_joint_stationarity_vector_from_gradient(kkt_gradient, states, specs, s_lambdas)?;
+    if let Some(score) = joint_score.as_ref() {
+        residual += score;
+    }
+    let block_betas: Vec<&Array1<f64>> = states.iter().map(|state| &state.beta).collect();
+    let (local_bands, joint_bands) = penalty_rounding_bands(s_lambdas, &block_betas, joint_bundle);
+    if local_bands.len() != total_p {
+        return Err(CustomFamilyError::DimensionMismatch { reason: format!(
+            "joint Newton penalty rounding bands have {} coordinates for {total_p} coefficients",
+            local_bands.len()
+        ) });
+    }
+    let data_growth = gam_linalg::roundoff::accumulation_growth(accumulation.accumulation_depth);
+    // The projection forms `r = Sβ − g + score`, so the gradient that yields `r′`
+    // is `g + (r̂ − r′)`.
+    let mut shrunk_gradient = kkt_gradient.clone();
+    for j in 0..total_p {
+        let band = data_growth * accumulation.absolute_sums[j] + local_bands[j] + joint_bands[j];
+        let shrunk = (residual[j].abs() - band).max(0.0).copysign(residual[j]);
+        shrunk_gradient[j] += residual[j] - shrunk;
+    }
+    exact_newton_joint_stationarity_inf_norm_from_gradient(
+        &shrunk_gradient,
+        states,
+        specs,
+        s_lambdas,
+        block_constraints,
+        Some(block_active_sets),
+        joint_lower_bounds,
+        joint_score.as_ref(),
+    )
+    .map(Some)
 }
 
 /// The refusal for a returned coefficient point whose fresh exact curvature is
@@ -2756,9 +2866,28 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // decrement alone published modes above their target: event-history
             // `cycles=3/1200` at residual 3.07e-4 against 1.4e-6 (job 1148116).
             // This head's residual and target were computed this cycle at this
-            // state. The constrained head calls the same predicate.
+            // state. The constrained head calls the same predicate. Past its target
+            // the residual is judged shrunk by each coordinate's rounding band,
+            // where the workspace measures its row summands (#2976).
+            let settlement_residual = if current_stationarity_residual > residual_tol {
+                returned_mode_band_shrunk_residual(
+                    hessian_workspace_for_cycle.as_ref(),
+                    head_kkt_gradient.as_ref().unwrap_or(&grad_joint),
+                    &states,
+                    specs,
+                    options,
+                    &s_lambdas,
+                    joint_bundle,
+                    &block_constraints,
+                    &cached_active_sets,
+                    joint_lower_bounds.as_ref(),
+                )?
+                .unwrap_or(current_stationarity_residual)
+            } else {
+                current_stationarity_residual
+            };
             let exact_first_order_certified = returned_mode_settles(
-                current_stationarity_residual,
+                settlement_residual,
                 residual_tol,
                 returned_decrement,
                 returned_weak_decrement,
@@ -2768,7 +2897,8 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 log::info!(
                     "[PIRLS/joint-Newton mode certificate] tentative convergence revoked: \
                      negative_curvature={has_resolvable_negative_curvature}, \
-                     residual={current_stationarity_residual:.3e}/{residual_tol:.3e} \
+                     residual={current_stationarity_residual:.3e} (band-shrunk \
+                     {settlement_residual:.3e})/{residual_tol:.3e} \
                      (relative_stationarity={:.3e} vs inner_tol={inner_tol:.3e}), \
                      decrement={returned_decrement:.3e}, weak={returned_weak_decrement:.3e}, \
                      null_score={returned_null_stationarity:.3e}, correction={step_inf:.3e}/{step_tol:.3e}",
@@ -2843,9 +2973,9 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 }
             } else {
                 log::info!(
-                    "[PIRLS/joint-Newton mode certificate] certified: residual={current_stationarity_residual:.3e}/{residual_tol:.3e}, decrement={returned_decrement:.3e}, weak={returned_weak_decrement:.3e}, null_score={returned_null_stationarity:.3e}, correction={step_inf:.3e}/{step_tol:.3e}"
+                    "[PIRLS/joint-Newton mode certificate] certified: residual={current_stationarity_residual:.3e} (band-shrunk {settlement_residual:.3e})/{residual_tol:.3e}, decrement={returned_decrement:.3e}, weak={returned_weak_decrement:.3e}, null_score={returned_null_stationarity:.3e}, correction={step_inf:.3e}/{step_tol:.3e}"
                 );
-                certified_residual = current_stationarity_residual;
+                certified_residual = settlement_residual;
                 certified_residual_tol = residual_tol;
                 cached_joint_workspace = hessian_workspace_for_cycle.take();
                 cycles_done = cycle;
@@ -4795,7 +4925,29 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     // here cannot short-circuit the gam#979 escape and cannot
                     // spin: the guard's streak starts over. β is back at the head
                     // state, so the mark carries that state's head residual and target.
-                    finish_post_step_convergence!(current_kkt_norm, residual_tol);
+                    // The constrained head settles on this record, so it carries the
+                    // residual band-shrunk where the workspace measures its row
+                    // summands, as the unconstrained head judges it (#2976).
+                    let stall_mark_residual = if joint_constraints.is_some()
+                        && current_kkt_norm > residual_tol
+                    {
+                        returned_mode_band_shrunk_residual(
+                            hessian_workspace_for_cycle.as_ref(),
+                            head_kkt_gradient.as_ref().unwrap_or(&grad_joint),
+                            &states,
+                            specs,
+                            options,
+                            &s_lambdas,
+                            joint_bundle,
+                            &block_constraints,
+                            &cached_active_sets,
+                            joint_lower_bounds.as_ref(),
+                        )?
+                        .unwrap_or(current_kkt_norm)
+                    } else {
+                        current_kkt_norm
+                    };
+                    finish_post_step_convergence!(stall_mark_residual, residual_tol);
                 }
                 let last_math_summary = last_joint_math
                     .as_ref()
@@ -5624,7 +5776,27 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             if residual.is_finite() {
                 min_certified_residual = min_certified_residual.min(residual);
             }
-            finish_post_step_convergence!(residual, residual_tol);
+            // The constrained head settles on this record, so it carries the
+            // residual band-shrunk where the workspace measures its row summands,
+            // as the unconstrained head judges it (#2976).
+            let decrement_mark_residual = if joint_constraints.is_some() && residual > residual_tol {
+                returned_mode_band_shrunk_residual(
+                    cached_joint_workspace.as_ref(),
+                    residual_gradient,
+                    &states,
+                    specs,
+                    options,
+                    &s_lambdas,
+                    joint_bundle,
+                    &block_constraints,
+                    &cached_active_sets,
+                    joint_lower_bounds.as_ref(),
+                )?
+                .unwrap_or(residual)
+            } else {
+                residual
+            };
+            finish_post_step_convergence!(decrement_mark_residual, residual_tol);
         }
 
         // Noise-floor KKT certificate.
