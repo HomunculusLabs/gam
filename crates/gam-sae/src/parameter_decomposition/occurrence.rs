@@ -47,6 +47,7 @@ use std::fmt;
 
 use super::apply::{ApplyError, FactoredEdit};
 use super::field::{CotangentTerm, ParameterCotangent};
+use crate::inference::intervention_shard::{InterventionChange, ParameterEditScope};
 use super::lift::{
     LiftError, TeacherFingerprint, TensorId, TensorRegistry, TieOrientation, UseMap, UseSiteId,
 };
@@ -172,6 +173,17 @@ impl PositionScope {
     }
 }
 
+/// The executing framework's name for one discovered read of a parameter: the module
+/// whose call made the read and the op that made it, such as `("embed_out", "F.linear")`
+/// for a tied unembedding read outside any module call. Discovery reports it beside the
+/// read's use site. A use-specific edit carries it so that a runner can refuse an ordinal
+/// that addresses another read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadLabel {
+    pub module: String,
+    pub op: String,
+}
+
 /// One parameter edit: which uses read it, at which positions, and the change of
 /// the stored tensor, held as its factors in the stored orientation. The fields are
 /// private, so every record has been checked against the registry by
@@ -268,6 +280,99 @@ impl ParameterEditRecord {
                 self.delta.left().to_owned(),
             )?)),
         }
+    }
+
+    /// The record as the declared changes a framework runner applies. Each
+    /// [`InterventionChange::ParameterEdit`] names the storage tensor and carries
+    /// `left · rightᵀ` in the stored orientation, row-major, whatever the tie of the read
+    /// it reaches: the runner edits the stored value, and the read applies its own tie.
+    ///
+    /// - A global record that reaches every position is one [`ParameterEditScope::Global`]
+    ///   change.
+    /// - A global record with declared positions is one [`ParameterEditScope::UseSite`]
+    ///   change per use it reaches, each seen at those positions. A global change reaches
+    ///   every position of the pass, and every use reading the edit at those positions is
+    ///   the same experiment. A key-value cache filled before a global edit is this case.
+    /// - A use-specific record is one use-site change at its read's ordinal.
+    ///
+    /// A use-site change names its read by `labels`, which discovery reported for the
+    /// read, so a read without a non-empty module and op is refused. A change carries at
+    /// most `min(rows, cols)` terms, so a record with more is refused, not refactored.
+    /// The plan carrying the changes must declare, as its forward path, the discovery
+    /// pass this registry holds: an ordinal addresses a read only on that path, which is
+    /// why a registry with another fingerprint is refused.
+    pub fn intervention_changes(
+        &self,
+        registry: &TensorRegistry,
+        labels: &BTreeMap<UseSiteId, ReadLabel>,
+    ) -> Result<Vec<InterventionChange>, OccurrenceError> {
+        let found = registry.teacher_fingerprint();
+        if found != self.registry {
+            return Err(OccurrenceError::RegistryMismatch {
+                record: self.registry,
+                registry: found,
+            });
+        }
+        let (storage, (rows, cols)) = self.scope.storage(registry)?;
+        let rank = self.delta.term_count();
+        if rank > rows.min(cols) {
+            return Err(OccurrenceError::RankExceedsShape {
+                storage,
+                rank,
+                rows,
+                cols,
+            });
+        }
+        let positions = self.positions.positions().map(<[usize]>::to_vec);
+        let scopes = match (&self.scope, positions) {
+            (EditScope::Global(..), None) => vec![ParameterEditScope::Global],
+            (_, positions) => {
+                let affected = self.scope.affected_uses(registry)?;
+                let reads = registry.use_sites_of(&storage).len();
+                let numbered: Vec<UseSiteId> = (0..reads)
+                    .map(|ordinal| UseSiteId::read(&storage, ordinal))
+                    .collect();
+                if let Some(use_site) = affected.iter().find(|use_site| !numbered.contains(use_site)) {
+                    return Err(OccurrenceError::UnnumberedUseSite {
+                        use_site: use_site.clone(),
+                        storage,
+                        reads,
+                    });
+                }
+                // In ordinal order, so one record has one list of changes.
+                let mut scopes = Vec::with_capacity(affected.len());
+                for (ordinal, use_site) in numbered.iter().enumerate() {
+                    if !affected.contains(use_site) {
+                        continue;
+                    }
+                    let label = labels
+                        .get(use_site)
+                        .filter(|label| !label.module.is_empty() && !label.op.is_empty())
+                        .ok_or_else(|| OccurrenceError::UnlabelledRead(use_site.clone()))?;
+                    scopes.push(ParameterEditScope::UseSite {
+                        ordinal,
+                        read_module: label.module.clone(),
+                        read_op: label.op.clone(),
+                        positions: positions.clone(),
+                    });
+                }
+                scopes
+            }
+        };
+        let left: Vec<f64> = self.delta.left().iter().copied().collect();
+        let right: Vec<f64> = self.delta.right().iter().copied().collect();
+        Ok(scopes
+            .into_iter()
+            .map(|scope| InterventionChange::ParameterEdit {
+                parameter: storage.0.clone(),
+                rows,
+                cols,
+                rank,
+                left: left.clone(),
+                right: right.clone(),
+                scope,
+            })
+            .collect())
     }
 }
 
@@ -507,6 +612,17 @@ pub enum OccurrenceError {
     RepeatedSubstitution(UseSiteId),
     /// A use that a record reaches did not read the edited value.
     MissingSubstitution(UseSiteId),
+    /// A declared parameter edit carries at most `min(rows, cols)` terms, and the
+    /// record's delta has `rank`.
+    RankExceedsShape {
+        storage: TensorId,
+        rank: usize,
+        rows: usize,
+        cols: usize,
+    },
+    /// Discovery gave no non-empty module and op for a read a use-site change names, so
+    /// a runner could not check that the change's ordinal addresses that read.
+    UnlabelledRead(UseSiteId),
 }
 
 impl From<LiftError> for OccurrenceError {
@@ -626,6 +742,22 @@ impl fmt::Display for OccurrenceError {
                 "occurrence: use site {} is reached by a record but did not read the edited value",
                 use_site.0
             ),
+            Self::RankExceedsShape {
+                storage,
+                rank,
+                rows,
+                cols,
+            } => write!(
+                f,
+                "occurrence: the edit of storage {} has {rank} terms; a declared parameter edit of a ({rows}, {cols}) tensor carries at most {}",
+                storage.0,
+                (*rows).min(*cols)
+            ),
+            Self::UnlabelledRead(use_site) => write!(
+                f,
+                "occurrence: discovery gave no module and op for read {}, which a use-site parameter edit must name",
+                use_site.0
+            ),
         }
     }
 }
@@ -635,6 +767,10 @@ impl std::error::Error for OccurrenceError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference::intervention_shard::{
+        CleanPass, ExperimentUnit, InterventionExperiment, InterventionExperimentPlan, KlPositions,
+        Readout,
+    };
     use crate::parameter_decomposition::field::FieldCoefficient;
     use gam_linalg::roundoff::accumulation_growth;
     use ndarray::{Array1, Array2, Axis, array};
@@ -1572,6 +1708,176 @@ mod tests {
                 use_site: named,
                 storage: storage.clone(),
                 reads: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn records_become_the_declared_changes_a_runner_applies() {
+        let chain = Chain::rectangular();
+        let (rows, cols) = chain.weight.dim();
+        let (registry, storage, uses) = registry_with_uses(&chain.weight, &TIES);
+        // Rank two, so carrying the factors row-major differs from carrying them
+        // column-major.
+        let delta = FactoredEdit::new(
+            array![[0.3, 1.2], [-0.8, 0.1], [1.5, -0.6]],
+            array![[-0.9, 0.7], [0.45, -0.2]],
+        )
+        .expect("the factors agree on the term count");
+        let record = |scope: EditScope, positions: PositionScope| {
+            ParameterEditRecord::new(&registry, scope, positions, delta.clone())
+                .expect("the record is valid")
+        };
+        let label = |ordinal: usize| ReadLabel {
+            module: format!("layers.{ordinal}"),
+            op: "F.linear".to_string(),
+        };
+        let labels: BTreeMap<UseSiteId, ReadLabel> = uses
+            .iter()
+            .enumerate()
+            .map(|(ordinal, use_site)| (use_site.clone(), label(ordinal)))
+            .collect();
+        let at_read = |ordinal: usize, positions: Option<Vec<usize>>| ParameterEditScope::UseSite {
+            ordinal,
+            read_module: label(ordinal).module,
+            read_op: label(ordinal).op,
+            positions,
+        };
+        // `left` is (rows, rank) and `right` is (cols, rank), both row-major, in the
+        // stored orientation.
+        let carried = |scope: ParameterEditScope| InterventionChange::ParameterEdit {
+            parameter: storage.0.clone(),
+            rows,
+            cols,
+            rank: 2,
+            left: vec![0.3, 1.2, -0.8, 0.1, 1.5, -0.6],
+            right: vec![-0.9, 0.7, 0.45, -0.2],
+            scope,
+        };
+
+        // A global record at every position is one global change and names no read.
+        let global = record(EditScope::Global(storage.clone()), PositionScope::every())
+            .intervention_changes(&registry, &BTreeMap::new())
+            .expect("a global record converts");
+        assert_eq!(global, vec![carried(ParameterEditScope::Global)]);
+
+        // A use-specific record on the transposed read still carries the stored
+        // orientation: the runner edits the stored value, and the read transposes it.
+        let middle = record(
+            EditScope::UseSite(uses[1].clone()),
+            PositionScope::declared(vec![2, 4]).expect("the positions are increasing"),
+        )
+        .intervention_changes(&registry, &labels)
+        .expect("a use-specific record converts");
+        assert_eq!(middle, vec![carried(at_read(1, Some(vec![2, 4])))]);
+
+        // A global edit behind a key-value cache filled up to position 3 reaches every
+        // read at positions 3.. only: one use-site change per read, in ordinal order.
+        let cached = record(
+            EditScope::Global(storage.clone()),
+            PositionScope::declared(vec![3, 4, 5]).expect("the positions are increasing"),
+        )
+        .intervention_changes(&registry, &labels)
+        .expect("a positioned global record converts");
+        assert_eq!(
+            cached,
+            (0..TIES.len())
+                .map(|ordinal| carried(at_read(ordinal, Some(vec![3, 4, 5]))))
+                .collect::<Vec<_>>()
+        );
+
+        // The plan accepts every conversion, and only the global change needs its own
+        // clean forward.
+        let plan = |changes: Vec<InterventionChange>| {
+            InterventionExperimentPlan::new(
+                Vec::new(),
+                Vec::new(),
+                vec![InterventionExperiment {
+                    unit: ExperimentUnit {
+                        group: 0,
+                        sequence: 0,
+                        length: 6,
+                    },
+                    changes,
+                    readouts: vec![Readout::Kl(KlPositions::Declared(vec![5]))],
+                }],
+                0,
+                Some("full-forward:len6".to_string()),
+            )
+            .expect("the plan accepts the converted changes")
+        };
+        assert_eq!(plan(global).experiments()[0].clean_pass(), CleanPass::SeparateForward);
+        assert_eq!(plan(middle).experiments()[0].clean_pass(), CleanPass::SameBatch);
+        let cached_plan = plan(cached);
+        assert_eq!(cached_plan.experiments()[0].clean_pass(), CleanPass::SameBatch);
+        assert_eq!(cached_plan.experiments()[0].edited_positions(), vec![3, 4, 5]);
+
+        // A read discovery did not label, or labelled with an empty op, is refused.
+        let use_specific = record(EditScope::UseSite(uses[1].clone()), PositionScope::every());
+        assert_eq!(
+            use_specific.intervention_changes(&registry, &BTreeMap::new()),
+            Err(OccurrenceError::UnlabelledRead(uses[1].clone()))
+        );
+        let mut unnamed_op = labels.clone();
+        unnamed_op.insert(
+            uses[1].clone(),
+            ReadLabel {
+                module: "layers.1".to_string(),
+                op: String::new(),
+            },
+        );
+        assert_eq!(
+            use_specific.intervention_changes(&registry, &unnamed_op),
+            Err(OccurrenceError::UnlabelledRead(uses[1].clone()))
+        );
+        let mut two_labels = labels.clone();
+        two_labels.remove(&uses[2]);
+        assert_eq!(
+            record(
+                EditScope::Global(storage.clone()),
+                PositionScope::declared(vec![3]).expect("one position is increasing"),
+            )
+            .intervention_changes(&registry, &two_labels),
+            Err(OccurrenceError::UnlabelledRead(uses[2].clone()))
+        );
+
+        // Three terms on a 3x2 tensor exceed what a declared change carries.
+        let three_terms = ParameterEditRecord::new(
+            &registry,
+            EditScope::Global(storage.clone()),
+            PositionScope::every(),
+            FactoredEdit::new(
+                array![[0.3, 1.2, 0.5], [-0.8, 0.1, -0.4], [1.5, -0.6, 0.2]],
+                array![[-0.9, 0.7, 0.3], [0.45, -0.2, 0.6]],
+            )
+            .expect("the factors agree on the term count"),
+        )
+        .expect("the record is valid");
+        assert_eq!(
+            three_terms.intervention_changes(&registry, &labels),
+            Err(OccurrenceError::RankExceedsShape {
+                storage: storage.clone(),
+                rank: 3,
+                rows,
+                cols,
+            })
+        );
+
+        // An ordinal addresses a read only on the discovery pass of the record's registry.
+        let (decode, ..) = registry_with_uses(
+            &chain.weight,
+            &[
+                TieOrientation::Identity,
+                TieOrientation::Transpose,
+                TieOrientation::Identity,
+                TieOrientation::Identity,
+            ],
+        );
+        assert_eq!(
+            use_specific.intervention_changes(&decode, &labels),
+            Err(OccurrenceError::RegistryMismatch {
+                record: registry.teacher_fingerprint(),
+                registry: decode.teacher_fingerprint(),
             })
         );
     }
