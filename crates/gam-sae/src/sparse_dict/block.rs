@@ -467,8 +467,8 @@ pub(super) fn gram_schmidt_rows(block: &mut Array2<f32>) {
     }
 }
 
-/// The inverse Gram `(UUᵀ)⁻¹` of one block's stored rows `U` (`b×P`), `b×b`
-/// row-major.
+/// One block's stored span: the inverse Gram `(UUᵀ)⁻¹` of its stored rows `U` (`b×P`),
+/// `b×b` row-major, with `tr(UUᵀ)` and `‖(UUᵀ)⁻¹‖_F`.
 ///
 /// The rows are stored as `f32`, so they are orthonormal only to storage rounding
 /// and `UᵀU` is not a projector. A loss priced through `UᵀU` moves at first order
@@ -479,22 +479,31 @@ pub(super) fn gram_schmidt_rows(block: &mut Array2<f32>) {
 /// each of 49 paired frame trials priced that way summed to between 6.8e-6 and
 /// 5.0e-4, against a 2.46e-6 bar. Priced through each block's orthogonal projector
 /// they summed to at most 3.3e-12, and every trial's fixed-support decrease was
-/// positive (#2502, lane job 1229606). The block's tied projector is therefore the orthogonal
-/// projector of its stored span, `P = Uᵀ(UUᵀ)⁻¹U`, a function of the span alone, and a
-/// row's span coordinates `w = (UUᵀ)⁻¹Ux` are the coefficients of `Px` on the stored
-/// rows.
+/// positive (#2502, lane job 1229606). The block's tied projector is therefore the
+/// orthogonal projector of its stored span, `P = Uᵀ(UUᵀ)⁻¹U`, a function of the span
+/// alone, and a row's span coordinates `w = (UUᵀ)⁻¹Ux` are the coefficients of `Px`
+/// on the stored rows.
 ///
 /// The Gram is accumulated in f64 from the stored bits in ascending column order and
-/// factored by Cholesky. A pivot at or below the bound the Rayleigh–Ritz step uses
-/// for a direction the stored rows cannot resolve, `u₃₂·√b·max_i G_ii`, means that
-/// row adds no direction the earlier rows do not already span: it takes no
-/// coordinate, and `P` projects onto the span of the others. A dead block whose
-/// frame is zero therefore has the zero projector. A non-finite Gram is refused by
-/// name.
-pub(super) fn stored_span_inverse_gram(frame: ArrayView2<'_, f32>) -> Result<Vec<f64>, String> {
+/// factored by Cholesky. A frame whose rows are all zero is a dead block with the
+/// zero projector: there is nothing to invert. Otherwise every pivot must exceed the
+/// bound the Rayleigh–Ritz step uses for a direction the stored rows cannot resolve,
+/// `u₃₂·√b·max_i G_ii`. A pivot at or below it means the Gram's condition number has
+/// reached the storage's own resolution, about `1/(u₃₂·√b)`: the stored bits do not
+/// determine the span, so the block has no tied projector and is refused by name, as
+/// is a non-finite Gram. Short of that bound the conditioning enters every rounding
+/// band through `trace` and `inverse_norm` ([`StoredSpans::coordinate_rounding`]).
+struct StoredSpan {
+    inverse_gram: Vec<f64>,
+    trace: f64,
+    inverse_norm: f64,
+}
+
+fn stored_span(frame: ArrayView2<'_, f32>) -> Result<StoredSpan, String> {
     let (b, p) = frame.dim();
     let mut factor = vec![0.0f64; b * b];
     let mut largest = 0.0f64;
+    let mut trace = 0.0f64;
     for i in 0..b {
         for j in 0..=i {
             let mut dot = 0.0f64;
@@ -504,9 +513,16 @@ pub(super) fn stored_span_inverse_gram(frame: ArrayView2<'_, f32>) -> Result<Vec
             factor[i * b + j] = dot;
         }
         largest = largest.max(factor[i * b + i]);
+        trace += factor[i * b + i];
+    }
+    if largest == 0.0 {
+        return Ok(StoredSpan {
+            inverse_gram: vec![0.0; b * b],
+            trace: 0.0,
+            inverse_norm: 0.0,
+        });
     }
     let floor = super::block_frame::STORED_FRAME_RESOLUTION * (b as f64).sqrt() * largest;
-    let mut resolved = vec![false; b];
     for j in 0..b {
         let mut pivot = factor[j * b + j];
         for m in 0..j {
@@ -516,13 +532,12 @@ pub(super) fn stored_span_inverse_gram(frame: ArrayView2<'_, f32>) -> Result<Vec
             return Err(format!("stored frame Gram pivot at row {j} is {pivot}"));
         }
         if pivot <= floor {
-            // Row j adds no resolved direction: its column of the factor is zero.
-            for i in j..b {
-                factor[i * b + j] = 0.0;
-            }
-            continue;
+            return Err(format!(
+                "stored frame rows do not resolve {b} dimensions: Gram pivot {pivot:e} at row {j} \
+                 is at or below the f32 storage floor {floor:e} (largest diagonal {largest:e}), so \
+                 the stored bits do not determine the block's span and it has no tied projector"
+            ));
         }
-        resolved[j] = true;
         let root = pivot.sqrt();
         factor[j * b + j] = root;
         for i in j + 1..b {
@@ -533,16 +548,11 @@ pub(super) fn stored_span_inverse_gram(frame: ArrayView2<'_, f32>) -> Result<Vec
             factor[i * b + j] = value / root;
         }
     }
-    // (UUᵀ)⁻¹ = L⁻ᵀL⁻¹ over the resolved rows, one column at a time: L y = e_column,
-    // then Lᵀ z = y. An unresolved row's entries stay zero.
+    // (UUᵀ)⁻¹ = L⁻ᵀL⁻¹, one column at a time: L y = e_column, then Lᵀ z = y.
     let mut inverse = vec![0.0f64; b * b];
     let mut forward = vec![0.0f64; b];
     for column in 0..b {
         for i in 0..b {
-            if !resolved[i] {
-                forward[i] = 0.0;
-                continue;
-            }
             let mut value = if i == column { 1.0 } else { 0.0 };
             for m in 0..i {
                 value -= factor[i * b + m] * forward[m];
@@ -550,9 +560,6 @@ pub(super) fn stored_span_inverse_gram(frame: ArrayView2<'_, f32>) -> Result<Vec
             forward[i] = value / factor[i * b + i];
         }
         for i in (0..b).rev() {
-            if !resolved[i] {
-                continue;
-            }
             let mut value = forward[i];
             for m in i + 1..b {
                 value -= factor[m * b + i] * inverse[m * b + column];
@@ -560,24 +567,82 @@ pub(super) fn stored_span_inverse_gram(frame: ArrayView2<'_, f32>) -> Result<Vec
             inverse[i * b + column] = value / factor[i * b + i];
         }
     }
-    Ok(inverse)
+    let inverse_norm = inverse.iter().map(|value| value * value).sum::<f64>().sqrt();
+    Ok(StoredSpan {
+        inverse_gram: inverse,
+        trace,
+        inverse_norm,
+    })
 }
 
-/// [`stored_span_inverse_gram`] for every block of `decoder`, concatenated, so block
-/// `g`'s inverse Gram is `[g·b², (g+1)·b²)`.
-pub(super) fn stored_span_inverse_grams(
-    decoder: ArrayView2<'_, f32>,
-    b: usize,
-) -> Result<Vec<f64>, String> {
+/// [`stored_span`] for every block of `decoder`: block `g`'s inverse Gram is
+/// `inverse_grams[g·b², (g+1)·b²)`.
+pub(super) struct StoredSpans {
+    pub(super) inverse_grams: Vec<f64>,
+    trace: Vec<f64>,
+    inverse_norm: Vec<f64>,
+}
+
+pub(super) fn stored_spans(decoder: ArrayView2<'_, f32>, b: usize) -> Result<StoredSpans, String> {
     let blocks = decoder.nrows() / b.max(1);
-    let per_block: Vec<Vec<f64>> = (0..blocks)
+    let per_block: Vec<StoredSpan> = (0..blocks)
         .into_par_iter()
         .map(|block| {
-            stored_span_inverse_gram(decoder.slice(ndarray::s![block * b..(block + 1) * b, ..]))
+            stored_span(decoder.slice(ndarray::s![block * b..(block + 1) * b, ..]))
                 .map_err(|error| format!("block {block}: {error}"))
         })
         .collect::<Result<_, String>>()?;
-    Ok(per_block.concat())
+    let mut spans = StoredSpans {
+        inverse_grams: Vec::with_capacity(blocks * b * b),
+        trace: Vec::with_capacity(blocks),
+        inverse_norm: Vec::with_capacity(blocks),
+    };
+    for span in per_block {
+        spans.inverse_grams.extend_from_slice(&span.inverse_gram);
+        spans.trace.push(span.trace);
+        spans.inverse_norm.push(span.inverse_norm);
+    }
+    Ok(spans)
+}
+
+impl StoredSpans {
+    /// A Euclidean bound on how far the rounding of a row's span coordinates moves its
+    /// γ-free reconstruction `Σ_g U_gᵀw_g`, over the blocks `code` admits.
+    ///
+    /// Each `w = G⁻¹s` is formed from the inner products `s = Ux`, `P`-term f64 sums of
+    /// exact f32 products, so `|δs_r| ≤ γ_P·‖x‖·‖u_r‖` and `‖δs‖ ≤ γ_P·‖x‖·√tr G`, and from
+    /// the Gram, whose entries round within `γ_P·‖u_i‖·‖u_j‖`, so `‖δG‖_F ≤ γ_P·tr G`. The
+    /// Cholesky factor and the two triangular solves perturb `G` by at most `γ_{b+1}·b·tr G`
+    /// each, so `γ_k` with `k = P + 3b(b+1)` bounds all of it. The coordinates then move by
+    /// `G⁻¹(δs − δG·w)` and the projection by `Uᵀ` of that, whose norm is at most
+    /// `‖δs − δG·w‖·√‖G⁻¹‖₂ ≤ γ_k·√‖G⁻¹‖_F·(‖x‖·√tr G + tr G·‖w‖)`. For orthonormal rows
+    /// that is `γ_k·b^{1/4}·(√b·‖x‖ + b·‖w‖)`; an ill-conditioned frame raises it through
+    /// `‖G⁻¹‖_F`, up to the storage floor [`stored_span`] refuses at.
+    pub(super) fn coordinate_rounding(
+        &self,
+        code: &RowBlockCode,
+        b: usize,
+        p: usize,
+        row_norm: f64,
+    ) -> f64 {
+        let scaled = (p + 3 * b * (b + 1)) as f64 * gam_linalg::roundoff::UNIT_ROUNDOFF;
+        if !(scaled < 1.0) {
+            return f64::INFINITY;
+        }
+        let gamma_k = scaled / (1.0 - scaled);
+        let mut bound = 0.0f64;
+        for (slot, &block) in code.blocks.iter().enumerate() {
+            if code.gates[slot] == 0.0 {
+                continue;
+            }
+            let block = block as usize;
+            let coordinates = &code.projections[slot * b..(slot + 1) * b];
+            let norm = coordinates.iter().map(|value| value * value).sum::<f64>().sqrt();
+            let trace = self.trace[block];
+            bound += self.inverse_norm[block].sqrt() * (row_norm * trace.sqrt() + trace * norm);
+        }
+        gamma_k * bound
+    }
 }
 
 /// A row's span coordinates on one block, `w = (UUᵀ)⁻¹s` from its inner products
@@ -611,7 +676,7 @@ pub(super) struct RowBlockCode {
     /// Signed within-block code `z_g = γ w_g`, `k×b` flattened row-major.
     pub(super) codes: Vec<f32>,
     /// Gamma-free span coordinates `w_g = (U_gU_gᵀ)⁻¹U_g x` of each selected block
-    /// ([`stored_span_inverse_gram`]), accumulated in f64 from the stored inputs, so
+    /// ([`StoredSpans`]), accumulated in f64 from the stored inputs, so
     /// `U_gᵀw_g = P_g x`. Streaming scalar and frame moments consume these same values.
     pub(super) projections: Vec<f64>,
 }
@@ -699,7 +764,7 @@ pub(super) fn route_and_code_all(
 ) -> Result<Vec<RowBlockCode>, String> {
     let n = x.nrows();
     let batch = minibatch.max(1);
-    let inverse_grams = stored_span_inverse_grams(decoder, b)?;
+    let inverse_grams = stored_spans(decoder, b)?.inverse_grams;
     let mut out: Vec<RowBlockCode> = Vec::with_capacity(n);
     let mut start = 0usize;
     while start < n {
@@ -724,7 +789,7 @@ pub(super) fn route_and_code_all(
 /// Code one minibatch's routed shortlists on the host. Each row admits its
 /// support by descent in the tied loss (`code_row`); a row whose best gate falls
 /// below its projection roundoff (`orphan_gate_floor`) keeps no block.
-/// `inverse_grams` is [`stored_span_inverse_grams`] of `decoder`.
+/// `inverse_grams` is [`stored_spans`] of `decoder`, `.inverse_grams`.
 pub(super) fn code_routed_rows(
     mb: ArrayView2<'_, f32>,
     decoder: ArrayView2<'_, f32>,
@@ -856,13 +921,13 @@ fn route_and_code_minibatch(
 /// the guard changes nothing there.
 ///
 /// `P_g` is the orthogonal projector of block `g`'s stored span
-/// ([`stored_span_inverse_gram`]): `y_g = U_gᵀw_g` for the span coordinates
+/// ([`StoredSpans`]): `y_g = U_gᵀw_g` for the span coordinates
 /// `w_g = (U_gU_gᵀ)⁻¹s_g` of the inner products `s_g = U_g x`, and `c_g = s_g·w_g`.
 /// Every quantity is a function of the projectors `P_g`, so the rule is
 /// invariant to any change of basis of a block's stored rows that keeps their
 /// span, and it is a pure function of `(x, decoder, γ)`, so
 /// [`block_sparse_dictionary_transform`] reproduces the training support exactly.
-/// `inverse_grams` is [`stored_span_inverse_grams`] of `decoder`.
+/// `inverse_grams` is [`stored_spans`] of `decoder`, `.inverse_grams`.
 fn code_row(
     row: ArrayView1<'_, f32>,
     decoder: ArrayView2<'_, f32>,
@@ -1164,8 +1229,9 @@ fn refresh_frames(
         .map_err(|error| format!("tied frame refresh block {block}: {error}"))?;
         stationarity = stationarity.max(residual);
 
-        let proposal_inverse_gram = stored_span_inverse_gram(proposal.view())
-            .map_err(|error| format!("tied frame refresh block {block}: {error}"))?;
+        let proposal_inverse_gram = stored_span(proposal.view())
+            .map_err(|error| format!("tied frame refresh block {block}: {error}"))?
+            .inverse_gram;
         let mut proposed_inner = vec![0.0; b];
         let mut proposed_coordinates = vec![0.0; b];
         for &(row, slot) in &members[block] {

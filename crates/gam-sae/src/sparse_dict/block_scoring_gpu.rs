@@ -61,7 +61,7 @@ use ndarray::{Array2, Array3, ArrayView1, ArrayView2};
 
 use super::block::{
     RowBlockCode, block_gates, block_projections_row, code_routed_rows, route_row_blocks,
-    stored_span_inverse_grams,
+    stored_spans,
 };
 
 /// Which path produced a block route. Returned by the fail-loud entry point so
@@ -317,7 +317,7 @@ pub fn code_block_shortlists_cpu(
         rows.nrows(),
         "code_block_shortlists_cpu needs one shortlist per row"
     );
-    let inverse_grams = stored_span_inverse_grams(decoder, b)?;
+    let inverse_grams = stored_spans(decoder, b)?.inverse_grams;
     Ok(pack_row_codes(
         &code_routed_rows(rows, decoder, &inverse_grams, gamma, b, k, shortlists),
         k,
@@ -525,7 +525,7 @@ pub fn route_blocks_required(
 /// Route and code one minibatch under `mode`, returning each row's codes padded
 /// to width `k`. A device route codes on the device ([`BLOCK_CODE_KERNEL_SOURCE`]);
 /// a CPU route codes on the host (`super::block::code_routed_rows`).
-/// `inverse_grams` is `super::block::stored_span_inverse_grams` of `decoder`.
+/// `inverse_grams` is `super::block::stored_spans` of `decoder`, `.inverse_grams`.
 #[cfg(target_os = "linux")]
 pub(super) fn route_and_code_blocks(
     rows: ArrayView2<'_, f32>,
@@ -576,8 +576,9 @@ pub fn route_and_code_blocks_required(
     k: usize,
     mode: gam_gpu::GpuPolicy,
 ) -> Result<((Array2<u32>, Array2<f32>, Array3<f64>), BlockRoutePath), gam_gpu::GpuError> {
-    let inverse_grams = stored_span_inverse_grams(decoder, b)
-        .map_err(|error| gam_gpu::gpu_err!("block-code decoder: {error}"))?;
+    let inverse_grams = stored_spans(decoder, b)
+        .map_err(|error| gam_gpu::gpu_err!("block-code decoder: {error}"))?
+        .inverse_grams;
     let (codes, path) = route_and_code_blocks(rows, decoder, &inverse_grams, gamma, b, k, mode)?;
     Ok((pack_row_codes(&codes, k, b), path))
 }

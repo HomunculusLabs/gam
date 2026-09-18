@@ -550,5 +550,14 @@
     ],
     "reason": "#2901 (ad-spec's EDF rank-bound ruling): every EDF route now admits its per-block traces through penalized_edf_bundle_within_bands, each within the rounding band of the solve that formed it and under an EdfRankBound certificate. A non-finite trace refuses on every block; a certified block refuses outside [-band, rank + band]; an Uncertified or NotAssessed block publishes its finite raw trace unclamped, below zero too. penalized_edf_bundle and its admit_trace clamp published a trace outside [0, rank] at its edge and saturated +inf at the rank. With the custom-family, survival, shared-tangent and deterministic-shortcut routes migrated, they have no caller and are deleted. bounded_roundoff_value was the shared-tangent route's sqrt(eps)*max(rank, 1) admission of the same traces, which the band admission replaces. The two clamp tests pinned the +inf saturation and the NaN propagation the admission now refuses; they are restated as a_positive_overflow_trace_is_refused_instead_of_saturated_2901 and a_nan_or_negative_overflow_trace_is_refused_2901. a_negative_trace_is_admitted_at_zero keeps its name as the within-band case.",
     "evidence": "Gate 1192361 (gx6, acdf183fe6 + patch adc41e92) ran source_removal_guard.py, which reported these identities as removed without an acknowledgement. At that base, git grep -F 'penalized_edf_bundle(' finds it called only by the four migrated routes (warm_start.rs, entry.rs, fit.rs, response_geometry.rs) and its own tests, admit_trace only by penalized_edf_bundle, and bounded_roundoff_value only at the shared-tangent trace admission."
+  },
+  {
+    "base": "ee6d82a55482800c1f2f7a65245851da5362b818",
+    "items": [
+      "crates/gam-sae/src/sparse_dict/block.rs:fn:stored_span_inverse_gram",
+      "crates/gam-sae/src/sparse_dict/block.rs:fn:stored_span_inverse_grams"
+    ],
+    "reason": "#2502: replaced by stored_span and stored_spans, which return each block's inverse Gram (UU^T)^-1 together with tr(UU^T) and the Frobenius norm of the inverse, so the rounding band of the span coordinates carries the stored frame's conditioning (StoredSpans::coordinate_rounding, residual_band), and which refuse by name a nonzero frame whose f32 storage cannot resolve its span instead of silently giving the unresolved row no coordinate.",
+    "evidence": "git grep -n stored_span_inverse_gram at db6a3680d8 finds 22 lines, all in crates/gam-sae/src/sparse_dict: block.rs (10: the two declarations, their docs and callers), block_stream.rs (5), block_scoring_gpu.rs (4), block_stream_tests.rs (2), block_tests.rs (1). This commit rewrites every one onto stored_spans(..).inverse_grams or stored_span; no file outside sparse_dict names either function. Gate gx1 job 1260605 at db6a3680d8 on the exact tree: RC_CHECK 0, RC_PYFFI 0, assertionless 0, and exactly these two removals refused before this entry; lane job 1259575: sparse_dict::block tests 62 passed."
   }
 ]

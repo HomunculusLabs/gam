@@ -4284,5 +4284,14 @@
     },
     "reason": "#2901: penalized_edf_bundle clamped a per-block trace outside [0, rank] to the interval. Every route now admits its traces through penalized_edf_bundle_within_bands against their solves' bands, so it has no caller and is deleted together with its gam_solve::estimate re-export.",
     "evidence": "Gate 1192361 (gx6, acdf183fe6 + patch adc41e92): public_api_census.py reported exactly this identity as removed without an acknowledgement; gate 1198492 (gx6, 5b2af0f350 + patch 836cf538, with this entry) gave census 0."
+  },
+  {
+    "base": "ee6d82a55482800c1f2f7a65245851da5362b818",
+    "removed": {
+      "crates/gam-sae/src/sparse_dict/block.rs::stored_span_inverse_gram": 1,
+      "crates/gam-sae/src/sparse_dict/block.rs::stored_span_inverse_grams": 1
+    },
+    "reason": "#2502: replaced by stored_span and stored_spans, which return each block's inverse Gram with tr(UU^T) and the Frobenius norm of the inverse, so the span coordinates' rounding band carries the stored frame's conditioning, and which refuse by name a nonzero frame its f32 storage cannot resolve.",
+    "evidence": "Replacement: stored_spans and StoredSpans::coordinate_rounding in crates/gam-sae/src/sparse_dict/block.rs. git grep -n stored_span_inverse_gram at db6a3680d8 finds 22 lines, all in crates/gam-sae/src/sparse_dict, each rewritten in this commit. Gate gx1 job 1260605 at db6a3680d8: public_api_census refused exactly these two removals before this entry."
   }
 ]

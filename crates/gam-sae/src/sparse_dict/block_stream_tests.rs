@@ -1017,12 +1017,12 @@ fn a_row_keeps_its_retained_support_unless_the_routed_support_lowers_its_loss_25
     let routed = route().blocks[0];
     assert!(routed < 2, "the router must pick a duplicate, got block {routed}");
     let duplicate = 1 - routed;
-    let inverse_grams = crate::sparse_dict::block::stored_span_inverse_grams(decoder.view(), 1)
+    let spans = crate::sparse_dict::block::stored_spans(decoder.view(), 1)
         .expect("every block spans one dimension");
     let (kept, kept_projection, declined) = super::descend_block_support(
         x.row(0),
         decoder.view(),
-        &inverse_grams,
+        &spans,
         1.0,
         1,
         1,
@@ -1038,7 +1038,7 @@ fn a_row_keeps_its_retained_support_unless_the_routed_support_lowers_its_loss_25
     let (adopted, adopted_projection, adopted_declined) = super::descend_block_support(
         x.row(0),
         decoder.view(),
-        &inverse_grams,
+        &spans,
         1.0,
         1,
         1,
@@ -1052,7 +1052,7 @@ fn a_row_keeps_its_retained_support_unless_the_routed_support_lowers_its_loss_25
     let (first, _, first_declined) = super::descend_block_support(
         x.row(0),
         decoder.view(),
-        &inverse_grams,
+        &spans,
         1.0,
         1,
         1,
@@ -1119,9 +1119,10 @@ fn a_retained_support_prices_its_stored_span_2502() {
     let prior = [1_u32, 0, 3];
     let gamma = 0.8_f32;
     let price = |frames: &Array2<f32>, row: ndarray::ArrayView1<'_, f32>| {
-        let inverse_grams = crate::sparse_dict::block::stored_span_inverse_grams(frames.view(), b)
+        let spans = crate::sparse_dict::block::stored_spans(frames.view(), b)
             .expect("every block spans two dimensions");
-        let code = super::kept_block_code(row, frames.view(), &inverse_grams, gamma, b, k, &prior);
+        let code =
+            super::kept_block_code(row, frames.view(), &spans.inverse_grams, gamma, b, k, &prior);
         let rss = super::row_projection(row, frames.view(), &code, b, gamma).rss;
         (code, rss)
     };
@@ -1410,6 +1411,13 @@ fn a_resumed_stream_continues_bit_for_bit_2502() {
         .err()
         .expect("a checkpoint written under another tolerance must be refused");
     assert!(error.contains("tolerance"), "{error}");
+    // The epoch cap is the driver's, so a chain may resume under another one.
+    let mut extended = config;
+    extended.max_epochs += 7;
+    assert!(
+        BlockSparseStreamState::resume(&path, &extended).is_ok(),
+        "a stream driven to another epoch cap must resume"
+    );
     std::fs::remove_file(&path).unwrap();
 }
 
@@ -1464,4 +1472,71 @@ fn a_block_that_meets_the_certificate_bar_keeps_its_stored_bits_2502() {
     );
     let (_, below, _) = step(0.5 * stationarity);
     assert_ne!(below, current, "a block above the bar must still move");
+}
+
+#[test]
+fn a_rescaled_frame_trial_is_priced_by_its_span_and_descends_2502() {
+    // Block 0 is a line that starts on e0; block 1 is e2; every row admits both. The
+    // proposal rotates block 0 halfway toward the rows' principal axis in the e0-e1 plane,
+    // a real descent. Stored at norm 1 or at norm 2 (doubling is exact, so the span is the
+    // same bits), it must commit with the same paired decrease: the projector
+    // Uᵀ(UUᵀ)⁻¹U is a function of the span. Priced as UᵀU instead, the norm-2 frame
+    // reconstructs every row four times too far along the line and the trial ascends
+    // (#2502).
+    let rows = 16usize;
+    let x = Array2::from_shape_fn((rows, 3), |(row, column)| {
+        let i = row as f64;
+        let angle = std::f64::consts::PI / 6.0 + 0.2 * i.sin();
+        let radius = 1.0 + 0.3 * (3.0 * i).cos();
+        (match column {
+            0 => radius * angle.cos(),
+            1 => radius * angle.sin(),
+            _ => 0.5 + 0.2 * (2.0 * i).sin(),
+        }) as f32
+    });
+    let baseline = array![[1.0_f32, 0.0, 0.0], [0.0, 0.0, 1.0]];
+    let theta = std::f64::consts::PI / 12.0;
+    let mut config = BlockSparseConfig::new(2, 1);
+    config.block_topk = 2;
+    config.minibatch = rows;
+    config.aux_k = 0;
+    let trial = |norm: f32| {
+        let proposal = array![
+            [norm * theta.cos() as f32, norm * theta.sin() as f32, 0.0],
+            [0.0, 0.0, 1.0]
+        ];
+        let mut state = BlockSparseStreamState::new_with_decoder(proposal.clone(), &config).unwrap();
+        state.gamma = 1.0;
+        state.pending_frame = Some(super::PendingFrameTrial {
+            baseline_decoder: baseline.clone(),
+            baseline_gamma: 1.0,
+            proposed_decoder: proposal,
+            baseline_rss: 0.0,
+            baseline_gamma_num: 0.0,
+            baseline_gamma_den: 0.0,
+            baseline_rows: 0,
+            baseline_usage: vec![0; 2],
+            baseline_second: vec![Array2::zeros((1, 1)); 2],
+            baseline_supports: Vec::new(),
+            rerouted_rows: 0,
+            moves: super::TrialMoves::default(),
+        });
+        state.partial_fit(x.view()).unwrap();
+        assert_eq!(state.usage, vec![rows, rows], "every row must admit both blocks");
+        state
+            .end_epoch()
+            .unwrap()
+            .frame_trial
+            .expect("the pending trial is adjudicated")
+    };
+    let unit = trial(1.0);
+    let doubled = trial(2.0);
+    assert!(unit.committed && unit.moved_decrease > 0.0, "{unit:?}");
+    assert!(doubled.committed, "the norm-2 frame of a descending step must commit: {doubled:?}");
+    assert!(
+        (doubled.moved_decrease - unit.moved_decrease).abs() <= 1.0e-12 * unit.moved_decrease,
+        "the stored norm moved the priced decrease: {:e} vs {:e}",
+        doubled.moved_decrease,
+        unit.moved_decrease
+    );
 }

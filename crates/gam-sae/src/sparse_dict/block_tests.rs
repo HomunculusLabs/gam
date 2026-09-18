@@ -22,7 +22,7 @@ fn code_row_at(
     shortlist: &[(u32, f32)],
 ) -> RowBlockCode {
     let inverse_grams =
-        stored_span_inverse_grams(decoder, b).expect("every fixture block spans b dimensions");
+        stored_spans(decoder, b).expect("every fixture block spans b dimensions").inverse_grams;
     code_row(row, decoder, &inverse_grams, gamma, b, k, shortlist)
 }
 
@@ -1920,4 +1920,45 @@ fn a_blocks_code_is_a_function_of_its_stored_span_2502() {
         gram_free_moved, touched,
         "UᵀU pricing must see the doubling on every row that admits the doubled block"
     );
+}
+
+/// #2502 — A STORED FRAME'S CONDITIONING ENTERS ITS ROUNDING BAND, AND A FRAME ITS OWN
+/// STORAGE CANNOT RESOLVE IS REFUSED.
+///
+/// A block's span coordinates `w = (UUᵀ)⁻¹Ux` carry the rounding of `Ux` and of the Gram,
+/// amplified by `‖(UUᵀ)⁻¹‖`. Rows `e0` and `e0 + δ·e1` span the same plane as `e0, e1`,
+/// but their Gram's condition number is about `4/δ²`. At δ = 1e-2 the frame is admitted,
+/// and its coordinates' band must exceed an orthonormal frame's on the same row by the
+/// conditioning, which a band without `‖(UUᵀ)⁻¹‖` misses (it grows with ‖w‖ alone, about
+/// 27 times here, against about 3000). At δ = 1e-4 the Gram's second pivot, δ², falls
+/// below the f32 storage floor `u₃₂·√2·max G_ii`, the stored bits do not determine the
+/// plane, and the frame is refused by name. An all-zero frame is a dead block with the zero
+/// projector.
+#[test]
+fn a_stored_frames_conditioning_enters_its_rounding_band_2502() {
+    let p = 4usize;
+    let b = 2usize;
+    let frame = |delta: f32| ndarray::array![[1.0_f32, 0.0, 0.0, 0.0], [1.0, delta, 0.0, 0.0]];
+    let orthonormal = ndarray::array![[1.0_f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]];
+    let row = ndarray::array![0.8_f32, 0.3, -0.4, 0.2];
+    let row_norm = row.iter().map(|&x| (x as f64).powi(2)).sum::<f64>().sqrt();
+    let band = |decoder: &Array2<f32>| {
+        let spans = stored_spans(decoder.view(), b).expect("an admitted frame");
+        let code = code_row_at(row.view(), decoder.view(), 1.0, b, 1, &[(0, 1.0)]);
+        spans.coordinate_rounding(&code, b, p, row_norm)
+    };
+    let orthonormal_band = band(&orthonormal);
+    let conditioned = frame(1.0e-2);
+    let conditioned_band = band(&conditioned);
+    assert!(orthonormal_band > 0.0);
+    assert!(
+        conditioned_band >= 50.0 * orthonormal_band,
+        "the band must carry the frame's conditioning: {conditioned_band:e} vs {orthonormal_band:e}"
+    );
+    let error = stored_spans(frame(1.0e-4).view(), b)
+        .err()
+        .expect("a frame below the storage floor must be refused");
+    assert!(error.contains("block 0") && error.contains("do not resolve"), "{error}");
+    let dead = stored_spans(Array2::<f32>::zeros((b, p)).view(), b).expect("a dead block");
+    assert!(dead.inverse_grams.iter().all(|&value| value == 0.0));
 }

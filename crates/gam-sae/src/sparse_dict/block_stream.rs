@@ -61,7 +61,7 @@
 use super::BlockSparseConfig;
 use super::block::{
     RowBlockCode, block_birth_evidence_margin, gram_schmidt_rows, relative_scalar_change,
-    route_and_code_all, span_coordinates, stable_rank_symmetric, stored_span_inverse_grams,
+    StoredSpans, route_and_code_all, span_coordinates, stable_rank_symmetric, stored_spans,
 };
 use super::block_frame::{STORED_FRAME_RESOLUTION, ritz_tied_frame_step, stored_projector_distance};
 use super::residual_reservoir::{ResidualReservoir, residual_rounding_energy};
@@ -165,8 +165,8 @@ fn append_supports(supports: &mut Vec<u32>, codes: &[RowBlockCode], k: usize) {
 /// The tied code of a row's retained support `prior` at `decoder` and `gamma`:
 /// each retained block's span coordinates `w_g = (U_gU_gᵀ)⁻¹U_g x`, in the retained
 /// slot order and padded to `k` slots, with gate `‖P_g x‖`. A retained block the row
-/// no longer projects onto takes a zero gate and is not admitted. `inverse_grams` is
-/// `stored_span_inverse_grams` of `decoder`.
+/// no longer projects onto takes a zero gate and is not admitted. `inverse_grams` is the
+/// `inverse_grams` of `stored_spans(decoder, b)`.
 fn kept_block_code(
     row: ArrayView1<'_, f32>,
     decoder: ArrayView2<'_, f32>,
@@ -237,12 +237,12 @@ fn kept_block_code(
 /// so a row changes support only finitely often: #2283's rule for the atom lane.
 ///
 /// The third value is the routed loss minus the retained loss when the routed support
-/// admits different blocks and is declined, and `None` otherwise. `inverse_grams` is
-/// `stored_span_inverse_grams` of `decoder`.
+/// admits different blocks and is declined, and `None` otherwise. `spans` is
+/// `stored_spans` of `decoder`.
 fn descend_block_support(
     row: ArrayView1<'_, f32>,
     decoder: ArrayView2<'_, f32>,
-    inverse_grams: &[f64],
+    spans: &StoredSpans,
     gamma: f32,
     b: usize,
     k: usize,
@@ -253,7 +253,7 @@ fn descend_block_support(
     if prior.first().is_none_or(|&block| block == NO_BLOCK) {
         return (fresh, fresh_projection, None);
     }
-    let kept = kept_block_code(row, decoder, inverse_grams, gamma, b, k, prior);
+    let kept = kept_block_code(row, decoder, &spans.inverse_grams, gamma, b, k, prior);
     let kept_projection = row_projection(row, decoder, &kept, b, gamma);
     if same_admitted_blocks(&fresh, &kept) {
         return (kept, kept_projection, None);
@@ -263,26 +263,45 @@ fn descend_block_support(
         .map(|&x| x as f64 * x as f64)
         .sum::<f64>()
         .sqrt();
-    // Each loss is `‖r‖²` of a residual whose entries round within the band
-    // `residual_rounding_energy` bounds (the reservoir's currency for the same
-    // residual), so the loss itself rounds within `2‖r‖·band + band²`.
-    let rounding = |projection: &RowProjection| {
-        let band_energy = residual_rounding_energy(
-            gam_linalg::roundoff::UNIT_ROUNDOFF,
-            3 * projection.live_terms + 2,
-            row_norm,
-            (gamma as f64).abs() * projection.projection_mass,
-        );
-        2.0 * projection.rss.sqrt() * band_energy.sqrt() + band_energy
+    // Each loss is `‖r‖²` of a residual that rounds within `residual_band` (the
+    // reservoir's currency for the same residual), so the loss itself rounds within
+    // `2‖r‖·band + band²`.
+    let rounding = |code: &RowBlockCode, projection: &RowProjection| {
+        let band = residual_band(row_norm, code, projection, spans, b, gamma);
+        2.0 * projection.rss.sqrt() * band + band * band
     };
-    if fresh_projection.rss + rounding(&fresh_projection)
-        < kept_projection.rss - rounding(&kept_projection)
+    if fresh_projection.rss + rounding(&fresh, &fresh_projection)
+        < kept_projection.rss - rounding(&kept, &kept_projection)
     {
         (fresh, fresh_projection, None)
     } else {
         let excess = fresh_projection.rss - kept_projection.rss;
         (kept, kept_projection, Some(excess))
     }
+}
+
+/// The Euclidean band within which a row's residual `x − γ Σ_g U_gᵀw_g`, coded as
+/// `code` and projected as `projection`, rounds: the residual's own formation from its
+/// coordinates (`residual_rounding_energy`), plus the rounding of the coordinates
+/// themselves, which each admitted block's conditioning amplifies
+/// (`StoredSpans::coordinate_rounding`). `spans` is `stored_spans` of the pass's decoder.
+fn residual_band(
+    row_norm: f64,
+    code: &RowBlockCode,
+    projection: &RowProjection,
+    spans: &StoredSpans,
+    b: usize,
+    gamma: f32,
+) -> f64 {
+    let scale = (gamma as f64).abs();
+    let formation = residual_rounding_energy(
+        gam_linalg::roundoff::UNIT_ROUNDOFF,
+        3 * projection.live_terms + 2,
+        row_norm,
+        scale * projection.projection_mass,
+    )
+    .sqrt();
+    formation + scale * spans.coordinate_rounding(code, b, projection.sum.len(), row_norm)
 }
 
 /// The routed supports one minibatch declined: rows whose routed support admits
@@ -301,7 +320,7 @@ struct DeclinedRoutes {
 fn descend_supports(
     rows: ArrayView2<'_, f32>,
     decoder: ArrayView2<'_, f32>,
-    inverse_grams: &[f64],
+    spans: &StoredSpans,
     gamma: f32,
     b: usize,
     k: usize,
@@ -321,7 +340,7 @@ fn descend_supports(
             descend_block_support(
                 rows.row(row),
                 decoder,
-                inverse_grams,
+                spans,
                 gamma,
                 b,
                 k,
@@ -1025,41 +1044,47 @@ impl BlockSparseStreamState {
             }
             // Route, then let each row keep its committed support unless the routed
             // one lowers its loss beyond rounding (`descend_block_support`).
-            let route_descending = |decoder: ArrayView2<'_, f32>, scale: f32| {
-                stored_span_inverse_grams(decoder, b).and_then(|inverse_grams| {
-                    route_and_code_all(
+            let route_descending = |decoder: ArrayView2<'_, f32>, scale: f32, spans: &StoredSpans| {
+                route_and_code_all(
+                    rows,
+                    decoder,
+                    scale,
+                    self.g,
+                    b,
+                    k,
+                    self.config.minibatch,
+                    self.config.block_tile,
+                )
+                .map(|routed| {
+                    descend_supports(
                         rows,
                         decoder,
+                        spans,
                         scale,
-                        self.g,
                         b,
                         k,
-                        self.config.minibatch,
-                        self.config.block_tile,
+                        routed,
+                        &self.retained_supports,
+                        offset,
                     )
-                    .map(|routed| {
-                        descend_supports(
-                            rows,
-                            decoder,
-                            &inverse_grams,
-                            scale,
-                            b,
-                            k,
-                            routed,
-                            &self.retained_supports,
-                            offset,
-                        )
-                    })
                 })
             };
-            let (codes, projected, declined) = route_descending(self.decoder.view(), gamma)?;
+            let spans = stored_spans(self.decoder.view(), b)?;
+            let (codes, projected, declined) = route_descending(self.decoder.view(), gamma, &spans)?;
             // Route the complete pre-birth model on these same rows before
             // mutating moments. Birth evidence uses a true paired full pass.
             let baseline_codes = self
                 .pending_birth
                 .as_ref()
                 .map(|pending| {
-                    route_descending(pending.baseline_decoder.view(), pending.baseline_gamma)
+                    stored_spans(pending.baseline_decoder.view(), b)
+                        .and_then(|spans| {
+                            route_descending(
+                                pending.baseline_decoder.view(),
+                                pending.baseline_gamma,
+                                &spans,
+                            )
+                        })
                         .map(|arbitrated| (arbitrated.0, arbitrated.1))
                 })
                 .transpose()?;
@@ -1067,7 +1092,14 @@ impl BlockSparseStreamState {
                 .pending_frame
                 .as_ref()
                 .map(|pending| {
-                    route_descending(pending.baseline_decoder.view(), pending.baseline_gamma)
+                    stored_spans(pending.baseline_decoder.view(), b)
+                        .and_then(|spans| {
+                            route_descending(
+                                pending.baseline_decoder.view(),
+                                pending.baseline_gamma,
+                                &spans,
+                            )
+                        })
                         .map(|arbitrated| (arbitrated.0, arbitrated.1))
                 })
                 .transpose()?;
@@ -1110,22 +1142,18 @@ impl BlockSparseStreamState {
                         .zip(&projection.sum)
                         .map(|(&x, &sum)| (x as f64 - gamma as f64 * sum) as f32)
                         .collect();
-                    // Frame rows are orthonormal, so `|γ|·Σ_t |w_t|` is the
-                    // reconstruction mass. An entry costs a product and an addition per
-                    // term, an addition per block, and the scaling and subtraction: at
-                    // most `3t + 2` f64 operations.
+                    // Each entry costs a product and an addition per term, an addition
+                    // per block, and the scaling and subtraction: at most `3t + 2` f64
+                    // operations over the `|γ|·Σ_t |w_t|` reconstruction mass; the
+                    // coordinates carry their own rounding too (`residual_band`).
                     let row_norm = rows
                         .row(row)
                         .iter()
                         .map(|&x| x as f64 * x as f64)
                         .sum::<f64>()
                         .sqrt();
-                    let rounding_energy = residual_rounding_energy(
-                        gam_linalg::roundoff::UNIT_ROUNDOFF,
-                        3 * projection.live_terms + 2,
-                        row_norm,
-                        (gamma as f64).abs() * projection.projection_mass,
-                    );
+                    let band = residual_band(row_norm, &codes[row], projection, &spans, b, gamma);
+                    let rounding_energy = band * band;
                     self.reservoir.offer(
                         projection.rss,
                         rounding_energy,
@@ -2298,17 +2326,21 @@ impl BlockSparseStreamState {
                 String::from_utf8_lossy(CHECKPOINT_SCHEMA)
             ));
         }
+        // `max_epochs` bounds the one-shot fit's loop. A stream's epochs are its driver's,
+        // so a resumed stream may be driven to another cap and the saved value is skipped.
         for (name, expected) in [
-            ("n_blocks", config.n_blocks),
-            ("block_size", config.block_size),
-            ("block_topk", config.block_topk),
-            ("max_epochs", config.max_epochs),
-            ("minibatch", config.minibatch),
-            ("block_tile", config.block_tile),
-            ("aux_k", config.aux_k),
+            ("n_blocks", Some(config.n_blocks)),
+            ("block_size", Some(config.block_size)),
+            ("block_topk", Some(config.block_topk)),
+            ("max_epochs", None),
+            ("minibatch", Some(config.minibatch)),
+            ("block_tile", Some(config.block_tile)),
+            ("aux_k", Some(config.aux_k)),
         ] {
             let saved = input.usize()?;
-            if saved != expected {
+            if let Some(expected) = expected
+                && saved != expected
+            {
                 return Err(format!(
                     "BlockSparseStream.resume: the checkpoint was written with {name}={saved}, \
                      not {expected}"
