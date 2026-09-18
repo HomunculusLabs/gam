@@ -1003,6 +1003,7 @@ impl FittedModelPredictExt for FittedModel {
             runtime.latent_z_conditional_calibration,
             // The Bernoulli predictor's primary design IS the marginal design.
             LatentConditioningSpan::PrimaryDesign,
+            runtime.residual_repair,
         )
     }
 
@@ -3711,6 +3712,8 @@ mod tests {
             latent_z_calibration: None,
             latent_conditioning_span:
                 gam_inference::predict_io::LatentConditioningSpan::PrimaryDesign,
+            residual_repair: None,
+            beta_residual: None,
             latent_z_conditional_calibration: None,
         };
         let theta = predictor.theta();

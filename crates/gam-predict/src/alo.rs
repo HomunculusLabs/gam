@@ -1484,6 +1484,7 @@ fn compute_saved_bernoulli_marginal_slope_alo(
     let slope_dimension = predictor.beta_slope.len();
     let parameter_dimension = marginal_dimension
         + slope_dimension
+        + replay.residual_dimension
         + replay.score_warp_dimension
         + replay.link_deviation_dimension;
     let geometry = require_saved_geometry(model, class, parameter_dimension)?;
@@ -1505,8 +1506,11 @@ fn compute_saved_bernoulli_marginal_slope_alo(
         .design_noise
         .as_ref()
         .expect("validated marginal-slope design");
-    let mut coordinate_designs =
-        Vec::with_capacity(2 + replay.score_warp_dimension + replay.link_deviation_dimension);
+    let mut coordinate_designs = Vec::with_capacity(
+        2 + replay.residual_dimension
+            + replay.score_warp_dimension
+            + replay.link_deviation_dimension,
+    );
     let mut coordinate_ranges = Vec::with_capacity(coordinate_designs.capacity());
     let mut coordinate_names = Vec::with_capacity(coordinate_designs.capacity());
     coordinate_designs.push(input.design.clone());
@@ -1516,6 +1520,14 @@ fn compute_saved_bernoulli_marginal_slope_alo(
     coordinate_ranges.push(marginal_dimension..marginal_dimension + slope_dimension);
     coordinate_names.push("slope".to_string());
     let mut coefficient = marginal_dimension + slope_dimension;
+    for coordinate in 0..replay.residual_dimension {
+        // gam#2924: each residual coefficient is its own row primary with a
+        // unit design, exactly like the flex coordinates below.
+        coordinate_designs.push(constant_scalar_design(n));
+        coordinate_ranges.push(coefficient..coefficient + 1);
+        coordinate_names.push(format!("residual-repair[{coordinate}]"));
+        coefficient += 1;
+    }
     for coordinate in 0..replay.score_warp_dimension {
         coordinate_designs.push(constant_scalar_design(n));
         coordinate_ranges.push(coefficient..coefficient + 1);

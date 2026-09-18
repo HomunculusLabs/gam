@@ -556,6 +556,12 @@ pub struct FitConfig {
     pub slope_formula: Option<String>,
     /// Column name for the z (exposure/dose) variable in marginal-slope models.
     pub z_column: Option<String>,
+    /// Residual genetic repair (gam#2924): columns of conditionally centred
+    /// genetic residual features `r = φ − E_ref[φ | S, A]` that enter the
+    /// Bernoulli marginal-slope genetic drive beside the score with one
+    /// ridge-shrunk constant coefficient each, the marginal anchor integrating
+    /// the joint `(z, r)` law. Empty is the single-score family.
+    pub residual_columns: Vec<String>,
     /// Consume an externally fitted latent score without fitting another
     /// conditional or rank-based transform. This assumes a standard-normal
     /// latent law; freezing an input does not certify its conditional law.
@@ -756,6 +762,7 @@ impl Default for FitConfig {
             noise_formula: None,
             slope_formula: None,
             z_column: None,
+            residual_columns: Vec::new(),
             frozen_score: false,
             latent_measure: None,
             declared_latent_law: None,

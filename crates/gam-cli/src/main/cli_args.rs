@@ -270,6 +270,7 @@ pub(crate) struct FitArgs {
             "predict_noise",
             "slope_formula",
             "z_column",
+            "residual_columns",
             "weights_column",
             "offset_column",
             "noise_offset_column",
@@ -324,6 +325,12 @@ pub(crate) struct FitArgs {
     /// empirical latent measure for marginal calibration.
     #[arg(long = "z-column")]
     pub(crate) z_column: Option<String>,
+    /// Residual genetic repair column (gam#2924, Bernoulli marginal-slope):
+    /// a conditionally centred genetic residual feature entering the genetic
+    /// drive beside the score with a ridge-shrunk constant coefficient. Repeat
+    /// the flag for every column of the block.
+    #[arg(long = "residual-column", value_name = "COLUMN")]
+    pub(crate) residual_columns: Vec<String>,
     /// Optional non-negative per-row training weights column.
     #[arg(long = "weights-column")]
     pub(crate) weights_column: Option<String>,

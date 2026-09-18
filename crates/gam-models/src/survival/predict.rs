@@ -5906,6 +5906,9 @@ pub fn build_saved_survival_marginal_slope_predictor(
         LatentConditioningSpan::PrimaryDesignTail {
             ncols: cov_design.ncols(),
         },
+        // The residual repair block (gam#2924) is a Bernoulli-only block until
+        // the survival kernel takes it (gam#2923).
+        None,
     )?;
 
     let pred_input = PredictInput {
@@ -6282,6 +6285,8 @@ mod tests {
             latent_z_calibration: None,
             latent_z_conditional_calibration: None,
             latent_conditioning_span: LatentConditioningSpan::PrimaryDesign,
+            residual_repair: None,
+            beta_residual: None,
         };
         let z = 1.1;
         let q = 0.8;

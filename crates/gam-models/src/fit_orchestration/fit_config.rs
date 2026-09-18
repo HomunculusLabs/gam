@@ -184,6 +184,19 @@ impl FitConfig {
             normalize_optional_column(self.noise_offset_column, "noise_offset_column")?;
         self.weight_column = normalize_optional_column(self.weight_column, "weight_column")?;
         self.z_column = normalize_optional_column(self.z_column, "z_column")?;
+        self.residual_columns = normalize_residual_columns(
+            std::mem::take(&mut self.residual_columns),
+            self.z_column.as_deref(),
+        )?;
+        if !self.residual_columns.is_empty()
+            && self.family.as_deref() != Some("bernoulli-marginal-slope")
+        {
+            return Err(
+                "residual_columns requires family = \"bernoulli-marginal-slope\" (gam#2924); the \
+                 survival marginal-slope family takes it once gam#2923 lands"
+                    .to_string(),
+            );
+        }
         if self.transformation_normal_config.is_some()
             && !(self.transformation_normal || self.family.as_deref() == Some("transformation-normal"))
         {
@@ -360,4 +373,29 @@ mod tests {
             "{refused_frozen}"
         );
     }
+}
+
+/// Trim, reject empties and duplicates, and keep the score out of the residual
+/// block: a residual column that IS the score would enter the drive twice.
+fn normalize_residual_columns(
+    columns: Vec<String>,
+    z_column: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::with_capacity(columns.len());
+    for raw in columns {
+        let name = raw.trim();
+        if name.is_empty() {
+            return Err("residual_columns contains an empty column name".to_string());
+        }
+        if out.iter().any(|existing| existing == name) {
+            return Err(format!("residual_columns names '{name}' more than once"));
+        }
+        if z_column == Some(name) {
+            return Err(format!(
+                "residual_columns names the score column '{name}'; the score enters through z_column"
+            ));
+        }
+        out.push(name.to_string());
+    }
+    Ok(out)
 }

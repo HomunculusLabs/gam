@@ -146,6 +146,11 @@ pub struct BernoulliMarginalSlopeTermSpec {
     /// Stage-1, in which case the free 1-D `score_warp` spline is the
     /// fallback basis (it spans only the x-free leakage column).
     pub score_influence_jacobian: Option<Array2<f64>>,
+    /// Residual genetic repair block (gam#2924): `K` conditionally centred
+    /// features entering the genetic drive with constant, ridge-shrunk
+    /// coefficients, the anchor integrating the joint `(z, r)` law. `None` is
+    /// the single-score family unchanged.
+    pub residual: Option<residual_repair::ResidualRepairSpec>,
 }
 
 pub struct BernoulliMarginalSlopeFitResult {
@@ -197,6 +202,11 @@ pub struct BernoulliMarginalSlopeFitResult {
     /// rank-INT provably cannot. Persisted so prediction rebuilds `a(C)` from
     /// the (reproducible) marginal design and applies the identical map.
     pub latent_z_conditional_calibration: Option<LatentZConditionalCalibration>,
+    /// The fitted residual repair geometry (gam#2924) when a residual block was
+    /// supplied: column names, the pooled joint `(z, r)` covariance, the
+    /// conditional model when the pairwise gate escalated, and the centring
+    /// p-values. The coefficients live in `fit.block_states[2]`.
+    pub residual_repair: Option<residual_repair::ResidualRepairGeometry>,
 }
 
 #[derive(Clone, Debug)]
@@ -2643,6 +2653,7 @@ pub(crate) mod gradient_paths;
 pub(crate) mod hessian_paths;
 mod information_third;
 pub(crate) mod install_flex;
+pub mod residual_repair;
 pub(crate) mod row_kernel;
 #[cfg(test)]
 mod tests {
@@ -2871,6 +2882,11 @@ pub(crate) use block_specs::fit_bernoulli_marginal_slope_terms;
 pub use conditional_score_covariance::{
     ConditionalScoreCoordinate, ConditionalScoreCovariance, ScoreCovarianceField,
 };
+pub use residual_repair::{
+    MAX_RESIDUAL_COLUMNS, RESIDUAL_BLOCK_NAME, ResidualBlockRuntime, ResidualRepairGeometry,
+    ResidualRepairRefusal, ResidualRepairSpec,
+};
+pub(crate) use residual_repair::residual_row_index;
 pub use gradient_paths::{
     MarginalSlopeCovariance, MarginalSlopeCovarianceShape, marginal_slope_covariance_from_scores,
     padded_deviation_seed,

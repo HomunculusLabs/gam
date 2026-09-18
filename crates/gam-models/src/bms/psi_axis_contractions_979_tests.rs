@@ -63,6 +63,7 @@ fn rigid_psi_axis_contractions_match_the_materialized_tensors_979() {
     let policy = gam_runtime::resource::ResourcePolicy::default_library();
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(Array1::from_shape_fn(n, |i| {
             if (i * 7) % 5 < 2 { 1.0 } else { 0.0 }
         })),

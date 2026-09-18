@@ -71,6 +71,12 @@ pub(super) struct BernoulliMarginalSlopeFamily {
     /// on the unarmed fit's own evidence, through
     /// `fit_custom_family_arming_on_evidence` (#979).
     pub(super) jeffreys_armed: bool,
+    /// The residual genetic repair block (gam#2924): `K` conditionally centred
+    /// features with constant coefficients entering the genetic drive beside
+    /// the score, and the joint `(z, r)` covariance the anchor integrates.
+    /// `Some` routes every rigid-path consumer through the residual row kernel
+    /// (`RowKernel<2+K>`); `None` is the two-primary family unchanged.
+    pub(super) residual: Option<Arc<super::residual_repair::ResidualBlockRuntime>>,
 }
 
 /// Number of outer-gradient evaluations the auto-subsample schedule
@@ -275,6 +281,7 @@ pub(super) fn hash_intercept_warm_start_key_flex(
 pub(super) struct ThetaHints {
     pub(super) marginal_beta: Option<Array1<f64>>,
     pub(super) slope_beta: Option<Array1<f64>>,
+    pub(super) residual_beta: Option<Array1<f64>>,
     pub(super) score_warp_beta: Option<Array1<f64>>,
     pub(super) link_dev_beta: Option<Array1<f64>>,
 }

@@ -73,6 +73,7 @@ fn test_family_with_dense_designs(
 ) -> BernoulliMarginalSlopeFamily {
     BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(y),
         weights: Arc::new(weights),
         z: Arc::new(z),
@@ -105,6 +106,7 @@ fn default_test_family() -> BernoulliMarginalSlopeFamily {
     let empty_design = dense_design(Array2::zeros((0, 0)));
     BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(Array1::zeros(0)),
         weights: Arc::new(Array1::zeros(0)),
         z: Arc::new(Array1::zeros(0)),
@@ -236,6 +238,7 @@ fn flex_hessian_matvec_fixture(
         build_link_deviation_block_from_knots_design_seed_and_weights(&link_seed, &q_seed, &cfg)?;
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         score_warp: Some(score_prepared.runtime.clone()),
         link_dev: Some(link_prepared.runtime.clone()),
         ..test_family_with_dense_designs(y, weights, z.clone(), design.clone(), design)
@@ -296,6 +299,7 @@ fn dual_flex_exact_fixture() -> (BernoulliMarginalSlopeFamily, Vec<ParameterBloc
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "link block", e));
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         score_warp: Some(score_prepared.runtime.clone()),
         link_dev: Some(link_prepared.runtime.clone()),
         ..test_family_with_intercept_designs(y.clone(), weights.clone(), z.clone())
@@ -345,6 +349,7 @@ fn h_only_exact_fixture() -> (BernoulliMarginalSlopeFamily, Vec<ParameterBlockSt
     ];
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         score_warp: Some(prepared.runtime.clone()),
         ..test_family_with_zero_primary_designs(
             array![0.0, 1.0, 0.0, 1.0, 0.0],
@@ -381,6 +386,7 @@ fn w_only_exact_fixture() -> (BernoulliMarginalSlopeFamily, Vec<ParameterBlockSt
     ];
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         link_dev: Some(prepared.runtime.clone()),
         ..test_family_with_zero_primary_designs(
             array![0.0, 1.0, 0.0, 1.0, 0.0],
@@ -903,6 +909,7 @@ fn bernoulli_margslope_warm_start_cache_persists_across_eval_cache_builds() {
     let make_family =
         |cache: Option<Arc<BernoulliInterceptWarmStartCache>>| BernoulliMarginalSlopeFamily {
             jeffreys_armed: true,
+            residual: None,
             y: Arc::new(y.clone()),
             weights: Arc::new(weights.clone()),
             z: Arc::new(z.clone()),
@@ -994,6 +1001,7 @@ fn bernoulli_margslope_flex_ll_early_exit_is_exact_or_provably_rejected() {
             .unwrap_or_else(|e| panic!("{} failed: {:?}", "link-wiggle deviation block", e));
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(y),
         weights: Arc::new(weights),
         z: Arc::new(z),
@@ -1115,6 +1123,7 @@ fn base_spec(
         link_dev: None,
         latent_z_policy: LatentZPolicy::default(),
         score_influence_jacobian: None,
+        residual: None,
     }
 }
 
@@ -2378,6 +2387,7 @@ fn bernoulli_marginal_slope_rejects_nonprobit_base_link() {
         link_dev: None,
         latent_z_policy: LatentZPolicy::default(),
         score_influence_jacobian: None,
+        residual: None,
     };
     let err = validate_spec(design.to_dense().view(), &spec)
         .expect_err("non-probit marginal-slope link should be rejected");
@@ -2433,6 +2443,7 @@ fn link_dev_without_score_warp_exposes_structural_derivative_lower_bounds() {
     let beta_link = Array1::from_iter((0..link_dim).map(|idx| 0.1 * (idx as f64 + 1.0)));
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         link_dev: Some(prepared.runtime.clone()),
         ..test_family_with_zero_primary_designs(
             Array1::zeros(seed.len()),
@@ -2546,6 +2557,7 @@ fn zero_deviation_intercept_fast_path_matches_denested_calibration() {
     let n = seed.len();
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         gaussian_frailty_sd: Some(0.65),
         score_warp: Some(score_prepared.runtime.clone()),
         link_dev: Some(link_prepared.runtime.clone()),
@@ -2613,6 +2625,7 @@ fn exact_layout_ignores_dummy_beta_widths_for_empty_design_blocks() {
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "build link deviation block", e));
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(Array1::zeros(seed.len())),
         weights: Arc::new(Array1::ones(seed.len())),
         z: Arc::new(seed.clone()),
@@ -2678,6 +2691,7 @@ fn score_warp_block_exposes_structural_derivative_lower_bounds() {
         .len();
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(Array1::zeros(seed.len())),
         weights: Arc::new(Array1::ones(seed.len())),
         z: Arc::new(seed.clone()),
@@ -2735,6 +2749,7 @@ fn post_update_block_beta_clamps_infeasible_score_warp_step_to_the_feasible_segm
     let score_dim = prepared.block.design.ncols();
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(Array1::zeros(seed.len())),
         weights: Arc::new(Array1::ones(seed.len())),
         z: Arc::new(seed.clone()),
@@ -3330,6 +3345,7 @@ fn observed_denested_partials_include_third_a_derivative_for_piecewise_cubic_lin
     let family =
         BernoulliMarginalSlopeFamily {
             jeffreys_armed: true,
+            residual: None,
             y: Arc::new(array![0.0, 1.0, 1.0]),
             weights: Arc::new(array![1.0, 0.7, 1.3]),
             z: Arc::new(z.clone()),
@@ -3520,6 +3536,7 @@ fn flexible_family_routes_outer_derivatives_by_scale() {
     let family =
         BernoulliMarginalSlopeFamily {
             jeffreys_armed: true,
+            residual: None,
             y: Arc::new(array![0.0, 1.0, 0.0]),
             weights: Arc::new(Array1::ones(3)),
             z: Arc::new(seed.clone()),
@@ -3663,6 +3680,7 @@ fn bms_advertises_exact_outer_hvp_and_plans_arc_outer_newton() {
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "score warp block", e));
     let flex_family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(array![0.0, 1.0, 0.0]),
         weights: Arc::new(Array1::ones(3)),
         z: Arc::new(seed.clone()),
@@ -3693,6 +3711,7 @@ fn bms_advertises_exact_outer_hvp_and_plans_arc_outer_newton() {
 fn rigid_fast_path_matches_loglik_finite_differences() {
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(array![1.0]),
         weights: Arc::new(array![1.2]),
         z: Arc::new(array![0.3]),
@@ -3821,6 +3840,7 @@ fn w_only_gradient_hessian_finite_and_symmetric() {
 
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(array![0.0, 1.0, 0.0, 1.0, 0.0]),
         weights: Arc::new(Array1::ones(seed.len())),
         z: Arc::new(seed.clone()),
@@ -3917,6 +3937,7 @@ fn h_only_gradient_hessian_finite_and_symmetric() {
 
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(array![0.0, 1.0, 0.0, 1.0, 0.0]),
         weights: Arc::new(Array1::ones(seed.len())),
         z: Arc::new(seed.clone()),
@@ -4025,6 +4046,7 @@ fn w_only_exact_outer_directional_derivatives_are_present_and_finite() {
 
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(array![0.0, 1.0, 0.0, 1.0, 0.0]),
         weights: Arc::new(Array1::ones(seed.len())),
         z: Arc::new(seed.clone()),
@@ -4171,6 +4193,7 @@ fn h_only_exact_outer_directional_derivatives_are_present_and_finite() {
 
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(array![0.0, 1.0, 0.0, 1.0, 0.0]),
         weights: Arc::new(Array1::ones(seed.len())),
         z: Arc::new(seed.clone()),
@@ -4270,6 +4293,7 @@ fn h_only_row_primary_higher_order_contractions_are_finite_and_symmetric() {
 
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(array![0.0, 1.0, 0.0, 1.0, 0.0]),
         weights: Arc::new(Array1::ones(seed.len())),
         z: Arc::new(seed.clone()),
@@ -4376,6 +4400,7 @@ fn w_only_row_primary_higher_order_contractions_are_finite_and_symmetric() {
 
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(array![0.0, 1.0, 0.0, 1.0, 0.0]),
         weights: Arc::new(Array1::ones(seed.len())),
         z: Arc::new(seed.clone()),
@@ -5830,6 +5855,7 @@ fn w_only_gradient_matches_loglik_finite_differences() {
     let family =
         BernoulliMarginalSlopeFamily {
             jeffreys_armed: true,
+            residual: None,
             y: Arc::new(y.clone()),
             weights: Arc::new(weights.clone()),
             z: Arc::new(z.clone()),
@@ -5938,6 +5964,7 @@ fn h_only_gradient_matches_loglik_finite_differences() {
     let family =
         BernoulliMarginalSlopeFamily {
             jeffreys_armed: true,
+            residual: None,
             y: Arc::new(y.clone()),
             weights: Arc::new(weights.clone()),
             z: Arc::new(z.clone()),
@@ -6055,6 +6082,7 @@ fn flexible_denested_gradient_matches_loglik_finite_differences() {
     let family =
         BernoulliMarginalSlopeFamily {
             jeffreys_armed: true,
+            residual: None,
             y: Arc::new(y.clone()),
             weights: Arc::new(weights.clone()),
             z: Arc::new(z.clone()),
@@ -6198,6 +6226,7 @@ fn flexible_exact_outer_directional_derivatives_are_present_and_finite() {
     let family =
         BernoulliMarginalSlopeFamily {
             jeffreys_armed: true,
+            residual: None,
             y: Arc::new(y.clone()),
             weights: Arc::new(weights.clone()),
             z: Arc::new(z.clone()),
@@ -6326,6 +6355,7 @@ fn flexible_evaluate_block_diagonals_match_joint_exact_oracle() {
     let slope_x = array![[1.0, 0.3], [1.0, -0.6], [1.0, 0.5], [1.0, -1.0]];
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(y.clone()),
         weights: Arc::new(weights.clone()),
         z: Arc::new(z.clone()),
@@ -6696,6 +6726,7 @@ fn empirical_rigid_fd_fixture() -> (
         .grid;
     let family = BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(array![1.0, 0.0, 1.0]),
         weights: Arc::new(array![1.0, 0.7, 1.3]),
         z: Arc::new(array![0.3, -0.8, 1.6]),
@@ -7336,6 +7367,7 @@ fn sigma_exact_joint_psi_terms_returns_analytic_terms() {
     let sigma = 0.7;
     let make_family = |sigma: f64| BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         gaussian_frailty_sd: Some(sigma),
         ..test_family_with_intercept_designs(y.clone(), weights.clone(), z.clone())
     };
@@ -7414,6 +7446,7 @@ fn make_block_psi_test_family(n: usize) -> BernoulliMarginalSlopeFamily {
     });
     BernoulliMarginalSlopeFamily {
         jeffreys_armed: true,
+        residual: None,
         y: Arc::new(y),
         weights: Arc::new(weights),
         z: Arc::new(z),

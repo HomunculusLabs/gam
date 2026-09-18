@@ -202,6 +202,7 @@ pub(crate) fn resolve_fit_request_config(
         fit_config.slope_time_degree = value;
     }
     fit_config.z_column = json_config.z_column;
+    fit_config.residual_columns = json_config.residual_columns.unwrap_or_default();
     fit_config.frozen_score = json_config.frozen_score.unwrap_or(false);
     fit_config.latent_measure = json_config.latent_measure;
     fit_config.declared_latent_law = json_config.declared_latent_law.map(|law| {

@@ -200,6 +200,11 @@ pub struct FitRequestConfigDocument {
     pub weights: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub z_column: Option<String>,
+    /// Residual genetic repair columns for the Bernoulli marginal-slope family
+    /// (gam#2924): conditionally centred genetic residual features entering the
+    /// genetic drive beside the score with ridge-shrunk constant coefficients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub residual_columns: Option<Vec<String>>,
     /// The supplied z column is already transformed by a frozen external model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frozen_score: Option<bool>,

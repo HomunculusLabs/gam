@@ -3,6 +3,7 @@ use super::cell_moment_assembly::{
 };
 use super::exact_eval_cache::*;
 use super::family::*;
+use super::residual_repair::with_residual_kernel;
 use super::gradient_paths::*;
 use super::hessian_paths::*;
 use super::row_kernel::*;
@@ -665,6 +666,13 @@ impl crate::custom_family::JeffreysThirdInformationDerivative for BernoulliMargi
         {
             return Ok(None);
         }
+        if self.residual_active() {
+            // The residual row kernel derives its channels from the canonical
+            // jet lowering, which stops at the fourth order; the order-five
+            // contraction this term needs has no generic lowering. `None` keeps
+            // the released value-only Jeffreys semantics for an armed fit.
+            return Ok(None);
+        }
         if self.effective_flex_active(block_states)? {
             return self
                 .flex_third_information_all_axes(block_states, d_beta_u_flat, d_beta_v_flat)
@@ -909,13 +917,25 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         // own. All gating logic lives
         // in `maybe_install_auto_outer_subsample` so the survival
         // families can reuse the same schedule.
+        // The residual row kernel (gam#2924) has no family-side row cache: its
+        // correction traces come only from the generic workspace's projected
+        // path, which is full-data. A subsampled measure or a missing
+        // workspace hands the evaluation to the reference hypercoord path,
+        // which reads the same generic directional kernels.
+        if self.residual_active()
+            && (options.outer_score_subsample.is_some() || hessian_workspace.is_none())
+        {
+            return Ok(None);
+        }
         let stratum_secondary: Vec<u8> = self
             .y
             .iter()
             .map(|v| if *v > 0.5 { 1u8 } else { 0u8 })
             .collect();
         let owned_options;
-        let options: &BlockwiseFitOptions =
+        let options: &BlockwiseFitOptions = if self.residual_active() {
+            options
+        } else {
             match crate::marginal_slope_shared::maybe_install_auto_outer_subsample(
                 options,
                 self.z.as_slice().expect("z must be contiguous"),
@@ -942,7 +962,8 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
                     &owned_options
                 }
                 None => options,
-            };
+            }
+        };
         let ranges = Self::block_ranges_from_specs(specs);
         let total = ranges.last().map(|(_, end)| *end).unwrap_or(0);
         let theta_dim = rho.len() + psi_dim;
@@ -1398,6 +1419,12 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         &self,
         block_states: &[ParameterBlockState],
     ) -> Result<Option<Array2<f64>>, String> {
+        if self.residual_active() {
+            return with_residual_kernel!(self, block_states, |kern| {
+                let cache = build_row_kernel_cache(&kern, &crate::row_kernel::RowSet::All)?;
+                row_kernel_hessian_dense(&kern, &cache, &crate::row_kernel::RowSet::All).map(Some)
+            });
+        }
         if !self.effective_flex_active(block_states)? {
             let kern = BernoulliRigidRowKernel::new(self.clone(), block_states.to_vec());
             let cache = build_row_kernel_cache(&kern, &crate::row_kernel::RowSet::All)?;
@@ -1440,6 +1467,20 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
             format!("BernoulliMarginalSlopeFamily exact Newton joint gradient evaluation: {err}")
         })?;
         self.validate_exact_monotonicity(block_states)?;
+        if self.residual_active() {
+            return with_residual_kernel!(self, block_states, |kern| {
+                let cache = build_row_kernel_cache(&kern, &crate::row_kernel::RowSet::All)?;
+                Ok(Some(ExactNewtonJointGradientEvaluation {
+                    log_likelihood: row_kernel_log_likelihood(
+                        &cache,
+                        &crate::row_kernel::RowSet::All,
+                    ),
+                    gradient: Self::exact_newton_score_from_objective_gradient(
+                        row_kernel_gradient(&kern, &cache, &crate::row_kernel::RowSet::All),
+                    ),
+                }))
+            });
+        }
         if !self.effective_flex_active(block_states)? {
             let kern = BernoulliRigidRowKernel::new(self.clone(), block_states.to_vec());
             let cache = build_row_kernel_cache(&kern, &crate::row_kernel::RowSet::All)?;
@@ -1470,6 +1511,13 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         crate::custom_family::validate_blockspec_consistency(specs).map_err(|err| {
             format!("BernoulliMarginalSlopeFamily exact Newton joint Hessian workspace: {err}")
         })?;
+        if self.residual_active() {
+            return with_residual_kernel!(self, block_states, |kern| {
+                let workspace: Arc<dyn ExactNewtonJointHessianWorkspace> =
+                    Arc::new(RowKernelHessianWorkspace::new(kern)?);
+                Ok(Some(workspace))
+            });
+        }
         if !self.effective_flex_active(block_states)? {
             // Rigid path: use generic RowKernel<2> operator
             let kern = BernoulliRigidRowKernel::new(self.clone(), block_states.to_vec());
@@ -1497,6 +1545,14 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
                 "BernoulliMarginalSlopeFamily exact Newton joint Hessian workspace with options: {err}"
             )
         })?;
+        if self.residual_active() {
+            let rows = crate::row_kernel::row_set_from_options(options, self.y.len());
+            return with_residual_kernel!(self, block_states, |kern| {
+                let workspace: Arc<dyn ExactNewtonJointHessianWorkspace> =
+                    Arc::new(RowKernelHessianWorkspace::with_rows(kern, rows)?);
+                Ok(Some(workspace))
+            });
+        }
         if !self.effective_flex_active(block_states)? {
             // Rigid path: RowKernel<2> operator wired through the supplied
             // `RowSet`. With no outer subsample this is `RowSet::All`
@@ -1567,6 +1623,17 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         block_states: &[ParameterBlockState],
         d_beta_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        if self.residual_active() {
+            let sl = d_beta_flat.as_slice().ok_or("non-contiguous d_beta")?;
+            return with_residual_kernel!(self, block_states, |kern| {
+                crate::row_kernel::row_kernel_directional_derivative(
+                    &kern,
+                    &crate::row_kernel::RowSet::All,
+                    sl,
+                )
+                .map(Some)
+            });
+        }
         if !self.effective_flex_active(block_states)? {
             let kern = BernoulliRigidRowKernel::new(self.clone(), block_states.to_vec());
             let sl = d_beta_flat.as_slice().ok_or("non-contiguous d_beta")?;
@@ -1592,6 +1659,19 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         d_beta_u_flat: &Array1<f64>,
         d_beta_v_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        if self.residual_active() {
+            let su = d_beta_u_flat.as_slice().ok_or("non-contiguous d_beta_u")?;
+            let sv = d_beta_v_flat.as_slice().ok_or("non-contiguous d_beta_v")?;
+            return with_residual_kernel!(self, block_states, |kern| {
+                crate::row_kernel::row_kernel_second_directional_derivative(
+                    &kern,
+                    &crate::row_kernel::RowSet::All,
+                    su,
+                    sv,
+                )
+                .map(Some)
+            });
+        }
         if !self.effective_flex_active(block_states)? {
             let kern = BernoulliRigidRowKernel::new(self.clone(), block_states.to_vec());
             let su = d_beta_u_flat.as_slice().ok_or("non-contiguous d_beta_u")?;
@@ -1636,6 +1716,15 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         // fresh exact cache on every call, so a `p`-axis sweep rebuilt the cache
         // and every row's cached `e_q`/`e_g` third tensors `p` times (gam#2892).
         // Build the cache once at this β and differentiate every axis from it.
+        if self.residual_active() {
+            return with_residual_kernel!(self, block_states, |kern| {
+                crate::row_kernel::row_kernel_directional_derivative_all_axes(
+                    &kern,
+                    &crate::row_kernel::RowSet::All,
+                )
+                .map(Some)
+            });
+        }
         if self.effective_flex_active(block_states)? {
             let p = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
             let cache = self.build_exact_eval_cache(block_states)?;
@@ -1684,6 +1773,19 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         // marginal-slope kernel has the BLAS-3 design-row-Gram batched override.
         // Fall back to the generic per-axis assembly (bit-for-bit identical to the
         // trait default) when flex is active.
+        if self.residual_active() {
+            let su = d_beta_u_flat
+                .as_slice()
+                .ok_or("non-contiguous d_beta_u for batched all-axes second directional")?;
+            return with_residual_kernel!(self, block_states, |kern| {
+                crate::row_kernel::row_kernel_second_directional_derivative_all_axes(
+                    &kern,
+                    &crate::row_kernel::RowSet::All,
+                    su,
+                )
+                .map(Some)
+            });
+        }
         if self.effective_flex_active(block_states)? {
             let p = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
             let mut axes = Vec::with_capacity(p);
@@ -1753,6 +1855,45 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
             && !self.joint_hessian_is_structurally_coupled(block_states)?
         {
             return Ok(None);
+        }
+        if self.residual_active() {
+            // Same eigendirection contraction as the flex branch below, on the
+            // residual kernel's generic second directional derivative.
+            let total = block_slices(self).total;
+            if weight.dim() != (total, total) {
+                return Err(format!(
+                    "BMS joint_jeffreys_information_contracted_trace_hessian_with_specs: residual weight shape {:?} != ({total}, {total})",
+                    weight.dim()
+                ));
+            }
+            let mut symmetric = weight + &weight.t();
+            symmetric.mapv_inplace(|value| 0.5 * value);
+            let (scales, directions) =
+                gam_linalg::faer_ndarray::FaerEigh::eigh(&symmetric, faer::Side::Lower).map_err(
+                    |error| {
+                        format!(
+                            "BMS residual jeffreys contracted-trace: weight eigendecomposition failed: {error}"
+                        )
+                    },
+                )?;
+            return with_residual_kernel!(self, block_states, |kern| {
+                let mut out = Array2::<f64>::zeros((total, total));
+                for (index, &scale) in scales.iter().enumerate() {
+                    if scale == 0.0 {
+                        continue;
+                    }
+                    let direction = directions.column(index).to_owned();
+                    let direction = direction.as_slice().ok_or("non-contiguous eigendirection")?;
+                    let second = crate::row_kernel::row_kernel_second_directional_derivative(
+                        &kern,
+                        &crate::row_kernel::RowSet::All,
+                        direction,
+                        direction,
+                    )?;
+                    out.scaled_add(scale, &second);
+                }
+                Ok(Some(out))
+            });
         }
         if self.effective_flex_active(block_states)? {
             let total = block_slices(self).total;
@@ -2178,6 +2319,26 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
                 )?,
             ),
         )))
+    }
+
+    /// The residual repair block's coefficients are read directly by its row
+    /// kernel against the training feature matrix and the joint covariance, so
+    /// the coordinate is model content: no change of basis or width preserves
+    /// the kernel's rebuild (gam#2924).
+    fn block_coefficient_coordinate(
+        &self,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
+        block_spec: &ParameterBlockSpec,
+    ) -> crate::custom_family::CoefficientCoordinate {
+        if self.residual_block_index() == Some(block_index) {
+            return crate::custom_family::CoefficientCoordinate::Structural;
+        }
+        match self.block_linear_constraints(block_states, block_index, block_spec) {
+            Ok(Some(_)) => crate::custom_family::CoefficientCoordinate::Structural,
+            Ok(None) => crate::custom_family::CoefficientCoordinate::Spanning,
+            Err(_) => crate::custom_family::CoefficientCoordinate::Structural,
+        }
     }
 
     fn block_linear_constraints(
@@ -3784,6 +3945,14 @@ impl BernoulliMarginalSlopeExactNewtonJointPsiWorkspace {
             return Err(
                 "BernoulliMarginalSlopeFamily log-sigma axis requires Gaussian frailty".to_string(),
             );
+        }
+        if family.residual_active() && hyper_layout.len() > 0 {
+            return Err(format!(
+                "residual_columns (gam#2924) cannot be fitted with {} outer hyper axis(es): the \
+                 residual row kernel differentiates only the smoothing coordinates; freeze spatial \
+                 length scales and use a fixed frailty_sd",
+                hyper_layout.len()
+            ));
         }
         // Build (or reuse, at a bit-identical β) the exact-cache. This workspace
         // does not materialize per-row primary Hessians, so it keys a separate

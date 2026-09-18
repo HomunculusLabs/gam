@@ -225,6 +225,12 @@ pub struct BernoulliMarginalSlopePredictor {
     /// conditional calibration was fit against. Ignored when
     /// `latent_z_conditional_calibration` is `None`.
     pub latent_conditioning_span: LatentConditioningSpan,
+    /// The residual genetic repair block (gam#2924): the fitted geometry that
+    /// replays the joint `(z, r)` anchor, and its coefficients (block 2 of the
+    /// fit). `None` is the single-score predictor unchanged. The prediction
+    /// rows' residual features arrive in [`PredictInput::auxiliary_matrix`].
+    pub residual_repair: Option<crate::bms::ResidualRepairGeometry>,
+    pub beta_residual: Option<Array1<f64>>,
 }
 
 /// Saved marginal-slope affine row coordinates after replaying every fitted
@@ -670,6 +676,19 @@ impl BernoulliMarginalSlopePredictor {
             link_deviation_runtime: self.link_deviation_runtime.as_ref(),
             score_warp_anchor_rows: anchor_corrections.score_warp_anchor_rows.as_ref(),
             link_deviation_anchor_rows: anchor_corrections.link_dev_anchor_rows.as_ref(),
+            residual_geometry: self.residual_repair.as_ref(),
+            residual_beta: self.beta_residual.as_ref(),
+            residual_features: if self.residual_repair.is_some() {
+                Some(input.auxiliary_matrix.as_ref().ok_or_else(|| {
+                    EstimationError::InvalidInput(
+                        "saved BMS ALO with a residual repair block requires the rows' residual \
+                         features"
+                            .to_string(),
+                    )
+                })?)
+            } else {
+                None
+            },
         })
         .map_err(EstimationError::InvalidInput)
     }
@@ -946,6 +965,140 @@ impl BernoulliMarginalSlopePredictor {
         internal_grad: Option<Array2<f64>>,
     ) -> Result<(Array1<f64>, Option<Array2<f64>>), EstimationError> {
         Ok((internal_eta, internal_grad))
+    }
+
+    /// The residual block's slice of a flat coefficient vector: after the
+    /// marginal and slope surfaces.
+    fn residual_theta_slice<'a>(
+        &self,
+        theta: &'a Array1<f64>,
+    ) -> Result<ArrayView1<'a, f64>, EstimationError> {
+        let beta = self.beta_residual.as_ref().ok_or_else(|| {
+            EstimationError::InvalidInput(
+                "bernoulli marginal-slope residual repair coefficients are missing".to_string(),
+            )
+        })?;
+        let start = self.beta_marginal.len() + self.beta_slope.len();
+        if theta.len() < start + beta.len() {
+            return Err(EstimationError::InvalidInput(format!(
+                "bernoulli marginal-slope theta length {} cannot hold the residual block at {start}..{}",
+                theta.len(),
+                start + beta.len()
+            )));
+        }
+        Ok(theta.slice(ndarray::s![start..start + beta.len()]))
+    }
+
+    /// The residual genetic repair row index (gam#2924) and its gradient with
+    /// respect to every coefficient: `η = c·q + s(g z + βᵀr)` with the anchor
+    /// `c = √(1 + s² b̃ᵀ Σ(a) b̃)` replayed from the saved joint covariance —
+    /// the pooled matrix, or the conditional model evaluated on the prediction
+    /// rows' marginal design. Plug-in and posterior-mean prediction both read
+    /// this one function; the coefficient-uncertainty integration of the
+    /// posterior mean therefore carries `∂η/∂β` through the anchor, not only
+    /// through the linear read `s·r`.
+    fn residual_eta_and_gradient(
+        &self,
+        input: &PredictInput,
+        theta: &Array1<f64>,
+        need_gradient: bool,
+        geometry: &crate::bms::ResidualRepairGeometry,
+        z: &Array1<f64>,
+        design_slope: &DesignMatrix,
+        marginal_eta: &Array1<f64>,
+        slope_eta: &Array1<f64>,
+    ) -> Result<(Array1<f64>, Option<Array2<f64>>), EstimationError> {
+        let n = z.len();
+        let width = geometry.width();
+        let features = input.auxiliary_matrix.as_ref().ok_or_else(|| {
+            EstimationError::InvalidInput(format!(
+                "bernoulli marginal-slope prediction requires the residual columns {:?}",
+                geometry.columns
+            ))
+        })?;
+        if features.nrows() != n || features.ncols() != width {
+            return Err(EstimationError::InvalidInput(format!(
+                "bernoulli marginal-slope residual features are {}x{} but the prediction has {n} rows and the saved block {width} columns",
+                features.nrows(),
+                features.ncols()
+            )));
+        }
+        let beta_residual = self.residual_theta_slice(theta)?;
+        let beta_residual = beta_residual.to_vec();
+        // The joint covariance field on the prediction rows: pooled, or the
+        // conditional model on the marginal-index span exactly as at fit time.
+        let a_block = input
+            .design
+            .try_to_dense_arc("bernoulli marginal-slope residual repair conditioning span")
+            .map_err(EstimationError::InvalidInput)?;
+        let field = geometry
+            .covariance_field(a_block.view())
+            .map_err(EstimationError::InvalidInput)?;
+        let scale = self.probit_frailty_scale();
+        let marginal_dim = self.beta_marginal.len();
+        let slope_dim = self.beta_slope.len();
+        let residual_offset = marginal_dim + slope_dim;
+        let mut eta = Array1::<f64>::zeros(n);
+        let mut grad = need_gradient.then(|| Array2::<f64>::zeros((n, theta.len())));
+        let chunk_size = prediction_chunk_rows(theta.len(), 1, n);
+        let mut start = 0usize;
+        while start < n {
+            let end = (start + chunk_size).min(n);
+            let (mc, lc) = if need_gradient {
+                (
+                    Some(
+                        input
+                            .design
+                            .try_row_chunk(start..end)
+                            .map_err(|e| EstimationError::InvalidInput(e.to_string()))?,
+                    ),
+                    Some(
+                        design_slope
+                            .try_row_chunk(start..end)
+                            .map_err(|e| EstimationError::InvalidInput(e.to_string()))?,
+                    ),
+                )
+            } else {
+                (None, None)
+            };
+            for i in start..end {
+                let marginal = bernoulli_marginal_link_map(&self.base_link, marginal_eta[i])
+                    .map_err(EstimationError::InvalidInput)?;
+                let r = features.row(i);
+                let r = r.as_slice().ok_or_else(|| {
+                    EstimationError::InvalidInput(
+                        "residual feature row is not contiguous".to_string(),
+                    )
+                })?;
+                let (eta_i, d_q, d_g, d_beta) = crate::bms::residual_row_index(
+                    &marginal,
+                    slope_eta[i],
+                    &beta_residual,
+                    z[i],
+                    r,
+                    field.at_row(i),
+                    scale,
+                )
+                .map_err(EstimationError::InvalidInput)?;
+                eta[i] = eta_i;
+                if let (Some(grad), Some(mc), Some(lc)) = (grad.as_mut(), mc.as_ref(), lc.as_ref())
+                {
+                    let li = i - start;
+                    let mut row = grad.row_mut(i);
+                    for j in 0..marginal_dim {
+                        row[j] = d_q * mc[[li, j]];
+                    }
+                    for j in 0..slope_dim {
+                        row[marginal_dim + j] = d_g * lc[[li, j]];
+                    }
+                    for (j, value) in d_beta.iter().enumerate() {
+                        row[residual_offset + j] = *value;
+                    }
+                }
+            }
+            start = end;
+        }
+        self.transform_internal_eta_to_base_scale(eta, grad)
     }
 
     fn link_terms_value_d1(
@@ -1296,6 +1449,7 @@ impl BernoulliMarginalSlopePredictor {
         latent_z_calibration: Option<crate::bms::LatentZRankIntCalibration>,
         latent_z_conditional_calibration: Option<crate::bms::LatentZConditionalCalibration>,
         latent_conditioning_span: LatentConditioningSpan,
+        residual_repair: Option<crate::bms::ResidualRepairGeometry>,
     ) -> Result<Self, String> {
         let gaussian_frailty_sd = match frailty {
             FrailtySpec::None => None,
@@ -1349,7 +1503,18 @@ impl BernoulliMarginalSlopePredictor {
                 format!("bernoulli marginal-slope predictor latent measure is invalid: {e}")
             })?;
         let blocks = &unified.blocks;
+        if residual_repair.is_some()
+            && (score_warp_runtime.is_some() || link_deviation_runtime.is_some())
+        {
+            return Err(crate::bms::ResidualRepairRefusal::FlexBlocksUnsupported.to_string());
+        }
+        if residual_repair.is_some() && latent_measure.is_empirical() {
+            return Err(
+                crate::bms::ResidualRepairRefusal::EmpiricalLatentMeasureUnsupported.to_string(),
+            );
+        }
         let expected_blocks = 2
+            + usize::from(residual_repair.is_some())
             + usize::from(score_warp_runtime.is_some())
             + usize::from(link_deviation_runtime.is_some());
         if blocks.len() != expected_blocks {
@@ -1359,6 +1524,26 @@ impl BernoulliMarginalSlopePredictor {
             ));
         }
         let mut cursor = 2usize;
+        let beta_residual = match residual_repair.as_ref() {
+            Some(geometry) => {
+                let beta = blocks
+                    .get(cursor)
+                    .ok_or_else(|| "missing residual repair coefficient block".to_string())?
+                    .beta
+                    .clone();
+                if beta.len() != geometry.width() {
+                    return Err(format!(
+                        "bernoulli marginal-slope residual repair block has {} coefficients but \
+                         the saved geometry names {} columns",
+                        beta.len(),
+                        geometry.width()
+                    ));
+                }
+                cursor += 1;
+                Some(beta)
+            }
+            None => None,
+        };
         let beta_score_warp = if score_warp_runtime.is_some() {
             let beta = blocks
                 .get(cursor)
@@ -1399,12 +1584,15 @@ impl BernoulliMarginalSlopePredictor {
             latent_z_calibration,
             latent_z_conditional_calibration,
             latent_conditioning_span,
+            residual_repair,
+            beta_residual,
         })
     }
 
     pub fn theta(&self) -> Array1<f64> {
         let total = self.beta_marginal.len()
             + self.beta_slope.len()
+            + self.beta_residual.as_ref().map_or(0, |b| b.len())
             + self.beta_score_warp.as_ref().map_or(0, |b| b.len())
             + self.beta_link_dev.as_ref().map_or(0, |b| b.len());
         let mut theta = Array1::<f64>::zeros(total);
@@ -1417,6 +1605,12 @@ impl BernoulliMarginalSlopePredictor {
             .slice_mut(ndarray::s![cursor..cursor + self.beta_slope.len()])
             .assign(&self.beta_slope);
         cursor += self.beta_slope.len();
+        if let Some(beta) = self.beta_residual.as_ref() {
+            theta
+                .slice_mut(ndarray::s![cursor..cursor + beta.len()])
+                .assign(beta);
+            cursor += beta.len();
+        }
         if let Some(beta) = self.beta_score_warp.as_ref() {
             theta
                 .slice_mut(ndarray::s![cursor..cursor + beta.len()])
@@ -1455,6 +1649,11 @@ impl BernoulliMarginalSlopePredictor {
         cursor += self.beta_marginal.len();
         let slope = theta.slice(ndarray::s![cursor..cursor + self.beta_slope.len()]);
         cursor += self.beta_slope.len();
+        if let Some(beta) = self.beta_residual.as_ref() {
+            // The residual block sits between the slope surface and the flex
+            // blocks; its slice is read by `residual_theta_slice`.
+            cursor += beta.len();
+        }
         let score_warp = self.beta_score_warp.as_ref().map(|beta| {
             let view = theta.slice(ndarray::s![cursor..cursor + beta.len()]);
             cursor += beta.len();
@@ -1613,6 +1812,18 @@ impl BernoulliMarginalSlopePredictor {
             .dot(&beta_slope.to_owned())
             .mapv(|v| v + self.baseline_slope)
             + &slope_offset;
+        if let Some(geometry) = self.residual_repair.as_ref() {
+            return self.residual_eta_and_gradient(
+                input,
+                theta,
+                need_gradient,
+                geometry,
+                &z,
+                design_slope,
+                &marginal_eta,
+                &slope_eta,
+            );
+        }
         let flex_active =
             self.score_warp_runtime.is_some() || self.link_deviation_runtime.is_some();
         let marginal_dim = self.beta_marginal.len();
@@ -2255,12 +2466,13 @@ impl BernoulliMarginalSlopePredictor {
     }
 
     /// Length of the concatenated coefficient vector this predictor
-    /// consumes (`marginal + slope + score_warp? + link_dev?`). The
+    /// consumes (`marginal + slope + residual? + score_warp? + link_dev?`). The
     /// posterior predictive path validates each saved draw against this
     /// before mapping it through [`Self::final_eta_from_theta`].
     pub fn theta_len(&self) -> usize {
         self.beta_marginal.len()
             + self.beta_slope.len()
+            + self.beta_residual.as_ref().map_or(0, Array1::len)
             + self.beta_score_warp.as_ref().map_or(0, Array1::len)
             + self.beta_link_dev.as_ref().map_or(0, Array1::len)
     }
@@ -2271,6 +2483,14 @@ impl BernoulliMarginalSlopePredictor {
     /// [`Self::anchored_row_kernels`] is unavailable.
     pub fn has_flexible_runtime(&self) -> bool {
         self.score_warp_runtime.is_some() || self.link_deviation_runtime.is_some()
+    }
+
+    /// Whether a residual repair block (gam#2924) is present. With one, η reads
+    /// `βᵀr` and the anchor reads the whole residual coefficient vector through
+    /// `b̃ᵀΣb̃`, so η is not a function of `(q, b)` alone and
+    /// [`Self::anchored_row_kernels`] is unavailable.
+    pub fn has_residual_repair(&self) -> bool {
+        self.residual_repair.is_some()
     }
 
     /// The latent score every kernel evaluation consumes: the saved
@@ -2350,6 +2570,14 @@ impl BernoulliMarginalSlopePredictor {
                 "bernoulli marginal-slope anchored row kernels are only defined for the rigid \
                  and declared-law latent measures; a score-warp or link-deviation runtime \
                  anchors the intercept on its own coefficient vector"
+                    .to_string(),
+            ));
+        }
+        if self.has_residual_repair() {
+            return Err(EstimationError::InvalidInput(
+                "bernoulli marginal-slope anchored row kernels are functions of (q, b) alone; a \
+                 residual repair block (gam#2924) moves the index through its coefficients and \
+                 the anchor through the joint (z, r) quadratic form"
                     .to_string(),
             ));
         }

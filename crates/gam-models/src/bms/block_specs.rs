@@ -2004,6 +2004,16 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         );
         effective_kappa_options.enabled = false;
     }
+    if effective_kappa_options.enabled && spec.residual.is_some() {
+        // gam#2924: the residual row kernel differentiates the smoothing
+        // coordinates only; a spatial length scale stays at its data-seeded
+        // value, as an explicit `length_scale=` would pin it.
+        log::info!(
+            "[BMS spatial] residual_columns present: spatial length scales are held at their \
+             seeded values (pass length_scale= to choose them)"
+        );
+        effective_kappa_options.enabled = false;
+    }
     let (z_standardized, z_normalization) = standardize_latent_z_with_policy(
         &spec.z,
         &spec.weights,
@@ -2187,6 +2197,43 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         }
     };
     let z_train = z.as_ref();
+    // gam#2924: the residual repair block, gated and bound to the calibrated
+    // score on the marginal-index span. Every unsupported combination is a
+    // typed refusal at this point, before any design is widened.
+    let residual_runtime: Option<Arc<ResidualBlockRuntime>> = match spec.residual.as_ref() {
+        None => None,
+        Some(residual) => {
+            if spec.score_warp.is_some() || spec.link_dev.is_some() {
+                return Err(ResidualRepairRefusal::FlexBlocksUnsupported.to_string());
+            }
+            if sigma_learnable {
+                return Err(ResidualRepairRefusal::LearnedFrailtyUnsupported.to_string());
+            }
+            if latent_measure.is_empirical() {
+                return Err(ResidualRepairRefusal::EmpiricalLatentMeasureUnsupported.to_string());
+            }
+            let a_block = conditioning_dense
+                .as_ref()
+                .ok_or_else(|| ResidualRepairRefusal::InfluenceAbsorberUnsupported.to_string())?;
+            let runtime = ResidualBlockRuntime::fit(
+                residual,
+                z_train.view(),
+                spec.weights.view(),
+                a_block.view(),
+            )
+            .map_err(|refusal| refusal.to_string())?;
+            log::info!(
+                "[BMS residual repair] {} centred column(s) admitted; joint (z, r) covariance is {}",
+                runtime.width(),
+                if runtime.field.is_conditional() {
+                    "conditional Σ(a)"
+                } else {
+                    "pooled"
+                }
+            );
+            Some(Arc::new(runtime))
+        }
+    };
     let pilot_baseline = pooled_probit_baseline(&spec.y, z_train, &spec.weights)?;
     let baseline = (
         bernoulli_marginal_slope_eta_from_probability(
@@ -2476,6 +2523,11 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
     };
     let extra_rho0 = {
         let mut out = Vec::new();
+        if residual_runtime.is_some() {
+            // The residual ridge's REML coordinate, seeded at λ = 1 on the
+            // standardised score scale; the outer search owns it from here.
+            out.push(0.0);
+        }
         if let Some(ref prepared) = score_warp_prepared {
             out.extend(std::iter::repeat_n(0.0, prepared.block.penalties.len()));
         }
@@ -2626,6 +2678,11 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
                 influence_columns.as_ref(),
             )?,
         ];
+        if let Some(runtime) = residual_runtime.as_ref() {
+            let rho_residual = rho.slice(s![cursor..cursor + 1]).to_owned();
+            cursor += 1;
+            blocks.push(runtime.block_spec(rho_residual, hints.residual_beta.clone())?);
+        }
         push_deviation_aux_blockspecs(
             &mut blocks,
             rho,
@@ -2674,6 +2731,7 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
             .design;
         BernoulliMarginalSlopeFamily {
             jeffreys_armed: true,
+            residual: residual_runtime.clone(),
             y: Arc::clone(&y),
             weights: Arc::clone(&weights),
             z: Arc::clone(&z),
@@ -2789,6 +2847,9 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
                     Vec::new()
                 };
                 let mut derivative_blocks = vec![marginal_psi_derivs, slope_psi_derivs];
+                if residual_runtime.is_some() {
+                    derivative_blocks.push(Vec::new());
+                }
                 if score_warp_runtime.is_some() {
                     derivative_blocks.push(Vec::new());
                 }
@@ -2870,6 +2931,12 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
                 hints_mut.slope_beta = Some(block.beta.clone());
             }
             bidx += 1;
+            if residual_runtime.is_some() {
+                if let Some(block) = fit.block_states.get(bidx) {
+                    hints_mut.residual_beta = Some(block.beta.clone());
+                }
+                bidx += 1;
+            }
             if score_warp_prepared.is_some() {
                 if let Some(block) = fit.block_states.get(bidx) {
                     hints_mut.score_warp_beta = Some(block.beta.clone());
@@ -3366,5 +3433,8 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         cross_block_warnings,
         latent_z_rank_int_calibration,
         latent_z_conditional_calibration,
+        residual_repair: residual_runtime
+            .as_ref()
+            .map(|runtime| runtime.geometry.clone()),
     })
 }

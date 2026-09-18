@@ -149,6 +149,47 @@ impl From<FittedModelError> for PredictInputError {
     }
 }
 
+/// The residual repair block's prediction features (gam#2924), read by the
+/// column names the fit recorded. The columns are the caller's responsibility
+/// to centre on the same reference law as at fit time; a missing or non-finite
+/// column is refused rather than defaulted to zero, because a zero residual is
+/// a statement ("this person's genome carries nothing beyond the score") the
+/// predictor must not make on the caller's behalf.
+fn build_residual_repair_feature_matrix(
+    geometry: &crate::bms::ResidualRepairGeometry,
+    data: ndarray::ArrayView2<'_, f64>,
+    col_map: &HashMap<String, usize>,
+) -> Result<Array2<f64>, PredictInputError> {
+    let n = data.nrows();
+    let width = geometry.width();
+    let mut out = Array2::<f64>::zeros((n, width));
+    for (local_col, name) in geometry.columns.iter().enumerate() {
+        let col = *col_map.get(name).ok_or_else(|| PredictInputError::InvalidInput {
+            reason: format!(
+                "residual repair prediction requires column '{name}', which the prediction table \
+                 does not carry"
+            ),
+        })?;
+        if col >= data.ncols() {
+            return Err(PredictInputError::DimensionMismatch {
+                reason: format!(
+                    "residual repair prediction column '{name}' resolves to index {col}, out of \
+                     bounds for {} columns",
+                    data.ncols()
+                ),
+            });
+        }
+        let column = data.column(col);
+        if let Some(row) = column.iter().position(|v| !v.is_finite()) {
+            return Err(PredictInputError::InvalidInput {
+                reason: format!("residual repair prediction column '{name}' is non-finite at row {row}"),
+            });
+        }
+        out.column_mut(local_col).assign(&column);
+    }
+    Ok(out)
+}
+
 fn build_marginal_slope_local_auxiliary_matrix(
     model: &FittedModel,
     data: ndarray::ArrayView2<'_, f64>,
@@ -1442,8 +1483,14 @@ fn build_predict_input_for_model_inner(
                 .map_err(|error| PredictInputError::InvalidInput {
                     reason: error.to_string(),
                 })?;
-            let auxiliary_matrix =
-                build_marginal_slope_local_auxiliary_matrix(model, design_input, col_map)?;
+            let auxiliary_matrix = match model.residual_repair.as_ref() {
+                Some(geometry) => Some(build_residual_repair_feature_matrix(
+                    geometry,
+                    design_input,
+                    col_map,
+                )?),
+                None => build_marginal_slope_local_auxiliary_matrix(model, design_input, col_map)?,
+            };
             Ok(PredictInput {
                 design: design.design.clone(),
                 offset: mean_offset,

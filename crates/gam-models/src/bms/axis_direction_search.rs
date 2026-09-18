@@ -4391,6 +4391,9 @@ impl BernoulliMarginalSlopeFamily {
         &self,
         block_states: &[ParameterBlockState],
     ) -> Result<FamilyEvaluation, String> {
+        if self.residual_active() {
+            return self.evaluate_residual_block_diagonals(block_states);
+        }
         let slices = block_slices(self);
         let flex_active = self.effective_flex_active(block_states)?;
 

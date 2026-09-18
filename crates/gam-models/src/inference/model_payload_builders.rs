@@ -482,6 +482,9 @@ pub struct BernoulliMarginalSlopeInputs<'a> {
     pub link_dev_runtime: Option<&'a DeviationRuntime>,
     pub base_link: InverseLink,
     pub frailty: crate::survival::lognormal_kernel::FrailtySpec,
+    /// The residual genetic repair geometry (gam#2924) when the fit carried a
+    /// residual block; its coefficients are block 2 of `fit_result`.
+    pub residual_repair: Option<crate::bms::ResidualRepairGeometry>,
 }
 
 /// Drop the #461 training-only influence-absorber coefficients `γ` from a fitted
@@ -738,6 +741,7 @@ pub fn assemble_bernoulli_marginal_slope_payload(
         link_dev_runtime,
         base_link,
         frailty,
+        residual_repair,
     } = inputs;
 
     // #461 predict seam: drop the training-only influence-absorber γ (and
@@ -779,6 +783,7 @@ pub fn assemble_bernoulli_marginal_slope_payload(
     payload.resolved_slopespec = Some(resolved_slopespec);
     payload.score_warp_runtime = score_warp_runtime.map(serialize_anchored_deviation_runtime);
     payload.link_deviation_runtime = link_dev_runtime.map(serialize_anchored_deviation_runtime);
+    payload.residual_repair = residual_repair;
     source.apply_to(&mut payload);
     Ok(payload)
 }
@@ -1959,6 +1964,7 @@ fn payload_for_bernoulli_marginal_slope(
             link_dev_runtime: ms_result.link_dev_runtime.as_ref(),
             base_link,
             frailty,
+            residual_repair: ms_result.residual_repair.clone(),
         },
         SavedModelSourceMetadata {
             training_headers: dataset.headers.clone(),

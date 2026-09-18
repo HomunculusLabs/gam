@@ -582,6 +582,13 @@ pub struct FittedModelPayload {
     /// conditional calibration).
     #[serde(default)]
     pub latent_z_conditional_calibration: Option<LatentZConditionalCalibration>,
+    /// The residual genetic repair block (gam#2924, Bernoulli marginal-slope):
+    /// column names, the pooled joint `(z, r)` covariance, the conditional
+    /// model when the pairwise gate escalated, and the centring p-values. The
+    /// coefficients are block 2 of the unified fit. `#[serde(default)]` so
+    /// models saved before the block existed load as "no residual block".
+    #[serde(default)]
+    pub residual_repair: Option<crate::bms::ResidualRepairGeometry>,
     #[serde(default)]
     pub marginal_baseline: Option<f64>,
     #[serde(default)]
@@ -959,6 +966,7 @@ impl FittedModelPayload {
             declared_latent_law_compression: None,
             latent_z_rank_int_calibration: None,
             latent_z_conditional_calibration: None,
+            residual_repair: None,
             marginal_baseline: None,
             baseline_slope: None,
             baseline_slopes: None,
@@ -1392,6 +1400,10 @@ pub struct SavedPredictionRuntime {
     /// absorber as its own block (unlike the BMS A2 widened-marginal design),
     /// so it never widens any persisted prediction design.
     pub influence_absorber_width: Option<usize>,
+    /// The residual genetic repair geometry (gam#2924) carried into the
+    /// Bernoulli marginal-slope predictor build. `None` for every other model
+    /// and for fits without a residual block.
+    pub residual_repair: Option<crate::bms::ResidualRepairGeometry>,
 }
 
 pub fn gaussian_location_scale_mean_beta(fit: &UnifiedFitResult) -> Option<Array1<f64>> {
@@ -1708,12 +1720,14 @@ fn validate_survival_location_scale_saved_fit(
 
 fn validate_marginal_slope_saved_fit(
     fit: &UnifiedFitResult,
+    residual_repair: Option<&crate::bms::ResidualRepairGeometry>,
     score_warp: Option<&SavedCompiledFlexBlock>,
     link_deviation: Option<&SavedCompiledFlexBlock>,
     fit_label: &str,
 ) -> Result<(), FittedModelError> {
     validate_marginal_slope_saved_fit_impl(
         fit,
+        residual_repair.map(crate::bms::ResidualRepairGeometry::width),
         score_warp,
         link_deviation,
         fit_label,
@@ -1731,6 +1745,7 @@ fn validate_survival_marginal_slope_saved_fit(
 ) -> Result<(), FittedModelError> {
     validate_marginal_slope_saved_fit_impl(
         fit,
+        None,
         payload.score_warp_runtime.as_ref(),
         payload.link_deviation_runtime.as_ref(),
         fit_label,
@@ -1751,6 +1766,7 @@ fn validate_survival_marginal_slope_saved_fit(
 /// / link-deviation tail follows the same shape in both families.
 fn validate_marginal_slope_saved_fit_impl(
     fit: &UnifiedFitResult,
+    residual_width: Option<usize>,
     score_warp: Option<&SavedCompiledFlexBlock>,
     link_deviation: Option<&SavedCompiledFlexBlock>,
     fit_label: &str,
@@ -1760,10 +1776,16 @@ fn validate_marginal_slope_saved_fit_impl(
     influence_absorber_width: Option<usize>,
 ) -> Result<(), FittedModelError> {
     let expected_blocks = base_block_count
+        + usize::from(residual_width.is_some())
         + usize::from(score_warp.is_some())
         + usize::from(link_deviation.is_some())
         + usize::from(influence_absorber_width.is_some());
     if fit.blocks.len() != expected_blocks {
+        let residual_suffix = if residual_width.is_some() {
+            ", residual-repair"
+        } else {
+            ""
+        };
         let score_warp_suffix = if score_warp.is_some() {
             ", score-warp"
         } else {
@@ -1781,11 +1803,25 @@ fn validate_marginal_slope_saved_fit_impl(
         };
         return Err(FittedModelError::SchemaMismatch {
             reason: format!(
-                "{family_kind} marginal-slope saved {fit_label} requires {expected_blocks} blocks [{base_block_role_list}{score_warp_suffix}{link_deviation_suffix}{influence_suffix}], got {}",
+                "{family_kind} marginal-slope saved {fit_label} requires {expected_blocks} blocks [{base_block_role_list}{residual_suffix}{score_warp_suffix}{link_deviation_suffix}{influence_suffix}], got {}",
                 fit.blocks.len(),
             ),
         });
     }
+    // The residual repair block (gam#2924) sits directly after the base
+    // blocks; the flex tail follows it.
+    if let Some(width) = residual_width {
+        let beta = &fit.blocks[base_block_count].beta;
+        if width == 0 || beta.len() != width {
+            return Err(FittedModelError::SchemaMismatch {
+                reason: format!(
+                    "{family_kind} marginal-slope saved {fit_label} residual repair block has {} coefficients but the saved geometry names {width} columns",
+                    beta.len(),
+                ),
+            });
+        }
+    }
+    let base_block_count = base_block_count + usize::from(residual_width.is_some());
     if let Some(runtime) = score_warp {
         let beta = &fit.blocks[base_block_count].beta;
         if beta.len() != runtime.basis_dim {
@@ -3547,6 +3583,11 @@ impl FittedModel {
                 required.remove("z");
                 required.insert(z_column.clone());
             }
+            // gam#2924: the residual repair block's features are read by name
+            // at predict, so a projected load must carry them.
+            if let Some(geometry) = payload.residual_repair.as_ref() {
+                required.extend(geometry.columns.iter().cloned());
+            }
         }
         if let Some(noise_formula) = payload.formula_noise.as_ref() {
             self.add_auxiliary_formula_columns(
@@ -4004,6 +4045,7 @@ impl FittedModel {
                 .latent_z_conditional_calibration
                 .clone(),
             influence_absorber_width: self.payload().influence_absorber_width,
+            residual_repair: self.payload().residual_repair.clone(),
         };
         if matches!(
             runtime.model_class,
@@ -4047,6 +4089,7 @@ impl FittedModel {
                     })?;
             validate_marginal_slope_saved_fit(
                 unified,
+                runtime.residual_repair.as_ref(),
                 runtime.score_warp.as_ref(),
                 runtime.link_deviation.as_ref(),
                 "unified",
@@ -5611,6 +5654,7 @@ impl FittedModel {
         if matches!(self.family_state, FittedFamily::MarginalSlope { .. }) {
             validate_marginal_slope_saved_fit(
                 self.fit_result.as_ref().expect("checked above"),
+                self.residual_repair.as_ref(),
                 self.score_warp_runtime.as_ref(),
                 self.link_deviation_runtime.as_ref(),
                 "fit_result",
@@ -5624,6 +5668,7 @@ impl FittedModel {
                 })?;
             validate_marginal_slope_saved_fit(
                 unified,
+                self.residual_repair.as_ref(),
                 self.score_warp_runtime.as_ref(),
                 self.link_deviation_runtime.as_ref(),
                 "unified",

@@ -2430,6 +2430,33 @@ impl BernoulliMarginalSlopeFamily {
         // `options.outer_score_subsample` (set only for `OuterDerivative`
         // scope), which `outer_weighted_rows` honors here.
         let weighted_rows = outer_weighted_rows(options, n);
+        if let Some(runtime) = self.residual.as_ref() {
+            // Residual repair (gam#2924): the value-only row index shares its
+            // statement of the anchor with the jet row program.
+            let row_ll = |i: usize| -> Result<f64, String> {
+                super::residual_repair::residual_row_neglog_only(self, runtime, block_states, i)
+                    .map(|neglog| -neglog)
+            };
+            if let Some(threshold) = options.early_exit_threshold {
+                return bernoulli_margslope_line_search_ll_with_early_exit(
+                    &weighted_rows,
+                    threshold,
+                    row_ll,
+                );
+            }
+            return gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+                weighted_rows.len(),
+                |range| -> Result<f64, String> {
+                    let mut ll = 0.0;
+                    for wr in &weighted_rows[range] {
+                        ll += wr.weight * row_ll(wr.index)?;
+                    }
+                    Ok(ll)
+                },
+                |left, right| -> Result<_, String> { Ok(left + right) },
+            )
+            .map(|opt| opt.unwrap_or(0.0));
+        }
         if !flex_active {
             // Rigid probit under the active latent measure. Standard-normal
             // keeps the algebraic Gaussian identity; empirical measure solves
@@ -2884,14 +2911,16 @@ impl BernoulliMarginalSlopeFamily {
 
     #[inline]
     pub(super) fn score_block_index(&self) -> Option<usize> {
-        self.score_warp.as_ref().map(|_| 2)
+        self.score_warp
+            .as_ref()
+            .map(|_| 2 + usize::from(self.residual.is_some()))
     }
 
     #[inline]
     pub(super) fn link_block_index(&self) -> Option<usize> {
-        self.link_dev
-            .as_ref()
-            .map(|_| 2 + usize::from(self.score_warp.is_some()))
+        self.link_dev.as_ref().map(|_| {
+            2 + usize::from(self.residual.is_some()) + usize::from(self.score_warp.is_some())
+        })
     }
 
     pub(super) fn optional_exact_block_state<'a>(
@@ -2945,13 +2974,25 @@ impl BernoulliMarginalSlopeFamily {
         &self,
         block_states: &[ParameterBlockState],
     ) -> Result<(), String> {
-        let expected_blocks =
-            2usize + usize::from(self.score_warp.is_some()) + usize::from(self.link_dev.is_some());
+        let expected_blocks = 2usize
+            + usize::from(self.residual.is_some())
+            + usize::from(self.score_warp.is_some())
+            + usize::from(self.link_dev.is_some());
         crate::block_layout::block_count::validate_block_count::<String>(
             "BernoulliMarginalSlopeFamily",
             expected_blocks,
             block_states.len(),
         )?;
+        if let (Some(runtime), Some(idx)) = (self.residual.as_ref(), self.residual_block_index()) {
+            let residual = &block_states[idx];
+            if residual.beta.len() != runtime.width() {
+                return Err(format!(
+                    "bernoulli marginal-slope residual beta length mismatch: got {}, expected {}",
+                    residual.beta.len(),
+                    runtime.width()
+                ));
+            }
+        }
 
         let n_rows = self.y.len();
         let marginal = &block_states[0];
@@ -3863,6 +3904,7 @@ mod empirical_rigid_jet_oracle_tests {
         };
         BernoulliMarginalSlopeFamily {
             jeffreys_armed: true,
+            residual: None,
             y: Arc::new(Array1::from_vec(y)),
             weights: Arc::new(Array1::from_vec(weights)),
             z: Arc::new(Array1::from_vec(z)),
@@ -4520,6 +4562,7 @@ mod empirical_flex_jet_oracle_tests {
         };
         let family = BernoulliMarginalSlopeFamily {
             jeffreys_armed: true,
+            residual: None,
             y: Arc::new(Array1::from_vec(vec![1.0])),
             weights: Arc::new(Array1::from_vec(vec![1.0])),
             z: Arc::new(Array1::from_vec(vec![0.45])),
