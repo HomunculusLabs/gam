@@ -766,5 +766,17 @@
     ],
     "reason": "#2963 K=1: a latent forecast's quadrature check no longer carries the order-G state onto the rung 2G-1. KilledProcess::other_error (declared in forecast/integrator.rs, implemented for the grid filter in forecast.rs) integrated each cell under the rung from the entering order-G state carried onto it by resample_state, the Lagrange interpolant of that state at the rung's nodes. That measured only the cell's own quadrature of G's posterior and inherited the error G's state already carried, so the checked error was not a bound (probe 1230171: static K=1 checked 8.85e-7 against 3.74e-6 from the oracle). The rung is now integrator::Companion: the same killed runs on the rung, each evolved from its own opening state (the history filtered under the rung) over the same mesh, and a cell's gap compares the two engines' integrals of it. other_error and resample_state have no remaining use and are deleted.",
     "evidence": "At 9b49a08952 (the files are unchanged since 3b118c6258), git grep -n -w finds the method other_error only in crates/gam-event-history/src/forecast/integrator.rs (the trait declaration at :102 and its one call in integrate_interval at :415) and in forecast.rs (the impl for WindowIntegrand at :722); the only other matches are an unrelated local variable in a test of joint/constant_rate_inference.rs (:551 and :553). resample_state occurs only in forecast.rs, its definition at :523 and its one call at :734. In the landing tree forecast.rs and forecast/integrator.rs name either 0 times. Gate job 1248920 at 3b118c6258 without this entry named exactly these three items (sw-status/evh-forecast-k1-check.1248920.sr.txt). With this entry, gate job 1251088 at 9b49a08952 (tree e43d8ff622) reported RC_SR=0 and RC_API=0 against the exact tree."
+  },
+  {
+    "base": "2a2fb129c3458d06b76c037ed67272f6b58e9cd1",
+    "items": [
+      "crates/gam-sae/src/parameter_decomposition/program.rs:enum:NodeValue",
+      "crates/gam-sae/src/parameter_decomposition/program.rs:fn:deref",
+      "crates/gam-sae/src/parameter_decomposition/program.rs:fn:deref_mut",
+      "crates/gam-sae/src/parameter_decomposition/program.rs:fn:governed",
+      "crates/gam-sae/src/parameter_decomposition/program.rs:type:Target"
+    ],
+    "reason": "#2951 mpd-program binding step B3: every value the mechanism program's executor forms is reserved before it is formed (SPEC: never out of memory). The private two-variant enum NodeValue { Governed, Plain } kept executor-formed values as plain, uncounted arrays, with its Deref/DerefMut impls (fn deref, fn deref_mut, type Target) and fn governed, which reserved a plain value only at the output. Every node value is now a governed array, so the enum and its impls are replaced by `type NodeValue = Governed<Array2<f64>>`, whose Deref is the owner's, and by admit/governed_copy, which reserve before forming. All five were private to program.rs.",
+    "evidence": "source_removal_guard.py without this entry, on the probe commit of B3's program.rs patch (md5 2d1f2f52) at cd4e4d3662 (sw-status/mpd-program-b3-guards/removal.txt), names exactly these five items, each private and not test-scoped, all in program.rs; public_api_census.py returned RC 0 on the same probe. The landing's full gate, dx2 run mpd-program-b3w-c51e30d0, applies this entry with the patch, and sw-land2's pre-push guard checks the landing commit."
   }
 ]
