@@ -47,19 +47,50 @@
 //!
 //! # Validity domain
 //!
-//! The block covers what its sublayers cover: query and key projections without
-//! biases that feed the rotary embedding directly (no per-head query/key norm),
-//! an MLP with a ReLU or exact GELU activation, and normalizations with the
-//! source's own gain and bias. Masks on the value and output projections, on
-//! normalization gains, and on a gated (SwiGLU) MLP are not carried here.
+//! The block covers what its sublayers cover: query and key projections that feed
+//! the rotary embedding directly (no per-head query/key norm), an MLP with a ReLU
+//! or exact GELU activation, and normalizations with the source's own gain and
+//! bias. Masks on the value and output projections, on normalization gains, and on
+//! a gated (SwiGLU) MLP are not carried by [`ComponentBlock`].
+//!
+//! # Attention-only layers
+//!
+//! An attention-only transformer's layer has no normalization, no MLP and no
+//! bias: `h' = h + concat_h(z_h) W_Oᵀ`, with `z_h` the joint-softmax value read of
+//! head `h` ([`NativeAttentionLayer`]). Its learned absolute positions enter the
+//! embedding, so its rotary embedding is empty and the source's rotation leaves
+//! the rows unchanged. Each of the four linear reads executes one of three ways
+//! ([`ProjectionRead`]), all through the owner of matrix-free edits
+//! ([`super::apply`]):
+//!
+//! * `Native`: the stored tensor on its original path.
+//! * `Components(m)`: `U diag(m) R` over the component coordinates of the exact
+//!   factor `W = U R` ([`ComponentAttentionLayer`]), with the native anchor at
+//!   zero, so `U M R` is never formed.
+//! * `Edited`: the stored tensor plus a factored edit `Δ` on exactly the rows whose
+//!   absolute positions a [`PositionScope`] reaches. The other rows come from the
+//!   same native product as the unedited layer, so they are its bits.
+//!
+//! Queries, keys and values go through the tensor-free attention core
+//! ([`RotaryCausalAttention::attend_projected`]). Its head-mixed rows feed the
+//! output read, and its forward-error radii are against the exact attention of the
+//! rows it was handed. Every mask on Q, K, V and O is a real mask on the summed
+//! read: the softmax and the value mix see the masked rows, never a sum of
+//! per-component patterns.
 
+use super::apply::{ApplyError, FactorView, apply_anchored_linear, native_linear};
 use super::attention::{
-    AttentionExecution, AttentionProgramError, ComponentAttention, ComponentProjection,
-    NativeAttention, QueryKeyMasks,
+    AttentionExecution, AttentionGeometry, AttentionProgramError, ComponentAttention,
+    ComponentProjection, NativeAttention, ProjectedAttention, ProjectedRows, QueryKeyMasks,
+    RotaryCausalAttention, RotaryEmbedding,
 };
 use super::gated_rewrite::{GatedRewriteError, MaskedNorm, ResidualLayout, decoder_layer};
-use super::rewrite::{ComponentMlp, ComponentRead, MlpMask, NativeMlp, RewriteError};
-use ndarray::{Array1, Array2, ArrayView2};
+use super::occurrence::PositionScope;
+use super::rewrite::{
+    ComponentMlp, ComponentRead, ExactFactor, FactorRefusal, MlpMask, NativeMlp, RewriteError,
+};
+use gam_runtime::resource::Governed;
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use std::fmt;
 
 /// A source model's input normalization on its own tensors.
@@ -128,6 +159,41 @@ pub enum BlockError {
     /// The decoder layer returned a stream without running this sublayer: an
     /// executor invariant.
     SublayerNotExecuted { sublayer: Sublayer },
+    /// An attention-only layer's residual rows do not match its positions and its
+    /// model width.
+    ResidualShape {
+        expected: (usize, usize),
+        found: (usize, usize),
+    },
+    /// A projection weight whose shape is not the layer geometry's.
+    ProjectionShape {
+        projection: AttentionProjection,
+        expected: (usize, usize),
+        found: (usize, usize),
+    },
+    /// A projection weight has no exact factor through its declared read.
+    Factor {
+        projection: AttentionProjection,
+        refusal: FactorRefusal,
+    },
+    /// A matrix-free read refused its operands or its memory footprint.
+    Apply {
+        projection: AttentionProjection,
+        error: ApplyError,
+    },
+    /// A component read on a layer that holds no component factors.
+    NoComponentFactors { projection: AttentionProjection },
+    /// An edited read at a negative absolute position, which no position scope can
+    /// name.
+    NegativePosition {
+        projection: AttentionProjection,
+        position: i64,
+    },
+    /// An edit declares a position that no row of the layer holds.
+    EditPositionAbsent {
+        projection: AttentionProjection,
+        position: usize,
+    },
 }
 
 impl From<GatedRewriteError> for BlockError {
@@ -160,6 +226,42 @@ impl fmt::Display for BlockError {
             Self::SublayerNotExecuted { sublayer } => write!(
                 formatter,
                 "executor invariant: the decoder layer returned without running the {sublayer} sublayer"
+            ),
+            Self::ResidualShape { expected, found } => write!(
+                formatter,
+                "the attention-only layer's residual rows have shape {found:?}, its positions and width need {expected:?}"
+            ),
+            Self::ProjectionShape {
+                projection,
+                expected,
+                found,
+            } => write!(
+                formatter,
+                "the {projection} weight has shape {found:?}, the layer geometry needs {expected:?}"
+            ),
+            Self::Factor { projection, refusal } => {
+                write!(formatter, "the {projection} weight has no exact factor: {refusal}")
+            }
+            Self::Apply { projection, error } => {
+                write!(formatter, "the {projection} read refused: {error}")
+            }
+            Self::NoComponentFactors { projection } => write!(
+                formatter,
+                "a component read of the {projection} projection needs a layer with component factors"
+            ),
+            Self::NegativePosition {
+                projection,
+                position,
+            } => write!(
+                formatter,
+                "an edited {projection} read at negative position {position}, which no position scope names"
+            ),
+            Self::EditPositionAbsent {
+                projection,
+                position,
+            } => write!(
+                formatter,
+                "the {projection} edit declares position {position}, which no row of the layer holds"
             ),
         }
     }
@@ -420,13 +522,376 @@ impl ComponentBlock {
     }
 }
 
+/// One of an attention-only layer's four linear reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttentionProjection {
+    Query,
+    Key,
+    Value,
+    Output,
+}
+
+impl AttentionProjection {
+    fn index(self) -> usize {
+        match self {
+            Self::Query => 0,
+            Self::Key => 1,
+            Self::Value => 2,
+            Self::Output => 3,
+        }
+    }
+}
+
+impl fmt::Display for AttentionProjection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Query => "query",
+            Self::Key => "key",
+            Self::Value => "value",
+            Self::Output => "output",
+        })
+    }
+}
+
+/// A parameter edit read at declared positions: `Θ + Δ` on every row whose
+/// absolute position `positions` reaches, and the stored tensor on every other row.
+#[derive(Clone, Copy, Debug)]
+pub struct ScopedEdit<'a> {
+    /// `Δ = Σ_k u_k v_kᵀ` in the read's orientation (`occurrence`'s
+    /// `ParameterEditRecord::delta_read_at`).
+    pub edit: FactorView<'a>,
+    pub positions: &'a PositionScope,
+}
+
+/// How one linear read of an attention-only layer executes (see the module
+/// documentation).
+#[derive(Clone, Copy, Debug)]
+pub enum ProjectionRead<'a> {
+    /// The stored tensor on its original path.
+    Native,
+    /// `U diag(m) R` over the component coordinates of a [`ComponentAttentionLayer`].
+    /// Entries are any real numbers: continuous, binary or signed.
+    Components(ArrayView1<'a, f64>),
+    /// The stored tensor plus a factored edit at declared positions.
+    Edited(ScopedEdit<'a>),
+}
+
+/// The reads of an attention-only layer's four projections.
+#[derive(Clone, Copy, Debug)]
+pub struct AttentionLayerReads<'a> {
+    pub query: ProjectionRead<'a>,
+    pub key: ProjectionRead<'a>,
+    pub value: ProjectionRead<'a>,
+    pub output: ProjectionRead<'a>,
+}
+
+impl AttentionLayerReads<'_> {
+    /// Every projection on its stored tensor.
+    pub fn native() -> Self {
+        Self {
+            query: ProjectionRead::Native,
+            key: ProjectionRead::Native,
+            value: ProjectionRead::Native,
+            output: ProjectionRead::Native,
+        }
+    }
+}
+
+/// Every stage of one executed attention-only layer. Rows are positions.
+#[derive(Debug)]
+pub struct AttentionLayerExecution {
+    /// `x W_Qᵀ` under the query read, `tokens × n_heads·head_dim`.
+    pub queries: Governed<Array2<f64>>,
+    /// `x W_Kᵀ` under the key read, `tokens × n_kv_heads·head_dim`.
+    pub keys: Governed<Array2<f64>>,
+    /// `x W_Vᵀ` under the value read, `tokens × n_kv_heads·head_dim`.
+    pub values: Governed<Array2<f64>>,
+    /// The scores, the attention pattern and the head-mixed rows `concat_h z_h`, each
+    /// with its forward-error radius against the exact attention of the rows above.
+    pub attention: ProjectedAttention,
+    /// `concat_h(z_h) W_Oᵀ` under the output read: the layer's write, no residual.
+    pub write: Governed<Array2<f64>>,
+    /// `h + write`, the residual stream after the layer.
+    pub output: Array2<f64>,
+}
+
+/// A norm-free, MLP-free, bias-free decoder layer `h' = h + concat_h(z_h) W_Oᵀ` on
+/// its original tensors.
+#[derive(Clone, Debug)]
+pub struct NativeAttentionLayer {
+    geometry: AttentionGeometry,
+    attention: RotaryCausalAttention,
+    query: Array2<f64>,
+    key: Array2<f64>,
+    value: Array2<f64>,
+    output: Array2<f64>,
+}
+
+impl NativeAttentionLayer {
+    /// The layer's attention core and its four weights in torch `Linear` layout:
+    /// `query` is `n_heads·head_dim × model_dim`, `key` and `value` are
+    /// `n_kv_heads·head_dim × model_dim`, `output` is `model_dim × n_heads·head_dim`.
+    /// A source with learned absolute positions passes an empty rotary embedding.
+    pub fn new(
+        geometry: AttentionGeometry,
+        rotary: RotaryEmbedding,
+        score_scale: f64,
+        query: Array2<f64>,
+        key: Array2<f64>,
+        value: Array2<f64>,
+        output: Array2<f64>,
+    ) -> Result<Self, BlockError> {
+        let attention = RotaryCausalAttention::new(geometry, rotary, score_scale)?;
+        let (model, query_dim, kv_dim) = (
+            geometry.model_dim,
+            geometry.query_dim(),
+            geometry.key_value_dim(),
+        );
+        for (projection, weight, expected) in [
+            (AttentionProjection::Query, &query, (query_dim, model)),
+            (AttentionProjection::Key, &key, (kv_dim, model)),
+            (AttentionProjection::Value, &value, (kv_dim, model)),
+            (AttentionProjection::Output, &output, (model, query_dim)),
+        ] {
+            if weight.dim() != expected {
+                return Err(BlockError::ProjectionShape {
+                    projection,
+                    expected,
+                    found: weight.dim(),
+                });
+            }
+        }
+        Ok(Self {
+            geometry,
+            attention,
+            query,
+            key,
+            value,
+            output,
+        })
+    }
+
+    pub fn geometry(&self) -> AttentionGeometry {
+        self.geometry
+    }
+
+    /// The stored weight of one projection.
+    pub fn weight(&self, projection: AttentionProjection) -> ArrayView2<'_, f64> {
+        match projection {
+            AttentionProjection::Query => self.query.view(),
+            AttentionProjection::Key => self.key.view(),
+            AttentionProjection::Value => self.value.view(),
+            AttentionProjection::Output => self.output.view(),
+        }
+    }
+
+    /// The layer under `reads`, over the residual rows at their absolute positions.
+    /// A component read is refused: this layer holds no component factors.
+    pub fn execute(
+        &self,
+        reads: AttentionLayerReads<'_>,
+        residual: ArrayView2<'_, f64>,
+        positions: &[i64],
+    ) -> Result<AttentionLayerExecution, BlockError> {
+        execute_attention_layer(self, None, reads, residual, positions)
+    }
+}
+
+/// The exact factor `W = U R` of one projection, with `Rᵀ` held in the column layout
+/// the matrix-free kernels read.
+#[derive(Clone, Debug)]
+struct ProjectionFactor {
+    factor: ExactFactor,
+    read_transpose: Array2<f64>,
+}
+
+/// An attention-only layer whose four projections can execute through masked
+/// component coordinates.
+#[derive(Clone, Debug)]
+pub struct ComponentAttentionLayer {
+    native: NativeAttentionLayer,
+    factors: [ProjectionFactor; 4],
+}
+
+impl ComponentAttentionLayer {
+    /// Solves each projection's exact write through its declared read (rewrite's
+    /// overcomplete factor), refusing an uncovered or unresolved read.
+    pub fn new(
+        native: NativeAttentionLayer,
+        query: ComponentRead<'_>,
+        key: ComponentRead<'_>,
+        value: ComponentRead<'_>,
+        output: ComponentRead<'_>,
+    ) -> Result<Self, BlockError> {
+        let solve = |projection: AttentionProjection, read: ComponentRead<'_>| {
+            ExactFactor::solve_write(native.weight(projection), read.read, read.candidate_write)
+                .map(|factor| ProjectionFactor {
+                    read_transpose: factor.read().t().to_owned(),
+                    factor,
+                })
+                .map_err(|refusal| BlockError::Factor { projection, refusal })
+        };
+        let factors = [
+            solve(AttentionProjection::Query, query)?,
+            solve(AttentionProjection::Key, key)?,
+            solve(AttentionProjection::Value, value)?,
+            solve(AttentionProjection::Output, output)?,
+        ];
+        Ok(Self { native, factors })
+    }
+
+    /// The layer on its stored tensors.
+    pub fn native(&self) -> &NativeAttentionLayer {
+        &self.native
+    }
+
+    /// The exact factor `W = U R` of one projection.
+    pub fn factor(&self, projection: AttentionProjection) -> &ExactFactor {
+        &self.factors[projection.index()].factor
+    }
+
+    /// The layer under `reads`, over the residual rows at their absolute positions.
+    pub fn execute(
+        &self,
+        reads: AttentionLayerReads<'_>,
+        residual: ArrayView2<'_, f64>,
+        positions: &[i64],
+    ) -> Result<AttentionLayerExecution, BlockError> {
+        execute_attention_layer(&self.native, Some(&self.factors), reads, residual, positions)
+    }
+}
+
+fn execute_attention_layer(
+    layer: &NativeAttentionLayer,
+    factors: Option<&[ProjectionFactor; 4]>,
+    reads: AttentionLayerReads<'_>,
+    residual: ArrayView2<'_, f64>,
+    positions: &[i64],
+) -> Result<AttentionLayerExecution, BlockError> {
+    let expected = (positions.len(), layer.geometry.model_dim);
+    if residual.dim() != expected {
+        return Err(BlockError::ResidualShape {
+            expected,
+            found: residual.dim(),
+        });
+    }
+    let factor = |projection: AttentionProjection| factors.map(|all| &all[projection.index()]);
+    let queries = read_projection(
+        layer.weight(AttentionProjection::Query),
+        factor(AttentionProjection::Query),
+        AttentionProjection::Query,
+        reads.query,
+        residual,
+        positions,
+    )?;
+    let keys = read_projection(
+        layer.weight(AttentionProjection::Key),
+        factor(AttentionProjection::Key),
+        AttentionProjection::Key,
+        reads.key,
+        residual,
+        positions,
+    )?;
+    let values = read_projection(
+        layer.weight(AttentionProjection::Value),
+        factor(AttentionProjection::Value),
+        AttentionProjection::Value,
+        reads.value,
+        residual,
+        positions,
+    )?;
+    let attention = layer.attention.attend_projected(
+        ProjectedRows::exact(queries.view()),
+        ProjectedRows::exact(keys.view()),
+        ProjectedRows::exact(values.view()),
+        positions,
+    )?;
+    let write = read_projection(
+        layer.weight(AttentionProjection::Output),
+        factor(AttentionProjection::Output),
+        AttentionProjection::Output,
+        reads.output,
+        attention.mixed.view(),
+        positions,
+    )?;
+    let mut output = residual.to_owned();
+    output += &*write;
+    Ok(AttentionLayerExecution {
+        queries,
+        keys,
+        values,
+        attention,
+        write,
+        output,
+    })
+}
+
+/// One linear read of `rows`, whose row `r` sits at absolute position `positions[r]`.
+fn read_projection(
+    weight: ArrayView2<'_, f64>,
+    factor: Option<&ProjectionFactor>,
+    projection: AttentionProjection,
+    read: ProjectionRead<'_>,
+    rows: ArrayView2<'_, f64>,
+    positions: &[i64],
+) -> Result<Governed<Array2<f64>>, BlockError> {
+    let refused = |error: ApplyError| BlockError::Apply { projection, error };
+    match read {
+        ProjectionRead::Native => native_linear(weight, rows).map_err(refused),
+        ProjectionRead::Components(mask) => {
+            let factor = factor.ok_or(BlockError::NoComponentFactors { projection })?;
+            let components = FactorView::new(factor.factor.write(), factor.read_transpose.view())
+                .map_err(refused)?;
+            apply_anchored_linear(weight, 0.0, components, mask, rows).map_err(refused)
+        }
+        ProjectionRead::Edited(scoped) => {
+            let mut row_positions = Vec::with_capacity(positions.len());
+            for &position in positions {
+                row_positions.push(
+                    usize::try_from(position)
+                        .ok()
+                        .ok_or(BlockError::NegativePosition {
+                            projection,
+                            position,
+                        })?,
+                );
+            }
+            if let Some(&absent) = scoped
+                .positions
+                .positions()
+                .and_then(|declared| declared.iter().find(|position| !row_positions.contains(position)))
+            {
+                return Err(BlockError::EditPositionAbsent {
+                    projection,
+                    position: absent,
+                });
+            }
+            let mut written = native_linear(weight, rows).map_err(refused)?;
+            let reached: Vec<usize> = row_positions
+                .iter()
+                .enumerate()
+                .filter_map(|(row, position)| scoped.positions.reaches(*position).then_some(row))
+                .collect();
+            if reached.is_empty() {
+                return Ok(written);
+            }
+            let selected = rows.select(Axis(0), &reached);
+            let every_term = Array1::<f64>::ones(scoped.edit.term_count());
+            let edited = apply_anchored_linear(weight, 1.0, scoped.edit, every_term.view(), selected.view())
+                .map_err(refused)?;
+            for (index, &row) in reached.iter().enumerate() {
+                written.row_mut(row).assign(&edited.row(index));
+            }
+            Ok(written)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parameter_decomposition::attention::{
-        AffineProjection, AttentionGeometry, RotaryEmbedding, RotaryPairing,
-    };
-    use crate::parameter_decomposition::rewrite::{ComponentMask, ExactFactor};
+    use crate::parameter_decomposition::attention::{AffineProjection, RotaryPairing};
+    use crate::parameter_decomposition::rewrite::ComponentMask;
     use gam_linalg::roundoff::{UNIT_ROUNDOFF, accumulation_growth};
     use gam_math::gaussian_activation::GaussianActivation;
     use ndarray::ArrayView1;
@@ -1098,5 +1563,576 @@ mod tests {
             ),
             "an MLP normalization gain of another width must be refused, typed by sublayer"
         );
+    }
+
+    const LAYER_WIDTH: usize = 8;
+    const LAYER_HEAD_DIM: usize = 4;
+    const LAYER_TOKENS: usize = 6;
+    const LAYER_COMPONENTS: usize = 9;
+    /// `1/sqrt(head_dim)` at `head_dim = 4`, exactly.
+    const LAYER_SCORE_SCALE: f64 = 0.5;
+
+    fn layer_geometry() -> AttentionGeometry {
+        AttentionGeometry {
+            model_dim: LAYER_WIDTH,
+            n_heads: 2,
+            n_kv_heads: 2,
+            head_dim: LAYER_HEAD_DIM,
+        }
+    }
+
+    /// Learned absolute positions: the source rotates no plane.
+    fn no_rotary() -> RotaryEmbedding {
+        RotaryEmbedding {
+            pairing: RotaryPairing::HalfSplit,
+            inverse_frequencies: Vec::new(),
+            attention_scaling: 1.0,
+        }
+    }
+
+    const PROJECTIONS: [AttentionProjection; 4] = [
+        AttentionProjection::Query,
+        AttentionProjection::Key,
+        AttentionProjection::Value,
+        AttentionProjection::Output,
+    ];
+
+    /// An attention-only layer whose four weights factor exactly through overcomplete
+    /// reads in eighths, `W = N R`, so each exact write is its candidate and every edited
+    /// tensor `U diag(m) R` is formed without rounding.
+    struct LayerFixture {
+        candidates: [Array2<f64>; 4],
+        reads: [Array2<f64>; 4],
+        residual: Array2<f64>,
+        positions: Vec<i64>,
+    }
+
+    impl LayerFixture {
+        fn new(seed: u64) -> Self {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let candidates = [
+                eighths(&mut rng, LAYER_WIDTH, LAYER_COMPONENTS),
+                eighths(&mut rng, LAYER_WIDTH, LAYER_COMPONENTS),
+                eighths(&mut rng, LAYER_WIDTH, LAYER_COMPONENTS),
+                eighths(&mut rng, LAYER_WIDTH, LAYER_COMPONENTS),
+            ];
+            let reads = [
+                eighths(&mut rng, LAYER_COMPONENTS, LAYER_WIDTH),
+                eighths(&mut rng, LAYER_COMPONENTS, LAYER_WIDTH),
+                eighths(&mut rng, LAYER_COMPONENTS, LAYER_WIDTH),
+                eighths(&mut rng, LAYER_COMPONENTS, LAYER_WIDTH),
+            ];
+            Self {
+                candidates,
+                reads,
+                // Thirds of eighths in `[-2, 2]`. With eighth-valued rows every linear read is exact
+                // in f64, so two routes with the same algebra would share their bits: the bitwise
+                // checks could not see a route change, and the derived bands would never meet rounding.
+                residual: Array2::from_shape_simple_fn((LAYER_TOKENS, LAYER_WIDTH), || {
+                    rng.random_range(-48..=48) as f64 / 24.0
+                }),
+                positions: (0..LAYER_TOKENS as i64).collect(),
+            }
+        }
+
+        fn native_with(&self, weights: [Array2<f64>; 4]) -> NativeAttentionLayer {
+            let [query, key, value, output] = weights;
+            NativeAttentionLayer::new(
+                layer_geometry(),
+                no_rotary(),
+                LAYER_SCORE_SCALE,
+                query,
+                key,
+                value,
+                output,
+            )
+            .expect("fixture weights match the geometry")
+        }
+
+        /// The source layer: every weight is its factors' product.
+        fn native(&self) -> NativeAttentionLayer {
+            self.native_with([0, 1, 2, 3].map(|index| self.candidates[index].dot(&self.reads[index])))
+        }
+
+        fn component(&self) -> ComponentAttentionLayer {
+            let read = |index: usize| ComponentRead {
+                read: self.reads[index].view(),
+                candidate_write: self.candidates[index].view(),
+            };
+            ComponentAttentionLayer::new(self.native(), read(0), read(1), read(2), read(3))
+                .expect("random overcomplete reads are resolved")
+        }
+
+        /// Direct execution with the edited tensors `U diag(m) R`.
+        fn edited(&self, layer: &ComponentAttentionLayer, masks: &LayerMasks) -> NativeAttentionLayer {
+            self.native_with(PROJECTIONS.map(|projection| {
+                let factor = layer.factor(projection);
+                masked_product(factor.write(), masks.of(projection), factor.read())
+            }))
+        }
+    }
+
+    #[derive(Clone)]
+    struct LayerMasks {
+        query: Array1<f64>,
+        key: Array1<f64>,
+        value: Array1<f64>,
+        output: Array1<f64>,
+    }
+
+    impl LayerMasks {
+        /// Eighths: continuous in `[0, 1]`, binary, and signed in `[-3/2, 3/2]`.
+        fn family(rng: &mut StdRng) -> [(&'static str, Self); 3] {
+            let mut draw = |low: i32, high: i32, denominator: f64| {
+                let mut vector = || {
+                    Array1::from_shape_simple_fn(LAYER_COMPONENTS, || rng.random_range(low..=high) as f64 / denominator)
+                };
+                Self {
+                    query: vector(),
+                    key: vector(),
+                    value: vector(),
+                    output: vector(),
+                }
+            };
+            [
+                ("continuous", draw(0, 8, 8.0)),
+                ("binary", draw(0, 1, 1.0)),
+                ("signed", draw(-12, 12, 8.0)),
+            ]
+        }
+
+        fn of(&self, projection: AttentionProjection) -> ArrayView1<'_, f64> {
+            match projection {
+                AttentionProjection::Query => self.query.view(),
+                AttentionProjection::Key => self.key.view(),
+                AttentionProjection::Value => self.value.view(),
+                AttentionProjection::Output => self.output.view(),
+            }
+        }
+
+        fn reads(&self) -> AttentionLayerReads<'_> {
+            AttentionLayerReads {
+                query: ProjectionRead::Components(self.query.view()),
+                key: ProjectionRead::Components(self.key.view()),
+                value: ProjectionRead::Components(self.value.view()),
+                output: ProjectionRead::Components(self.output.view()),
+            }
+        }
+    }
+
+    /// Rounding of `A diag(m) B x` through the matrix-free kernel on either route. The
+    /// factored route passes each term through the products `b_c x` (`d` operations), the
+    /// scale, the product with `a_c` and `C − 1` sums, and the accumulation into the tile:
+    /// `C + d + 2`. The edited tensor's native product takes `d` operations over terms
+    /// bounded entrywise by the same magnitudes.
+    fn component_rounding(
+        factor: &ExactFactor,
+        mask: ArrayView1<'_, f64>,
+        rows: ArrayView2<'_, f64>,
+    ) -> Array2<f64> {
+        let growth = accumulation_growth(factor.components() + factor.read().ncols() + 2);
+        magnitude(factor, mask, rows.mapv(f64::abs).view()).mapv(|value| growth * value / (1.0 - growth))
+    }
+
+    /// Per output entry, a bound on one route's distance from the exact layer with the
+    /// edited tensors. Each read's rounding band enters the owner's attention radius as that
+    /// read's input radius (first order), so the mixed radius covers the exact attention at the
+    /// exact reads. The output read adds its own rounding and `|U| |m| |R|` times the mixed
+    /// radius, and the residual addition rounds once.
+    fn attention_layer_route_band(
+        layer: &ComponentAttentionLayer,
+        masks: &LayerMasks,
+        fixture: &LayerFixture,
+        execution: &AttentionLayerExecution,
+    ) -> Array2<f64> {
+        let radius = |projection: AttentionProjection| {
+            dominate(component_rounding(
+                layer.factor(projection),
+                masks.of(projection),
+                fixture.residual.view(),
+            ))
+        };
+        let (query_radius, key_radius, value_radius) = (
+            radius(AttentionProjection::Query),
+            radius(AttentionProjection::Key),
+            radius(AttentionProjection::Value),
+        );
+        let attention = RotaryCausalAttention::new(layer_geometry(), no_rotary(), LAYER_SCORE_SCALE)
+            .expect("the fixture attention core");
+        let with_radius = attention
+            .attend_projected(
+                ProjectedRows {
+                    values: execution.queries.view(),
+                    radius: query_radius.view(),
+                },
+                ProjectedRows {
+                    values: execution.keys.view(),
+                    radius: key_radius.view(),
+                },
+                ProjectedRows {
+                    values: execution.values.view(),
+                    radius: value_radius.view(),
+                },
+                &fixture.positions,
+            )
+            .expect("finite projected rows");
+        assert!(
+            bits(&with_radius.mixed) == bits(&execution.attention.mixed),
+            "the radius arithmetic must leave the mixed rows' bits alone"
+        );
+        let output = layer.factor(AttentionProjection::Output);
+        component_rounding(output, masks.output.view(), execution.attention.mixed.view())
+            + &magnitude(output, masks.output.view(), with_radius.mixed_radius.view())
+            + &addition_rounding(&execution.output)
+    }
+
+    fn layer_stage_bits(execution: &AttentionLayerExecution) -> Vec<u64> {
+        execution
+            .queries
+            .iter()
+            .chain(execution.keys.iter())
+            .chain(execution.values.iter())
+            .chain(execution.attention.weights.iter())
+            .chain(execution.attention.mixed.iter())
+            .chain(execution.write.iter())
+            .chain(execution.output.iter())
+            .map(|value| value.to_bits())
+            .collect()
+    }
+
+    fn row_bits(values: &Array2<f64>, row: usize) -> Vec<u64> {
+        values.row(row).iter().map(|value| value.to_bits()).collect()
+    }
+
+    /// A1 for an attention-only layer: for continuous, binary and signed masks on Q, K, V and
+    /// O, the component layer equals direct execution with the edited tensors within the sum of
+    /// the two routes' derived bands.
+    #[test]
+    fn a_masked_attention_layer_equals_the_edited_tensor_layer_within_the_derived_band() {
+        let fixture = LayerFixture::new(2981);
+        let layer = fixture.component();
+        for projection in PROJECTIONS {
+            assert_eq!(
+                layer.factor(projection).write(),
+                fixture.candidates[projection.index()].view(),
+                "the {projection} weight factors exactly through its candidate, so the edited tensors carry no rounding"
+            );
+        }
+        let mut rng = StdRng::seed_from_u64(2982);
+        for (kind, masks) in LayerMasks::family(&mut rng) {
+            let component = layer
+                .execute(masks.reads(), fixture.residual.view(), &fixture.positions)
+                .expect("masked layer");
+            let edited = fixture
+                .edited(&layer, &masks)
+                .execute(AttentionLayerReads::native(), fixture.residual.view(), &fixture.positions)
+                .expect("edited-tensor layer");
+            let band = dominate(
+                attention_layer_route_band(&layer, &masks, &fixture, &component)
+                    + &attention_layer_route_band(&layer, &masks, &fixture, &edited),
+            );
+            assert_eq!(
+                violations(&component.output, &edited.output, &band),
+                0,
+                "{kind} masks: the component layer left the derived band around the edited-tensor layer"
+            );
+
+            // Positive controls: a value mask and an output mask moved by 1e-9 each leave the band.
+            let mut moved_value = masks.clone();
+            moved_value.value[2] += 1.0e-9;
+            let mut moved_output = masks.clone();
+            moved_output.output[5] += 1.0e-9;
+            for (control, moved) in [("value 1e-9", moved_value), ("output 1e-9", moved_output)] {
+                let perturbed = fixture
+                    .edited(&layer, &moved)
+                    .execute(AttentionLayerReads::native(), fixture.residual.view(), &fixture.positions)
+                    .expect("perturbed edited-tensor layer");
+                let control_band = dominate(
+                    attention_layer_route_band(&layer, &masks, &fixture, &component)
+                        + &attention_layer_route_band(&layer, &moved, &fixture, &perturbed),
+                );
+                assert!(
+                    violations(&component.output, &perturbed.output, &control_band) > 0,
+                    "{kind} masks: the band must resolve a {control} mask move"
+                );
+            }
+        }
+    }
+
+    /// All-on reads run every projection on its stored tensor, so each stage is bit-identical
+    /// to the native layer's.
+    #[test]
+    fn all_on_reads_execute_the_native_attention_layer_bit_for_bit() {
+        let fixture = LayerFixture::new(2983);
+        let layer = fixture.component();
+        let native = fixture
+            .native()
+            .execute(AttentionLayerReads::native(), fixture.residual.view(), &fixture.positions)
+            .expect("native layer");
+        let all_on = layer
+            .execute(AttentionLayerReads::native(), fixture.residual.view(), &fixture.positions)
+            .expect("all-on component layer");
+        assert!(
+            layer_stage_bits(&all_on) == layer_stage_bits(&native),
+            "all-on reads must execute the stored tensors on their original paths"
+        );
+
+        // Positive control: the factored all-ones value read is algebraically the same layer but
+        // not the same bits.
+        let ones = Array1::<f64>::ones(LAYER_COMPONENTS);
+        let factored = layer
+            .execute(
+                AttentionLayerReads {
+                    value: ProjectionRead::Components(ones.view()),
+                    ..AttentionLayerReads::native()
+                },
+                fixture.residual.view(),
+                &fixture.positions,
+            )
+            .expect("all-ones factored value read");
+        assert!(
+            layer_stage_bits(&factored) != layer_stage_bits(&native),
+            "the bit-identity check must distinguish the factored all-ones value path"
+        );
+    }
+
+    /// The occurrence test's shape: head 1 of layer 0 ablated in the output write, `Δ = −W_O[:,
+    /// 4..8] e_{4..7}ᵀ`. Scoped at one declared row, it moves exactly that row of layer 0's write,
+    /// every earlier logits row of a 2-layer stack keeps its bits, and the declared row equals
+    /// the dense edited layer within the derived band. Scoped at every position, every row
+    /// does.
+    #[test]
+    fn a_scoped_output_edit_moves_exactly_its_declared_rows_through_a_two_layer_stack() {
+        let (first, second) = (LayerFixture::new(2984), LayerFixture::new(2985));
+        let (layer0, layer1) = (first.native(), second.native());
+        let mut rng = StdRng::seed_from_u64(2986);
+        let unembed = eighths(&mut rng, 5, LAYER_WIDTH);
+        let head_columns: Vec<usize> = (LAYER_HEAD_DIM..2 * LAYER_HEAD_DIM).collect();
+        let output_weight = layer0.weight(AttentionProjection::Output).to_owned();
+        let left = output_weight.select(Axis(1), &head_columns).mapv(|value| -value);
+        let mut right = Array2::<f64>::zeros((LAYER_WIDTH, LAYER_HEAD_DIM));
+        for (term, &column) in head_columns.iter().enumerate() {
+            right[[column, term]] = 1.0;
+        }
+        let edit = FactorView::new(left.view(), right.view()).expect("finite edit factors");
+        let stack = |reads: AttentionLayerReads<'_>| {
+            let hidden = layer0
+                .execute(reads, first.residual.view(), &first.positions)
+                .expect("layer 0");
+            let top = layer1
+                .execute(AttentionLayerReads::native(), hidden.output.view(), &first.positions)
+                .expect("layer 1");
+            let logits = native_linear(unembed.view(), top.output.view())
+                .expect("unembedding")
+                .to_owned();
+            (hidden, logits)
+        };
+        let (native_hidden, native_logits) = stack(AttentionLayerReads::native());
+        let declared = 3_usize;
+        let scope = PositionScope::declared(vec![declared]).expect("one declared position");
+        let (scoped_hidden, scoped_logits) = stack(AttentionLayerReads {
+            output: ProjectionRead::Edited(ScopedEdit {
+                edit,
+                positions: &scope,
+            }),
+            ..AttentionLayerReads::native()
+        });
+        for row in 0..LAYER_TOKENS {
+            assert_eq!(
+                row_bits(&native_hidden.write, row) == row_bits(&scoped_hidden.write, row),
+                row != declared,
+                "row {row}: an output edit scoped at {declared} must move exactly its declared row of the write"
+            );
+            if row < declared {
+                assert!(
+                    row_bits(&native_logits, row) == row_bits(&scoped_logits, row),
+                    "logits row {row} precedes the edited row, so it must keep its bits"
+                );
+            }
+        }
+        assert!(
+            row_bits(&native_logits, declared) != row_bits(&scoped_logits, declared),
+            "positive control: the logits at the declared row move"
+        );
+
+        // The dense edited layer: `W_O + left rightᵀ` zeroes head 1's columns exactly.
+        let ablated = &output_weight + &left.dot(&right.t());
+        let dense_layer = first.native_with([
+            layer0.weight(AttentionProjection::Query).to_owned(),
+            layer0.weight(AttentionProjection::Key).to_owned(),
+            layer0.weight(AttentionProjection::Value).to_owned(),
+            ablated.clone(),
+        ]);
+        let dense = dense_layer
+            .execute(AttentionLayerReads::native(), first.residual.view(), &first.positions)
+            .expect("dense edited layer");
+        assert!(
+            bits(&dense.attention.mixed) == bits(&scoped_hidden.attention.mixed),
+            "the edit reaches only the output read, so the mixed rows keep their bits"
+        );
+        // The scoped route forms `W_O x` (`H` operations) plus the terms `left (rightᵀ x)`
+        // (`d + 1 + H + 1`), the dense route `W_O' x` (`H`); `H = d` here.
+        let mixed_abs = dense.attention.mixed.mapv(f64::abs);
+        let growth = accumulation_growth(2 * LAYER_WIDTH + 2);
+        let band = dominate(
+            (mixed_abs.dot(&output_weight.mapv(f64::abs).t())
+                + &mixed_abs.dot(&right.mapv(f64::abs)).dot(&left.mapv(f64::abs).t())
+                + &mixed_abs.dot(&ablated.mapv(f64::abs).t()))
+            .mapv(|value| growth * value / (1.0 - growth)),
+        );
+        let row_violations = |left_rows: &Array2<f64>, right_rows: &Array2<f64>, row: usize| {
+            (0..LAYER_WIDTH)
+                .filter(|&column| (left_rows[[row, column]] - right_rows[[row, column]]).abs() > band[[row, column]])
+                .count()
+        };
+        assert_eq!(
+            row_violations(&scoped_hidden.write, &dense.write, declared),
+            0,
+            "the declared row of the scoped write must equal the dense edited layer within the derived band"
+        );
+        assert!(
+            row_violations(&native_hidden.write, &dense.write, declared) > 0,
+            "positive control: the unedited write at the declared row must leave the band"
+        );
+
+        let every = PositionScope::every();
+        let global = layer0
+            .execute(
+                AttentionLayerReads {
+                    output: ProjectionRead::Edited(ScopedEdit {
+                        edit,
+                        positions: &every,
+                    }),
+                    ..AttentionLayerReads::native()
+                },
+                first.residual.view(),
+                &first.positions,
+            )
+            .expect("globally edited layer 0");
+        assert_eq!(
+            violations(&global.write, &dense.write, &band),
+            0,
+            "an output edit at every position must equal the dense edited layer within the derived band"
+        );
+    }
+
+    /// Reads outside the layer's domain are refused, typed by projection.
+    #[test]
+    fn an_attention_layer_refuses_reads_outside_its_domain() {
+        let fixture = LayerFixture::new(2987);
+        let native = fixture.native();
+        let layer = fixture.component();
+        assert!(
+            native
+                .execute(AttentionLayerReads::native(), fixture.residual.view(), &fixture.positions)
+                .is_ok(),
+            "positive control: the fixture layer executes"
+        );
+
+        let ones = Array1::<f64>::ones(LAYER_COMPONENTS);
+        assert!(
+            matches!(
+                native.execute(
+                    AttentionLayerReads {
+                        value: ProjectionRead::Components(ones.view()),
+                        ..AttentionLayerReads::native()
+                    },
+                    fixture.residual.view(),
+                    &fixture.positions,
+                ),
+                Err(BlockError::NoComponentFactors {
+                    projection: AttentionProjection::Value
+                })
+            ),
+            "a component read on a layer without factors must be refused"
+        );
+
+        let short = Array1::<f64>::ones(LAYER_COMPONENTS - 1);
+        assert!(
+            matches!(
+                layer.execute(
+                    AttentionLayerReads {
+                        key: ProjectionRead::Components(short.view()),
+                        ..AttentionLayerReads::native()
+                    },
+                    fixture.residual.view(),
+                    &fixture.positions,
+                ),
+                Err(BlockError::Apply {
+                    projection: AttentionProjection::Key,
+                    error: ApplyError::Shape { .. }
+                })
+            ),
+            "a mask of another length must be refused by the matrix-free read"
+        );
+
+        let (left, right) = (Array2::<f64>::ones((LAYER_WIDTH, 1)), Array2::<f64>::ones((LAYER_WIDTH, 1)));
+        let edit = FactorView::new(left.view(), right.view()).expect("finite edit factors");
+        let absent = PositionScope::declared(vec![LAYER_TOKENS]).expect("one declared position");
+        assert!(
+            matches!(
+                native.execute(
+                    AttentionLayerReads {
+                        output: ProjectionRead::Edited(ScopedEdit {
+                            edit,
+                            positions: &absent,
+                        }),
+                        ..AttentionLayerReads::native()
+                    },
+                    fixture.residual.view(),
+                    &fixture.positions,
+                ),
+                Err(BlockError::EditPositionAbsent {
+                    projection: AttentionProjection::Output,
+                    position,
+                }) if position == LAYER_TOKENS
+            ),
+            "an edit declaring a position no row holds must be refused"
+        );
+
+        let first = PositionScope::declared(vec![0]).expect("one declared position");
+        let shifted: Vec<i64> = fixture.positions.iter().map(|position| position - 1).collect();
+        assert!(
+            matches!(
+                native.execute(
+                    AttentionLayerReads {
+                        output: ProjectionRead::Edited(ScopedEdit {
+                            edit,
+                            positions: &first,
+                        }),
+                        ..AttentionLayerReads::native()
+                    },
+                    fixture.residual.view(),
+                    &shifted,
+                ),
+                Err(BlockError::NegativePosition {
+                    projection: AttentionProjection::Output,
+                    position: -1
+                })
+            ),
+            "an edited read at a negative position must be refused"
+        );
+
+        let [query, key, value, output] =
+            [0, 1, 2, 3].map(|index| fixture.candidates[index].dot(&fixture.reads[index]));
+        assert!(
+            matches!(
+                NativeAttentionLayer::new(
+                    layer_geometry(),
+                    no_rotary(),
+                    LAYER_SCORE_SCALE,
+                    query,
+                    key,
+                    value,
+                    output.select(Axis(1), &[0, 1, 2]),
+                ),
+                Err(BlockError::ProjectionShape {
+                    projection: AttentionProjection::Output,
+                    ..
+                })
+            ),
+            "an output weight of another shape must be refused at construction"
+        );
+        assert_eq!(output.dim(), (LAYER_WIDTH, LAYER_WIDTH), "control: the fixture weight has the geometry's shape");
     }
 }
