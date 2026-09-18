@@ -3135,6 +3135,44 @@ pub(crate) fn inner_blockwise_coefficient_mode<
     )
 }
 
+/// Refuse a workspace-source family whose declared dense joint curvature carries a
+/// non-finite entry at the spec seed state (gam#1088, #979).
+///
+/// An inner solve of a workspace-source family consumes the workspace's source, not
+/// the dense matrix the family declares through `exact_newton_joint_hessian_with_specs`,
+/// so the solve examines only what it consumes: its prevalidation forms that source
+/// through `exact_newton_joint_hessian_source_from_workspace`, which refuses a non-finite
+/// dense build or operator diagonal as a `NumericalFailure` naming the inner-solve boundary.
+/// This examines the declaration itself, once per fit, at the state `buildblock_states`
+/// builds from the specs' `initial_beta`, with the canonical message the per-solve probe
+/// of a no-workspace family raises. A family answering `false` to
+/// `has_explicit_joint_hessian` materializes nothing here, and a family with no HVP
+/// workspace is examined by each of its inner solves instead.
+///
+/// Every fit entry calls this. A route that searches through the joint-hyper evaluators
+/// without entering one, such as the spatial exact-joint drivers BMS flex uses, reaches
+/// it at its owned-mode finish. During that search each solve's prevalidation refuses a
+/// non-finite entry in the source it consumes; an entry present only in the declaration
+/// is refused at the finish.
+pub(crate) fn refuse_non_finite_declared_joint_curvature<
+    F: CustomFamily + Clone + Send + Sync + 'static,
+>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+) -> Result<(), CustomFamilyError> {
+    if !(family.inner_coefficient_hessian_hvp_available(specs) && family.has_explicit_joint_hessian()) {
+        return Ok(());
+    }
+    let mut states = buildblock_states(family, specs)?;
+    refresh_all_block_etas(family, specs, &mut states)?;
+    match family.exact_newton_joint_hessian_with_specs(&states, specs)? {
+        Some(joint_hessian) => crate::joint_newton::joint_hessian_source_finite_check(
+            &crate::joint_newton::JointHessianSource::Dense(joint_hessian),
+        ),
+        None => Ok(()),
+    }
+}
+
 fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     specs: &[ParameterBlockSpec],
@@ -3185,53 +3223,41 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
     // concentrated coupled likelihoods. The `_with_specs` path subsumes the
     // spec-less one for every family (single-block / uncoupled delegate
     // identically), so it is the correct probe here.
-    // The DECLARED dense joint curvature, when the family commits to one.
+    // The DECLARED dense joint curvature is examined where it is consumed (gam#1088).
     //
-    // gam#1088's loud arm is a statement about what the family declares as its
-    // analytic second derivative at the starting β — not about whichever
-    // representation the solver happens to consume. Those two differed, and the
-    // gap had no guard on either side of it. A family supplying BOTH a dense
-    // `exact_newton_joint_hessian` and an HVP sets `has_workspace_source`, so
-    // this probe short-circuited to `true` without looking at the dense
-    // curvature at all; the workspace path's own check then probes the
-    // `JointHessianSource::Operator` variant, whose finiteness test is its
-    // ASSEMBLED DIAGONAL (the full operator is never materialised there). A
-    // non-finite entry present in the declared dense curvature and absent from
-    // the HVP was therefore examined by neither. Measured on
-    // `TwoBlockNonFiniteCurvatureFamily`, which declares `[[NaN, 0.25], [0.25,
-    // 1.0]]`: `inner_blockwise_fit` returned `Ok` — a fit minted from a
-    // curvature that does not exist, where the contract is a typed failure.
+    // gam#1088's loud arm is a statement about the family's analytic second
+    // derivative before the solve begins: a non-finite entry is a contract
+    // violation and a typed failure, never a fit. Which state each examination
+    // reads:
     //
-    // `has_explicit_joint_hessian()` is the family's own statement that it
-    // materialises a dense p×p, so consulting the declaration here costs an
-    // HVP-only family nothing: such a family answers `false` and never
-    // materialises anything.
-    let declared_dense_joint = if has_workspace_source && !family.has_explicit_joint_hessian() {
-        None
-    } else {
-        family.exact_newton_joint_hessian_with_specs(&states, specs)?
-    };
-    let declares_dense_joint = declared_dense_joint.is_some();
-    if let Some(joint_hessian) = declared_dense_joint {
-        crate::joint_newton::joint_hessian_source_finite_check(
-            &crate::joint_newton::JointHessianSource::Dense(joint_hessian),
-        )?;
-    }
-    // A family reaches the joint-exact route either through its HVP workspace
-    // or through a declared dense joint curvature; both were previously
-    // answered here, but only the second had its finiteness examined, and the
-    // check above now covers both. The materialisation the old branch performed
-    // is the same one `declared_dense_joint` performs, so nothing is evaluated
-    // twice.
+    // - A family with no HVP workspace consumes the dense curvature it declares,
+    //   so this solve examines it here, at the spec seed state `buildblock_states`
+    //   built above from each spec's `initial_beta`. A warm-started solve starts
+    //   from another β, which this probe does not read.
+    // - A workspace-source family does not consume its declared dense matrix in
+    //   this solve. A joint-Newton solve consumes the workspace's source, which
+    //   the prevalidation below forms through
+    //   `exact_newton_joint_hessian_source_from_workspace`, refusing a non-finite
+    //   dense build or operator diagonal; a block-separable solve consumes, and
+    //   that prevalidation checks, the block Hessians. An entry present only in
+    //   the declaration is examined once per fit, at the spec seed of the fit's
+    //   specs, by [`refuse_non_finite_declared_joint_curvature`], which every fit
+    //   entry calls. Materializing the declaration here built one dense p×p per inner
+    //   solve at one unchanging state, on every solve of a BMS flex search (#979).
     //
-    // gam#1088 scopes the loud arm to exactly this point: "a non-finite entry
-    // in the family's analytic joint curvature at the starting beta is a
-    // contract violation against the family's second derivative -- the solve
-    // cannot even begin". A non-finite entry that only emerges after the
-    // coupled loop has driven beta to an overflowing operating point is a
-    // genuine rho-degeneracy and still exits gracefully through the in-loop
-    // guard.
-    let has_joint_exacthessian = has_workspace_source || declares_dense_joint;
+    // A non-finite entry that only emerges after the coupled loop has driven β to
+    // an overflowing operating point is a genuine ρ-degeneracy and still exits
+    // gracefully through the in-loop guard.
+    let has_joint_exacthessian = has_workspace_source
+        || match family.exact_newton_joint_hessian_with_specs(&states, specs)? {
+            Some(joint_hessian) => {
+                crate::joint_newton::joint_hessian_source_finite_check(
+                    &crate::joint_newton::JointHessianSource::Dense(joint_hessian),
+                )?;
+                true
+            }
+            None => false,
+        };
     // When the family declares its likelihood blocks UNCOUPLED
     // (`∂²L/∂β_a∂β_b = 0` for every a ≠ b) the joint penalized objective is
     // fully separable across blocks: the joint Hessian is exactly

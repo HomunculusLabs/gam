@@ -2122,6 +2122,322 @@ pub(crate) fn advertised_workspace_gradient_missing_fails_before_row_measure_fal
     );
 }
 
+/// The quartic's joint curvature served through an HVP workspace AND declared as a
+/// dense p×p, counting every materialization of the declaration (#979, gam#1088).
+/// `declared_non_finite` puts a NaN in the declaration only; `consumed_non_finite`
+/// puts it in the source the inner solve consumes (the workspace's dense build,
+/// matvec and diagonal). `source_preference` picks which of the workspace's two
+/// representations the inner solve forms its source from.
+#[derive(Clone)]
+struct DeclaredDenseQuarticWorkspaceFamily {
+    inner: OneBlockQuarticExactFamily,
+    declared_non_finite: bool,
+    consumed_non_finite: bool,
+    source_preference: JointHessianSourcePreference,
+    dense_declarations: Arc<AtomicUsize>,
+    workspace_builds: Arc<AtomicUsize>,
+}
+
+struct DeclaredDenseQuarticWorkspace {
+    curvature: f64,
+    drift_scale: f64,
+    non_finite: bool,
+    source_preference: JointHessianSourcePreference,
+}
+
+impl DeclaredDenseQuarticWorkspace {
+    fn served_curvature(&self) -> f64 {
+        if self.non_finite { f64::NAN } else { self.curvature }
+    }
+}
+
+impl ExactNewtonJointHessianWorkspace for DeclaredDenseQuarticWorkspace {
+    fn warm_up_outer_caches_for_mode(&self, eval_mode: EvalMode) -> Result<(), String> {
+        // No directional cache to prime, in any mode.
+        match eval_mode {
+            EvalMode::ValueOnly | EvalMode::ValueAndGradient | EvalMode::ValueGradientHessian => {
+                Ok(())
+            }
+        }
+    }
+
+    fn hessian_dense(&self) -> Result<Option<Array2<f64>>, String> {
+        Ok(Some(array![[self.served_curvature()]]))
+    }
+
+    fn hessian_source_preference(&self) -> JointHessianSourcePreference {
+        self.source_preference
+    }
+
+    fn hessian_matvec_available(&self) -> bool {
+        true
+    }
+
+    fn hessian_matvec(&self, direction: &Array1<f64>) -> Result<Option<Array1<f64>>, String> {
+        assert_eq!(direction.len(), 1);
+        Ok(Some(direction * self.served_curvature()))
+    }
+
+    fn hessian_diagonal(&self) -> Result<Option<Array1<f64>>, String> {
+        Ok(Some(array![self.served_curvature()]))
+    }
+
+    fn directional_derivative(&self, direction: &Array1<f64>) -> Result<Option<Array2<f64>>, String> {
+        assert_direction_finite(direction, "declared-dense quartic workspace directional derivative");
+        Ok(Some(array![[self.drift_scale * direction[0]]]))
+    }
+}
+
+impl CustomFamily for DeclaredDenseQuarticWorkspaceFamily {
+    fn exact_newton_joint_hessian_beta_dependent(&self) -> bool {
+        self.inner.exact_newton_joint_hessian_beta_dependent()
+    }
+
+    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        self.inner.evaluate(block_states)
+    }
+
+    fn exact_newton_hessian_directional_derivative(
+        &self,
+        block_states: &[ParameterBlockState],
+        block_idx: usize,
+        direction: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        self.inner
+            .exact_newton_hessian_directional_derivative(block_states, block_idx, direction)
+    }
+
+    fn exact_newton_hessian_second_directional_derivative(
+        &self,
+        block_states: &[ParameterBlockState],
+        block_idx: usize,
+        u: &Array1<f64>,
+        v: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        self.inner
+            .exact_newton_hessian_second_directional_derivative(block_states, block_idx, u, v)
+    }
+
+    fn has_explicit_joint_hessian(&self) -> bool {
+        true
+    }
+
+    fn exact_newton_joint_hessian(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Option<Array2<f64>>, String> {
+        assert_joint_dim(block_states, 1, "declared-dense quartic joint Hessian");
+        self.dense_declarations.fetch_add(1, Ordering::Relaxed);
+        let beta = block_states[0].beta[0];
+        let curvature = 1.0 + self.inner.curvature * beta * beta;
+        Ok(Some(array![[if self.declared_non_finite { f64::NAN } else { curvature }]]))
+    }
+
+    fn exact_newton_joint_hessian_workspace(
+        &self,
+        states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+    ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
+        assert_states_finite(states, "declared-dense quartic workspace construction");
+        assert_specs_consistent(specs, "declared-dense quartic workspace construction");
+        self.workspace_builds.fetch_add(1, Ordering::Relaxed);
+        let beta = states[0].beta[0];
+        Ok(Some(Arc::new(DeclaredDenseQuarticWorkspace {
+            curvature: 1.0 + self.inner.curvature * beta * beta,
+            drift_scale: 2.0 * self.inner.curvature * beta,
+            non_finite: self.consumed_non_finite,
+            source_preference: self.source_preference,
+        })))
+    }
+
+    fn inner_coefficient_hessian_hvp_available(&self, specs: &[ParameterBlockSpec]) -> bool {
+        assert_specs_consistent(specs, "declared-dense quartic coefficient HVP availability");
+        true
+    }
+}
+
+fn declared_dense_quartic_family(
+    declared_non_finite: bool,
+    consumed_non_finite: bool,
+    source_preference: JointHessianSourcePreference,
+) -> DeclaredDenseQuarticWorkspaceFamily {
+    DeclaredDenseQuarticWorkspaceFamily {
+        inner: OneBlockQuarticExactFamily {
+            linear: 3.0,
+            curvature: 0.5,
+            second_scale: 1.0,
+        },
+        declared_non_finite,
+        consumed_non_finite,
+        source_preference,
+        dense_declarations: Arc::new(AtomicUsize::new(0)),
+        workspace_builds: Arc::new(AtomicUsize::new(0)),
+    }
+}
+
+fn declared_dense_quartic_specs() -> Vec<ParameterBlockSpec> {
+    vec![ParameterBlockSpec {
+        name: "declared_dense_quartic".to_string(),
+        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
+        offset: array![0.0],
+        penalties: vec![PenaltyMatrix::Dense(array![[1.0]])],
+        nullspace_dims: vec![],
+        initial_log_lambdas: array![0.0],
+        initial_beta: Some(array![0.75]),
+        gauge_priority: 100,
+        jacobian_callback: None,
+        stacked_design: None,
+        stacked_offset: None,
+    }]
+}
+
+fn declared_dense_quartic_options() -> BlockwiseFitOptions {
+    BlockwiseFitOptions {
+        inner_tol: 1e-11,
+        use_remlobjective: true,
+        compute_covariance: false,
+        ..BlockwiseFitOptions::default()
+    }
+}
+
+const NON_FINITE_CURVATURE_REFUSAL: &str = "smooth-regularized logdet Hessian contains non-finite entry";
+
+/// #979: a workspace-source family's declared dense curvature is materialized once per
+/// fit, by the fit entry, and never by the inner solves, which consume the workspace's
+/// source. Before, every inner solve materialized it at the same spec seed state.
+#[test]
+pub(crate) fn a_workspace_family_materializes_its_declared_curvature_once_per_fit_979() {
+    let family = declared_dense_quartic_family(false, false, JointHessianSourcePreference::Dense);
+    let specs = declared_dense_quartic_specs();
+    let options = declared_dense_quartic_options();
+
+    for _ in 0..3 {
+        let inner = inner_blockwise_fit(&family, &specs, &[array![0.0]], &options, None)
+            .expect("the quartic inner solve converges through its workspace");
+        assert!(inner.converged, "the quartic inner solve must converge");
+    }
+    assert_eq!(
+        family.dense_declarations.load(Ordering::Relaxed),
+        0,
+        "an inner solve consumes the workspace's source and must not materialize the declaration",
+    );
+    assert!(
+        family.workspace_builds.load(Ordering::Relaxed) >= 3,
+        "the three solves must have run through the workspace for the zero above to mean anything",
+    );
+
+    family.dense_declarations.store(0, Ordering::Relaxed);
+    fit_custom_family_fixed_log_lambdas(&family, &specs, &options, None)
+        .expect("the fixed-lambda quartic fit assembles");
+    assert_eq!(
+        family.dense_declarations.load(Ordering::Relaxed),
+        1,
+        "the fixed-lambda entry examines the declaration exactly once",
+    );
+
+    family.dense_declarations.store(0, Ordering::Relaxed);
+    family.workspace_builds.store(0, Ordering::Relaxed);
+    fit_custom_family(&family, &specs, &options).expect("the quartic REML fit must certify");
+    assert_eq!(
+        family.dense_declarations.load(Ordering::Relaxed),
+        1,
+        "the searching entry examines the declaration exactly once, whatever the number of inner solves",
+    );
+    assert!(
+        family.workspace_builds.load(Ordering::Relaxed) > 1,
+        "the search must run several inner solves for one materialization to pin anything",
+    );
+}
+
+/// #979, gam#1088: a NaN only in the declared curvature of a workspace-source family is
+/// refused, with the canonical message, by both fit entries.
+#[test]
+pub(crate) fn a_non_finite_declared_curvature_refuses_at_both_fit_entries_979() {
+    let family = declared_dense_quartic_family(true, false, JointHessianSourcePreference::Dense);
+    let specs = declared_dense_quartic_specs();
+    let options = declared_dense_quartic_options();
+
+    let searched = fit_custom_family(&family, &specs, &options)
+        .expect_err("a non-finite declared curvature must refuse the searching entry");
+    assert!(
+        searched.to_string().contains(NON_FINITE_CURVATURE_REFUSAL),
+        "unexpected searching-entry refusal: {searched}",
+    );
+    let fixed = fit_custom_family_fixed_log_lambdas(&family, &specs, &options, None)
+        .expect_err("a non-finite declared curvature must refuse the fixed-lambda entry");
+    assert!(
+        fixed.to_string().contains(NON_FINITE_CURVATURE_REFUSAL),
+        "unexpected fixed-lambda refusal: {fixed}",
+    );
+    assert_eq!(
+        family.dense_declarations.load(Ordering::Relaxed),
+        2,
+        "each entry examines the declaration once and refuses before any inner solve",
+    );
+    assert_eq!(
+        family.workspace_builds.load(Ordering::Relaxed),
+        0,
+        "the refusal must precede every inner solve",
+    );
+}
+
+/// #979, gam#1088: an inner solve of a workspace-source family whose consumed source
+/// carries a NaN is refused where its prevalidation forms that source from the workspace,
+/// as a `NumericalFailure` naming the inner-solve boundary, without materializing the
+/// declaration. The same boundary refuses it inside an owned joint-hyper evaluation, the
+/// one a spatial exact-joint search (BMS flex) runs, before that search reaches its
+/// owned-mode finish. Both representations are refused: the workspace's dense build, and
+/// the assembled diagonal of a workspace that prefers its operator.
+#[test]
+pub(crate) fn the_inner_prevalidation_refuses_a_non_finite_consumed_source_in_a_direct_and_an_owned_search_979() {
+    let specs = declared_dense_quartic_specs();
+    let options = declared_dense_quartic_options();
+    for (source_preference, refusal) in [
+        (
+            JointHessianSourcePreference::Dense,
+            "joint Newton inner prevalidation Hessian source: dense Hessian contains non-finite values",
+        ),
+        (
+            JointHessianSourcePreference::Operator,
+            "joint Newton inner prevalidation Hessian source: operator diagonal contains non-finite values",
+        ),
+    ] {
+        let family = declared_dense_quartic_family(false, true, source_preference);
+
+        let direct = inner_blockwise_fit(&family, &specs, &[array![0.0]], &options, None)
+            .expect_err("a non-finite consumed source must refuse the inner solve");
+        assert!(
+            matches!(&direct, CustomFamilyError::NumericalFailure { reason } if reason.as_str() == refusal),
+            "unexpected direct inner refusal of the {source_preference:?} source: {direct:?}",
+        );
+
+        let owned = evaluate_custom_family_joint_hyper_owned(
+            &family,
+            &specs,
+            &options,
+            &array![0.0],
+            &test_design_hyper_layout(vec![vec![]]),
+            None,
+            EvalMode::ValueOnly,
+        )
+        .err()
+        .expect("a non-finite consumed source must refuse the owned joint-hyper evaluation");
+        assert!(
+            owned.to_string().contains(refusal),
+            "unexpected owned-search refusal of the {source_preference:?} source: {owned:?}",
+        );
+        assert_eq!(
+            family.dense_declarations.load(Ordering::Relaxed),
+            0,
+            "neither solve materializes the declaration; the prevalidation reads the consumed source",
+        );
+        assert!(
+            family.workspace_builds.load(Ordering::Relaxed) >= 2,
+            "both solves must reach the workspace, so each refusal is the consumed source's",
+        );
+    }
+}
+
 /// A workspace that exposes both a dense build and a matrix-free HVP and
 /// refines its representation per intent (#738): matrix-free for the inner
 /// solve, dense for logdet factorization. Mirrors CTN's contract.

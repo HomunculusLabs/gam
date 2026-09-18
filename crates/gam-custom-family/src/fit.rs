@@ -2200,6 +2200,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     }
     let specs: &[ParameterBlockSpec] = &canonical.reduced_specs;
     let penalty_counts = validate_blockspecs(specs)?;
+    crate::inner_blockwise_fit::refuse_non_finite_declared_joint_curvature(family, specs)?;
 
     // gam#1587: full-width cross-block joint penalties (the reference-symmetric
     // `M⊗S_t` multinomial smoothing penalty). Empty for every other family, so
@@ -3669,6 +3670,7 @@ fn fit_custom_family_user_fixed_log_lambdas_impl<
         )?;
     let specs: &[ParameterBlockSpec] = &canonical.reduced_specs;
     let penalty_counts = validate_blockspecs(specs)?;
+    crate::inner_blockwise_fit::refuse_non_finite_declared_joint_curvature(family, specs)?;
     let rho = flatten_log_lambdas(specs);
     let per_block = split_log_lambdas(&rho, &penalty_counts)?;
     // #2349: carry the family's joint penalty specs exactly like the outer
@@ -3942,6 +3944,7 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
         });
     }
     let penalty_counts = validate_blockspecs(specs)?;
+    crate::inner_blockwise_fit::refuse_non_finite_declared_joint_curvature(family, specs)?;
     let per_block = split_log_lambdas(&rho, &penalty_counts)?;
     // Audit the geometry the outer entry audits: a family's declared output
     // channels are installed first (#558). Without them the latent survival
@@ -4204,6 +4207,7 @@ pub fn fit_custom_family_fixed_log_lambda_warm_start<
         )?;
     let specs: &[ParameterBlockSpec] = &canonical.reduced_specs;
     let penalty_counts = validate_blockspecs(specs)?;
+    crate::inner_blockwise_fit::refuse_non_finite_declared_joint_curvature(family, specs)?;
     let rho = flatten_log_lambdas(specs);
     let per_block = split_log_lambdas(&rho, &penalty_counts)?;
     let inner = inner_blockwise_fit(family, specs, &per_block, options, None)?;
