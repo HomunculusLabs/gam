@@ -81,7 +81,7 @@ use std::fmt;
 
 use gam_linalg::roundoff::accumulation_growth;
 use gam_math::categorical::{CategoricalError, log_softmax_with_error};
-use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ShapeBuilder};
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3, ShapeBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::parameter_decomposition::gated_rewrite::{GatedRewriteError, MaskedNorm, rms_normalizers};
@@ -97,6 +97,13 @@ pub enum AttentionProgramError {
         tensor: &'static str,
         expected: (usize, usize),
         found: (usize, usize),
+    },
+    /// A `heads × tokens × tokens` score or weight array whose shape does not
+    /// match the geometry's head count and the token count.
+    HeadShape {
+        tensor: &'static str,
+        expected: (usize, usize, usize),
+        found: (usize, usize, usize),
     },
     /// Query heads share key/value heads in contiguous groups, so `n_kv_heads`
     /// must divide `n_heads`.
@@ -122,6 +129,11 @@ impl fmt::Display for AttentionProgramError {
                 expected,
                 found,
             } => write!(f, "{tensor} has shape {found:?}, the geometry needs {expected:?}"),
+            Self::HeadShape {
+                tensor,
+                expected,
+                found,
+            } => write!(f, "{tensor} has shape {found:?}, the heads and tokens need {expected:?}"),
             Self::KeyValueHeadsDoNotDivide {
                 n_heads,
                 n_kv_heads,
@@ -288,6 +300,22 @@ fn expect_shape(
         Ok(())
     } else {
         Err(AttentionProgramError::Shape {
+            tensor,
+            expected,
+            found,
+        })
+    }
+}
+
+fn expect_heads(
+    tensor: &'static str,
+    found: (usize, usize, usize),
+    expected: (usize, usize, usize),
+) -> Result<(), AttentionProgramError> {
+    if found == expected {
+        Ok(())
+    } else {
+        Err(AttentionProgramError::HeadShape {
             tensor,
             expected,
             found,
@@ -568,40 +596,83 @@ impl RotaryCausalAttention {
         HeadRows { value, radius }
     }
 
-    /// Causal mask, joint softmax per query row and the value read, propagating
-    /// the score and value radii.
-    fn mix(&self, scored: ScoredHeads, values: ProjectedRows<'_>) -> Result<ProjectedAttention, AttentionProgramError> {
+    /// The source's causal mask and joint softmax at given scores: for each head
+    /// and query token `t`, one categorical distribution over the keys `s ≤ t`,
+    /// with the radius [`RotaryCausalAttention::attend_projected`] carries. Scores
+    /// and their radii are `n_heads × tokens × tokens`. Entries with `s > t` are
+    /// never read; their weights are zero with radius zero.
+    pub fn weights_at_scores(
+        &self,
+        scores: ArrayView3<'_, f64>,
+        score_radius: ArrayView3<'_, f64>,
+    ) -> Result<(Array3<f64>, Array3<f64>), AttentionProgramError> {
+        let tokens = scores.dim().1;
+        let shape = (self.geometry.n_heads, tokens, tokens);
+        expect_heads("scores", scores.dim(), shape)?;
+        expect_heads("score radius", score_radius.dim(), shape)?;
+        let mut weights = Array3::zeros(shape);
+        let mut weight_radius = Array3::zeros(shape);
+        for head in 0..self.geometry.n_heads {
+            for t in 0..tokens {
+                let logits: Vec<f64> = (0..=t).map(|s| scores[[head, t, s]]).collect();
+                let logit_radius: Vec<f64> = (0..=t).map(|s| score_radius[[head, t, s]]).collect();
+                let (row, row_radius) =
+                    attention_weights(&logits, &logit_radius).map_err(AttentionProgramError::Categorical)?;
+                for s in 0..=t {
+                    weights[[head, t, s]] = row[s];
+                    weight_radius[[head, t, s]] = row_radius[s];
+                }
+            }
+        }
+        Ok((weights, weight_radius))
+    }
+
+    /// Each head's read of the values at given causal weights,
+    /// `mixed[t, h] = Σ_{s ≤ t} w_{hts} v_{s, g(h)}`, `tokens × n_heads·head_dim`,
+    /// with the radius [`RotaryCausalAttention::attend_projected`] carries:
+    /// `Σ_s (r^w_{hts} |v_s| + w_{hts} r^v_s) + γ_{t+1} Σ_s |w_{hts} v_s|`.
+    /// Weights and their radii are `n_heads × tokens × tokens`, values
+    /// `tokens × n_kv_heads·head_dim`. Entries with `s > t` are never read.
+    pub fn mix_at_weights(
+        &self,
+        weights: ArrayView3<'_, f64>,
+        weight_radius: ArrayView3<'_, f64>,
+        values: ProjectedRows<'_>,
+    ) -> Result<(Array2<f64>, Array2<f64>), AttentionProgramError> {
         let g = self.geometry;
         let (tokens, hd) = (values.values.nrows(), g.head_dim);
-        let mut weights = Array3::zeros((g.n_heads, tokens, tokens));
-        let mut weight_radius = Array3::zeros((g.n_heads, tokens, tokens));
+        expect_shape("value rows", values.values.dim(), (tokens, g.key_value_dim()))?;
+        expect_shape("value rows", values.radius.dim(), (tokens, g.key_value_dim()))?;
+        let shape = (g.n_heads, tokens, tokens);
+        expect_heads("weights", weights.dim(), shape)?;
+        expect_heads("weight radius", weight_radius.dim(), shape)?;
         let mut mixed = Array2::zeros((tokens, g.query_dim()));
         let mut mixed_radius = Array2::zeros((tokens, g.query_dim()));
         for head in 0..g.n_heads {
             let (qo, vo) = (head * hd, g.key_value_head(head) * hd);
             for t in 0..tokens {
-                let logits: Vec<f64> = (0..=t).map(|s| scored.scores[[head, t, s]]).collect();
-                let logit_radius: Vec<f64> = (0..=t).map(|s| scored.radius[[head, t, s]]).collect();
-                let (row, row_radius) =
-                    attention_weights(&logits, &logit_radius).map_err(AttentionProgramError::Categorical)?;
                 let mix_growth = accumulation_growth(t + 1);
-                for s in 0..=t {
-                    weights[[head, t, s]] = row[s];
-                    weight_radius[[head, t, s]] = row_radius[s];
-                }
                 for c in 0..hd {
                     let (mut value, mut abs, mut propagated) = (0.0, 0.0, 0.0);
                     for s in 0..=t {
-                        let v = values.values[[s, vo + c]];
-                        value += row[s] * v;
-                        abs += (row[s] * v).abs();
-                        propagated += row_radius[s] * v.abs() + row[s] * values.radius[[s, vo + c]];
+                        let (w, v) = (weights[[head, t, s]], values.values[[s, vo + c]]);
+                        value += w * v;
+                        abs += (w * v).abs();
+                        propagated += weight_radius[[head, t, s]] * v.abs() + w * values.radius[[s, vo + c]];
                     }
                     mixed[[t, qo + c]] = value;
                     mixed_radius[[t, qo + c]] = propagated + mix_growth * abs;
                 }
             }
         }
+        Ok((mixed, mixed_radius))
+    }
+
+    /// Causal mask, joint softmax per query row and the value read, propagating
+    /// the score and value radii.
+    fn mix(&self, scored: ScoredHeads, values: ProjectedRows<'_>) -> Result<ProjectedAttention, AttentionProgramError> {
+        let (weights, weight_radius) = self.weights_at_scores(scored.scores.view(), scored.radius.view())?;
+        let (mixed, mixed_radius) = self.mix_at_weights(weights.view(), weight_radius.view(), values)?;
         Ok(ProjectedAttention {
             scores: scored.scores,
             score_radius: scored.radius,
@@ -1615,6 +1686,112 @@ mod tests {
             )
             .expect("widened query radius");
         assert_ne!(bits(&widened), bits(&explicit), "a nonzero query radius must change the radii");
+    }
+
+    /// The softmax at given scores and the value read at given weights, chained on
+    /// `attend_projected`'s own scores, reproduce its weights, mixed rows and radii
+    /// bit for bit. Controls:
+    /// - a moved admissible score changes its row's weights and leaves the other rows alone;
+    /// - a NaN in a masked entry (`s > t`) is never read;
+    /// - an array with the wrong head count is refused.
+    #[test]
+    fn softmax_and_value_read_at_external_inputs_chain_to_attend_projected() {
+        let fixture = Fixture::new(RotaryPairing::HalfSplit).biased();
+        let native = fixture.edited(&all_on());
+        let queries = project_affine(&native.query, fixture.x.view()).0;
+        let keys = project_affine(&native.key, fixture.x.view()).0;
+        let values = project_affine(&native.value, fixture.x.view()).0;
+        let value_radius = Array2::from_elem(values.dim(), 0.0625);
+        let value_rows = ProjectedRows {
+            values: values.view(),
+            radius: value_radius.view(),
+        };
+        let attention = &native.attention;
+        let projected = attention
+            .attend_projected(
+                ProjectedRows::exact(queries.view()),
+                ProjectedRows::exact(keys.view()),
+                value_rows,
+                &fixture.positions,
+            )
+            .expect("projected attention");
+        fn bits<D: ndarray::Dimension>(arrays: &[&ndarray::Array<f64, D>]) -> Vec<u64> {
+            arrays.iter().flat_map(|a| a.iter().map(|v| v.to_bits())).collect()
+        }
+        let (weights, weight_radius) = attention
+            .weights_at_scores(projected.scores.view(), projected.score_radius.view())
+            .expect("weights at attend_projected's scores");
+        assert_eq!(
+            bits(&[&weights, &weight_radius]),
+            bits(&[&projected.weights, &projected.weight_radius]),
+            "the softmax stage must reproduce attend_projected's weights and radii"
+        );
+        let (mixed, mixed_radius) = attention
+            .mix_at_weights(weights.view(), weight_radius.view(), value_rows)
+            .expect("value read at those weights");
+        assert_eq!(
+            bits(&[&mixed, &mixed_radius]),
+            bits(&[&projected.mixed, &projected.mixed_radius]),
+            "the value-read stage must reproduce attend_projected's mixed rows and radii"
+        );
+
+        let row = |w: &Array3<f64>, head: usize, t: usize| -> Vec<u64> {
+            w.slice(ndarray::s![head, t, ..]).iter().map(|v| v.to_bits()).collect()
+        };
+        let mut moved = projected.scores.clone();
+        moved[[0, 3, 1]] += 0.25;
+        let moved_weights = attention
+            .weights_at_scores(moved.view(), projected.score_radius.view())
+            .expect("moved scores")
+            .0;
+        assert_ne!(row(&moved_weights, 0, 3), row(&weights, 0, 3), "a moved score must move its row");
+        assert_eq!(row(&moved_weights, 1, 3), row(&weights, 1, 3), "a moved score must leave other heads alone");
+        assert_eq!(row(&moved_weights, 0, 4), row(&weights, 0, 4), "a moved score must leave other rows alone");
+
+        let mut masked = projected.scores.clone();
+        masked[[0, 1, 3]] = f64::NAN;
+        let masked_weights = attention
+            .weights_at_scores(masked.view(), projected.score_radius.view())
+            .expect("a NaN past the causal mask is never read")
+            .0;
+        assert_eq!(
+            bits(&[&masked_weights]),
+            bits(&[&weights]),
+            "entries with s > t must not be read"
+        );
+        let mut masked_mix = weights.clone();
+        masked_mix[[1, 2, 4]] = f64::NAN;
+        let masked_mixed = attention
+            .mix_at_weights(masked_mix.view(), weight_radius.view(), value_rows)
+            .expect("a NaN weight past the causal mask is never read")
+            .0;
+        assert_eq!(
+            bits(&[&masked_mixed]),
+            bits(&[&mixed]),
+            "weights with s > t must not be read"
+        );
+
+        let one_head = projected.scores.slice(ndarray::s![..1, .., ..]);
+        assert_eq!(
+            attention
+                .weights_at_scores(one_head, projected.score_radius.slice(ndarray::s![..1, .., ..]))
+                .expect_err("one head for a two-head geometry"),
+            AttentionProgramError::HeadShape {
+                tensor: "scores",
+                expected: (2, 5, 5),
+                found: (1, 5, 5),
+            }
+        );
+        assert_eq!(
+            attention
+                .mix_at_weights(weights.slice(ndarray::s![..1, .., ..]), weight_radius.view(), value_rows)
+                .expect_err("one head of weights for a two-head geometry"),
+            AttentionProgramError::HeadShape {
+                tensor: "weights",
+                expected: (2, 5, 5),
+                found: (1, 5, 5),
+            }
+        );
     }
 
     /// Double-double unit roundoff: the low word's last place relative to the high
