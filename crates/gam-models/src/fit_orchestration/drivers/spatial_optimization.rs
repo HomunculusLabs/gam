@@ -7005,7 +7005,11 @@ impl<'d> ExactJointDesignCache<'d> {
         })
     }
 
-    fn ensure_theta(&mut self, theta: &Array1<f64>) -> Result<(), String> {
+    /// Realize every block at `theta`. The realizers' typed errors pass through
+    /// unchanged, so a trial one of them refuses (`TrialPointRefused`, e.g. a
+    /// cached penalty the rebuild dropped at this ψ) stays a refusal the outer
+    /// search can retreat from (#2953).
+    fn ensure_theta(&mut self, theta: &Array1<f64>) -> Result<(), EstimationError> {
         if self
             .current_theta
             .as_ref()
@@ -7017,14 +7021,16 @@ impl<'d> ExactJointDesignCache<'d> {
         let t_ensure = std::time::Instant::now();
         let kappa_theta_len = self.rho_dim + self.log_kappa_dim;
         if theta.len() < kappa_theta_len {
-            return Err(SmoothError::dimension_mismatch(format!(
-                "exact-joint theta length mismatch: got {}, expected at least {} (rho_dim={}, log_kappa_dim={})",
-                theta.len(),
-                kappa_theta_len,
-                self.rho_dim,
-                self.log_kappa_dim
-            ))
-            .into());
+            return Err(EstimationError::InvalidInput(
+                SmoothError::dimension_mismatch(format!(
+                    "exact-joint theta length mismatch: got {}, expected at least {} (rho_dim={}, log_kappa_dim={})",
+                    theta.len(),
+                    kappa_theta_len,
+                    self.rho_dim,
+                    self.log_kappa_dim
+                ))
+                .to_string(),
+            ));
         }
         let theta_kappa = theta.slice(s![..kappa_theta_len]).to_owned();
         let full_log_kappa = SpatialLogKappaCoords::from_theta_tail_with_dims(
@@ -7043,14 +7049,12 @@ impl<'d> ExactJointDesignCache<'d> {
             if block_idx < n - 1 {
                 let (block_lk, rest) = remaining.split_at(count);
                 self.realizers[block_idx]
-                    .apply_log_kappa(&block_lk, &self.block_term_indices[block_idx])
-                    .map_err(|e| e.to_string())?;
+                    .apply_log_kappa(&block_lk, &self.block_term_indices[block_idx])?;
                 remaining = rest;
             } else {
                 // Last block gets the remainder.
                 self.realizers[block_idx]
-                    .apply_log_kappa(&remaining, &self.block_term_indices[block_idx])
-                    .map_err(|e| e.to_string())?;
+                    .apply_log_kappa(&remaining, &self.block_term_indices[block_idx])?;
             }
         }
 
@@ -7980,7 +7984,11 @@ where
     }
 
     impl<M> NBlockExactJointState<'_, M> {
-        fn ensure_theta(&mut self, theta: &Array1<f64>) -> Result<(), String> {
+        /// Realize `theta`. An invalid input gains this driver's context, and every
+        /// other variant passes through typed. A trial the realizer refuses stays a
+        /// `TrialPointRefused` the outer search retreats from, not an InvalidInput
+        /// that aborts the fit (#2953).
+        fn ensure_theta(&mut self, theta: &Array1<f64>) -> Result<(), EstimationError> {
             let theta_changed = !self
                 .cache
                 .current_theta
@@ -7989,7 +7997,12 @@ where
             if theta_changed {
                 self.terminal_mode = None;
             }
-            self.cache.ensure_theta(theta)
+            self.cache.ensure_theta(theta).map_err(|error| match error {
+                EstimationError::InvalidInput(message) => EstimationError::InvalidInput(format!(
+                    "n-block exact-joint spatial design realization failed: {message}"
+                )),
+                other => other,
+            })
         }
 
         fn install_terminal_mode(&mut self, theta: &Array1<f64>, objective: f64, mode: M) {
@@ -8158,11 +8171,7 @@ where
                     });
                 }
             }
-            ctx.ensure_theta(theta).map_err(|err| {
-                EstimationError::InvalidInput(format!(
-                    "n-block exact-joint spatial design realization failed: {err}"
-                ))
-            })?;
+            ctx.ensure_theta(theta)?;
             let design_revision = Some(ctx.cache.design_revision());
             let specs = collect_specs(&ctx.cache);
             let designs = collect_designs(&ctx.cache);
@@ -8269,11 +8278,7 @@ where
                 {
                     return Ok(cost);
                 }
-                ctx.ensure_theta(theta).map_err(|err| {
-                    EstimationError::InvalidInput(format!(
-                        "n-block exact-joint spatial design realization failed: {err}"
-                    ))
-                })?;
+                ctx.ensure_theta(theta)?;
                 let design_revision = Some(ctx.cache.design_revision());
                 let specs = collect_specs(&ctx.cache);
                 let designs = collect_designs(&ctx.cache);
@@ -8336,9 +8341,7 @@ where
             None::<fn(&mut &mut NBlockExactJointState<'_, Mode>)>,
             Some(
                 |ctx: &mut &mut NBlockExactJointState<'_, Mode>, theta: &Array1<f64>| {
-                    ctx
-                        .ensure_theta(theta)
-                        .map_err(EstimationError::InvalidInput)?;
+                    ctx.ensure_theta(theta)?;
                     let design_revision = Some(ctx.cache.design_revision());
                     let specs = collect_specs(&ctx.cache);
                     let designs = collect_designs(&ctx.cache);
