@@ -426,6 +426,26 @@ pub(crate) fn dense_reduced_schur_route_under_cap(
     .pcg_attempt_under_cap(k, cap_bytes / DENSE_ROUTE_BLOCKS)
 }
 
+/// #2900 row 6.16 — whether a surrogate lane takes the dense `k × k` reduced Schur rather
+/// than its frozen rational surrogate, when one reduced-Schur product costs
+/// `reduced_schur_apply_flops`. The rational surrogate spends at most `num_probes · k`
+/// products per evaluation, the budget the device operator is sized against. The dense
+/// lane is priced as [`DenseReducedSchurRoute::Lane`]: it is taken only where that build,
+/// in products, is within the surrogate's budget and its blocks fit the memory governor's
+/// single-materialization cap. Before this, the dense lane was taken wherever its blocks
+/// fit in core, whatever it cost.
+pub fn surrogate_lane_prices_dense_reduced_schur(
+    lane: &SurrogateLaneState,
+    k: usize,
+    reduced_schur_apply_flops: u64,
+) -> bool {
+    let rational_products = lane.cfg.num_probes.saturating_mul(k);
+    matches!(
+        dense_reduced_schur_route(DenseReducedSchurRoute::Lane, k, reduced_schur_apply_flops),
+        gam_linalg::pcg::PcgAttempt::Budgeted { products } if products <= rational_products
+    )
+}
+
 pub(crate) fn build_dense_schur_direct<B: BatchedBlockSolver + Sync>(
     sys: &ArrowSchurSystem,
     htt_factors: &ArrowFactorSlab,

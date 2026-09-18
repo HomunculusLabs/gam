@@ -5264,10 +5264,18 @@ impl SaeManifoldTerm {
                     // #2731 — the dense lane allocates several k×k blocks, so it is admitted
                     // at that size, not at the one block the chunked route above prices.
                     // Under this branch's refusing exact-A policy the dense lane is the
-                    // exact-A pencil lane, admitted at its own count (#2933 F07).
+                    // exact-A pencil lane, admitted at its own count (#2933 F07). It is taken
+                    // only where it also costs no more products than the rational surrogate
+                    // would spend, priced at the reduced-Schur product `apply_flops` above
+                    // (#2900 row 6.16).
                     let dense_lane_admitted =
                         gam_solve::arrow_schur::dense_lane_exact_a_pencil_peak_bytes(a_sys.k)
-                            .is_some_and(|bytes| bytes <= plan.in_core_budget_bytes);
+                            .is_some_and(|bytes| bytes <= plan.in_core_budget_bytes)
+                            && gam_solve::arrow_schur::surrogate_lane_prices_dense_reduced_schur(
+                                lane,
+                                a_sys.k,
+                                apply_flops,
+                            );
                     let evaluated = gam_solve::arrow_schur::matrix_free_arrow_evidence_evaluation(
                         &a_sys,
                         0.0,

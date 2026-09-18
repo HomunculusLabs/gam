@@ -608,10 +608,33 @@ impl SaeSupportOuterObjective {
         // eigendecomposition and its derivative bundle is the exact `tr(S⁻¹·D)`;
         // otherwise it walks the frozen rational surrogate. The route prices its own peak
         // with `dense_lane_reduced_schur_peak_bytes`, the one admission rule the criterion
-        // lane uses as well.
+        // lane uses as well, and takes the dense route only where it costs no more products
+        // than the surrogate would spend (#2900 row 6.16). One reduced-Schur product pushes
+        // every row through its cross block and back: `p·(support + q)` flops each way on the
+        // support rows' gather and local Jacobian, or `q·k` each way on a dense row slab.
+        let reduced_schur_apply_flops: u64 = match system.device_sae_pcg.as_deref() {
+            Some(data) => data
+                .a_phi
+                .iter()
+                .zip(data.local_jac.iter())
+                .map(|(support, jacobian)| {
+                    2 * (data.p as u64 * support.len() as u64 + jacobian.len() as u64)
+                })
+                .sum(),
+            None => system
+                .rows
+                .iter()
+                .map(|row| 2 * row.htt.nrows() as u64 * system.k as u64)
+                .sum(),
+        };
         let dense_reduced_schur_admitted =
             gam_solve::arrow_schur::dense_lane_reduced_schur_peak_bytes(system.k)
-                .is_some_and(|bytes| bytes <= self.in_core_budget_bytes);
+                .is_some_and(|bytes| bytes <= self.in_core_budget_bytes)
+                && gam_solve::arrow_schur::surrogate_lane_prices_dense_reduced_schur(
+                    lane,
+                    system.k,
+                    reduced_schur_apply_flops,
+                );
         let evaluated = gam_solve::arrow_schur::matrix_free_arrow_evidence_evaluation(
             system,
             0.0,
