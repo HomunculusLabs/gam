@@ -2020,10 +2020,6 @@ const COVARIANCE_D1_DIM: usize = MAX_ORDER * MAX_ORDER;
 /// which a box loses the least signed correlation; it never assumes that age
 /// alone implies contraction.
 const ZONOTOPE_GENERATOR_CAP: usize = 240;
-/// `γ_{dim+2}` with room to spare: `2·(d+2)·u` with `u = ε/2` is `11ε` at
-/// `d = 9`, and this charges `32ε` for every floating-point dot product a
-/// zonotope forms.
-const ZONOTOPE_ROUNDOFF: f64 = 32.0 * f64::EPSILON;
 
 /// Radius of a ball ABOUT ITS REPRESENTATIVE, which is what a zonotope centred
 /// on that representative must absorb. Not `(hi−lo)/2`: the representative is
@@ -2203,9 +2199,24 @@ impl<const N: usize> Zonotope<N> {
             }
             next_center[i] = center;
             next_shared_q[i] = shared_q;
-            fresh_radius[i] = next_up_ball(
-                (radius + ZONOTOPE_ROUNDOFF * magnitude) * (1.0 + 64.0 * f64::EPSILON),
-            );
+            // The centre and shared-q accumulations each sum `dim + 1` terms (the
+            // constant and `dim` products), and a generator coordinate sums `dim`.
+            // Each summand passes its product and at most `dim` additions, so each
+            // accumulation's rounding is at most `γ_{dim+1}` of the magnitudes
+            // summed into `magnitude` (Higham, ASNA Lemma 3.1).
+            //
+            // After `radius` and `magnitude` are formed, their sum passes four rounded
+            // operations: `1 − n·u` and the division that form `γ`, the product with
+            // `magnitude`, and the addition to `radius`. Each term is at least `(1 − u)`
+            // of its exact value per operation, so the exact sum is at most the computed
+            // one times `(1 − u)^−4`. The owner `gam_math::roundoff::inflated(_, 4)`
+            // returns that bound, with the forming of its own factor and product
+            // counted, and the outward step keeps the enclosure's rounding
+            // convention (#2469).
+            fresh_radius[i] = next_up_ball(gam_math::roundoff::inflated(
+                radius + gam_math::roundoff::accumulation_growth(dim + 1) * magnitude,
+                4,
+            ));
         }
 
         for generator in self.generators.iter_mut() {
@@ -5433,6 +5444,32 @@ mod tests {
                 .any(|generator| *generator == [1.0, -1.0]),
             "compaction discarded the only signed correlation direction"
         );
+    }
+
+    /// #2469: one `x ← Mx + b` step charges its accumulations' own rounding band.
+    /// Under the exact identity on a 9-coordinate zonotope centred at ones, each
+    /// coordinate sums a magnitude of one (and a few outward ulps), so its fresh
+    /// axis radius lies in `[γ₁₀, 2·γ₁₀)`. The `32·ε·(1 + 64ε)` charge this replaced
+    /// was about 3.2× that upper bound.
+    #[test]
+    fn zonotope_step_charges_its_accumulations_rounding_band_2469() {
+        let dim = COVARIANCE_D1_DIM;
+        let mut state = Zonotope::<COVARIANCE_D1_DIM>::zeroed(dim);
+        state.center = [1.0; COVARIANCE_D1_DIM];
+        let identity = zonotope_identity_map::<COVARIANCE_D1_DIM>(dim);
+        let constant = [Ball::exact(0.0); COVARIANCE_D1_DIM];
+        assert!(state.apply(&identity, &constant));
+        assert_eq!(state.center, [1.0; COVARIANCE_D1_DIM]);
+        assert_eq!(state.generators.len(), dim);
+        let band = gam_math::roundoff::accumulation_growth(dim + 1);
+        for (i, generator) in state.generators.iter().enumerate() {
+            assert!(
+                generator[i] >= band && generator[i] < 2.0 * band,
+                "coordinate {i}: fresh radius {:.3e} outside [{band:.3e}, {:.3e})",
+                generator[i],
+                2.0 * band
+            );
+        }
     }
 
     /// Two occurrences of `qQ` contain ONE uncertain `q`, not two independent
