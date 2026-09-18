@@ -264,6 +264,9 @@ pub struct ResidualBlockRuntime {
     /// `Var((z, r) | a_i)` at every training row; `K + 1` coordinates.
     pub field: ScoreCovarianceField,
     pub geometry: ResidualRepairGeometry,
+    /// Each row's `γ(a_i)` and `2Σ_rr(a_i)` under a row-varying law, built by
+    /// the first row kernel over the fit and shared by the rest.
+    pub(crate) row_covariance: super::residual_repair_kernel::RowCovarianceSlot,
 }
 
 impl std::fmt::Debug for ResidualBlockRuntime {
@@ -428,6 +431,7 @@ impl ResidualBlockRuntime {
                 conditional_covariance: conditional,
                 centring_pvalues,
             },
+            row_covariance: Default::default(),
         })
     }
 
@@ -456,6 +460,7 @@ impl ResidualBlockRuntime {
             features,
             field,
             geometry,
+            row_covariance: Default::default(),
         })
     }
 

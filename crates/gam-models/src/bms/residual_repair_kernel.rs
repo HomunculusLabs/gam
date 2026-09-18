@@ -50,6 +50,7 @@ use super::*;
 use crate::row_kernel::{RowKernel, RowKernelCache, RowSet};
 use gam_math::jet_scalar::{JetScalar, SymmetricQuadraticCoefficients};
 use gam_math::jet_tower::RowProgram;
+use rayon::prelude::*;
 use std::borrow::Cow;
 use std::ops::Range;
 
@@ -518,6 +519,159 @@ pub(super) fn residual_row_geometry(
     Ok((nll, score, hessian))
 }
 
+/// Each row's `γ(a_i)` and lower-triangular `2Σ_rr(a_i)` under a row-varying law.
+/// Neither depends on `β`, so they are built once per fit and shared by every
+/// kernel over it, instead of re-derived from the row's factor on every call.
+/// The stored values are the per-call values themselves
+/// ([`DriveMoments::at`]'s `γ`, [`doubled_residual_block`]), so every result is
+/// bitwise the per-call result.
+pub(crate) struct RowCovariance {
+    width: usize,
+    /// Row-major `n × K`: `γ(a_i)`.
+    gamma: Vec<f64>,
+    /// Row-major `n × K(K+1)/2`: the lower triangle of `2Σ_rr(a_i)` by rows.
+    curvature: Vec<f64>,
+    /// The governor's charge for the storage above, held while it is live.
+    _reservation: gam_runtime::resource::MemoryReservation,
+}
+
+impl RowCovariance {
+    /// `f64` entries per row: `K` for `γ` and `K(K+1)/2` for the curvature.
+    fn entries_per_row(width: usize) -> usize {
+        width + width * (width + 1) / 2
+    }
+
+    /// `None` when some row's `2Σ_rr` is not bitwise symmetric, so its lower
+    /// triangle would not reproduce the upper one. Every row's is for the
+    /// low-rank rows a conditional law stores, whose entries are sums of the same
+    /// products in the same order.
+    fn build(
+        field: &super::conditional_score_covariance::ScoreCovarianceField,
+        width: usize,
+        rows: usize,
+        reservation: gam_runtime::resource::MemoryReservation,
+    ) -> Option<Self> {
+        let k = width;
+        let packed = k * (k + 1) / 2;
+        let mut gamma = vec![0.0_f64; rows * k];
+        let mut curvature = vec![0.0_f64; rows * packed];
+        let symmetric = gamma
+            .par_chunks_mut(k)
+            .zip(curvature.par_chunks_mut(packed))
+            .enumerate()
+            .map(|(row, (gamma_row, curvature_row))| {
+                let covariance = field.at_row(row);
+                for (j, entry) in gamma_row.iter_mut().enumerate() {
+                    *entry = covariance.coefficient(0, j + 1);
+                }
+                let block = doubled_residual_block(covariance);
+                let mut at = 0;
+                for j in 0..k {
+                    curvature_row[at..at + j + 1].copy_from_slice(&block[j * k..j * k + j + 1]);
+                    at += j + 1;
+                }
+                (0..k).all(|j| (0..j).all(|l| block[j * k + l].to_bits() == block[l * k + j].to_bits()))
+            })
+            .reduce(|| true, |a, b| a && b);
+        symmetric.then_some(Self {
+            width: k,
+            gamma,
+            curvature,
+            _reservation: reservation,
+        })
+    }
+
+    #[inline]
+    fn gamma_row(&self, row: usize) -> &[f64] {
+        &self.gamma[row * self.width..(row + 1) * self.width]
+    }
+
+    #[inline]
+    fn curvature_row(&self, row: usize) -> &[f64] {
+        let packed = self.width * (self.width + 1) / 2;
+        &self.curvature[row * packed..(row + 1) * packed]
+    }
+
+    /// `2Σ_rr(a_i)[j][l]` from a row's lower triangle.
+    #[inline]
+    fn packed_entry(row: &[f64], j: usize, l: usize) -> f64 {
+        let (high, low) = if j >= l { (j, l) } else { (l, j) };
+        row[high * (high + 1) / 2 + low]
+    }
+}
+
+/// Where a [`ResidualBlockRuntime`] keeps its [`RowCovariance`]: built on the
+/// first kernel over the fit, then shared.
+#[derive(Default)]
+pub(crate) struct RowCovarianceSlot(std::sync::OnceLock<Option<RowCovariance>>);
+
+impl RowCovarianceSlot {
+    /// The fit's row covariance, built on first use under `reserve`'s grant of
+    /// its `rows × columns` `f64` storage; `None` when refused or not bitwise
+    /// symmetric, which every later kernel over the fit then shares.
+    fn get_or_build(
+        &self,
+        field: &super::conditional_score_covariance::ScoreCovarianceField,
+        width: usize,
+        rows: usize,
+        reserve: &dyn Fn(usize, usize) -> Option<gam_runtime::resource::MemoryReservation>,
+    ) -> Option<&RowCovariance> {
+        self.0
+            .get_or_init(|| {
+                reserve(rows, RowCovariance::entries_per_row(width))
+                    .and_then(|reservation| RowCovariance::build(field, width, rows, reservation))
+            })
+            .as_ref()
+    }
+}
+
+/// Each row's `Σ_rr(a_i)β`, `u_i` and `v_i` for one kernel's `β`, computed once
+/// with [`DriveMoments::at`]'s own arithmetic.
+struct RowMoments {
+    width: usize,
+    /// Row-major `n × K`.
+    sigma_beta: Vec<f64>,
+    u: Vec<f64>,
+    v: Vec<f64>,
+    _reservation: gam_runtime::resource::MemoryReservation,
+}
+
+impl RowMoments {
+    /// `f64` entries per row: `K` for `Σ_rrβ`, one each for `u` and `v`.
+    fn entries_per_row(width: usize) -> usize {
+        width + 2
+    }
+
+    fn build(
+        field: &super::conditional_score_covariance::ScoreCovarianceField,
+        beta: &[f64],
+        rows: usize,
+        reservation: gam_runtime::resource::MemoryReservation,
+    ) -> Self {
+        let k = beta.len();
+        let mut sigma_beta = vec![0.0_f64; rows * k];
+        let mut u = vec![0.0_f64; rows];
+        let mut v = vec![0.0_f64; rows];
+        sigma_beta
+            .par_chunks_mut(k)
+            .zip(u.par_iter_mut().zip(v.par_iter_mut()))
+            .enumerate()
+            .for_each(|(row, (sigma_beta_row, (u_row, v_row)))| {
+                let moments = DriveMoments::at(field.at_row(row), beta);
+                sigma_beta_row.copy_from_slice(&moments.sigma_beta);
+                *u_row = moments.u;
+                *v_row = moments.v;
+            });
+        Self {
+            width: k,
+            sigma_beta,
+            u,
+            v,
+            _reservation: reservation,
+        }
+    }
+}
+
 /// The residual repair kernel over the family's training rows.
 pub(super) struct ResidualDriveKernel {
     family: BernoulliMarginalSlopeFamily,
@@ -531,12 +685,34 @@ pub(super) struct ResidualDriveKernel {
     /// `2Σ_rr` of the pooled law as a dense row-major `K×K` block, computed
     /// once; `None` when the joint covariance varies by row.
     pooled_curvature: Option<Vec<f64>>,
+    /// Whether the fit's [`RowCovariance`] (in the runtime) holds every row's
+    /// `γ` and `2Σ_rr`; `false` under the pooled law, or when refused, in which
+    /// case every call derives them from the row's factor.
+    row_covariance: bool,
+    /// Each row's `Σ_rrβ`, `u`, `v` for this kernel's `β` under a row-varying
+    /// law, when the governor granted their storage; `None` otherwise.
+    row_moments: Option<RowMoments>,
 }
 
 impl ResidualDriveKernel {
     pub(super) fn new(
         family: BernoulliMarginalSlopeFamily,
         block_states: Vec<ParameterBlockState>,
+    ) -> Result<Self, String> {
+        Self::with_row_cache_reservation(family, block_states, &|rows, columns| {
+            // A refusal is not an error: the kernel keeps the per-call path.
+            gam_runtime::resource::MemoryGovernor::global()
+                .try_reserve_dense_f64(rows, columns, "residual repair row covariance cache")
+                .ok()
+        })
+    }
+
+    /// `reserve(rows, columns)` grants or refuses each row cache's
+    /// `rows × columns` `f64` storage before any of it is allocated.
+    fn with_row_cache_reservation(
+        family: BernoulliMarginalSlopeFamily,
+        block_states: Vec<ParameterBlockState>,
+        reserve: &dyn Fn(usize, usize) -> Option<gam_runtime::resource::MemoryReservation>,
     ) -> Result<Self, String> {
         let runtime = family.residual.clone().ok_or_else(|| {
             "residual row kernel constructed on a family without a residual block".to_string()
@@ -570,6 +746,22 @@ impl ResidualDriveKernel {
         let pooled_curvature = pooled
             .is_some()
             .then(|| doubled_residual_block(runtime.field.at_row(0)));
+        let rows = family.y.len();
+        let (row_covariance, row_moments) = if runtime.field.is_conditional() && rows > 0 {
+            let beta = block_states[2]
+                .beta
+                .as_slice()
+                .ok_or("residual beta not contiguous")?;
+            let row_covariance = runtime
+                .row_covariance
+                .get_or_build(&runtime.field, beta.len(), rows, reserve)
+                .is_some();
+            let row_moments = reserve(rows, RowMoments::entries_per_row(beta.len()))
+                .map(|reservation| RowMoments::build(&runtime.field, beta, rows, reservation));
+            (row_covariance, row_moments)
+        } else {
+            (false, None)
+        };
         Ok(Self {
             family,
             block_states,
@@ -578,7 +770,19 @@ impl ResidualDriveKernel {
             runtime,
             pooled,
             pooled_curvature,
+            row_covariance,
+            row_moments,
         })
+    }
+
+    /// The fit's row covariance, when it holds every row.
+    #[inline]
+    fn row_covariance(&self) -> Option<&RowCovariance> {
+        if self.row_covariance {
+            self.runtime.row_covariance.0.get().and_then(Option::as_ref)
+        } else {
+            None
+        }
     }
 
     #[inline]
@@ -589,12 +793,25 @@ impl ResidualDriveKernel {
             .expect("residual beta is validated contiguous at construction")
     }
 
+    /// Calls `f(γ, Σ_rrβ, u, v)` with row `row`'s drive moments: borrowed from the
+    /// pooled law or the row cache, and derived from the row's factor for this
+    /// call when neither holds them.
     #[inline]
-    fn moments(&self, row: usize) -> Cow<'_, DriveMoments> {
-        match &self.pooled {
-            Some(moments) => Cow::Borrowed(moments),
-            None => Cow::Owned(DriveMoments::at(self.runtime.field.at_row(row), self.beta())),
+    fn with_moments<T>(&self, row: usize, f: impl FnOnce(&[f64], &[f64], f64, f64) -> T) -> T {
+        if let Some(moments) = &self.pooled {
+            return f(&moments.gamma, &moments.sigma_beta, moments.u, moments.v);
         }
+        if let (Some(covariance), Some(moments)) = (self.row_covariance(), &self.row_moments) {
+            let k = moments.width;
+            return f(
+                covariance.gamma_row(row),
+                &moments.sigma_beta[row * k..(row + 1) * k],
+                moments.u[row],
+                moments.v[row],
+            );
+        }
+        let moments = DriveMoments::at(self.runtime.field.at_row(row), self.beta());
+        f(&moments.gamma, &moments.sigma_beta, moments.u, moments.v)
     }
 }
 
@@ -613,14 +830,8 @@ impl RowProgram<5> for ResidualDriveKernel {
             .zip(self.beta())
             .map(|(r, b)| r * b)
             .sum::<f64>();
-        let moments = self.moments(row);
-        Ok([
-            self.block_states[0].eta[row],
-            self.block_states[1].eta[row],
-            t,
-            moments.u,
-            moments.v,
-        ])
+        let (u, v) = self.with_moments(row, |_, _, u, v| (u, v));
+        Ok([self.block_states[0].eta[row], self.block_states[1].eta[row], t, u, v])
     }
 
     fn eval<S: JetScalar<5>>(&self, row: usize, p: &[S; 5]) -> Result<S, String> {
@@ -784,34 +995,57 @@ impl ResidualDriveRows for ResidualDriveKernel {
     }
 
     fn residual_jacobian_rows(&self, row: usize) -> [Vec<f64>; 3] {
-        let moments = self.moments(row);
-        [
-            self.runtime.features.row(row).to_vec(),
-            moments.gamma.clone(),
-            moments.sigma_beta.iter().map(|x| 2.0 * x).collect(),
-        ]
+        self.with_moments(row, |gamma, sigma_beta, _, _| {
+            [
+                self.runtime.features.row(row).to_vec(),
+                gamma.to_vec(),
+                sigma_beta.iter().map(|x| 2.0 * x).collect(),
+            ]
+        })
     }
 
     fn curvature_action(&self, row: usize, d_r: &[f64]) -> Vec<f64> {
-        match &self.pooled_curvature {
-            Some(curvature) => invariant_curvature_action(curvature, d_r),
-            None => invariant_curvature_action(&doubled_residual_block(self.runtime.field.at_row(row)), d_r),
+        if let Some(curvature) = &self.pooled_curvature {
+            return invariant_curvature_action(curvature, d_r);
         }
+        if let Some(cache) = self.row_covariance() {
+            // The per-call products and sum, in the per-call order.
+            let packed = cache.curvature_row(row);
+            return (0..d_r.len())
+                .map(|j| {
+                    (0..d_r.len())
+                        .map(|l| RowCovariance::packed_entry(packed, j, l) * d_r[l])
+                        .sum::<f64>()
+                })
+                .collect();
+        }
+        invariant_curvature_action(&doubled_residual_block(self.runtime.field.at_row(row)), d_r)
     }
 
     fn add_curvature(&self, row: usize, scale: f64, target: &mut Array2<f64>) {
         if scale == 0.0 {
             return;
         }
-        match &self.pooled_curvature {
-            Some(curvature) => add_invariant_curvature(target, &self.residual, curvature, scale),
-            None => add_invariant_curvature(
-                target,
-                &self.residual,
-                &doubled_residual_block(self.runtime.field.at_row(row)),
-                scale,
-            ),
+        if let Some(curvature) = &self.pooled_curvature {
+            add_invariant_curvature(target, &self.residual, curvature, scale);
+            return;
         }
+        if let Some(cache) = self.row_covariance() {
+            let packed = cache.curvature_row(row);
+            let mut block = target.slice_mut(s![self.residual.clone(), self.residual.clone()]);
+            for (j, mut target_row) in block.rows_mut().into_iter().enumerate() {
+                for (l, entry) in target_row.iter_mut().enumerate() {
+                    *entry += scale * RowCovariance::packed_entry(packed, j, l);
+                }
+            }
+            return;
+        }
+        add_invariant_curvature(
+            target,
+            &self.residual,
+            &doubled_residual_block(self.runtime.field.at_row(row)),
+            scale,
+        );
     }
 
     fn row_invariant_curvature(&self) -> Option<&[f64]> {
@@ -1371,5 +1605,263 @@ mod residual_drive_kernel_tests {
             reordering_gate(26, law.clone());
             reordering_gate(32, law);
         }
+    }
+}
+
+#[cfg(test)]
+mod row_covariance_cache_tests {
+    //! The row covariance cache stores the per-call values themselves, so a
+    //! kernel that holds it and one the governor refused must agree bit for bit,
+    //! and the cached kernel must agree with itself at every pool width.
+
+    use super::super::conditional_score_covariance::{ConditionalScoreCovariance, ScoreCovarianceField};
+    use super::super::hessian_paths::{new_cell_moment_cache_stats, new_cell_moment_lru_cache};
+    use super::super::residual_repair::ResidualRepairGeometry;
+    use super::*;
+    use crate::row_kernel::{build_row_kernel_cache, row_kernel_gradient};
+    use gam_linalg::matrix::{DenseDesignMatrix, DesignMatrix};
+    use gam_problem::{InverseLink, StandardLink};
+    use ndarray::{Array1, Array2};
+    use std::sync::{Arc, Mutex};
+
+    /// A deterministic draw in `(0, 1)`.
+    fn unit(i: usize, salt: u64) -> f64 {
+        let mut state = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ salt;
+        let draw = gam_linalg::utils::splitmix64(&mut state);
+        ((draw >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+    }
+
+    fn gauss(i: usize, salt: u64) -> f64 {
+        (-2.0 * unit(i, salt).ln()).sqrt() * (std::f64::consts::TAU * unit(i, salt ^ 0xA5A5)).cos()
+    }
+
+    /// `n` rows whose `(z, r1, r2)` covariance moves with a context `a`, so the
+    /// gam#2766 conditional law escalates, and a residual family over them.
+    fn conditional_fixture(n: usize, k: usize) -> (BernoulliMarginalSlopeFamily, Vec<ParameterBlockState>) {
+        let a = Array2::from_shape_fn((n, 1), |(i, _)| 2.0 * unit(i, 1) - 1.0);
+        let mut scores = Array2::<f64>::zeros((n, k + 1));
+        for i in 0..n {
+            let rho = 0.8 * a[[i, 0]];
+            let z = gauss(i, 2);
+            scores[[i, 0]] = z;
+            let mut previous = gauss(i, 3);
+            scores[[i, 1]] = rho * z + (1.0 - rho * rho).sqrt() * previous;
+            for j in 2..=k {
+                let fresh = gauss(i, 3 + j as u64);
+                scores[[i, j]] = 0.5 * previous + 0.8 * fresh;
+                previous = fresh;
+            }
+        }
+        let weights = Array1::<f64>::ones(n);
+        let model = ConditionalScoreCovariance::fit(scores.view(), weights.view(), a.view())
+            .expect("conditional covariance fit")
+            .expect("a covariance that moves with a escalates");
+        let pooled = gradient_paths::marginal_slope_covariance_from_scores(scores.view(), &weights)
+            .expect("pooled covariance");
+        let pooled_dense: Vec<Vec<f64>> = (0..=k)
+            .map(|j| (0..=k).map(|l| pooled.coefficient(j, l)).collect())
+            .collect();
+        let field = ScoreCovarianceField::conditional(pooled, model.clone(), a.view()).expect("field");
+        let features = scores.slice(s![.., 1..]).to_owned();
+        let runtime = ResidualBlockRuntime {
+            features: features.clone(),
+            field,
+            geometry: ResidualRepairGeometry {
+                columns: (1..=k).map(|j| format!("r{j}")).collect(),
+                pooled_covariance: pooled_dense,
+                conditional_covariance: Some(model),
+                centring_pvalues: vec![1.0; k],
+            },
+            row_covariance: Default::default(),
+        };
+        let (pm, pg) = (3usize, 2usize);
+        let marginal_x = Array2::from_shape_fn((n, pm), |(i, j)| if j == 0 { 1.0 } else { a[[i, 0]].powi(j as i32) });
+        // Outside the marginal span, so a generic identifiability pass keeps both
+        // slope columns rather than aliasing them onto the marginal ones.
+        let slope_x = Array2::from_shape_fn((n, pg), |(i, j)| {
+            if j == 0 { 0.5 + 0.3 * (2.1 * a[[i, 0]]).cos() } else { (3.3 * a[[i, 0]]).sin() }
+        });
+        let policy = gam_runtime::resource::ResourcePolicy::default_library();
+        let family = BernoulliMarginalSlopeFamily {
+            jeffreys_armed: false,
+            residual: Some(Arc::new(runtime)),
+            y: Arc::new(Array1::from_shape_fn(n, |i| if unit(i, 5) < 0.4 { 1.0 } else { 0.0 })),
+            weights: Arc::new(Array1::from_shape_fn(n, |i| 0.6 + 0.4 * unit(i, 6))),
+            z: Arc::new(scores.column(0).to_owned()),
+            latent_measure: LatentMeasureKind::StandardNormal,
+            gaussian_frailty_sd: None,
+            base_link: InverseLink::Standard(StandardLink::Probit),
+            marginal_design: DesignMatrix::Dense(DenseDesignMatrix::from(marginal_x.clone())),
+            slope_design: DesignMatrix::Dense(DenseDesignMatrix::from(slope_x.clone())),
+            score_warp: None,
+            link_dev: None,
+            policy: policy.clone(),
+            cell_moment_lru: new_cell_moment_lru_cache(&policy),
+            cell_moment_cache_stats: new_cell_moment_cache_stats(),
+            intercept_warm_starts: None,
+            auto_subsample_phase_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            auto_subsample_last_rho: Arc::new(Mutex::new(None)),
+        };
+        let marginal_beta = Array1::from_vec(vec![-0.3, 0.2, -0.1]);
+        let slope_beta = Array1::from_vec(vec![0.5, -0.2]);
+        let residual_beta = Array1::from_shape_fn(k, |j| 0.35 * (0.9 * j as f64 + 0.4).cos() / (k as f64).sqrt());
+        let states = vec![
+            ParameterBlockState {
+                eta: marginal_x.dot(&marginal_beta),
+                beta: marginal_beta,
+            },
+            ParameterBlockState {
+                eta: slope_x.dot(&slope_beta),
+                beta: slope_beta,
+            },
+            ParameterBlockState {
+                eta: features.dot(&residual_beta),
+                beta: residual_beta,
+            },
+        ];
+        (family, states)
+    }
+
+    /// Every channel the fit reads, as one bit stream.
+    fn channel_bits(kern: &ResidualDriveKernel) -> Vec<u64> {
+        let p = kern.n_coefficients();
+        let d: Vec<f64> = (0..p).map(|j| ((j as f64) * 0.53 + 0.8).sin()).collect();
+        let e: Vec<f64> = (0..p).map(|j| ((j as f64) * 0.29 + 2.6).cos()).collect();
+        let cache = build_row_kernel_cache(kern, &RowSet::All).expect("row cache");
+        let mut bits: Vec<u64> = cache.nll.iter().map(|v| v.to_bits()).collect();
+        bits.extend(row_kernel_gradient(kern, &cache, &RowSet::All).iter().map(|v| v.to_bits()));
+        bits.extend(residual_hessian_dense(kern, &cache).expect("H").iter().map(|v| v.to_bits()));
+        bits.extend(residual_hessian_directional_derivative(kern, &d).expect("H'").iter().map(|v| v.to_bits()));
+        bits.extend(
+            residual_hessian_second_directional_derivative(kern, &d, &e)
+                .expect("H''")
+                .iter()
+                .map(|v| v.to_bits()),
+        );
+        for axis in residual_hessian_directional_derivative_all_axes(kern).expect("H' all axes") {
+            bits.extend(axis.iter().map(|v| v.to_bits()));
+        }
+        for row in [0, 7, 41] {
+            let (nll, score, observed) = residual_row_geometry(kern, row).expect("ALO row geometry");
+            bits.push(nll.to_bits());
+            bits.extend(score.iter().map(|v| v.to_bits()));
+            bits.extend(observed.iter().map(|v| v.to_bits()));
+        }
+        bits
+    }
+
+    #[test]
+    fn row_covariance_cache_is_bitwise_the_per_call_kernel_at_every_pool_width() {
+        // Two fixtures, so the refused kernel's runtime never holds a cache the
+        // cached kernel's built: the fit-level cache lives in the runtime.
+        let (refused_family, refused_states) = conditional_fixture(600, 2);
+        let refused =
+            ResidualDriveKernel::with_row_cache_reservation(refused_family, refused_states, &|_, _| None)
+                .expect("refused kernel");
+        assert!(
+            !refused.row_covariance && refused.row_moments.is_none(),
+            "a refused reservation keeps the per-call path"
+        );
+        let (family, states) = conditional_fixture(600, 2);
+        let cached = ResidualDriveKernel::new(family.clone(), states.clone()).expect("cached kernel");
+        assert!(
+            cached.row_covariance && cached.row_moments.is_some(),
+            "the governor grants a 600-row cache"
+        );
+        let second = ResidualDriveKernel::new(family, states).expect("second kernel over the fit");
+        assert!(second.row_covariance, "a later kernel shares the fit's row covariance");
+        let width = cached.residual.len();
+        eprintln!(
+            "[2924 row cache] {} bytes per row per fit and {} per kernel at K = {width}",
+            8 * RowCovariance::entries_per_row(width),
+            8 * RowMoments::entries_per_row(width)
+        );
+        let pool = |workers: usize| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .expect("test worker pool")
+        };
+        let reference = pool(1).install(|| channel_bits(&refused));
+        for workers in [1usize, 4, 12] {
+            let observed = pool(workers).install(|| channel_bits(&cached));
+            assert_eq!(observed.len(), reference.len(), "channel count at {workers} workers");
+            let first_difference = observed.iter().zip(&reference).position(|(a, b)| a != b);
+            assert_eq!(
+                first_difference, None,
+                "the cached kernel at {workers} workers differs from the per-call kernel"
+            );
+        }
+    }
+
+    /// The fit-level cache is built from `Σ(a)` alone, which no stage of a fit
+    /// re-estimates. Run an escalated K = 26 fit to convergence through the
+    /// custom-family engine, which constructs a kernel for every assembly, and
+    /// at the end compare every row's cached `γ` and `2Σ_rr` with a fresh
+    /// derivation from the row's factor, bit for bit.
+    #[test]
+    fn row_covariance_cache_is_the_fresh_recompute_after_an_escalated_fit() {
+        let k = 26;
+        let (family, states) = conditional_fixture(1_500, k);
+        let runtime = family.residual.clone().expect("the fixture carries a residual block");
+        assert!(runtime.field.is_conditional(), "the K = {k} fixture escalates to Σ(a)");
+        let dense_block = |name: &str, design: &DesignMatrix, beta: &Array1<f64>, priority: u8| ParameterBlockSpec {
+            name: name.to_string(),
+            design: design.clone(),
+            offset: Array1::zeros(design.nrows()),
+            penalties: vec![PenaltyMatrix::Diagonal(Array1::from_elem(beta.len(), 1.0))],
+            nullspace_dims: vec![0],
+            initial_log_lambdas: Array1::zeros(1),
+            initial_beta: Some(beta.clone()),
+            gauge_priority: priority,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        };
+        let specs = vec![
+            dense_block("marginal_surface", &family.marginal_design, &states[0].beta, 150),
+            dense_block("slope_surface", &family.slope_design, &states[1].beta, 120),
+            runtime
+                .block_spec(Array1::zeros(1), Some(states[2].beta.clone()))
+                .expect("residual block spec"),
+        ];
+        let fit = crate::custom_family::fit_custom_family(
+            &family,
+            &specs,
+            &crate::custom_family::BlockwiseFitOptions::default(),
+        )
+        .expect("the escalated K = 26 fit converges");
+        let cache = runtime
+            .row_covariance
+            .0
+            .get()
+            .and_then(Option::as_ref)
+            .expect("the fit's kernels built the row covariance");
+        let packed = k * (k + 1) / 2;
+        for row in 0..family.y.len() {
+            let covariance = runtime.field.at_row(row);
+            let gamma: Vec<u64> = (0..k).map(|j| covariance.coefficient(0, j + 1).to_bits()).collect();
+            let cached_gamma: Vec<u64> = cache.gamma_row(row).iter().map(|v| v.to_bits()).collect();
+            assert_eq!(cached_gamma, gamma, "row {row}: cached γ differs from the recompute");
+            let block = doubled_residual_block(covariance);
+            let cached = cache.curvature_row(row);
+            assert_eq!(cached.len(), packed);
+            for j in 0..k {
+                for l in 0..k {
+                    assert_eq!(
+                        RowCovariance::packed_entry(cached, j, l).to_bits(),
+                        block[j * k + l].to_bits(),
+                        "row {row}: cached 2Σ_rr[{j}][{l}] differs from the recompute"
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "[2924 row cache] escalated K = {k} fit: {} outer iterations, residual EDF {:.3}; the \
+             cache matches a fresh recompute on all {} rows",
+            fit.outer_iterations,
+            fit.blocks[2].edf,
+            family.y.len()
+        );
     }
 }
