@@ -156,6 +156,18 @@ struct StoredAnchor {
     taylor: Option<AnchorTaylor>,
 }
 
+/// The inputs and root of one completed write of a [`RootSlot`], without its
+/// table: what deciding a hit and seeding a solve read (gam#2928).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StoredRoot {
+    /// The sequence the write left, so a later table read can tell whether it
+    /// still reads the same write.
+    sequence: u64,
+    q: u64,
+    slope: u64,
+    root: f64,
+}
+
 impl RootSlot {
     fn empty() -> Self {
         let nan = f64::NAN.to_bits();
@@ -168,9 +180,11 @@ impl RootSlot {
         }
     }
 
-    /// The stored anchor from one completed write, or `None` while a writer
-    /// holds the slot or finished a write during the read.
-    fn read(&self) -> Option<StoredAnchor> {
+    /// The stored inputs and root from one completed write, or `None` while a
+    /// writer holds the slot or finished a write during the read. Most slot
+    /// calls only compare inputs or read the root, so the table is not loaded
+    /// here (gam#2928).
+    fn read_root(&self) -> Option<StoredRoot> {
         let before = self.sequence.load(Ordering::Acquire);
         if before & 1 == 1 {
             return None;
@@ -178,24 +192,41 @@ impl RootSlot {
         let q = self.q.load(Ordering::Acquire);
         let slope = self.slope.load(Ordering::Acquire);
         let root = f64::from_bits(self.root.load(Ordering::Acquire));
-        let mut coefficients = [[0.0; TAYLOR_SLOTS]; TAYLOR_SLOTS];
-        coefficients[0][0] = root;
-        for (cell, (i, j)) in self.table.iter().zip(AnchorTaylor::stored_entries()) {
-            coefficients[i][j] = f64::from_bits(cell.load(Ordering::Acquire));
-        }
-        if self.sequence.load(Ordering::Acquire) != before {
-            return None;
-        }
-        let taylor = coefficients
-            .iter()
-            .flatten()
-            .all(|value| value.is_finite())
-            .then_some(AnchorTaylor { coefficients });
-        Some(StoredAnchor {
+        (self.sequence.load(Ordering::Acquire) == before).then_some(StoredRoot {
+            sequence: before,
             q,
             slope,
             root,
-            taylor,
+        })
+    }
+
+    /// The table the write `stored` read published, or `None` while that write
+    /// published none or another write has begun since.
+    fn read_table(&self, stored: &StoredRoot) -> Option<AnchorTaylor> {
+        let mut coefficients = [[0.0; TAYLOR_SLOTS]; TAYLOR_SLOTS];
+        coefficients[0][0] = stored.root;
+        for (cell, (i, j)) in self.table.iter().zip(AnchorTaylor::stored_entries()) {
+            coefficients[i][j] = f64::from_bits(cell.load(Ordering::Acquire));
+        }
+        if self.sequence.load(Ordering::Acquire) != stored.sequence {
+            return None;
+        }
+        coefficients
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite())
+            .then_some(AnchorTaylor { coefficients })
+    }
+
+    /// The stored anchor from one completed write, with its table where the
+    /// same write published one, or `None` while a writer holds the slot.
+    fn read(&self) -> Option<StoredAnchor> {
+        let stored = self.read_root()?;
+        Some(StoredAnchor {
+            q: stored.q,
+            slope: stored.slope,
+            root: stored.root,
+            taylor: self.read_table(&stored),
         })
     }
 
@@ -215,9 +246,18 @@ impl RootSlot {
         self.q.store(anchor.q, Ordering::Release);
         self.slope.store(anchor.slope, Ordering::Release);
         self.root.store(anchor.root.to_bits(), Ordering::Release);
-        for (cell, (i, j)) in self.table.iter().zip(AnchorTaylor::stored_entries()) {
-            let value = anchor.taylor.map_or(f64::NAN, |taylor| taylor.coefficients[i][j]);
-            cell.store(value.to_bits(), Ordering::Release);
+        match &anchor.taylor {
+            Some(taylor) => {
+                for (cell, (i, j)) in self.table.iter().zip(AnchorTaylor::stored_entries()) {
+                    cell.store(taylor.coefficients[i][j].to_bits(), Ordering::Release);
+                }
+            }
+            None => {
+                let nan = f64::NAN.to_bits();
+                for cell in &self.table {
+                    cell.store(nan, Ordering::Release);
+                }
+            }
         }
         self.sequence.store(before + 2, Ordering::Release);
     }
@@ -354,8 +394,13 @@ pub(crate) fn anchor_derivatives_in_slot(
 /// The warm seed a stored anchor gives for `(q, b)`: its table's series at the
 /// new inputs ([`AnchorTaylor::predict`]), or the bare root while it holds
 /// none. It is only a seed — the solve certifies whatever it starts from.
-fn predicted_seed(stored: &StoredAnchor, q: f64, observed_slope: f64) -> f64 {
-    let Some(taylor) = stored.taylor else {
+fn predicted_seed(
+    stored: &StoredRoot,
+    taylor: Option<AnchorTaylor>,
+    q: f64,
+    observed_slope: f64,
+) -> f64 {
+    let Some(taylor) = taylor else {
         return stored.root;
     };
     taylor.predict(
@@ -366,6 +411,11 @@ fn predicted_seed(stored: &StoredAnchor, q: f64, observed_slope: f64) -> f64 {
 
 /// The slot path both entries share: the anchor for `(q, b)`, carrying
 /// derivatives whenever `differentiate` asks for them.
+///
+/// The row's own slot is asked first, by its inputs and root alone: its table
+/// is loaded only where a consumer differentiates or a warm seed reads it, and
+/// the cross-row table is hashed only where the row's slot does not answer
+/// (gam#2928).
 fn anchor_in_slot(
     q: f64,
     observed_slope: f64,
@@ -392,31 +442,53 @@ fn anchor_in_slot(
         });
     };
     let own = cache.slot(row, slot);
-    let own_stored = own
-        .and_then(RootSlot::read)
+    let own_root = own
+        .and_then(RootSlot::read_root)
         .filter(|stored| stored.root.is_finite());
-    let shared = cache.shared_slot(slot, inputs.0, inputs.1);
-    let own_match = own_stored.filter(|stored| (stored.q, stored.slope) == inputs);
-    let shared_match = if own_match.is_some() {
-        None
-    } else {
-        shared
-            .and_then(RootSlot::read)
-            .filter(|stored| stored.root.is_finite() && (stored.q, stored.slope) == inputs)
+    let publish = |anchor: &StoredAnchor| {
+        if let Some(own) = own {
+            own.write(anchor);
+        }
+        if let Some(shared) = cache.shared_slot(slot, inputs.0, inputs.1) {
+            shared.write(anchor);
+        }
     };
-    let root = match own_match.or(shared_match) {
+    if let (Some(own), Some(stored)) = (own, own_root)
+        && (stored.q, stored.slope) == inputs
+    {
+        let taylor = if differentiate { own.read_table(&stored) } else { None };
+        if taylor.is_some() || !differentiate {
+            return Ok(StoredAnchor {
+                q: inputs.0,
+                slope: inputs.1,
+                root: stored.root,
+                taylor,
+            });
+        }
+        let anchor = StoredAnchor {
+            q: inputs.0,
+            slope: inputs.1,
+            root: stored.root,
+            taylor: differentiated(stored.root)?,
+        };
+        publish(&anchor);
+        return Ok(anchor);
+    }
+    let shared_match = cache
+        .shared_slot(slot, inputs.0, inputs.1)
+        .and_then(RootSlot::read)
+        .filter(|stored| stored.root.is_finite() && (stored.q, stored.slope) == inputs);
+    let root = match shared_match {
         Some(stored) if stored.taylor.is_some() || !differentiate => {
-            if shared_match.is_some()
-                && let Some(own) = own
-            {
+            if let Some(own) = own {
                 own.write(&stored);
             }
             return Ok(stored);
         }
         Some(stored) => stored.root,
-        None => match own_stored {
-            Some(stored) => {
-                let seed = predicted_seed(&stored, q, observed_slope);
+        None => match (own, own_root) {
+            (Some(own), Some(stored)) => {
+                let seed = predicted_seed(&stored, own.read_table(&stored), q, observed_slope);
                 match solve_anchor_from(q, observed_slope, context.grid, seed) {
                     Ok(root) => root,
                     Err(warm_failure) => {
@@ -428,7 +500,7 @@ fn anchor_in_slot(
                     }
                 }
             }
-            None => solve_anchor(q, observed_slope, context.grid)?,
+            _ => solve_anchor(q, observed_slope, context.grid)?,
         },
     };
     let anchor = StoredAnchor {
@@ -437,12 +509,7 @@ fn anchor_in_slot(
         root,
         taylor: differentiated(root)?,
     };
-    if let Some(own) = own {
-        own.write(&anchor);
-    }
-    if let Some(shared) = shared {
-        shared.write(&anchor);
-    }
+    publish(&anchor);
     Ok(anchor)
 }
 
@@ -887,6 +954,16 @@ const TAYLOR_SLOTS: usize = ANCHOR_TAYLOR_ORDER + 1;
 /// derivative stack a carrier composes.
 const FACTORIAL: [f64; TAYLOR_SLOTS] = [1.0, 1.0, 2.0, 6.0, 24.0, 120.0];
 
+/// Slices of `δα^r` the table's solve reads: degree `e` for `2 ≤ r ≤ e ≤ 5`.
+const POWER_SLICES: usize = 10;
+
+/// Where the degree-`e` part of `δα^r` sits among the [`POWER_SLICES`]
+/// (`2 ≤ r ≤ e ≤ 5`): degrees in order, powers ascending within each.
+#[inline]
+fn power_slice(r: usize, degree: usize) -> usize {
+    (degree - 1) * (degree - 2) / 2 + (r - 2)
+}
+
 /// `[·, F′, F″, F‴, F⁗, F⁽⁵⁾](x)` with `F(x) = Φ(−x)`, `F^{(n)} = (−1)^n
 /// He_{n−1}(x) φ(x)`, with `φ(x)` replaced by the caller's `density` — a
 /// normalized node weight or the ratio `φ(q)/Σ w φ(η)` (gam#2941). The value
@@ -961,10 +1038,12 @@ impl AnchorTaylor {
             ));
         }
         let target = survival_cdf_derivative_stack(q, density.log_density_ratio(q).exp());
-        // parts[d][i]: the coefficient of δq^i·δb^(d−i) in δα. powers[r][e]:
-        // the degree-e part of δα^r, for r ≥ 2.
+        // parts[d][i]: the coefficient of δq^i·δb^(d−i) in δα. powers holds the
+        // degree-e part of δα^r for 2 ≤ r ≤ e ≤ 5 only — the ten slices the
+        // solve reads — at `power_slice(r, e)`, so a table zeroes 480 bytes of
+        // scratch instead of the whole 6·6·6 cube (gam#2928).
         let mut parts = [[0.0_f64; TAYLOR_SLOTS]; TAYLOR_SLOTS];
-        let mut powers = [[[0.0_f64; TAYLOR_SLOTS]; TAYLOR_SLOTS]; TAYLOR_SLOTS];
+        let mut powers = [[0.0_f64; TAYLOR_SLOTS]; POWER_SLICES];
         for degree in 1..TAYLOR_SLOTS {
             // [δα^r]_degree = Σ_j A_j·[δα^(r−1)]_(degree−j) reads parts below
             // `degree` only.
@@ -972,14 +1051,14 @@ impl AnchorTaylor {
                 let mut power = [0.0_f64; TAYLOR_SLOTS];
                 for j in 1..=degree + 1 - r {
                     let lower = degree - j;
-                    let right = if r == 2 { &parts[lower] } else { &powers[r - 1][lower] };
+                    let right = if r == 2 { &parts[lower] } else { &powers[power_slice(r - 1, lower)] };
                     for i1 in 0..=j {
                         for i2 in 0..=lower {
                             power[i1 + i2] += parts[j][i1] * right[i2];
                         }
                     }
                 }
-                powers[r][degree] = power;
+                powers[power_slice(r, degree)] = power;
             }
             // Everything of degree `degree` in the expanded equation except
             // `H_10·A_degree`: the slope moment `H_{0,degree}·δb^degree / degree!`,
@@ -994,7 +1073,7 @@ impl AnchorTaylor {
                         continue;
                     }
                     let scale = moments[r + s][s] / (FACTORIAL[r] * FACTORIAL[s]);
-                    let source = if r == 1 { &parts[lower] } else { &powers[r][lower] };
+                    let source = if r == 1 { &parts[lower] } else { &powers[power_slice(r, lower)] };
                     for i in 0..=lower {
                         rest[i] += scale * source[i];
                     }
