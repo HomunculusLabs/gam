@@ -68,6 +68,132 @@ impl RemlLamlResult {
     }
 }
 
+/// The Laplace record of an inner mode along its softest direction (gam#2765, gam#979).
+///
+/// The criterion's normalizer is the Gaussian integral of the quadratic model of the inner
+/// objective `f` about its mode. Along the softest eigenpair `(σ, v)` of the operator the mode
+/// response inverts, `f(β̂ + s·v) = f̂ + ½σs² + (t₃/6)s³ + (t₄/24)s⁴ + …`, and the one-dimensional
+/// Laplace series is `log ∫ e^{−f} ds = −f̂ + ½log(2π/σ) + c + O(c²)` with leading correction
+/// `c = 5t₃²/(24σ³) − t₄/(8σ²)`.
+///
+/// The one refusal is the rounding band: at or below the span spectrum's band `σ` is not resolved
+/// from zero, so the normalizer has no curvature to integrate and the trial point is refused
+/// before anything is priced. The cubic share `5t₃²/(24σ³)` is a RECORD, not a refusal. It
+/// measures how non-Gaussian the posterior is along `v` at one point, which does not tell a mode
+/// folding along the search path (`σ → 0`) from a well-conditioned mode with a large third
+/// derivative. Refusing on it was measured wrong (gate job 1219877): a mode at `σ = 2`, `t₃ = 8.5`
+/// (share 1.875) was refused; on the #2894 repro 122 of 387 graded evaluations refused, 80 of them
+/// at `σ ≥ 0.1`; and six custom-family pins went red. A fold test compares the fold distance
+/// `σ/|t₃|` with the inner mode's motion along `v`, and is its own derivation.
+///
+/// `t₃ = vᵀ D_β M[v] v` prices the complete operator the mode response inverts: the drift of the
+/// log-determinant operator (`HessianDerivativeProvider::hessian_derivative_correction`) plus the
+/// motion of the stationarity operator's difference from it
+/// (`HessianDerivativeProvider::mode_response_rhs_correction`), which that hook's contract omits
+/// exactly when the difference is constant. Where the difference moves without its derivatives the
+/// record says so ([`CompletionShare::NotSupplied`]). The quartic share is not priced. Grading the
+/// softest eigenpair alone describes one direction: a stiffer direction with a much larger `t₃`,
+/// and mixed third derivatives coupling `v` to stiff directions, also enter the multivariate
+/// correction. Every quantity is un-scaled by the operator's uniform curvature scale, and the share
+/// is invariant to rescaling `v`, so the record describes the objective.
+#[derive(Clone, Debug)]
+pub struct InnerModeFold {
+    /// The softest eigenvalue `σ` on the span the mode response inverts, un-scaled.
+    pub sigma: f64,
+    /// The span spectrum's rounding band, un-scaled.
+    pub rounding_band: f64,
+    /// `t₃ = vᵀ D_β M[v] v` along the softest eigenvector, un-scaled; `None` when the rounding band
+    /// refused before it was priced.
+    pub third_derivative: Option<f64>,
+    /// The cubic share `5t₃²/(24σ³)` of the Laplace series' leading correction, priced with `t₃`.
+    pub cubic_correction: Option<f64>,
+    /// The quartic share `|t₄|/(8σ²)` of the leading correction.
+    pub quartic_correction: QuarticShare,
+    /// Whether `t₃` carries the stationarity difference's motion, priced with `t₃`.
+    pub completion: Option<CompletionShare>,
+}
+
+/// Whether a fold record's `t₃` carries the motion of the stationarity operator's difference from
+/// the log-determinant operator (gam#2765).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionShare {
+    /// `t₃` prices the complete operator: the difference is constant, or its motion was priced.
+    Priced,
+    /// The difference moves but the provider supplies no derivative of it, so `t₃` is the
+    /// log-determinant operator's share alone.
+    NotSupplied,
+}
+
+/// Whether the quartic share of a fold verdict's leading correction was priced (gam#2765).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuarticShare {
+    /// Not priced by design: the verdict refuses on the cubic share and the rounding band, which is
+    /// sufficient for invalidity, and pricing `t₄` would add a second directional pass to every
+    /// healthy evaluation with no provider declaring that hook.
+    NotPriced,
+}
+
+impl InnerModeFold {
+    /// Whether the Laplace series' leading correction along the softest direction is below the
+    /// term it corrects.
+    pub fn is_valid(&self) -> bool {
+        self.sigma > self.rounding_band
+    }
+}
+
+impl std::fmt::Display for InnerModeFold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.third_derivative, self.cubic_correction, self.completion) {
+            (Some(third), Some(correction), Some(completion)) => write!(
+                f,
+                "the inner mode's softest curvature is {:.3e} (rounding band {:.3e}) with third \
+                 directional derivative {third:.3e} (completion {completion:?}), recording a \
+                 cubic share of {correction:.3e} of the Laplace series' leading correction; the \
+                 quartic share is not priced (gam#2765, gam#979)",
+                self.sigma, self.rounding_band,
+            ),
+            _ => write!(
+                f,
+                "the inner mode's softest curvature {:.3e} is at or below its rounding band \
+                 {:.3e}, so the Laplace normalizer has no resolved curvature to integrate \
+                 (gam#2765, gam#979)",
+                self.sigma, self.rounding_band,
+            ),
+        }
+    }
+}
+
+/// Why the unified evaluator published no evaluation (gam#2765).
+#[derive(Clone, Debug)]
+pub enum RemlLamlError {
+    /// The inner mode is at a fold: its Laplace normalizer approximates no integral, so the trial
+    /// point is refused, with no value or derivative standing in for one.
+    InnerModeFold(InnerModeFold),
+    /// Any other failure, with its diagnostic.
+    Failed(String),
+}
+
+impl std::fmt::Display for RemlLamlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InnerModeFold(fold) => write!(f, "{fold}"),
+            Self::Failed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl From<String> for RemlLamlError {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+
+impl From<RemlError> for RemlLamlError {
+    fn from(error: RemlError) -> Self {
+        Self::Failed(error.into())
+    }
+}
+
 /// Four additive scalar atoms of the unified criterion.
 ///
 /// `fixed_beta` owns every scalar other than the two determinant terms and the
@@ -1178,6 +1304,16 @@ impl HessianFactorization for TangentProjectedHessianOperator {
         self.h_t_op.active_rank()
     }
 
+    /// `Z · U_T` over the tangent operator's active eigenpairs: the span `solve` lifts through `Z`
+    /// (gam#2765).
+    fn inverted_span(&self) -> Option<InvertedSpan> {
+        let tangent = InvertedSpan::from_dense_spectral(&self.h_t_op)?;
+        Some(InvertedSpan {
+            basis: self.z.dot(&tangent.basis),
+            eigenvalues: tangent.eigenvalues,
+        })
+    }
+
     fn dim(&self) -> usize {
         self.z.nrows()
     }
@@ -1280,6 +1416,9 @@ pub(crate) struct BorrowedDerivProvider<'a>(&'a dyn HessianDerivativeProvider);
 impl<'a> HessianDerivativeProvider for BorrowedDerivProvider<'a> {
     fn mode_response_rhs_correction(&self) -> Option<ModeResponseRhsCorrectionFn> {
         self.0.mode_response_rhs_correction()
+    }
+    fn mode_response_rhs_correction_supplied(&self) -> bool {
+        self.0.mode_response_rhs_correction_supplied()
     }
     fn hessian_derivative_correction(
         &self,
@@ -1413,18 +1552,18 @@ pub(crate) fn try_tangent_projected_evaluate(
     rho: &[f64],
     mode: EvalMode,
     prior_cost_gradient: Option<(f64, Array1<f64>, Option<Array2<f64>>)>,
-) -> Result<Option<RemlLamlResult>, String> {
+) -> Result<Option<RemlLamlResult>, RemlLamlError> {
     let block = match solution.active_constraints.as_ref() {
         Some(block) if block.a.nrows() > 0 => block,
         _ => return Ok(None),
     };
     let p = solution.beta.len();
     if block.a.ncols() != p {
-        return Err(format!(
+        return Err(RemlLamlError::Failed(format!(
             "active_constraints.a has {} columns but beta is {}-dim",
             block.a.ncols(),
             p
-        ));
+        )));
     }
 
     let constrained_mode_response: Arc<dyn HessianFactorization> =

@@ -3348,7 +3348,17 @@ impl WorkingModelSurvival {
             mode,
             None,
         )
-        .map_err(EstimationError::InvalidInput)?;
+        .map_err(|error| match error {
+            // gam#2765: an inner mode at a fold refuses this trial point by its typed verdict.
+            gam_solve::estimate::reml::reml_outer_engine::RemlLamlError::InnerModeFold(fold) => {
+                EstimationError::TrialPointRefused {
+                    reason: format!("the {mode:?} survival evaluation refused this trial point: {fold}"),
+                }
+            }
+            gam_solve::estimate::reml::reml_outer_engine::RemlLamlError::Failed(reason) => {
+                EstimationError::InvalidInput(reason)
+            }
+        })?;
 
         let gradient = result
             .gradient_for_mode(mode, rho.len())

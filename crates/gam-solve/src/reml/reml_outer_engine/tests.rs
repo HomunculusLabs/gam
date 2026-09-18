@@ -2757,7 +2757,7 @@ pub(crate) fn aou_missing_projected_kkt_residual_is_contract_error() {
 
     let err = match reml_laml_evaluate(&solution, &[0.0], EvalMode::ValueGradientHessian, None) {
         Ok(_) => panic!("missing projected KKT residual must be a hard contract error"),
-        Err(err) => err,
+        Err(err) => err.to_string(),
     };
     assert!(
         err.contains("fixed-dispersion derivative contract violated")
@@ -2835,7 +2835,7 @@ impl TripwireOuterObjective {
     ) -> Result<gam_problem::OuterEval, gam_problem::EstimationError> {
         let rho_slice = rho.as_slice().expect("the outer rho is contiguous");
         let mut result = reml_laml_evaluate(&self.solution, rho_slice, mode, None)
-            .map_err(gam_problem::EstimationError::InvalidInput)?;
+            .map_err(|error| gam_problem::EstimationError::InvalidInput(error.to_string()))?;
         let gradient = match result.gradient_for_mode(mode, rho.len()) {
             Ok(gradient) => gradient,
             Err(reason) => {
@@ -7034,7 +7034,7 @@ pub(crate) fn malformed_projected_kkt_residual_is_contract_error() {
 
     let err = match reml_laml_evaluate(&sol, &rho, EvalMode::ValueAndGradient, None) {
         Ok(_) => panic!("wrong-length projected KKT residual must be rejected"),
-        Err(err) => err,
+        Err(err) => err.to_string(),
     };
     assert!(
         err.contains("projected KKT residual length mismatch"),
@@ -8546,5 +8546,168 @@ pub(crate) fn criterion_value_is_invariant_to_listing_a_zero_multiplier_active_r
              tight (gam#2765).",
             listed - free,
         );
+    }
+}
+
+/// gam#2765: a tangent-projected mode-response operator names the span its `solve` inverts, so a
+/// face mode is graded for a fold on the spectrum it was solved with.
+#[test]
+pub(crate) fn tangent_projected_operator_names_the_span_its_solve_inverts_2765() {
+    let z = array![[1.0, 0.0], [0.0, 0.6], [0.0, 0.8]];
+    let h_t = array![[2.0, 0.3], [0.3, 0.5]];
+    let op = TangentProjectedHessianOperator {
+        z,
+        h_t_op: DenseSpectralOperator::from_symmetric(&h_t).expect("spd tangent fixture"),
+    };
+    let span = op.inverted_span().expect("a tangent operator names its span");
+    assert_eq!(span.basis.dim(), (3, 2));
+    let rhs = array![0.7, -1.1, 0.4];
+    let solved = op.solve(&rhs);
+    let projected = span.basis.t().dot(&rhs);
+    let scaled = Array1::from_shape_fn(projected.len(), |i| projected[i] / span.eigenvalues[i]);
+    let through_span = span.basis.dot(&scaled);
+    for i in 0..3 {
+        assert!(
+            (solved[i] - through_span[i]).abs() <= 1.0e-12 * solved[i].abs().max(1.0),
+            "component {i}: solve {} against the span's inverse {}",
+            solved[i],
+            through_span[i]
+        );
+    }
+}
+
+/// Two coefficients at an exact mode (zero projected residual) with a chosen curvature and drift
+/// provider (gam#2765).
+fn fold_fixture_solution(
+    curvature: [f64; 2],
+    deriv_provider: Box<dyn HessianDerivativeProvider + 'static>,
+) -> InnerSolution<'static> {
+    InnerSolution {
+        log_likelihood: 0.0,
+        penalty_quadratic: 0.0,
+        hessian_op: spd(curvature),
+        mode_response_op: None,
+        beta: array![0.7, -1.3],
+        penalty_coords: vec![PenaltyCoordinate::from_dense_root(array![
+            [1.0, 0.0],
+            [0.0, 1.0]
+        ])],
+        penalty_logdet: PenaltyLogdetDerivs {
+            value: 0.0,
+            first: array![0.0],
+            second: None,
+        },
+        deriv_provider,
+        firth: None,
+        hessian_logdet_correction: 0.0,
+        penalty_subspace_trace: None,
+        rho_curvature_scale: 1.0,
+        rho_prior: gam_problem::RhoPrior::Flat,
+        n_observations: 20,
+        nullspace_dim: 0.0,
+        gaussian_weight_log_sum_half: 0.0,
+        dp_floor_scale: 1.0,
+        dispersion: DispersionHandling::Fixed {
+            phi: 1.0,
+            include_logdet_h: true,
+            include_logdet_s: true,
+        },
+        ext_coords: Vec::new(),
+        ext_coord_pair_fn: None,
+        rho_ext_pair_fn: None,
+        fixed_drift_deriv: None,
+        contracted_psi_second_order: None,
+        barrier_config: None,
+        kkt_residual: Some(ProjectedKktResidual::from_active_projected(array![0.0, 0.0])),
+        active_constraints: None,
+    }
+}
+
+/// gam#2765 / gam#979: the fold record refuses only a curvature at or below its span's rounding band,
+/// and records the cubic share without refusing on it. A span whose softest eigenvalue is exactly
+/// zero is refused before `t₃` is priced. A soft, well-resolved mode (curvature `1e-7` along `e₀`,
+/// where `D_β H[e₀] = diag(1, 0)` puts `t₃ = 1` and the cubic share at `2.1e20`) is recorded and not
+/// refused in either evaluation mode. A derivative-bearing evaluation hands its caller a gradient
+/// at curvature `1e-3` (cubic share `2.1e8`, still eight orders past the withdrawn refusal at
+/// `1.875`). It is not asked at `1e-7`: there the mode response `−H⁻¹Sβ` at `β = (0.7, −1.3)` puts
+/// the drift term `½tr(H⁻¹ D_β H[·])` near `0.35/σ² = 3.5e13`, and the envelope tripwire withholds
+/// a gradient predicting that √ε-step change whatever the record says.
+#[test]
+pub(crate) fn a_fold_record_refuses_only_an_unresolved_curvature_2765() {
+    let identity = Array2::<f64>::eye(2);
+    let unresolved = grade_inner_mode_fold(
+        &InvertedSpan {
+            basis: identity.clone(),
+            eigenvalues: vec![0.0, 5.0],
+        },
+        1.0,
+        &|_| panic!("an unresolved curvature is refused before t3 is priced"),
+    )
+    .expect("the rounding band grades without pricing");
+    assert!(!unresolved.is_valid(), "{unresolved}");
+    assert_eq!(
+        (unresolved.third_derivative, unresolved.cubic_correction, unresolved.completion),
+        (None, None, None),
+        "nothing is priced below the band: {unresolved}"
+    );
+
+    let soft = grade_inner_mode_fold(
+        &InvertedSpan {
+            basis: identity,
+            eigenvalues: vec![1.0e-7, 5.0],
+        },
+        1.0,
+        &|direction| Ok((direction[0].powi(3), CompletionShare::Priced)),
+    )
+    .expect("a resolved curvature is graded");
+    assert!(soft.is_valid(), "a large cubic share is recorded, not refused: {soft}");
+    let correction = soft.cubic_correction.expect("the cubic share is priced with t3");
+    assert_relative_eq!(correction, 5.0 / (24.0 * 1.0e-21), max_relative = 1e-12);
+    assert_eq!(soft.completion, Some(CompletionShare::Priced));
+
+    for mode in [EvalMode::ValueOnly, EvalMode::ValueAndGradient] {
+        let recorded = reml_laml_evaluate(
+            &fold_fixture_solution([1.0e-7, 5.0], Box::new(ModeResponseLinearDrift)),
+            &[0.0],
+            mode,
+            None,
+        )
+        .unwrap_or_else(|error| {
+            panic!("{mode:?}: a resolved soft mode is recorded, not refused, got {error}")
+        });
+        assert!(recorded.cost.is_finite(), "{mode:?}: the value is published, got {}", recorded.cost);
+    }
+
+    let mut graded = reml_laml_evaluate(
+        &fold_fixture_solution([1.0e-3, 5.0], Box::new(ModeResponseLinearDrift)),
+        &[0.0],
+        EvalMode::ValueAndGradient,
+        None,
+    )
+    .unwrap_or_else(|error| panic!("a resolved soft mode is recorded, not refused, got {error}"));
+    let gradient = graded
+        .gradient_for_mode(EvalMode::ValueAndGradient, 1)
+        .unwrap_or_else(|reason| panic!("the evaluation hands its caller a gradient: {reason}"));
+    assert!(
+        gradient.iter().all(|entry| entry.is_finite()),
+        "the published gradient is finite: {gradient}"
+    );
+}
+
+/// gam#2765 / gam#979: a curvature that does not move with `β` (`t₃ ≡ 0`) never refuses above its
+/// rounding band, however soft: the Laplace integral of a quadratic objective is exact.
+#[test]
+pub(crate) fn a_curvature_that_does_not_move_never_refuses_above_its_rounding_band_2765() {
+    for weakest in [1.0e-3, 1.0e-7, 1.0e-10] {
+        let result = reml_laml_evaluate(
+            &fold_fixture_solution([weakest, 5.0], Box::new(NoDrift)),
+            &[0.0],
+            EvalMode::ValueOnly,
+            None,
+        )
+        .unwrap_or_else(|error| {
+            panic!("curvature {weakest:e}: a quadratic objective is not a fold, got {error}")
+        });
+        assert!(result.cost.is_finite(), "curvature {weakest:e}: cost {}", result.cost);
     }
 }

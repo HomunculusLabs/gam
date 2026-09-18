@@ -776,6 +776,12 @@ impl HessianFactorization for DenseCholeskyOperator {
         self.cached_logdet
     }
 
+    /// The dense matrix this factorization inverts, decomposed (gam#2765): it is already held, so
+    /// naming its span costs a decomposition and no densification.
+    fn inverted_span(&self) -> Option<InvertedSpan> {
+        InvertedSpan::from_symmetric(&self.matrix)
+    }
+
     fn assemble_h_dense_for_tangent_projection(&self) -> Result<Array2<f64>, String> {
         Ok(self.matrix.clone())
     }
@@ -961,6 +967,11 @@ impl HessianFactorization for BlockCoupledOperator {
             BlockCoupledFactorization::Spectral(operator) => Some(operator),
             BlockCoupledFactorization::PositiveDefinite(_) => None,
         }
+    }
+
+    /// The inner factorization's span (gam#2765).
+    fn inverted_span(&self) -> Option<InvertedSpan> {
+        self.inner.as_factorization().inverted_span()
     }
 
     fn assemble_h_dense_for_tangent_projection(&self) -> Result<Array2<f64>, String> {

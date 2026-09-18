@@ -243,6 +243,12 @@ impl HessianFactorization for FirstOrderTraceSkipOperator {
         }
     }
 
+    /// Always the inner backend's: the skip list serves traces, and the span is what the
+    /// forwarded `solve` divides by (gam#2765).
+    fn inverted_span(&self) -> Option<gam_solve::estimate::reml::reml_outer_engine::InvertedSpan> {
+        self.inner.inverted_span()
+    }
+
     /// Always the inner backend's, skip list or not (gam#979).
     ///
     /// This wrapper exists to serve a precomputed list of FIRST-ORDER TRACES,
@@ -484,7 +490,9 @@ pub(crate) fn unified_joint_cost_gradient(
         }
         (0.0, gradient_correction, None)
     });
-    let mut result = evaluator.evaluate(rho_slice, eval_mode, first_order_trace_correction)?;
+    let mut result = evaluator
+        .evaluate(rho_slice, eval_mode, first_order_trace_correction)
+        .map_err(|error| unified_evaluation_error(error, eval_mode, "evaluation"))?;
 
     let cost = result.cost;
     let criterion_components = [
@@ -515,6 +523,25 @@ pub(crate) fn unified_joint_cost_gradient(
         criterion_components,
         ext_mode_response_cols,
     ))
+}
+
+/// A unified-evaluator failure as the custom family reports it (gam#2765): an inner mode at a fold
+/// refuses the trial point by its typed verdict, and any other failure keeps its diagnostic.
+fn unified_evaluation_error(
+    error: gam_solve::estimate::reml::reml_outer_engine::RemlLamlError,
+    eval_mode: EvalMode,
+    route: &str,
+) -> CustomFamilyError {
+    match error {
+        gam_solve::estimate::reml::reml_outer_engine::RemlLamlError::InnerModeFold(fold) => {
+            CustomFamilyError::TrialPointRefused {
+                reason: format!("the {eval_mode:?} {route} refused this trial point: {fold}"),
+            }
+        }
+        gam_solve::estimate::reml::reml_outer_engine::RemlLamlError::Failed(reason) => {
+            CustomFamilyError::from(reason)
+        }
+    }
 }
 
 pub(crate) fn unified_joint_efs_eval(
@@ -592,7 +619,8 @@ pub(crate) fn unified_joint_efs_eval(
         rho_slice,
         eval_mode,
         None,
-    )?;
+    )
+    .map_err(|error| unified_evaluation_error(error, eval_mode, "EFS evaluation"))?;
 
     let gradient = result
         .gradient
@@ -1161,6 +1189,9 @@ pub(crate) fn joint_outer_evaluate(
             }
             drift.completion_psi = ext_bundle.as_ref().and_then(|bundle| bundle.completion_psi.clone());
             drift.response_scale = rho_curvature_scale;
+            // gam#2765: without a completion the stationarity operator is the log-determinant
+            // operator, so no right-hand-side correction exists.
+            drift.completion_present = robust_jeffreys_completion.is_some();
             Box::new(JeffreysHphiAwareJointDerivatives::new(
             base_provider_box,
             drift,

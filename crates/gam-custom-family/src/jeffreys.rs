@@ -1506,6 +1506,10 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
         response_scale: 1.0,
         completion_first,
         completion_second,
+        // The assembly that installs the mode response knows whether its operator carries a
+        // completion (gam#2765).
+        completion_present: false,
+        completion_derivatives_supplied: family.jeffreys_third_information_derivative().is_some(),
     }))
 }
 

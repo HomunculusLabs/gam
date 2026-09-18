@@ -90,7 +90,7 @@ pub(crate) fn reml_laml_evaluate(
     rho: &[f64],
     mode: EvalMode,
     prior_cost_gradient: Option<(f64, Array1<f64>, Option<Array2<f64>>)>,
-) -> Result<RemlLamlResult, String> {
+) -> Result<RemlLamlResult, RemlLamlError> {
     // Validate the complete raw entry vector before tangent recursion or any
     // objective work. This makes every downstream exponential dominated by a
     // deterministic, smallest-coordinate refusal rather than optimizer bounds.
@@ -406,6 +406,26 @@ pub(crate) fn reml_laml_evaluate(
         solution.active_constraints.as_deref(),
         solution.mode_response_operator(),
     );
+    // gam#2765 / gam#979: the normalizer is the Gaussian integral of a quadratic model about the
+    // mode, so a mode whose softest direction leaves the Laplace series without a leading term is
+    // at a fold, however well it is solved. One verdict at one point refuses the value and every
+    // derivative alike, through the error channel, before anything is built on the mode.
+    if let Some(span) = mode_kernel.inverted_span() {
+        let fold = grade_inner_mode_fold(&span, solution.rho_curvature_scale, &|direction| {
+            inner_mode_third_derivative(solution.deriv_provider.as_ref(), direction)
+        })
+        .map_err(|reason| RemlError::ContractViolation {
+            reason: format!(
+                "inner-mode fold verdict (gam#2765): the third directional derivative along the \
+                 softest direction failed: {reason}"
+            ),
+        })?;
+        log::info!("[inner-mode fold] {fold}");
+        if !fold.is_valid() {
+            log::warn!("[inner-mode fold] refusing this trial point: {fold}");
+            return Err(RemlLamlError::InnerModeFold(fold));
+        }
+    }
     let mut ift_residual_energy: Option<f64> = None;
     let mut inner_polish_step: Option<Array1<f64>> = None;
     if let Some(r) = kkt_residual_vec
@@ -1759,7 +1779,7 @@ pub(crate) fn reml_laml_evaluate(
                     }
                     hessian
                 }
-                Err(err) => return Err(err),
+                Err(err) => return Err(err.into()),
             }
         } else {
             let reml_workspace = RemlDerivativeWorkspace {
@@ -1811,7 +1831,7 @@ pub(crate) fn reml_laml_evaluate(
                     }
                     gam_problem::HessianValue::Dense(h)
                 }
-                Err(err) => return Err(err),
+                Err(err) => return Err(err.into()),
             }
         };
         log::info!(

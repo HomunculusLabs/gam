@@ -2176,7 +2176,17 @@ impl<'a> RemlState<'a> {
             mode,
             prior,
         )
-        .map_err(EstimationError::InvalidInput)?;
+        .map_err(|error| match error {
+            // gam#2765: an inner mode at a fold refuses this trial point by its typed verdict.
+            super::reml_outer_engine::RemlLamlError::InnerModeFold(fold) => {
+                EstimationError::TrialPointRefused {
+                    reason: format!("the {mode:?} evaluation refused this trial point: {fold}"),
+                }
+            }
+            super::reml_outer_engine::RemlLamlError::Failed(reason) => {
+                EstimationError::InvalidInput(reason)
+            }
+        })?;
         let result = self.apply_theta_correction_atom_to_result(result, &tk_atom)?;
         // Adaptive, block-local Laplace-to-sampling fallback (issue #784): where
         // a curvature direction is too non-Gaussian for the Laplace summary,
@@ -2268,7 +2278,19 @@ impl<'a> RemlState<'a> {
             eval_mode,
             prior,
         )
-        .map_err(EstimationError::InvalidInput)?;
+        .map_err(|error| match error {
+            // gam#2765: an inner mode at a fold refuses this trial point by its typed verdict.
+            super::reml_outer_engine::RemlLamlError::InnerModeFold(fold) => {
+                EstimationError::TrialPointRefused {
+                    reason: format!(
+                        "the {eval_mode:?} EFS evaluation refused this trial point: {fold}"
+                    ),
+                }
+            }
+            super::reml_outer_engine::RemlLamlError::Failed(reason) => {
+                EstimationError::InvalidInput(reason)
+            }
+        })?;
         let cost_result = self.apply_theta_correction_atom_to_result(cost_result, &tk_atom)?;
         // Fold the #784 adaptive block-local Laplace-to-sampling correction into
         // the EFS objective too, so the EFS fixed-point and the BFGS/Newton path

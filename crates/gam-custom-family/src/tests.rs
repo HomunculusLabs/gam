@@ -8653,3 +8653,360 @@ pub(crate) fn completion_priced_outer_hessian_matches_central_differences_with_g
          reference={hessian_reference} (gap above the measured bar {hessian_bar:.3e})"
     );
 }
+
+/// A Richardson central difference of `along` at `t = 0`, and its measured error bar (gam#2765).
+/// Central differences at h, 2h and 4h are extrapolated, and the bar is four times the
+/// extrapolation's disagreement with the one an octave coarser, plus 1e-9 of the reference for a
+/// coincidentally small disagreement. The step is the cube root of the curvature's relative
+/// rounding band, where a central difference's roundoff (band / h) meets its truncation (h²).
+fn richardson_derivative_at_zero(along: &dyn Fn(f64) -> f64, spectrum: &[f64]) -> (f64, f64) {
+    let largest = spectrum
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    let step = (gam_linalg::roundoff::symmetric_spectrum_rounding_band(spectrum) / largest).cbrt();
+    let central = |width: f64| (along(width) - along(-width)) / (2.0 * width);
+    let (fine, middle, wide) = (central(step), central(2.0 * step), central(4.0 * step));
+    let reference = (4.0 * fine - middle) / 3.0;
+    let coarse = (4.0 * middle - wide) / 3.0;
+    (reference, 4.0 * (reference - coarse).abs() + 1e-9 * reference.abs())
+}
+
+/// gam#2765 / gam#979: the fold record's `t₃ = vᵀ D_β M[v] v` on a curvature that moves with `β` and
+/// carries no completion. `OneBlockQuarticExactFamily` has `h(β) = 1 + c·β²`, so at `β = 0.75` the
+/// production third derivative through the joint provider matches a Richardson central difference
+/// of the family's own curvature `h(β + t)`, and the record says the complete operator was priced.
+#[test]
+pub(crate) fn fold_third_derivative_prices_a_moving_curvature_drift_2765() {
+    let family = OneBlockQuarticExactFamily {
+        linear: 3.0,
+        curvature: 0.5,
+        second_scale: 1.0,
+    };
+    let specs = [ParameterBlockSpec {
+        name: "quartic".to_string(),
+        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
+        offset: array![0.0],
+        penalties: vec![PenaltyMatrix::Dense(array![[1.0]])],
+        nullspace_dims: vec![],
+        initial_log_lambdas: array![0.0],
+        initial_beta: Some(array![0.75]),
+        gauge_priority: 100,
+        jacobian_callback: None,
+        stacked_design: None,
+        stacked_offset: None,
+    }];
+    let states_at = |t: f64| {
+        let beta = array![0.75 + t];
+        let eta = specs[0].design.apply(&beta);
+        vec![ParameterBlockState { beta, eta }]
+    };
+    let curvature = |t: f64| -> f64 {
+        let evaluation = family.evaluate(&states_at(t)).expect("the quartic evaluates");
+        match &evaluation.blockworking_sets[0] {
+            BlockWorkingSet::ExactNewton {
+                hessian: SymmetricMatrix::Dense(hessian),
+                ..
+            } => hessian[[0, 0]],
+            _ => panic!("the quartic publishes a dense exact-Newton curvature"),
+        }
+    };
+    let (reference, bar) = richardson_derivative_at_zero(&curvature, &[curvature(0.0)]);
+    assert!(
+        reference.abs() > bar,
+        "the differences do not resolve t3 (|reference| {:.3e} <= bar {bar:.3e})",
+        reference.abs()
+    );
+
+    let states = states_at(0.0);
+    let synced = Arc::new(states.clone());
+    let dh =
+        crate::joint_newton::exact_newton_dh_closure(&family, Arc::clone(&synced), &specs, 1, false, 1.0, None);
+    let d2h =
+        crate::joint_newton::exact_newton_d2h_closure(&family, Arc::clone(&synced), &specs, 1, false, 1.0, None);
+    let provider = crate::inner_blockwise_fit::BorrowedJointDerivProvider {
+        compute_dh: &dh,
+        compute_dh_many: None,
+        compute_d2h: &d2h,
+        compute_d2h_many: None,
+        family_outer_hessian_operator: None,
+    };
+    let (third, completion) =
+        gam_solve::estimate::reml::reml_outer_engine::inner_mode_third_derivative(&provider, &array![1.0])
+            .expect("t3 along the curvature's direction");
+    eprintln!("[2765 t3] quartic production={third:+.10e} reference={reference:+.10e} bar={bar:.3e}");
+    assert_eq!(
+        completion,
+        gam_solve::estimate::reml::reml_outer_engine::CompletionShare::Priced,
+        "a curvature with no completion prices the complete operator"
+    );
+    assert!(
+        (third - reference).abs() <= bar,
+        "t3={third} reference={reference} (gap above the measured bar {bar:.3e})"
+    );
+}
+
+/// gam#2765 / gam#979: the fold record's `t₃` on a live, moving Jeffreys completion. The
+/// `GateBandCompletionFamily` mode sits at `β = 0`, where nothing moves along `v`, so the pin searches
+/// coefficient states for one where the conditioning gate is armed and moving and `vᵀ M(β + t·v) v`,
+/// `M = H + H_Φ + completion`, is resolved by its central difference along the softest eigenvector.
+/// There the production third derivative through the Jeffreys-aware provider matches the difference
+/// with the completion priced in the log-determinant drift, and with it carried by the
+/// right-hand-side correction. A provider that declares the completion's derivatives not supplied
+/// records `NotSupplied` and misses the difference by more than its bar: the positive control that
+/// the right-hand-side term is seen. The penalty does not move with `β`, so it drops out.
+#[test]
+pub(crate) fn fold_third_derivative_prices_the_moving_jeffreys_completion_2765() {
+    use gam_solve::estimate::reml::reml_outer_engine::{CompletionShare, inner_mode_third_derivative};
+    let mut spec = default_diagonal_exact_hook_spec();
+    spec.initial_beta = Some(Array1::zeros(2));
+    let specs = [spec];
+    let family = GateBandCompletionFamily;
+    let ranges = block_param_ranges(&specs);
+    let states_at = |beta: &Array1<f64>| {
+        let eta = specs[0].design.apply(beta);
+        vec![ParameterBlockState {
+            beta: beta.clone(),
+            eta,
+        }]
+    };
+    let curvature = |states: &[ParameterBlockState]| -> Option<Array2<f64>> {
+        let information = family
+            .exact_newton_joint_hessian_with_specs(states, &specs)
+            .ok()??;
+        let (_, hphi, completion) =
+            custom_family_outer_jeffreys_hphi(&family, states, &specs, &ranges).ok()??;
+        Some(&information + &hphi + &completion?)
+    };
+    let candidates = [
+        array![0.4, -0.3],
+        array![0.8, 0.5],
+        array![-0.6, 0.9],
+        array![1.2, -0.7],
+        array![0.25, 0.25],
+    ];
+    let found = candidates.iter().find_map(|beta| {
+        let states = states_at(beta);
+        let information = family
+            .exact_newton_joint_hessian_with_specs(&states, &specs)
+            .ok()??;
+        let plan = gam_solve::estimate::reml::jeffreys_subspace::JointJeffreysPlan::prepare(
+            information.view(),
+            Array2::<f64>::eye(2).view(),
+        )
+        .ok()?;
+        if !(plan.is_active() && plan.hessian_motion_active()) {
+            return None;
+        }
+        let (values, vectors) = curvature(&states)?.eigh(faer::Side::Lower).ok()?;
+        let softest = (0..values.len()).min_by(|&left, &right| values[left].total_cmp(&values[right]))?;
+        let direction = vectors.column(softest).to_owned();
+        let along = |t: f64| {
+            let m = curvature(&states_at(&(beta + &(&direction * t))))
+                .expect("the completion stays present next to the searched state");
+            direction.dot(&m.dot(&direction))
+        };
+        let (reference, bar) = richardson_derivative_at_zero(&along, values.as_slice()?);
+        (reference.abs() > bar).then(|| (beta.clone(), direction, reference, bar))
+    });
+    let Some((beta, direction, reference, bar)) = found else {
+        panic!("no searched state arms a moving gate with a resolved t3, so the pin decides nothing");
+    };
+
+    let states = states_at(&beta);
+    let total = 2;
+    let synced = Arc::new(states.clone());
+    let dh =
+        crate::joint_newton::exact_newton_dh_closure(&family, Arc::clone(&synced), &specs, total, false, 1.0, None);
+    let d2h =
+        crate::joint_newton::exact_newton_d2h_closure(&family, Arc::clone(&synced), &specs, total, false, 1.0, None);
+    for arm in ["priced in the drift", "carried by the right-hand side", "not supplied"] {
+        let mut drift =
+            custom_family_outer_jeffreys_hphi_drift_batched(&family, &states, &specs, &ranges)
+                .expect("Jeffreys drift construction")
+                .expect("an active Jeffreys geometry exposes a drift");
+        assert!(
+            drift.completion_first.is_some() && drift.completion_derivatives_supplied,
+            "the family exposes the completion's drifts and derivatives"
+        );
+        drift.completion_present = true;
+        if arm != "priced in the drift" {
+            drift.completion_first = None;
+            drift.completion_second = None;
+        }
+        if arm == "not supplied" {
+            drift.completion_derivatives_supplied = false;
+        }
+        let base = crate::inner_blockwise_fit::BorrowedJointDerivProvider {
+            compute_dh: &dh,
+            compute_dh_many: None,
+            compute_d2h: &d2h,
+            compute_d2h_many: None,
+            family_outer_hessian_operator: None,
+        };
+        let provider =
+            crate::joint_derivatives::JeffreysHphiAwareJointDerivatives::new(Box::new(base), drift, total);
+        let (third, completion) =
+            inner_mode_third_derivative(&provider, &direction).expect("t3 along the softest direction");
+        eprintln!(
+            "[2765 t3] completion arm={arm} beta={beta} status={completion:?} production={third:+.10e} \
+             reference={reference:+.10e} bar={bar:.3e}"
+        );
+        if arm == "not supplied" {
+            assert_eq!(completion, CompletionShare::NotSupplied, "{arm}");
+            assert!(
+                (third - reference).abs() > bar,
+                "positive control: without the completion's motion t3={third} stays within the bar \
+                 {bar:.3e} of the reference {reference}, so the pin cannot see the right-hand-side term"
+            );
+        } else {
+            assert_eq!(completion, CompletionShare::Priced, "{arm}");
+            assert!(
+                (third - reference).abs() <= bar,
+                "{arm}: t3={third} reference={reference} (gap above the measured bar {bar:.3e})"
+            );
+        }
+    }
+}
+
+/// gam#2765: the drift builder reads whether a completion's motion can be priced from the family's
+/// declaration. `GateBandCompletionFamily` declares its third information derivative, so its drift
+/// marks the completion's derivatives supplied. The same family without that declaration keeps its
+/// contracted-trace completion and is marked not supplied, which the fold record reports as
+/// `NotSupplied` instead of asking for derivatives that do not exist.
+#[test]
+pub(crate) fn a_completion_without_declared_derivatives_is_marked_not_supplied_2765() {
+    #[derive(Clone)]
+    struct GateBandWithoutThirdDerivativeFamily;
+
+    impl JeffreysCompletionOuterDerivatives for GateBandWithoutThirdDerivativeFamily {
+        fn contracted_trace_hessian_directional(
+            &self,
+            block_states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
+            weight: &Array2<f64>,
+            d_beta_u_flat: &Array1<f64>,
+        ) -> Result<Option<Array2<f64>>, String> {
+            GateBandCompletionFamily.contracted_trace_hessian_directional(
+                block_states,
+                specs,
+                weight,
+                d_beta_u_flat,
+            )
+        }
+
+        fn contracted_trace_hessian_second_directional(
+            &self,
+            block_states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
+            weight: &Array2<f64>,
+            d_beta_u_flat: &Array1<f64>,
+            d_beta_w_flat: &Array1<f64>,
+        ) -> Result<Option<Array2<f64>>, String> {
+            GateBandCompletionFamily.contracted_trace_hessian_second_directional(
+                block_states,
+                specs,
+                weight,
+                d_beta_u_flat,
+                d_beta_w_flat,
+            )
+        }
+    }
+
+    impl CustomFamily for GateBandWithoutThirdDerivativeFamily {
+        fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+            GateBandCompletionFamily.evaluate(block_states)
+        }
+
+        fn exact_newton_joint_hessian_beta_dependent(&self) -> bool {
+            true
+        }
+
+        fn diagonalworking_weights_directional_derivative(
+            &self,
+            block_states: &[ParameterBlockState],
+            block_idx: usize,
+            d_eta: &Array1<f64>,
+        ) -> Result<Option<Array1<f64>>, String> {
+            GateBandCompletionFamily.diagonalworking_weights_directional_derivative(
+                block_states,
+                block_idx,
+                d_eta,
+            )
+        }
+
+        fn exact_newton_joint_hessiansecond_directional_derivative(
+            &self,
+            block_states: &[ParameterBlockState],
+            u: &Array1<f64>,
+            v: &Array1<f64>,
+        ) -> Result<Option<Array2<f64>>, String> {
+            GateBandCompletionFamily
+                .exact_newton_joint_hessiansecond_directional_derivative(block_states, u, v)
+        }
+
+        fn joint_jeffreys_term_required(&self) -> bool {
+            true
+        }
+
+        fn joint_jeffreys_information_contracted_trace_hessian_available(&self) -> bool {
+            true
+        }
+
+        fn joint_jeffreys_information_contracted_trace_hessian_with_specs(
+            &self,
+            block_states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
+            weight: &Array2<f64>,
+        ) -> Result<Option<Array2<f64>>, String> {
+            GateBandCompletionFamily
+                .joint_jeffreys_information_contracted_trace_hessian_with_specs(block_states, specs, weight)
+        }
+
+        fn jeffreys_completion_outer_derivatives(
+            &self,
+        ) -> Option<&dyn JeffreysCompletionOuterDerivatives> {
+            Some(self)
+        }
+    }
+
+    let mut spec = default_diagonal_exact_hook_spec();
+    spec.initial_beta = Some(Array1::zeros(2));
+    let specs = [spec];
+    let ranges = block_param_ranges(&specs);
+    let states = [Array1::zeros(2), array![0.4, -0.3], array![0.8, 0.5]]
+        .into_iter()
+        .map(|beta| {
+            let eta = specs[0].design.apply(&beta);
+            vec![ParameterBlockState { beta, eta }]
+        })
+        .find(|states| {
+            custom_family_outer_jeffreys_hphi_drift_batched(
+                &GateBandCompletionFamily,
+                states,
+                &specs,
+                &ranges,
+            )
+            .is_ok_and(|drift| drift.is_some())
+        })
+        .expect("a searched state arms the Jeffreys term");
+    let declared =
+        custom_family_outer_jeffreys_hphi_drift_batched(&GateBandCompletionFamily, &states, &specs, &ranges)
+            .expect("Jeffreys drift construction")
+            .expect("the searched state arms the Jeffreys term");
+    assert!(
+        declared.completion_derivatives_supplied,
+        "a family declaring its third information derivative supplies the completion's derivatives"
+    );
+    let undeclared = custom_family_outer_jeffreys_hphi_drift_batched(
+        &GateBandWithoutThirdDerivativeFamily,
+        &states,
+        &specs,
+        &ranges,
+    )
+    .expect("Jeffreys drift construction")
+    .expect("the same state arms the Jeffreys term");
+    assert!(
+        undeclared.completion_first.is_some() && !undeclared.completion_derivatives_supplied,
+        "a completion without a declared third information derivative is marked not supplied"
+    );
+}

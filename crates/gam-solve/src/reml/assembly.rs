@@ -394,7 +394,7 @@ impl<'dp> InnerAssembly<'dp> {
         rho: &[f64],
         mode: EvalMode,
         prior: Option<(f64, Array1<f64>, Option<Array2<f64>>)>,
-    ) -> Result<RemlLamlResult, String> {
+    ) -> Result<RemlLamlResult, super::reml_outer_engine::RemlLamlError> {
         let solution = self.build();
         // The rho outer audit is a thread-local and a no-op unless armed. This
         // route gets the same fresh window and criterion record as the standard
@@ -426,7 +426,7 @@ pub fn evaluate_solution(
     rho: &[f64],
     mode: EvalMode,
     prior: Option<(f64, Array1<f64>, Option<Array2<f64>>)>,
-) -> Result<RemlLamlResult, String> {
+) -> Result<RemlLamlResult, super::reml_outer_engine::RemlLamlError> {
     reml_laml_evaluate(solution, rho, mode, prior)
 }
 

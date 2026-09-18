@@ -374,6 +374,13 @@ pub(crate) struct JeffreysHphiDriftBatchFn {
     pub(crate) completion_first: Option<CompletionDriftFn>,
     /// `D² completion[u, v]` for each pair, present with `completion_first`.
     pub(crate) completion_second: Option<CompletionSecondDriftFn>,
+    /// Whether the mode response's operator carries a completion at all. Without one the
+    /// stationarity operator is the log-determinant operator, so their difference is constant and
+    /// no right-hand-side correction exists (gam#2765).
+    pub(crate) completion_present: bool,
+    /// Whether the family supplies the third information derivative `completion_beta` reads, so a
+    /// present, unpriced completion's motion can be priced (gam#2765).
+    pub(crate) completion_derivatives_supplied: bool,
 }
 
 /// `D_β completion[δ]` for many directions (gam#2894).
@@ -519,8 +526,9 @@ impl HessianDerivativeProvider for JeffreysHphiAwareJointDerivatives<'_> {
         // `D_β completion` into every `hessian_derivative_correction`, so `C = 0` and the
         // pair right-hand side moves the completion through `h_k·v` already. Installing it
         // here as well counted it twice (the survival marginal-slope outer Hessian read
-        // 0.40957 at [1,1] against a central difference of 0.37341; gam#2894).
-        if self.drift.completion_first.is_some() {
+        // 0.40957 at [1,1] against a central difference of 0.37341; gam#2894). Without a
+        // completion the two operators are one, so `C = 0` as well (gam#2765).
+        if self.drift.completion_first.is_some() || !self.drift.completion_present {
             return None;
         }
         let beta = Arc::clone(&self.drift.completion_beta);
@@ -538,6 +546,11 @@ impl HessianDerivativeProvider for JeffreysHphiAwareJointDerivatives<'_> {
             }
             Ok(result * scale)
         }))
+    }
+
+    /// The completion's motion needs the family's third information derivative (gam#2765).
+    fn mode_response_rhs_correction_supplied(&self) -> bool {
+        self.drift.completion_derivatives_supplied
     }
 
     fn hessian_derivative_correction(
@@ -1056,6 +1069,8 @@ mod jeffreys_drift_composition_tests {
             }),
             completion_first: None,
             completion_second: None,
+            completion_present: false,
+            completion_derivatives_supplied: false,
         }
     }
 
@@ -1173,5 +1188,81 @@ mod jeffreys_drift_composition_tests {
                 .to_dense();
             assert_eq!(batched_dense, singular);
         }
+    }
+
+    /// gam#2765: without a completion the stationarity operator is the log-determinant operator, so
+    /// the provider names no right-hand-side correction and the fold record's `t₃` is complete by
+    /// contract. `D_β H_Φ[δ] = diag(δ)` at `δ = −v` gives `t₃ = Σ vᵢ³` along `v`.
+    #[test]
+    fn a_drift_without_a_completion_names_no_right_hand_side_correction_2765() {
+        let provider = wrapper();
+        assert!(
+            provider.mode_response_rhs_correction().is_none(),
+            "no completion, so no correction exists"
+        );
+        let direction = array![0.6, 0.8];
+        let (third, completion) =
+            gam_solve::estimate::reml::reml_outer_engine::inner_mode_third_derivative(&provider, &direction)
+                .expect("t3 along the direction");
+        assert_eq!(
+            completion,
+            gam_solve::estimate::reml::reml_outer_engine::CompletionShare::Priced
+        );
+        let expected = 0.6_f64.powi(3) + 0.8_f64.powi(3);
+        assert!((third - expected).abs() <= 1e-12 * expected, "t3={third} expected={expected}");
+    }
+
+    /// gam#2765: a completion that is present but whose derivatives the family does not supply is
+    /// recorded as not supplied, and its motion is never requested. With the derivatives supplied,
+    /// the same completion's motion `D_β C[−v]·v` enters `t₃`.
+    #[test]
+    fn a_present_completion_is_priced_only_where_its_derivatives_are_supplied_2765() {
+        let direction = array![0.6, 0.8];
+        let likelihood_share = 0.6_f64.powi(3) + 0.8_f64.powi(3);
+
+        let mut unsupplied = identity_drift();
+        unsupplied.completion_present = true;
+        unsupplied.completion_beta = Arc::new(|_, _| {
+            panic!("a completion declared without derivatives is never asked for its motion")
+        });
+        let provider = JeffreysHphiAwareJointDerivatives::new(Box::new(SilentInner), unsupplied, 2);
+        assert!(
+            provider.mode_response_rhs_correction().is_some(),
+            "the completion moves, so the correction exists"
+        );
+        assert!(
+            !provider.mode_response_rhs_correction_supplied(),
+            "its derivatives are declared absent"
+        );
+        let (third, completion) =
+            gam_solve::estimate::reml::reml_outer_engine::inner_mode_third_derivative(&provider, &direction)
+                .expect("t3 along the direction");
+        assert_eq!(
+            completion,
+            gam_solve::estimate::reml::reml_outer_engine::CompletionShare::NotSupplied
+        );
+        assert!(
+            (third - likelihood_share).abs() <= 1e-12 * likelihood_share,
+            "t3={third} carries the log-determinant operator's share {likelihood_share} alone"
+        );
+
+        let mut supplied = identity_drift();
+        supplied.completion_present = true;
+        supplied.completion_derivatives_supplied = true;
+        // `completion_beta(δ, u) = δ ⊙ u`, so the correction at `δ = −v` adds `−v²` to the image.
+        supplied.completion_beta = Arc::new(|delta, u| Ok(delta * u));
+        let provider = JeffreysHphiAwareJointDerivatives::new(Box::new(SilentInner), supplied, 2);
+        let (third, completion) =
+            gam_solve::estimate::reml::reml_outer_engine::inner_mode_third_derivative(&provider, &direction)
+                .expect("t3 along the direction");
+        assert_eq!(
+            completion,
+            gam_solve::estimate::reml::reml_outer_engine::CompletionShare::Priced
+        );
+        let complete = 2.0 * likelihood_share;
+        assert!(
+            (third - complete).abs() <= 1e-12 * complete,
+            "t3={third} carries the completion's motion: expected {complete}"
+        );
     }
 }

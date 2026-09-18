@@ -25,6 +25,14 @@ pub trait HessianDerivativeProvider: Send + Sync {
         None
     }
 
+    /// Whether [`Self::mode_response_rhs_correction`] can price the motion it names (gam#2765). A
+    /// provider whose stationarity operator carries a moving term without that term's derivatives
+    /// declares `false`, so a consumer that only records the motion says it is not supplied instead
+    /// of asking for derivatives that do not exist.
+    fn mode_response_rhs_correction_supplied(&self) -> bool {
+        true
+    }
+
     /// Compute the third-derivative correction to Hₖ.
     ///
     /// Given the mode response vₖ = H⁻¹(Aₖβ̂), returns the correction matrix
@@ -897,6 +905,9 @@ impl<'a> BarrierDerivativeProvider<'a> {
 impl HessianDerivativeProvider for BarrierDerivativeProvider<'_> {
     fn mode_response_rhs_correction(&self) -> Option<ModeResponseRhsCorrectionFn> {
         self.inner.mode_response_rhs_correction()
+    }
+    fn mode_response_rhs_correction_supplied(&self) -> bool {
+        self.inner.mode_response_rhs_correction_supplied()
     }
     fn hessian_derivative_correction(
         &self,
