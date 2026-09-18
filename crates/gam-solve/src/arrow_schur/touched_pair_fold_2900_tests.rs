@@ -5,6 +5,10 @@
 //! The serial in-place reduction is the control: it associates the reduction sum
 //! across chunk boundaries differently, so it must NOT be bit-equal to the chunked
 //! fold on this fixture, which shows the equality below can fail.
+//!
+//! #2822 — the partials take a dense store (value array, touched marker, key list)
+//! where the memory governor admits it, and the keyed store otherwise. The two fold
+//! the same words, signed zeros included.
 
 #![cfg(test)]
 
@@ -13,7 +17,9 @@ use crate::arrow_schur::newton_step::{
     SchurReductionKind, factor_blocks_for_system, subtract_row_schur_contribution,
 };
 use crate::arrow_schur::reduced_solve::{
-    SCHUR_MATVEC_PARALLEL_ROW_MIN, fold_row_chunk_partials, reduce_row_schur_contributions,
+    SCHUR_MATVEC_PARALLEL_ROW_MIN, TouchedPairStoreKind, fold_row_chunk_partials,
+    fold_touched_pair_chunk_partials, reduce_row_schur_contributions,
+    reserve_dense_touched_pair_partials,
 };
 use crate::arrow_schur::solve_options::{ArrowEvidencePolicy, CpuBatchedBlockSolver};
 use ndarray::{Array1, Array2, ArrayView1};
@@ -178,4 +184,85 @@ fn touched_pair_fold_matches_the_dense_chunk_partials_up_to_zero_sign_2900() {
              so bit equality cannot tell the two routes apart on this fixture"
         );
     }
+}
+
+fn raw_words_equal(left: &Array2<f64>, right: &Array2<f64>) -> bool {
+    left.dim() == right.dim()
+        && left
+            .iter()
+            .zip(right.iter())
+            .all(|(p, q)| p.to_bits() == q.to_bits())
+}
+
+#[test]
+fn dense_and_keyed_touched_pair_stores_fold_the_same_words_2822() {
+    let (n, active, k) = (1024usize, 6usize, 48usize);
+    let sys = sparse_row_system(n, active, k);
+    let backend = CpuBatchedBlockSolver;
+    let factors = factor_blocks_for_system(
+        &sys,
+        0.0,
+        ArrowEvidencePolicy::Strict,
+        &backend,
+        gam_gpu::GpuPolicy::Off,
+    )
+    .expect("row factors")
+    .factors;
+
+    for kind in [SchurReductionKind::Direct, SchurReductionKind::SqrtBa] {
+        let fold = |store| {
+            let mut schur = Array2::<f64>::eye(k) * 20.0;
+            fold_touched_pair_chunk_partials(&sys, &factors, &backend, kind, &mut schur, store)
+                .expect("touched-pair chunk fold");
+            schur
+        };
+        let dense = fold(TouchedPairStoreKind::Dense);
+        let keyed = fold(TouchedPairStoreKind::Keyed);
+
+        let mut serial = Array2::<f64>::eye(k) * 20.0;
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("one-thread pool")
+            .install(|| {
+                reduce_row_schur_contributions(
+                    &sys,
+                    &factors,
+                    &backend,
+                    kind,
+                    &mut serial,
+                    gam_gpu::GpuPolicy::Off,
+                )
+            })
+            .expect("serial in-place reduction");
+
+        assert!(
+            raw_words_equal(&dense, &keyed),
+            "{kind:?}: the dense and keyed touched-pair stores fold different words"
+        );
+        assert!(
+            !raw_words_equal(&serial, &keyed),
+            "{kind:?}: control failed: the serial reduction's words equal the chunked fold's, \
+             so word equality cannot tell two reductions apart on this fixture"
+        );
+    }
+}
+
+#[test]
+fn a_dense_touched_pair_footprint_the_governor_declines_folds_keyed_2822() {
+    // 48² pairs at 9 bytes, for 4 partials: 82,944 bytes.
+    assert!(
+        reserve_dense_touched_pair_partials(48, 4).is_some(),
+        "a 48-wide border's dense partials must be admitted, or the decline below is not \
+         specific to the footprint"
+    );
+    // 2⁴⁰ pairs at 9 bytes: 9 TiB, past any host's governor budget.
+    assert!(
+        reserve_dense_touched_pair_partials(1 << 20, 1).is_none(),
+        "a 9 TiB dense partial must be declined"
+    );
+    assert!(
+        reserve_dense_touched_pair_partials(usize::MAX, 1).is_none(),
+        "a dense partial whose byte count overflows must be declined"
+    );
 }

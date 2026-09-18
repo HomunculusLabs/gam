@@ -79,33 +79,136 @@ pub(crate) fn tile_schur_partial<B: BatchedBlockSolver>(
     Ok(partial)
 }
 
-/// A reduced-Schur chunk partial holding only the `(a, b)` pairs its rows touch,
-/// keyed `a·k + b`, each accumulating `-Σ_rows Σ_c left[c, a]·right[c, b]`.
+/// Which store the parallel reduced-Schur fold's chunk partials accumulate in.
 ///
-/// Every stored value is accumulated in the same row, `c`, `a`, `b` order and from
+/// Both fold the same words into the Schur (see [`TouchedPairPartial`]); they differ
+/// only in cost. `Dense` makes each product one indexed subtract and needs
+/// [`reserve_dense_touched_pair_partials`]' charge; `Keyed` holds only the touched
+/// pairs and hashes every product, which made the fold the dominant phase of the
+/// zoo rank-charge LM steps, 9.3 s of pair accumulation per `k = 108`, 3000-row
+/// build against 1.3 s dense (#2822, sw2f 1222281, one thread).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TouchedPairStoreKind {
+    Dense,
+    Keyed,
+}
+
+enum TouchedPairStore {
+    /// A `k×k` value array at `+0.0`, a touched marker per pair and the touched keys
+    /// in first-touch order.
+    Dense {
+        values: Vec<f64>,
+        touched: Vec<bool>,
+        keys: Vec<usize>,
+    },
+    /// The touched pairs only, keyed `a·k + b`.
+    Keyed(std::collections::HashMap<usize, f64>),
+}
+
+/// A reduced-Schur chunk partial over the `(a, b)` pairs its rows touch, keyed
+/// `a·k + b`, each accumulating `-Σ_rows Σ_c left[c, a]·right[c, b]`.
+///
+/// Every touched value is accumulated in the same row, `c`, `a`, `b` order and from
 /// the same `+0.0` start as a dense zero-seeded `k×k` partial under the CPU
-/// `block_gemm_subtract`, so it is the same f64. A pair no row of the chunk touches
-/// is `+0.0` in the dense partial and absent here, which changes at most the sign
-/// of a zero entry after the fold.
-#[derive(Default)]
+/// `block_gemm_subtract`, so it is the same f64 in either store. The fold adds each
+/// touched pair once, and distinct pairs are distinct Schur entries, so the order
+/// the store yields them in cannot move a word: the two stores fold identical
+/// words. A pair no row of the chunk touches is `+0.0` in the dense zero-seeded
+/// partial and never folded here, which changes at most the sign of a zero entry
+/// after the fold.
 struct TouchedPairPartial {
-    values: std::collections::HashMap<usize, f64>,
+    store: TouchedPairStore,
     left_active: Vec<(usize, f64)>,
     right_active: Vec<(usize, f64)>,
 }
 
 impl TouchedPairPartial {
-    fn clear(&mut self) {
-        self.values.clear();
+    fn new(store: TouchedPairStoreKind, k: usize) -> Self {
+        let store = match store {
+            TouchedPairStoreKind::Dense => TouchedPairStore::Dense {
+                values: vec![0.0; k * k],
+                touched: vec![false; k * k],
+                keys: Vec::new(),
+            },
+            TouchedPairStoreKind::Keyed => {
+                TouchedPairStore::Keyed(std::collections::HashMap::new())
+            }
+        };
+        Self {
+            store,
+            left_active: Vec::new(),
+            right_active: Vec::new(),
+        }
     }
 
-    /// `schur[a, b] += partial[a, b]` for every stored pair.
+    /// Back to every pair at `+0.0` and untouched; the dense store resets only the
+    /// pairs it touched.
+    fn clear(&mut self) {
+        match &mut self.store {
+            TouchedPairStore::Dense {
+                values,
+                touched,
+                keys,
+            } => {
+                for &key in keys.iter() {
+                    values[key] = 0.0;
+                    touched[key] = false;
+                }
+                keys.clear();
+            }
+            TouchedPairStore::Keyed(values) => values.clear(),
+        }
+    }
+
+    /// `schur[a, b] += partial[a, b]` for every touched pair.
     fn fold_into(&self, schur: &mut Array2<f64>) {
         let schur_flat = schur
             .as_slice_mut()
             .expect("TouchedPairPartial::fold_into: reduced Schur must be standard-layout");
-        for (&key, &value) in &self.values {
-            schur_flat[key] += value;
+        match &self.store {
+            TouchedPairStore::Dense { values, keys, .. } => {
+                for &key in keys {
+                    schur_flat[key] += values[key];
+                }
+            }
+            TouchedPairStore::Keyed(values) => {
+                for (&key, &value) in values {
+                    schur_flat[key] += value;
+                }
+            }
+        }
+    }
+}
+
+/// Charge the dense stores of `partials` live chunk partials at border `k`,
+/// `k²·(8 + 1)` bytes each, to the memory governor. `None` when the ledger declines
+/// the footprint or its byte count overflows; the fold then takes the keyed stores.
+///
+/// A dense store's touched-key list is not charged: it holds one `usize` per touched
+/// pair, which the keyed store it replaces also holds, together with its value.
+pub(crate) fn reserve_dense_touched_pair_partials(
+    k: usize,
+    partials: usize,
+) -> Option<gam_runtime::resource::MemoryReservation> {
+    let pair_bytes = std::mem::size_of::<f64>() + std::mem::size_of::<bool>();
+    let Some(bytes) = k
+        .checked_mul(k)
+        .and_then(|pairs| pairs.checked_mul(pair_bytes))
+        .and_then(|partial_bytes| partial_bytes.checked_mul(partials))
+    else {
+        log::debug!(
+            "[reduced Schur] {partials} dense touched-pair partials at k = {k}: \
+             byte count overflows; folding keyed"
+        );
+        return None;
+    };
+    match gam_runtime::resource::MemoryGovernor::global()
+        .try_reserve(bytes, "reduced-Schur dense touched-pair partials")
+    {
+        Ok(reservation) => Some(reservation),
+        Err(refusal) => {
+            log::debug!("[reduced Schur] {refusal}; folding keyed");
+            None
         }
     }
 }
@@ -113,7 +216,7 @@ impl TouchedPairPartial {
 /// Subtract one row's Schur contribution into a [`TouchedPairPartial`].
 ///
 /// The loop is `block_gemm_subtract`'s on the CPU backend, with the dense `k×k`
-/// write replaced by a keyed one: for each factor row `c`, the nonzero entries of
+/// write replaced by the store's: for each factor row `c`, the nonzero entries of
 /// `left[c, ·]` and `right[c, ·]` in column order, then `partial[a, b] -= l·r` over
 /// their product in `a`, `b` order.
 fn subtract_row_schur_contribution_touched_pairs<B: BatchedBlockSolver>(
@@ -129,7 +232,7 @@ fn subtract_row_schur_contribution_touched_pairs<B: BatchedBlockSolver>(
         row_schur_contribution_factors(sys, row_idx, row, htt_factor, backend, kind)?;
     let k = sys.k;
     let TouchedPairPartial {
-        values,
+        store,
         left_active,
         right_active,
     } = partial;
@@ -154,13 +257,65 @@ fn subtract_row_schur_contribution_touched_pairs<B: BatchedBlockSolver>(
                 right_active.push((col, r));
             }
         }
-        for &(a, lca) in left_active.iter() {
-            for &(b, rcb) in right_active.iter() {
-                *values.entry(a * k + b).or_insert(0.0) -= lca * rcb;
+        match store {
+            TouchedPairStore::Dense {
+                values,
+                touched,
+                keys,
+            } => {
+                for &(a, lca) in left_active.iter() {
+                    for &(b, rcb) in right_active.iter() {
+                        let key = a * k + b;
+                        if !touched[key] {
+                            touched[key] = true;
+                            keys.push(key);
+                        }
+                        values[key] -= lca * rcb;
+                    }
+                }
+            }
+            TouchedPairStore::Keyed(values) => {
+                for &(a, lca) in left_active.iter() {
+                    for &(b, rcb) in right_active.iter() {
+                        *values.entry(a * k + b).or_insert(0.0) -= lca * rcb;
+                    }
+                }
             }
         }
     }
     Ok(())
+}
+
+/// The parallel reduced-Schur fold: rows in fixed [`SCHUR_FOLD_ROW_CHUNK`]-row
+/// chunks, each reduced in row order into a touched-pair partial of the given
+/// store, the partials folded into `schur` in chunk order. Bit-identical run to run
+/// and across the two stores.
+pub(crate) fn fold_touched_pair_chunk_partials<B: BatchedBlockSolver + Sync>(
+    sys: &ArrowSchurSystem,
+    htt_factors: &ArrowFactorSlab,
+    backend: &B,
+    kind: SchurReductionKind,
+    schur: &mut Array2<f64>,
+    store: TouchedPairStoreKind,
+) -> Result<(), ArrowSchurError> {
+    let k = sys.k;
+    fold_row_chunk_partials(
+        sys.rows.len(),
+        || TouchedPairPartial::new(store, k),
+        TouchedPairPartial::clear,
+        |i, partial| {
+            subtract_row_schur_contribution_touched_pairs(
+                sys,
+                i,
+                &sys.rows[i],
+                htt_factors.factor(i),
+                backend,
+                kind,
+                partial,
+            )
+        },
+        |partial| partial.fold_into(schur),
+    )
 }
 
 /// Reduce the per-row Schur contributions `Σ_i H_tβ^(i)ᵀ (H_tt^(i))⁻¹ H_tβ^(i)`
@@ -264,29 +419,24 @@ pub(crate) fn reduce_row_schur_contributions<B: BatchedBlockSolver + Sync>(
         if parallel {
             // Deterministic ordered fold: chunk partials hold `-Σ contribution`
             // over their rows, so `schur += partial` reproduces the serial
-            // `schur -= Σ contribution` in fixed chunk order. Each partial stores
+            // `schur -= Σ contribution` in fixed chunk order. Each partial folds
             // only the `(a, b)` pairs its rows touch, so the fold costs the touched
             // pairs rather than `k²` per chunk: with dense `k×k` partials the
             // main-thread fold was 66% of the build at `k = 4096`, 30,000 rows and
-            // 28 active atoms (#2900, job 1148662), and the per-thread partials
-            // held `8·k²` bytes each.
-            return fold_row_chunk_partials(
-                n_rows,
-                TouchedPairPartial::default,
-                TouchedPairPartial::clear,
-                |i, partial| {
-                    subtract_row_schur_contribution_touched_pairs(
-                        sys,
-                        i,
-                        &sys.rows[i],
-                        htt_factors.factor(i),
-                        backend,
-                        kind,
-                        partial,
-                    )
-                },
-                |partial| partial.fold_into(schur),
-            );
+            // 28 active atoms (#2900, job 1148662). The partials take the dense
+            // store where the governor admits its `k²·(8 + 1)` bytes per live
+            // partial, and the keyed store otherwise; both fold the same words.
+            let dense_charge =
+                reserve_dense_touched_pair_partials(k, fold_row_chunk_partial_count(n_rows));
+            let store = if dense_charge.is_some() {
+                TouchedPairStoreKind::Dense
+            } else {
+                TouchedPairStoreKind::Keyed
+            };
+            let folded =
+                fold_touched_pair_chunk_partials(sys, htt_factors, backend, kind, schur, store);
+            drop(dense_charge);
+            return folded;
         }
         // Serial in-place reduction (original order) — bit-for-bit reference.
         for (i, row) in sys.rows.iter().enumerate() {
@@ -1775,6 +1925,13 @@ pub(crate) const SCHUR_MATVEC_PARALLEL_ROW_MIN: usize = 256;
 /// order do not depend on the pool.
 pub(crate) const SCHUR_FOLD_ROW_CHUNK: usize = 64;
 
+/// How many partials [`fold_row_chunk_partials`] keeps alive over `n_rows` rows: one
+/// per pool thread, never more than there are chunks. A caller charging the
+/// partials' memory before the fold charges this many.
+fn fold_row_chunk_partial_count(n_rows: usize) -> usize {
+    rayon::current_num_threads().clamp(1, n_rows.div_ceil(SCHUR_FOLD_ROW_CHUNK).max(1))
+}
+
 /// Reduce rows `0..n_rows` into zero-seeded partials over fixed
 /// [`SCHUR_FOLD_ROW_CHUNK`]-row chunks and hand every partial to `fold` in chunk
 /// order.
@@ -1787,6 +1944,8 @@ pub(crate) const SCHUR_FOLD_ROW_CHUNK: usize = 64;
 /// all of it zeroed and freed on every solve. Each buffer is re-zeroed before
 /// its chunk and every chunk reduces its rows in row order, so the fold is
 /// bit-identical to reducing each chunk into a fresh partial.
+///
+/// [`fold_row_chunk_partial_count`] is how many partials it builds.
 pub(crate) fn fold_row_chunk_partials<P, E>(
     n_rows: usize,
     new_partial: impl Fn() -> P,
@@ -1800,7 +1959,7 @@ where
 {
     use rayon::prelude::*;
     let n_chunks = n_rows.div_ceil(SCHUR_FOLD_ROW_CHUNK);
-    let width = rayon::current_num_threads().clamp(1, n_chunks.max(1));
+    let width = fold_row_chunk_partial_count(n_rows);
     let mut partials: Vec<P> = (0..width).map(|_| new_partial()).collect();
     for first in (0..n_chunks).step_by(width) {
         let count = width.min(n_chunks - first);
