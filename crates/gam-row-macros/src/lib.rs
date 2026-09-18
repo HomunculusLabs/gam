@@ -186,8 +186,132 @@ struct Graph {
     derivatives: HashMap<(usize, usize), usize>,
 }
 
-type Polynomial = BTreeMap<Vec<usize>, f64>;
+type Polynomial = BTreeMap<Vec<usize>, Coefficient>;
 type RingPolynomial = BTreeMap<Vec<usize>, f64>;
+
+/// An exact rational coefficient of a normalized polynomial (#932). Every `f64`
+/// literal is a dyadic rational, and the normalizer only adds, multiplies and
+/// divides by constants, so it can hold every coefficient exactly: a
+/// cancellation that is zero in the mathematics is zero in the lowering, rather
+/// than an ulp-sized residue that keeps a dead term and its multiplies (the
+/// third derivative of the binomial location-scale row read the fourth loss
+/// derivative through `m4 * 1.3877787807814457e-16`). An operation whose exact
+/// result does not fit reports `None`, and that channel keeps its unnormalized
+/// form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Coefficient {
+    numerator: i128,
+    /// Positive and coprime to `numerator` (`0/1` is zero once normalized).
+    denominator: i128,
+}
+
+impl Default for Coefficient {
+    fn default() -> Self {
+        Self {
+            numerator: 0,
+            denominator: 1,
+        }
+    }
+}
+
+impl Coefficient {
+    const ONE: Self = Self {
+        numerator: 1,
+        denominator: 1,
+    };
+
+    fn new(numerator: i128, denominator: i128) -> Option<Self> {
+        if denominator == 0 {
+            return None;
+        }
+        let sign = if denominator < 0 { -1 } else { 1 };
+        let numerator = numerator.checked_mul(sign)?;
+        let denominator = denominator.checked_mul(sign)?;
+        let (mut a, mut b) = (numerator.unsigned_abs(), denominator.unsigned_abs());
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        let divisor = i128::try_from(a.max(1)).ok()?;
+        Some(Self {
+            numerator: numerator / divisor,
+            denominator: denominator / divisor,
+        })
+    }
+
+    /// The exact value of a finite `f64`, `mantissa · 2^exponent`.
+    fn from_f64(value: f64) -> Option<Self> {
+        if !value.is_finite() {
+            return None;
+        }
+        if value == 0.0 {
+            return Self::new(0, 1);
+        }
+        let bits = value.to_bits();
+        let sign = if bits >> 63 == 0 { 1 } else { -1 };
+        let biased = i32::try_from((bits >> 52) & 0x7ff).ok()?;
+        let fraction = i128::from(bits & ((1_u64 << 52) - 1));
+        let (mantissa, exponent) = if biased == 0 {
+            (fraction, -1074)
+        } else {
+            (fraction | (1_i128 << 52), biased - 1075)
+        };
+        if exponent >= 0 {
+            let shift = u32::try_from(exponent).ok()?;
+            if shift > 72 {
+                return None;
+            }
+            Self::new(sign * (mantissa << shift), 1)
+        } else {
+            let shift = u32::try_from(-exponent).ok()?;
+            if shift > 125 {
+                return None;
+            }
+            Self::new(sign * mantissa, 1_i128 << shift)
+        }
+    }
+
+    fn is_zero(self) -> bool {
+        self.numerator == 0
+    }
+
+    fn neg(self) -> Self {
+        Self {
+            numerator: -self.numerator,
+            denominator: self.denominator,
+        }
+    }
+
+    fn add(self, other: Self) -> Option<Self> {
+        let numerator = self
+            .numerator
+            .checked_mul(other.denominator)?
+            .checked_add(other.numerator.checked_mul(self.denominator)?)?;
+        Self::new(numerator, self.denominator.checked_mul(other.denominator)?)
+    }
+
+    fn mul(self, other: Self) -> Option<Self> {
+        Self::new(
+            self.numerator.checked_mul(other.numerator)?,
+            self.denominator.checked_mul(other.denominator)?,
+        )
+    }
+
+    fn div(self, other: Self) -> Option<Self> {
+        if other.is_zero() {
+            return None;
+        }
+        Self::new(
+            self.numerator.checked_mul(other.denominator)?,
+            self.denominator.checked_mul(other.numerator)?,
+        )
+    }
+
+    /// The `f64` the lowering writes: exact for every coefficient whose
+    /// numerator and denominator fit a mantissa, one rounding otherwise.
+    fn to_f64(self) -> f64 {
+        self.numerator as f64 / self.denominator as f64
+    }
+}
 
 #[derive(Clone, Copy)]
 enum ScaleDistribution {
@@ -715,9 +839,9 @@ impl Graph {
         let zero_exponents = || vec![0; parameter_count];
         let polynomial = match self.nodes[id].clone() {
             Node::Constant(bits) => {
-                let value = f64::from_bits(bits);
+                let value = Coefficient::from_f64(f64::from_bits(bits))?;
                 let mut polynomial = Polynomial::new();
-                if value != 0.0 {
+                if !value.is_zero() {
                     polynomial.insert(zero_exponents(), value);
                 }
                 Some(polynomial)
@@ -725,7 +849,7 @@ impl Graph {
             Node::Parameter(parameter) => {
                 let mut exponents = zero_exponents();
                 exponents[parameter] = 1;
-                Some([(exponents, 1.0)].into_iter().collect())
+                Some([(exponents, Coefficient::ONE)].into_iter().collect())
             }
             Node::Variable(_)
             | Node::Exp(_)
@@ -737,23 +861,20 @@ impl Graph {
                 .polynomial(value, parameter_count, memo)
                 .map(|mut value| {
                     for coefficient in value.values_mut() {
-                        *coefficient = -*coefficient;
+                        *coefficient = coefficient.neg();
                     }
                     value
                 }),
             Node::Add(left, right) | Node::Sub(left, right) => {
                 let mut left = self.polynomial(left, parameter_count, memo)?;
                 let right = self.polynomial(right, parameter_count, memo)?;
-                let sign = if matches!(self.nodes[id], Node::Add(_, _)) {
-                    1.0
-                } else {
-                    -1.0
-                };
+                let subtract = matches!(self.nodes[id], Node::Sub(_, _));
                 for (exponents, coefficient) in right {
                     let total = left.entry(exponents).or_default();
-                    *total += sign * coefficient;
+                    let term = if subtract { coefficient.neg() } else { coefficient };
+                    *total = total.add(term)?;
                 }
-                left.retain(|_, coefficient| *coefficient != 0.0);
+                left.retain(|_, coefficient| !coefficient.is_zero());
                 Some(left)
             }
             Node::Mul(left, right) => {
@@ -767,22 +888,22 @@ impl Graph {
                             .zip(right_exponents)
                             .map(|(left, right)| left + right)
                             .collect::<Vec<_>>();
-                        *product.entry(exponents).or_default() +=
-                            left_coefficient * right_coefficient;
+                        let total = product.entry(exponents).or_default();
+                        *total = total.add(left_coefficient.mul(*right_coefficient)?)?;
                     }
                 }
-                product.retain(|_, coefficient| *coefficient != 0.0);
+                product.retain(|_, coefficient| !coefficient.is_zero());
                 Some(product)
             }
             Node::Div(numerator, denominator) => {
                 let mut numerator = self.polynomial(numerator, parameter_count, memo)?;
                 let denominator = self.polynomial(denominator, parameter_count, memo)?;
                 let coefficient = denominator.get(&zero_exponents()).copied()?;
-                if denominator.len() != 1 || coefficient == 0.0 {
+                if denominator.len() != 1 || coefficient.is_zero() {
                     None
                 } else {
                     for value in numerator.values_mut() {
-                        *value /= coefficient;
+                        *value = value.div(coefficient)?;
                     }
                     Some(numerator)
                 }
@@ -807,7 +928,7 @@ impl Graph {
             return self.constant(0.0);
         }
         if variables.is_empty() {
-            return self.constant(*polynomial.values().next().expect("nonempty polynomial"));
+            return self.constant(polynomial.values().next().expect("nonempty polynomial").to_f64());
         }
         let variable = variables[0];
         let parameter = self.intern(Node::Parameter(variable));
@@ -922,10 +1043,9 @@ impl Graph {
                             else {
                                 continue;
                             };
-                            let scale = coefficient / leading_coefficient;
-                            if !scale.is_finite() {
+                            let Some(scale) = coefficient.div(*leading_coefficient) else {
                                 continue;
-                            }
+                            };
                             let mut remainder = polynomial.clone();
                             let mut exact_subset = true;
                             for (other_powers, other_coefficient) in other {
@@ -934,9 +1054,8 @@ impl Graph {
                                     .zip(&shift)
                                     .map(|(power, shift)| power + shift)
                                     .collect::<Vec<_>>();
-                                if remainder.get(&shifted).copied()
-                                    != Some(scale * other_coefficient)
-                                {
+                                let expected = scale.mul(*other_coefficient);
+                                if expected.is_none() || remainder.get(&shifted).copied() != expected {
                                     exact_subset = false;
                                     break;
                                 }
@@ -1049,7 +1168,8 @@ impl Graph {
                         })
                     })
                     .collect::<Vec<_>>();
-                let factor_polynomial = [(factor.clone(), 1.0)].into_iter().collect::<Polynomial>();
+                let factor_polynomial =
+                    [(factor.clone(), Coefficient::ONE)].into_iter().collect::<Polynomial>();
                 let mut order = (0..parameter_count).collect::<Vec<_>>();
                 loop {
                     let shared = self.polynomial_horner(&factor_polynomial, &order);
@@ -1973,6 +2093,38 @@ fn constant_parameters(
         .collect()
 }
 
+/// The constant parameters of one emitted surface. A constant the surface's body
+/// never reads keeps its place in the signature as `_name`, so every surface of
+/// one atom takes the same arguments: once coefficients cancel exactly, a
+/// lower-order surface need not read a higher loss-stack entry at all (#932).
+fn surface_constant_parameters(
+    constants: &[Ident],
+    activity_constants: &HashSet<usize>,
+    body: &TokenStream2,
+) -> Vec<TokenStream2> {
+    let text = body.to_string();
+    constants
+        .iter()
+        .enumerate()
+        .map(|(index, constant)| {
+            let name = constant.to_string();
+            let read = text
+                .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+                .any(|token| token == name);
+            let parameter = if read {
+                constant.clone()
+            } else {
+                format_ident!("_{name}")
+            };
+            if activity_constants.contains(&index) {
+                quote!(#parameter: bool)
+            } else {
+                quote!(#parameter: f64)
+            }
+        })
+        .collect()
+}
+
 fn expand(input: RowAtomInput) -> Result<TokenStream2> {
     let RowAtomInput {
         visibility,
@@ -2143,11 +2295,13 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                 [#(#hessian_refs),*],
             )
         };
+        let surface_parameters =
+            surface_constant_parameters(&constants, &activity_constants, &body);
         output.push(quote! {
             #[inline(always)]
             #visibility fn #order2_name(
                 #primary_parameters
-                #(#constant_parameters),*
+                #(#surface_parameters),*
             ) -> ::gam_math::jet_scalar::StaticOrder2Atom<
                 #dimension,
                 #packed,
@@ -2240,11 +2394,13 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
             #(#assignments)*
             [#(#rows),*]
         };
+        let surface_parameters =
+            surface_constant_parameters(&constants, &activity_constants, &body);
         output.push(quote! {
             #[inline(always)]
             #visibility fn #third_name(
                 #primary_parameters
-                #(#constant_parameters,)*
+                #(#surface_parameters,)*
                 direction: &[f64; #dimension],
             ) -> [[f64; #dimension]; #dimension] {
                 #body
@@ -2351,11 +2507,13 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
             #(#assignments)*
             [#(#rows),*]
         };
+        let surface_parameters =
+            surface_constant_parameters(&constants, &activity_constants, &body);
         output.push(quote! {
             #[inline(always)]
             #visibility fn #fourth_name(
                 #primary_parameters
-                #(#constant_parameters,)*
+                #(#surface_parameters,)*
                 direction_u: &[f64; #dimension],
                 direction_v: &[f64; #dimension],
             ) -> [[f64; #dimension]; #dimension] {
@@ -2487,11 +2645,13 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
             #(#assignments)*
             [#(#rows),*]
         };
+        let surface_parameters =
+            surface_constant_parameters(&constants, &activity_constants, &body);
         output.push(quote! {
             #[inline(always)]
             #visibility fn #fifth_name(
                 #primary_parameters
-                #(#constant_parameters,)*
+                #(#surface_parameters,)*
                 direction_u: &[f64; #dimension],
                 direction_v: &[f64; #dimension],
                 direction_w: &[f64; #dimension],
@@ -2715,5 +2875,38 @@ mod row_atom_tests {
                 .to_string()
                 .contains("explicitly typed `f64`, `scale`, or `bool`")
         );
+    }
+
+    /// Polynomial coefficients are exact rationals (#932). The binomial
+    /// location-scale row composes its loss through its Taylor polynomial in
+    /// `D = q(δ) − q0`, and a third derivative at `δ = 0` cannot involve the
+    /// fourth loss derivative: the `D⁴` term's third derivative there is
+    /// `(72 − 48 − 24)/24 · r²·q0²·m4 = 0`. With `f64` coefficients that sum left
+    /// `m4 * 1.3877787807814457e-16`, so the lowering read `m4` and paid its
+    /// multiplies; exactly, the term is gone and `m4` is an unread parameter.
+    #[test]
+    fn at_zero_coefficients_cancel_exactly_932() {
+        let d = "((q0 - delta_eta_t * inv_sigma) * exp(-delta_eta_ls) - q0)";
+        let source = format!(
+            "fn atom_binomial_ls [third_at_zero](
+                delta_eta_t, delta_eta_ls;
+                inv_sigma: f64, q0: f64, m1: f64, m2: f64, m3: f64, m4: f64, neg_ll: f64
+            ) {{
+                neg_ll + m1 * {d} + 0.5 * m2 * {d} * {d} + m3 / 6.0 * {d} * {d} * {d}
+                    + m4 / 24.0 * {d} * {d} * {d} * {d}
+            }}"
+        );
+        let input = syn::parse_str::<RowAtomInput>(&source).expect("binomial row atom");
+        let expanded = super::expand(input).expect("expand row atom").to_string();
+        let start = expanded
+            .find("fn atom_binomial_ls_third_contracted_at_zero")
+            .expect("the third at-zero lowering");
+        let body = &expanded[start..];
+        assert!(body.contains("_m4 : f64"), "m4 is an unread parameter:\n{body}");
+        assert!(
+            !body.contains("m4 *") && !body.contains("* m4"),
+            "no term reads m4:\n{body}"
+        );
+        assert!(!body.contains("e-16"), "no ulp-sized coefficient survives:\n{body}");
     }
 }

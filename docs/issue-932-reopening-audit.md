@@ -682,13 +682,34 @@ and gam-sae at `aaa0ddcfac` (job 1256028), gam-models at `cd4e4d3662` (jobs 1256
 RIGID-BMS-HAND-932 passes every channel on this host (order2 1.019 through fourth_full 1.325),
 as it did on EPYC 7763 before.
 
-Binomial location-scale mechanism. Every production caller evaluates
+Binomial location-scale mechanism. Every production caller evaluated
 `binomial_ls_row_program` at `δ = 0`. A `name: origin` primary role on `row_program!`, which
 seeds the value with zero so the IEEE `0·x` terms fold, lifts order2 only to 0.766 (third
 0.560, fourth 0.783; job 1261446). A `row_atom!` at-zero form of the same row, with the loss
-as its Taylor polynomial in `q − q0`, gives 0.749 / 0.255 / 0.494 (job 1262339). The hand
-factors sums shared by several channels (`u = m1 + q·m2` feeds both Hessian entries it
-names), and neither generator does.
+as its Taylor polynomial in `q − q0` and an `active: bool` gate, gives 0.749 / 0.255 / 0.494
+(job 1262339): `polynomial()` refuses a `Select`, so no channel under the gate was normalized.
+
+The row is now `binomial_ls_row`, that at-zero `row_atom!` without the gate, called only by
+wrappers that answer an all-zero loss stack with zero. Two generator changes came with it.
+The at-zero normalization keeps exact rational coefficients, so a term that cancels exactly
+is gone instead of leaving an `f64` residue (the third read `m4 * 1.3877787807814457e-16`
+before, job 1263578). And each at-zero surface prefixes a constant it never reads with `_`,
+so a surface takes the full declaration without an unused binding. Release gate at
+`7c01c5dc95` (job 1269170, EPYC 7763): order2 1.005, third 0.963, fourth 1.025. Order2 and
+fourth pass, and the third still fails `faster`.
+
+Reading the emitted third (job 1270706): 16 multiplies, 6 additions and 4 negations, against
+the hand's 17, 7 and 1. Job 1273155 raced rearrangements of a verbatim copy of that schedule
+against the hand, two rounds each (EPYC 7763):
+
+| third schedule | `median_ratio` |
+|---|---|
+| the copy as emitted | 0.957, 0.965 |
+| its four channel signs moved onto the direction (two negations) | 1.033, 1.041 |
+| the same, with the Horner chains reassociated to shorten the longest | 0.958, 1.001 |
+| contracted first through the hand's `q_z = −r·z_t − q·z_ls` | 1.082, 1.065 |
+
+The chain length is not what loses; the negations are.
 
 ### Other rows, read
 

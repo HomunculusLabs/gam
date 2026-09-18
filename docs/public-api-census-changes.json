@@ -4349,5 +4349,13 @@
     },
     "reason": "#2900 row 6.15: ArrowSolverMode::automatic(k) and ArrowSolveOptions::automatic(k) switched the arrow-Schur step to Direct at the literal k <= 2000; ArrowSolveOptions::priced() and resolve_arrow_route price Direct against InexactPCG from the system instead. SaeStreamingPlan::solve_options_for_border_dim becomes solve_options(), since the border only fed automatic(k).",
     "evidence": "git grep -w at f554cf4063: every caller (system.rs, streaming_plan.rs, fit_drivers.rs, gam-sae tests.rs and tests_device_engage_1783.rs, arrow_schur/tests.rs, examples/full_color_fit_1017.rs) is migrated in this commit; gam-pyffi names neither. Direct gate dy6 i2900-615-g1 (base 6b6c05401e) named exactly these census removals."
+  },
+  {
+    "base": "18e7ce6254708f7e119ead693e17bc901eb39794",
+    "removed": {
+      "crates/gam-models/src/gamlss/binomial/kernel.rs::binomial_ls_row_program": 1
+    },
+    "reason": "#932: the pub(crate) row_program! declaration binomial_ls_row_program is replaced by the row_atom! declaration binomial_ls_row (same row, same fourth-order Taylor loss in q, lowered exactly at delta = 0), read only through the pub(crate) wrappers binomial_ls_row_order2, binomial_ls_row_third_contracted and binomial_ls_row_fourth_contracted.",
+    "evidence": "git grep -c -w binomial_ls_row_program at 7c01c5dc958bc4220f601f96faf58e47c5c7c08f finds callers only in gamlss/binomial/kernel.rs and gamlss/binomial/location_scale.rs, all converted here; no gam-cli, gam-pyffi, python or other-crate code names it. The workspace check with the replacement is green (job 1269170)."
   }
 ]

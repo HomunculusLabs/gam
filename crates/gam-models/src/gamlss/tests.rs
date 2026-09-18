@@ -151,7 +151,7 @@ pub(crate) fn assert_rel_close(label: &str, actual: f64, expected: f64, tol: f64
 /// lazy operator against the dense `exact_newton_joint_hessian_from_designs`.
 /// This pins the production assembler's own row coefficients
 /// (`exact_newton_joint_hessian_row_coefficients`, the order-2 surface of
-/// `binomial_ls_row_program`, which writes the q-map `q = −η_t·e^{−η_ls}` in
+/// `binomial_ls_row`, which writes the q-map `q = −η_t·e^{−η_ls}` in
 /// local coordinates around the row) to the tower, which spells the row NLL
 /// separately in predictor coordinates. A wrong coefficient (a dropped `q m2`,
 /// a sign in the cross block — the #736 cross-term genus) would slip past both
