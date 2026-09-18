@@ -1054,5 +1054,13 @@
     ],
     "reason": "Renamed to returned_mode_objective_resolution (#2977 C). It still returns joint_objective_roundoff_slack(objective, objective, measured), but that value is no longer the decrement bar: it is the floor under the derived decrement band (DecrementResolution::with_objective_resolution). Its four callers in exact_joint_fit.rs (the constrained and the unconstrained settling head, the #2485 fully-rejected stall mark and the decrement certificate) now pass the renamed helper's value to spectrum_decrement_resolution.",
     "evidence": "dy6 gate i2283-2977-C3 (direct-dy6-i2283-2977-C3.log) at b78a4a2f5e: RC_CHECK=0, RC_PYFFI=0, RC_TEST=0 over the gam-custom-family lib (335 tests); the landed tree names returned_mode_decrement_resolution nowhere."
+  },
+  {
+    "items": [
+      "tests/pyffi/misc/stateful_saved_model_sync.rs:const:EXPECTED_MODEL_PAYLOAD_VERSION"
+    ],
+    "reason": "Stale payload-version pin, fixed at its root: EXPECTED_MODEL_PAYLOAD_VERSION = 16 was a hand copy of MODEL_PAYLOAD_VERSION that stayed at 16 through the bumps to 17, 18, 19 and 20. The saved-model schema assert now reads MODEL_PAYLOAD_VERSION (u64::from), so no bump can leave it stale, and the literal is deleted. Its only use was that assert.",
+    "evidence": "git grep -n -w EXPECTED_MODEL_PAYLOAD_VERSION at ac69e5831b4db7771badfa9e5a6c3f318d8e93b7 finds only tests/pyffi/misc/stateful_saved_model_sync.rs:24 (the declaration) and :73 (the one use), a test_scoped const with production_occurrences 0 per the guard in gate dy5 i2955-pin-a. sw4r job 1281277: at main 1aac5b051f two stateful_saved_model_sync tests fail at :66 (left 99, right 96); with this file all five pass. Gate dy5 i2955-pin-a at ac69e5831b: workspace --all-targets check RC 0, gam-pyffi check RC 0.",
+    "base": "ac69e5831b4db7771badfa9e5a6c3f318d8e93b7"
   }
 ]
