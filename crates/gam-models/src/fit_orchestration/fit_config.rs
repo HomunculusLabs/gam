@@ -188,14 +188,25 @@ impl FitConfig {
             std::mem::take(&mut self.residual_columns),
             self.z_column.as_deref(),
         )?;
-        if !self.residual_columns.is_empty()
-            && self.family.as_deref() != Some("bernoulli-marginal-slope")
-        {
-            return Err(
-                "residual_columns requires family = \"bernoulli-marginal-slope\" (gam#2924); the \
-                 survival marginal-slope family takes it once gam#2923 lands"
-                    .to_string(),
-            );
+        // The block lives inside the Bernoulli marginal-slope likelihood, which
+        // front ends select either by name or, with the family left automatic,
+        // by the score column; any other family or no score is refused rather
+        // than dropping the features on a path that never reads them.
+        if !self.residual_columns.is_empty() {
+            let names_another_family = self.family.as_deref().is_some_and(|family| {
+                let canonical = family.to_ascii_lowercase().replace('_', "-");
+                canonical != "bernoulli-marginal-slope" && canonical != "binary-marginal-slope"
+            });
+            if names_another_family
+                || self.z_column.is_none()
+                || self.survival_likelihood.as_deref() == Some("marginal-slope")
+            {
+                return Err(
+                    "residual_columns requires a Bernoulli marginal-slope fit with a z_column \
+                     (gam#2924); the survival marginal-slope family takes it once gam#2923 lands"
+                        .to_string(),
+                );
+            }
         }
         if self.transformation_normal_config.is_some()
             && !(self.transformation_normal || self.family.as_deref() == Some("transformation-normal"))
@@ -372,6 +383,35 @@ mod tests {
             refused_frozen.starts_with("frozen_score requires a marginal-slope fit"),
             "{refused_frozen}"
         );
+    }
+
+    #[test]
+    fn resolve_admits_residual_columns_only_on_a_bernoulli_marginal_slope_request() {
+        fn request(
+            family: Option<&str>,
+            z_column: Option<&str>,
+            survival_likelihood: Option<&str>,
+        ) -> Result<FitConfig, String> {
+            FitConfig {
+                family: family.map(str::to_string),
+                z_column: z_column.map(str::to_string),
+                survival_likelihood: survival_likelihood.map(str::to_string),
+                residual_columns: vec!["r1".to_string(), "r2".to_string()],
+                ..FitConfig::default()
+            }
+            .resolve()
+        }
+        let refused = |result: Result<FitConfig, String>| {
+            result.is_err_and(|reason| reason.contains("residual_columns requires"))
+        };
+        // Front ends select the family by the score column with the family
+        // left automatic (the CLI has no family value for it), or by name.
+        assert!(request(None, Some("z"), None).is_ok());
+        assert!(request(Some("auto"), Some("z"), None).is_ok());
+        assert!(request(Some("bernoulli-marginal-slope"), Some("z"), None).is_ok());
+        assert!(refused(request(Some("binomial-probit"), Some("z"), None)));
+        assert!(refused(request(None, None, None)));
+        assert!(refused(request(None, Some("z"), Some("marginal-slope"))));
     }
 }
 

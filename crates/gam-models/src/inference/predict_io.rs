@@ -1089,31 +1089,38 @@ impl BernoulliMarginalSlopePredictor {
             } else {
                 (None, None)
             };
-            for i in start..end {
-                let marginal = bernoulli_marginal_link_map(&self.base_link, marginal_eta[i])
-                    .map_err(EstimationError::InvalidInput)?;
-                let r = features.row(i);
-                let r = r.as_slice().ok_or_else(|| {
-                    EstimationError::InvalidInput(
-                        "residual feature row is not contiguous".to_string(),
+            // Each row's anchor replay reads only that row, so the rows run on
+            // the pool and scatter in index order: bit for bit the serial loop.
+            let rows = (start..end)
+                .into_par_iter()
+                .map(|i| {
+                    let marginal = bernoulli_marginal_link_map(&self.base_link, marginal_eta[i])
+                        .map_err(EstimationError::InvalidInput)?;
+                    let r = features.row(i);
+                    let r = r.as_slice().ok_or_else(|| {
+                        EstimationError::InvalidInput(
+                            "residual feature row is not contiguous".to_string(),
+                        )
+                    })?;
+                    let grid = self.empirical_grid_for_prediction_row(input, i)?;
+                    crate::bms::residual_row_index(
+                        &marginal,
+                        slope_eta[i],
+                        &beta_residual,
+                        z[i],
+                        r,
+                        field.at_row(i),
+                        grid.as_ref(),
+                        scale,
                     )
-                })?;
-                let grid = self.empirical_grid_for_prediction_row(input, i)?;
-                let (eta_i, d_q, d_g, d_beta) = crate::bms::residual_row_index(
-                    &marginal,
-                    slope_eta[i],
-                    &beta_residual,
-                    z[i],
-                    r,
-                    field.at_row(i),
-                    grid.as_ref(),
-                    scale,
-                )
-                .map_err(EstimationError::InvalidInput)?;
+                    .map_err(EstimationError::InvalidInput)
+                })
+                .collect::<Result<Vec<_>, EstimationError>>()?;
+            for (li, (eta_i, d_q, d_g, d_beta)) in rows.into_iter().enumerate() {
+                let i = start + li;
                 eta[i] = eta_i;
                 if let (Some(grad), Some(mc), Some(lc)) = (grad.as_mut(), mc.as_ref(), lc.as_ref())
                 {
-                    let li = i - start;
                     let mut row = grad.row_mut(i);
                     for j in 0..marginal_dim {
                         row[j] = d_q * mc[[li, j]];

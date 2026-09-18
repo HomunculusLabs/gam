@@ -2754,6 +2754,13 @@ fn materialize_impl<'a>(
                 conflict: TransformationNormalConflict::SurvResponse,
             });
         }
+        if !effective_config.residual_columns.is_empty() {
+            return Err(WorkflowError::InvalidConfig {
+                reason: "residual_columns is a Bernoulli marginal-slope block (gam#2924); the \
+                         survival marginal-slope family takes it once gam#2923 lands"
+                    .to_string(),
+            });
+        }
         // `materialize_*` now return `WorkflowError` directly so the typed
         // `ColumnNotFound` payload (and any future variant-typed leaf
         // errors) survive the dispatcher hop instead of being flattened
