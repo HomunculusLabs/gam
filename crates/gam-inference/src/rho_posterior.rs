@@ -190,24 +190,6 @@ fn whitening_factor_from_outer_hessian(
     Ok(l_inv)
 }
 
-/// Gauss–Hermite rule of any order for the STANDARD NORMAL weight, by
-/// Golub–Welsch (`gam_math::quadrature::gauss_hermite_rule`). Probabilists'
-/// convention: the nodes are `√2·x_i` and the weights `w_i/√π` of the
-/// physicists' rule, so the weights sum to one and the rule integrates
-/// polynomials of degree `2n−1` exactly against `N(0,1)`.
-pub(crate) fn standard_normal_gh_rule(nodes_per_axis: usize) -> Result<Vec<(f64, f64)>, String> {
-    let rule = gam_math::quadrature::gauss_hermite_rule(nodes_per_axis).map_err(|error| {
-        format!("standard-normal Gauss–Hermite rule of order {nodes_per_axis}: {error}")
-    })?;
-    let sqrt_pi = std::f64::consts::PI.sqrt();
-    Ok(rule
-        .nodes
-        .iter()
-        .zip(rule.weights.iter())
-        .map(|(&node, &weight)| (std::f64::consts::SQRT_2 * node, weight / sqrt_pi))
-        .collect())
-}
-
 /// Enumerate the product rule over `rules`, one rule per axis, appending every
 /// node with the log of its product weight.
 pub(crate) fn enumerate_gh_product(
@@ -261,9 +243,14 @@ where
             "rho_posterior_quadrature: product quadrature is capped at K<={TIER1_MAX_DIM}, got {k}"
         )));
     }
-    let rule = standard_normal_gh_rule(nodes_per_axis).map_err(|reason| {
-        EstimationError::RemlOptimizationFailed(format!("rho_posterior_quadrature: {reason}"))
-    })?;
+    let rule = gam_math::quadrature::standard_normal_gauss_hermite_rule(nodes_per_axis).map_err(
+        |error| {
+            EstimationError::RemlOptimizationFailed(format!(
+                "rho_posterior_quadrature: standard-normal Gauss–Hermite rule of order \
+                 {nodes_per_axis}: {error}"
+            ))
+        },
+    )?;
     let l_inv = whitening_factor_from_outer_hessian(outer_hessian).map_err(|reason| {
         EstimationError::RemlOptimizationFailed(format!("rho_posterior_quadrature: {reason}"))
     })?;

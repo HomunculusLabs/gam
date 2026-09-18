@@ -132,5 +132,15 @@
     ],
     "reason": "#2965: Mixed seeded two coefficient directions per path evaluation, so computed_joint (dense H, D H[u], D2 H[u, v]) and loading_curvature made one whole-cohort path evaluation per coefficient pair. Both now call objective.rs::coordinate_hessian, which sweeps blocks of TANGENT_WIDTH coordinates per level over Rows<Rows<S, W>, W>. The tests' pair-replay oracle seeds one direction per level over Rows<Rows<S, 1>, 1>, which forms each channel from the same operands in the same order as the block sweep. Nothing calls Mixed any more, so it is deleted.",
     "evidence": "Gate 1209285 (lane sw2d, node cn1010, base 319992cd4c + patch 935ceade, TREE a5eb48cf3c) ran source_removal_guard.py, which reported exactly this identity removed without an acknowledgement: crates/gam-event-history/src/scalar.rs line 17, struct Mixed, production_occurrences 0. At that tree, cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0 with 0 error lines, so no code still names Mixed. public_api_census.py exited 0."
+  },
+  {
+    "base": "32cf9943331d3b16168fb4bf575d51f91c0b9427",
+    "items": [
+      "crates/gam-inference/src/hmc_io.rs:fn:max_representable_gh_order",
+      "crates/gam-inference/src/hmc_io.rs:static:MAX_REPRESENTABLE_ORDER",
+      "crates/gam-inference/src/rho_posterior.rs:fn:standard_normal_gh_rule"
+    ],
+    "reason": "#784: the standard-normal Gauss-Hermite rule and its representable-order ceiling move into gam_math::quadrature (standard_normal_gauss_hermite_rule, max_representable_standard_normal_gauss_hermite_order), so gam-solve's block_quadrature_units_784 probe reads the production ceiling instead of a usize::MAX sentinel; gam-solve cannot depend on gam-inference. rho_posterior's crate-private standard_normal_gh_rule and hmc_io's private max_representable_gh_order are deleted with the same arithmetic, in the same operation order, and every caller (the corrector's ceiling, block_quadrature_marginal_correction's rules, rho_posterior_quadrature, and the hmc_io tests) now calls gam-math.",
+    "evidence": "The item list is the refusal of scripts/source_removal_guard.py in direct lane dy3 run q784ceil-g2 (base fca653ffde, exact tree 813288c2, patch md5 d3171157): max_representable_gh_order and its MAX_REPRESENTABLE_ORDER static in hmc_io.rs, and standard_normal_gh_rule in rho_posterior.rs. At the base, git grep -w finds standard_normal_gh_rule and max_representable_gh_order only in rho_posterior.rs and hmc_io.rs, both edited here; gam-math's new MAX_REPRESENTABLE_ORDER static is a different item in quadrature.rs."
   }
 ]

@@ -4196,5 +4196,13 @@
     },
     "reason": "#2946 L-0 (gam-21 ruling): gam_linalg::roundoff::accumulation_growth is re-exported from its new owner gam_math::roundoff, where it is a pub const fn, instead of declared in gam-linalg. The public path is unchanged. The census counts the declaration gam-linalg no longer holds.",
     "evidence": "Gate 1217155 (pool-gx7) ran scripts/public_api_census.py --base 666558f622 over this commit's tree (8162f1d1b2) and measured exactly this removal. The count goes from 12424 to 12425 public function declarations: this one removed, and gam_math::roundoff's accumulation_growth and inflated added. The same gate's workspace --all-targets --locked check is RC 0, so every gam_linalg::roundoff::accumulation_growth caller compiles through the re-export."
+  },
+  {
+    "base": "32cf9943331d3b16168fb4bf575d51f91c0b9427",
+    "removed": {
+      "crates/gam-inference/src/rho_posterior.rs::standard_normal_gh_rule": 1
+    },
+    "reason": "#784: rho_posterior's crate-private standard_normal_gh_rule moves into gam_math::quadrature as standard_normal_gauss_hermite_rule, with the same arithmetic in the same operation order, so the representable-order ceiling and gam-solve's block_quadrature_units_784 probe read one rule builder; every caller now calls gam-math.",
+    "evidence": "The removed map is the census's own output: scripts/public_api_census.py in direct lane dy3 run q784ceil-g2 (base fca653ffde, exact tree 813288c2, patch md5 d3171157) refused exactly this item. At the base, git grep -w standard_normal_gh_rule finds the definition and its callers only in rho_posterior.rs and hmc_io.rs, both edited here."
   }
 ]
