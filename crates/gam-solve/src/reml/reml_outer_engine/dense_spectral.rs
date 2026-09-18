@@ -1240,6 +1240,25 @@ impl HessianFactorization for DenseSpectralOperator {
         self.n_dim
     }
 
+    /// Weyl (#2954): a backward-stable symmetric eigensolver returns the exact
+    /// spectrum of `H + E` with `‖E‖₂ ≤ p·ε·‖H‖₂`
+    /// ([`gam_linalg::roundoff::symmetric_spectrum_rounding_band`]), so each
+    /// eigenvalue moves by at most that much and `log|H|₊ = Σ_active ln σ_i` by at
+    /// most `p·ε·‖H‖₂·Σ_active 1/σ_i` to first order. The error is normwise, so
+    /// no diagonal equilibration tightens it.
+    fn logdet_forward_error(&self) -> Option<f64> {
+        let band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(&self.raw_eigenvalues);
+        let inverse_sum: f64 = self
+            .reg_eigenvalues
+            .iter()
+            .zip(self.active_mask.iter())
+            .filter(|(_, active)| **active)
+            .map(|(value, _)| value.abs().recip())
+            .sum();
+        let bound = band * inverse_sum;
+        bound.is_finite().then_some(bound)
+    }
+
     fn is_dense(&self) -> bool {
         true
     }

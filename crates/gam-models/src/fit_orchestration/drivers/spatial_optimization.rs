@@ -646,7 +646,9 @@ fn exact_joint_spatial_seed(
 
     // The joint ρ domain is derived from the incumbent's own design and
     // penalties (#2812), and the setup projects the incumbent's seed into it.
-    let rho_seed = best.fit.lambdas.mapv(f64::ln);
+    // A coordinate the incumbent's certificate carried onto a face seeds from
+    // where its search stopped (#2954).
+    let rho_seed = best.fit.search_seed_log_lambdas();
     let (rho_lower, rho_upper) =
         joint_rho_resolvability_domain(&best.design.design, &best.design.penalties, rho_dim);
     let setup = ExactJointHyperSetup::new(
@@ -6318,7 +6320,7 @@ fn try_exact_joint_latent_coord_optimization(
     let mut theta0 = Array1::<f64>::zeros(rho_dim + latent_coord_ext_dim);
     theta0
         .slice_mut(s![..rho_dim])
-        .assign(&best.fit.lambdas.mapv(f64::ln));
+        .assign(&best.fit.search_seed_log_lambdas());
     theta0
         .slice_mut(s![rho_dim..rho_dim + latent_flat_dim])
         .assign(latent.values.as_flat());

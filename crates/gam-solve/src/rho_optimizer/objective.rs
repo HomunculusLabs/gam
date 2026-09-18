@@ -1798,6 +1798,20 @@ pub(crate) fn criterion_certificate_to_native(
         }
         rails.sort_by_key(|rail| rail.index);
     }
+    // The polish's rails stay in the order they were taken, which the index does
+    // not encode.
+    if let Some(polish) = certificate.newton_polish.as_mut() {
+        for rail in polish.rails.iter_mut() {
+            rail.index = native(rail.index);
+        }
+        let mut entry = polish.entry.clone();
+        for (canonical, &value) in polish.entry.iter().enumerate() {
+            if let Some(slot) = entry.get_mut(native(canonical)) {
+                *slot = value;
+            }
+        }
+        polish.entry = entry;
+    }
 }
 
 /// Wraps any [`OuterObjective`] so the optimizer can work in a CANONICAL
@@ -2270,6 +2284,7 @@ mod native_certificate_index_tests {
             lower: -1.0,
             upper: 1.0,
             margin: 0.5,
+            face: crate::model_types::RailFaceKind::Representability,
         }
     }
 
@@ -2294,6 +2309,7 @@ mod native_certificate_index_tests {
             curvature: CurvatureEvidence::NotSpent,
             lambdas_railed: vec![0, 3, 5],
             railed_facts: vec![fact(0), fact(3)],
+            newton_polish: None,
             curvature_floor: None,
         };
         criterion_certificate_to_native(&mut certificate, &perm);

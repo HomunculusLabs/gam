@@ -1197,13 +1197,17 @@ where
     // #2812 / #2902 row 8: the λ-selection domain of each coordinate is derived
     // from the conditioned design's Gram on that penalty's columns and the
     // penalty's spectrum, not the picked ±RHO_BOUND box (SPEC rule 20).
-    let (rho_domain_lower, rho_domain_upper) =
-        crate::estimate::rho_domain::resolvability_domain_from_design(
-            w_o.view(),
-            &x_fit,
-            canonical_shared.as_slice(),
-        )
-        .map_err(EstimationError::LayoutError)?;
+    let crate::estimate::rho_domain::ResolvabilityDomain {
+        lower: rho_domain_lower,
+        upper: rho_domain_upper,
+        lower_is_limit: rho_lower_is_limit,
+        upper_is_limit: rho_upper_is_limit,
+    } = crate::estimate::rho_domain::resolvability_domain_and_limit_faces_from_design(
+        w_o.view(),
+        &x_fit,
+        canonical_shared.as_slice(),
+    )
+    .map_err(EstimationError::LayoutError)?;
     let mut reml_state = RemlState::newwith_offset_shared(
         reml_y_view,
         x_fit,
@@ -1396,6 +1400,9 @@ where
                 .with_objective_scale(Some(n_obs as f64))
                 .with_problem_size(n_obs, x_o.ncols())
                 .with_bounds(rho_model_domain.0.clone(), rho_model_domain.1.clone())
+                // #2954: which of those faces are the terms' limit models, so a
+                // mint may rail a coordinate there and nowhere else.
+                .with_limit_faces(rho_lower_is_limit.clone(), rho_upper_is_limit.clone())
                 // Make the outer smoothing-parameter search invariant to the order
                 // the smooth terms / tensor margins were written (#1538/#1539). The
                 // structural keys label each ρ-coordinate by its placement-

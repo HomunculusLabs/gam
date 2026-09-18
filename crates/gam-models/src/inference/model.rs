@@ -84,7 +84,16 @@ use std::path::Path;
 // grade `PlugInCertified` is now `PlugInAdequate`. The old tokens are read-only serde
 // aliases, so a v20, v19 or v18 payload still loads, and a v20 binary refuses a v21
 // payload by version instead of failing on an unknown variant.
-pub const MODEL_PAYLOAD_VERSION: u32 = 21;
+// v22 records the #2954 certificate's Newton polish
+// (`OuterCriterionCertificate::newton_polish`) and each railed coordinate's face kind
+// (`RailedCoordinateFact::face`, `NewtonPolishRail::face`) inside the fit artifacts. Both carry
+// serde defaults, so an older payload loads with no polish and every face `Unrecorded`: no
+// record is ever read as a face kind it did not record.
+pub const MODEL_PAYLOAD_VERSION: u32 = 22;
+
+/// The schema before the certificate's Newton polish and face kinds (#2954), whose only
+/// difference is those fields' absence.
+const NEWTON_POLISH_ABSENT_PAYLOAD_VERSION: u32 = 21;
 
 /// The schema before the rho-posterior adequacy tokens (#2946 T2), whose only
 /// difference is the old tokens, which this binary reads as aliases.
@@ -104,8 +113,9 @@ const COVARIANCE_COPIES_PAYLOAD_VERSION: u32 = 18;
 /// refused or an accepted version read it from here rather than offsetting
 /// [`MODEL_PAYLOAD_VERSION`], because a bump that keeps its predecessor
 /// readable changes which offsets are refused.
-pub const READABLE_PAYLOAD_VERSIONS: [u32; 4] = [
+pub const READABLE_PAYLOAD_VERSIONS: [u32; 5] = [
     MODEL_PAYLOAD_VERSION,
+    NEWTON_POLISH_ABSENT_PAYLOAD_VERSION,
     RHO_CERTIFICATE_TOKENS_PAYLOAD_VERSION,
     EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION,
     COVARIANCE_COPIES_PAYLOAD_VERSION,
@@ -7374,6 +7384,7 @@ mod tests {
         };
         for version in [
             MODEL_PAYLOAD_VERSION,
+            NEWTON_POLISH_ABSENT_PAYLOAD_VERSION,
             RHO_CERTIFICATE_TOKENS_PAYLOAD_VERSION,
             EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION,
             COVARIANCE_COPIES_PAYLOAD_VERSION,
@@ -7383,9 +7394,99 @@ mod tests {
                 .validate_payload_version()
                 .unwrap_or_else(|error| panic!("payload version {version} is readable: {error}"));
         }
-        assert_eq!(RHO_CERTIFICATE_TOKENS_PAYLOAD_VERSION, MODEL_PAYLOAD_VERSION - 1);
+        assert_eq!(NEWTON_POLISH_ABSENT_PAYLOAD_VERSION, MODEL_PAYLOAD_VERSION - 1);
+        assert_eq!(RHO_CERTIFICATE_TOKENS_PAYLOAD_VERSION, NEWTON_POLISH_ABSENT_PAYLOAD_VERSION - 1);
         assert_eq!(EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION, RHO_CERTIFICATE_TOKENS_PAYLOAD_VERSION - 1);
         assert_eq!(COVARIANCE_COPIES_PAYLOAD_VERSION, EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION - 1);
+    }
+
+    /// #2954: a payload written before the certificate recorded its Newton polish and each
+    /// railed coordinate's face kind loads, with no polish and the face `Unrecorded`, never as a
+    /// kind the record did not hold; and a payload claiming a later version than this binary
+    /// writes is refused by the named version error.
+    #[test]
+    fn a_payload_before_the_newton_polish_loads_with_unrecorded_faces_2954() {
+        let blocks = || {
+            vec![FittedBlock {
+                beta: array![0.1],
+                role: BlockRole::Mean,
+                edf: 1.0,
+                lambdas: Array1::zeros(0),
+            }]
+        };
+        let mut fit = saved_fit(blocks());
+        fit.artifacts.criterion_certificate =
+            Some(gam_solve::rho_optimizer::OuterCriterionCertificate {
+                stationarity: gam_solve::rho_optimizer::OuterStationarityCertificate::AnalyticGradient {
+                    grad_norm: 2e-7,
+                    projected_grad_norm: 2e-7,
+                    bound: 1e-5,
+                    rung: gam_solve::rho_optimizer::CertifiedRung {
+                        label: "solver-band".to_string(),
+                        derived_standard: false,
+                    },
+                },
+                curvature: gam_solve::rho_optimizer::CurvatureEvidence::Measured { psd: true },
+                lambdas_railed: vec![0],
+                railed_facts: vec![gam_solve::rho_optimizer::RailedCoordinateFact {
+                    index: 0,
+                    theta: 20.0,
+                    lower: -20.0,
+                    upper: 20.0,
+                    margin: 0.5,
+                    face: gam_solve::model_types::RailFaceKind::LimitModel,
+                }],
+                newton_polish: None,
+                curvature_floor: None,
+            });
+        let payload = marginal_slope_payload(NEWTON_POLISH_ABSENT_PAYLOAD_VERSION, fit);
+        let mut older = serde_json::to_value(&payload).expect("serialize the payload");
+        for materialization in ["fit_result", "unified"] {
+            if let Some(certificate) = older
+                .get_mut(materialization)
+                .and_then(|fit| fit.get_mut("artifacts"))
+                .and_then(|artifacts| artifacts.get_mut("criterion_certificate"))
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                certificate.remove("newton_polish");
+                certificate["railed_facts"][0]
+                    .as_object_mut()
+                    .expect("a railed fact serializes as an object")
+                    .remove("face")
+                    .expect("the face kind was written");
+            }
+        }
+        let loaded: FittedModelPayload =
+            serde_json::from_value(older).expect("a payload before the Newton polish parses");
+        FittedModel::from_payload(loaded.clone())
+            .payload()
+            .validate_payload_version()
+            .expect("a payload before the Newton polish is readable");
+        let certificate = loaded
+            .fit_result
+            .as_ref()
+            .and_then(|fit| fit.artifacts.criterion_certificate.as_ref())
+            .expect("the loaded fit keeps its certificate");
+        assert!(certificate.newton_polish.is_none());
+        assert_eq!(
+            certificate.railed_facts[0].face,
+            gam_solve::model_types::RailFaceKind::Unrecorded
+        );
+
+        let err = FittedModel::from_payload(marginal_slope_payload(
+            MODEL_PAYLOAD_VERSION + 1,
+            saved_fit(blocks()),
+        ))
+        .payload()
+        .validate_payload_version()
+        .expect_err("a payload from a later schema is refused");
+        assert!(
+            err.to_string().contains(&format!(
+                "file has version={}, this binary expects MODEL_PAYLOAD_VERSION={MODEL_PAYLOAD_VERSION}",
+                MODEL_PAYLOAD_VERSION + 1
+            )),
+            "{err}"
+        );
     }
 
     /// #2902 row 34: at payload version 17 a binomial beta-logistic link's

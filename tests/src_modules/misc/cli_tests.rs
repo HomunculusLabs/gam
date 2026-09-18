@@ -400,6 +400,7 @@ mod tests {
             curvature: gam::model_types::CurvatureEvidence::Measured { psd: true },
             lambdas_railed: Vec::new(),
             railed_facts: Vec::new(),
+            newton_polish: None,
             curvature_floor: None,
         };
         UnifiedFitResult::try_from_parts(gam::estimate::UnifiedFitResultParts {
@@ -509,6 +510,7 @@ mod tests {
             curvature: gam::model_types::CurvatureEvidence::Measured { psd: true },
             lambdas_railed: Vec::new(),
             railed_facts: Vec::new(),
+            newton_polish: None,
             curvature_floor: None,
         };
         let result = UnifiedFitResult::try_from_parts(gam::estimate::UnifiedFitResultParts {
@@ -706,6 +708,7 @@ fn saved_fit_summary_fixture() -> SavedFitSummary {
             curvature: gam::model_types::CurvatureEvidence::Measured { psd: true },
             lambdas_railed: Vec::new(),
             railed_facts: Vec::new(),
+            newton_polish: None,
             curvature_floor: None,
         }),
     }
@@ -3801,6 +3804,7 @@ fn compact_fit_result_for_batch_preserves_unified_geometry_invariant() {
                 curvature: gam::solver::rho_optimizer::CurvatureEvidence::Measured { psd: true },
                 lambdas_railed: Vec::new(),
                 railed_facts: Vec::new(),
+                newton_polish: None,
                 curvature_floor: None,
             }),
             ..Default::default()
@@ -3879,6 +3883,7 @@ fn core_saved_fit_result_json_roundtripswith_finite_summary() {
                 curvature: gam::model_types::CurvatureEvidence::Measured { psd: true },
                 lambdas_railed: Vec::new(),
                 railed_facts: Vec::new(),
+                newton_polish: None,
                 curvature_floor: None,
             }),
         },

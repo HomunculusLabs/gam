@@ -308,6 +308,13 @@ pub trait HessianFactorization: Send + Sync {
     /// Full dimension of H.
     fn dim(&self) -> usize;
 
+    /// A first-order bound on the forward error of [`Self::logdet`] carried from
+    /// this factorization's own backward error (#2954), with the `O(‖δH‖²)`
+    /// remainder dropped. `None` when the backend forms none.
+    fn logdet_forward_error(&self) -> Option<f64> {
+        None
+    }
+
     /// Whether this operator is backed by a dense factorization.
     ///
     /// Dense operators (eigendecomposition) have O(p²) trace cost per matrix;

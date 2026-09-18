@@ -449,6 +449,7 @@ pub fn fit_shared_tangent_reml(
                 curvature: gam_solve::rho_optimizer::CurvatureEvidence::NoEstimand,
                 lambdas_railed: Vec::new(),
                 railed_facts: Vec::new(),
+                newton_polish: None,
                 curvature_floor: None,
             },
         )

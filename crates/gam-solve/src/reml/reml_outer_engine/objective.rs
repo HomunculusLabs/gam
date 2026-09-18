@@ -439,6 +439,17 @@ pub(crate) fn reml_laml_evaluate(
             return Err(RemlLamlError::InnerModeFold(fold));
         }
     }
+    // #2954: the factor `log|H_β|` is read from, for the certificate's band on
+    // the criterion's value.
+    if crate::estimate::outer_eval_capture::certificate_parts_capture_enabled()
+        && let Some(logdet_forward_error) = hop.logdet_forward_error()
+    {
+        crate::estimate::outer_eval_capture::record_certificate_inner_factor(
+            crate::estimate::outer_eval_capture::InnerFactorCondition {
+                logdet_forward_error,
+            },
+        );
+    }
     let mut ift_residual_energy: Option<f64> = None;
     let mut inner_polish_step: Option<Array1<f64>> = None;
     if let Some(r) = kkt_residual_vec
@@ -531,6 +542,46 @@ pub(crate) fn reml_laml_evaluate(
         if cost_correction.is_finite() {
             ift_residual_energy = Some(residual_energy);
             cost += cost_correction;
+        }
+    }
+    // #2954: the certificate's band charges the error `V` carries because the
+    // inner mode stops at a residual, `E_r = ½·rᵀH_β⁻¹r` in `V`'s own units,
+    // wherever an armed evaluation can form it: the correction's own energy
+    // where the correction ran, otherwise the residual of the correction's own
+    // construction that the assembly handed over for the band alone, priced
+    // through the same mode-response kernel and never added to the cost. The
+    // profiled-Gaussian criterion reads the penalized deviance `D_p` through
+    // `((n−M_p)/2)·log D_p`, so an excess `δD_p = rᵀH⁻¹r` in `D_p` is
+    // `E_r·dD_p'/φ̂` in `V`.
+    if crate::estimate::outer_eval_capture::certificate_parts_capture_enabled() {
+        let handed = crate::estimate::outer_eval_capture::take_certificate_band_residual();
+        let source = handed.as_ref().map_or(
+            crate::estimate::outer_eval_capture::InnerResidualSource::InnerGradient,
+            |(_, source)| *source,
+        );
+        let energy = ift_residual_energy.or_else(|| {
+            let (residual, _) = handed?;
+            if residual.as_array().len() != hop.dim() {
+                return None;
+            }
+            let reduced = match solution.penalty_subspace_trace.as_ref() {
+                Some(kernel) => residual
+                    .projected_into_reduced_range(kernel)
+                    .ok()?
+                    .as_array()
+                    .clone(),
+                None => residual.as_array().clone(),
+            };
+            let half_energy = 0.5 * reduced.dot(&mode_kernel.respond_one(&reduced));
+            Some(match &solution.dispersion {
+                DispersionHandling::ProfiledGaussian => half_energy * dp_cgrad / profiled_scale,
+                DispersionHandling::Fixed { .. } => half_energy,
+            })
+        });
+        if let Some(energy) = energy.filter(|energy| energy.is_finite()) {
+            crate::estimate::outer_eval_capture::record_certificate_inner_residual(
+                crate::estimate::outer_eval_capture::InnerResidualCharge { energy, source },
+            );
         }
     }
 
@@ -1113,7 +1164,13 @@ pub(crate) fn reml_laml_evaluate(
             (None, DriftDerivResult::Dense(matrix)) => hop.trace_logdet_h_k(matrix, None),
             (None, DriftDerivResult::Operator(op)) => hop.trace_logdet_operator(op.as_ref()),
         };
-    let capture_rho_parts = crate::estimate::outer_eval_capture::rho_outer_audit_enabled();
+    // The drift split is audit-only. The parts themselves are also published to
+    // an armed certificate capture (#2954). Both flags are read HERE, on the
+    // calling thread: the map below runs on pool threads, where a thread-local
+    // reads disarmed.
+    let capture_drift_split = crate::estimate::outer_eval_capture::rho_outer_audit_enabled();
+    let capture_rho_parts = capture_drift_split
+        || crate::estimate::outer_eval_capture::certificate_parts_capture_enabled();
     type RhoGradEntry = (usize, f64, f64, f64, f64, f64, f64, f64, f64);
     let rho_grad_entries: Vec<RhoGradEntry> = (0..k)
         .into_par_iter()
@@ -1254,7 +1311,7 @@ pub(crate) fn reml_laml_evaluate(
             // needs no oracle: `tr(K · λ_k S_k)` with `K` and `S_k` both PSD
             // cannot be negative.
             let (part_frozen_logdet_h, part_mode_response_logdet_h) =
-                if capture_rho_parts && incl_logdet_h {
+                if capture_drift_split && incl_logdet_h {
                     let frozen = penalty_total_drift_result(coord, curvature_lambdas[idx], None);
                     let mode_response = rho_corrections[idx]
                         .as_ref()
@@ -1437,6 +1494,7 @@ pub(crate) fn reml_laml_evaluate(
         for part in rho_audit_parts.iter_mut() {
             part.total = grad[part.index];
         }
+        crate::estimate::outer_eval_capture::record_certificate_parts(&rho_audit_parts);
         crate::estimate::outer_eval_capture::record_rho_gradient_parts(rho_audit_parts);
     }
 

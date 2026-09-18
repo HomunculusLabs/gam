@@ -49,11 +49,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 pub mod asymptote_certificate;
 mod bridges;
 mod capability;
+mod decrement_bands;
 #[cfg(test)]
 #[path = "rho_optimizer/efs_fallback_routing_tests.rs"]
 mod efs_fallback_routing_tests;
 mod hessian_operator;
+mod newton_polish;
 mod objective;
+mod rail;
 pub mod rail_face;
 #[cfg(test)]
 #[path = "rho_optimizer/rail_projection_tests.rs"]
@@ -73,6 +76,7 @@ pub use capability::*;
 pub use gam_problem::{DeclaredHessianForm, Derivative, HessianValue, OuterEval};
 pub(crate) use hessian_operator::*;
 pub use objective::*;
+pub(crate) use rail::*;
 pub(crate) use run::*;
 // Re-export the outer-problem driver at `pub` (not just `pub(crate)`) so the
 // gam-pyffi crate can construct it directly for the SAE joint-fit FFI path.

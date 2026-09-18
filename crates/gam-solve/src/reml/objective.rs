@@ -1035,6 +1035,34 @@ impl<'a> RemlState<'a> {
     /// `InnerAssembly`. All three assembly builders (`build_dense_assembly`,
     /// `build_sparse_assembly`, `build_dense_original_assembly`) delegate
     /// here to avoid repeating the 18-field struct literal.
+    /// The inner residual an assembly presents to the unified evaluator (#2954).
+    ///
+    /// `populate` says whether the evaluator applies the inner-KKT envelope
+    /// correction; without it the assembly presents exact KKT and the value is
+    /// the raw criterion at `β̂`. An armed certificate capture is handed the
+    /// residual either way, so the certificate's band can charge the error the
+    /// inner mode leaves in `V` where this assembly declines to correct it: the
+    /// normal-equation residual of a direct Gaussian-identity solve, or the
+    /// iterative inner Newton's own final penalized gradient.
+    fn presented_inner_kkt_residual(
+        &self,
+        residual: Option<crate::model_types::ProjectedKktResidual>,
+        populate: bool,
+    ) -> Option<crate::model_types::ProjectedKktResidual> {
+        if let Some(residual) = residual.as_ref() {
+            let source = if self.gaussian_fixed_cache_eligible() {
+                crate::estimate::outer_eval_capture::InnerResidualSource::NormalEquations
+            } else {
+                crate::estimate::outer_eval_capture::InnerResidualSource::InnerGradient
+            };
+            crate::estimate::outer_eval_capture::stash_certificate_band_residual(
+                residual.clone(),
+                source,
+            );
+        }
+        residual.filter(|_| populate)
+    }
+
     pub(crate) fn finish_assembly(
         &self,
         pirls_result: &PirlsResult,
@@ -1487,7 +1515,9 @@ impl<'a> RemlState<'a> {
         // vector additionally carries a constraint-normal (Lagrange multiplier)
         // component this standard path does not strip, so present exact-KKT
         // there (unchanged behaviour) rather than a mis-projected residual.
-        let inner_kkt_residual = if populate_inner_kkt && free_basis_opt.is_none() {
+        let presented = populate_inner_kkt
+            || crate::estimate::outer_eval_capture::certificate_parts_capture_enabled();
+        let inner_kkt_residual = if presented && free_basis_opt.is_none() {
             self.standard_inner_kkt_residual_transformed(
                 pirls_result,
                 bundle.firth_dense_operator.is_some(),
@@ -1503,6 +1533,8 @@ impl<'a> RemlState<'a> {
         } else {
             None
         };
+        let inner_kkt_residual =
+            self.presented_inner_kkt_residual(inner_kkt_residual, populate_inner_kkt);
         self.finish_assembly(
             pirls_result,
             ctx,
@@ -1586,7 +1618,9 @@ impl<'a> RemlState<'a> {
         // Sparse-exact assembles β and H in the original basis (see `beta =
         // sparse_exact_beta_original`), so the envelope residual is mapped to
         // that basis. Sparse-native fits are unconstrained on this path.
-        let inner_kkt_residual = if populate_inner_kkt {
+        let presented = populate_inner_kkt
+            || crate::estimate::outer_eval_capture::certificate_parts_capture_enabled();
+        let inner_kkt_residual = if presented {
             self.inner_kkt_residual_original_basis(
                 pirls_result,
                 bundle.firth_dense_operator.is_some()
@@ -1595,6 +1629,8 @@ impl<'a> RemlState<'a> {
         } else {
             None
         };
+        let inner_kkt_residual =
+            self.presented_inner_kkt_residual(inner_kkt_residual, populate_inner_kkt);
         self.finish_assembly(
             pirls_result,
             ctx,
@@ -1967,7 +2003,9 @@ impl<'a> RemlState<'a> {
         // the original basis, and `build_dense_original_assembly` is only ever
         // reached on the unconstrained QS frame, so the transformed residual
         // maps up cleanly via the same orthogonal `Qs`.
-        let inner_kkt_residual = if populate_inner_kkt {
+        let presented = populate_inner_kkt
+            || crate::estimate::outer_eval_capture::certificate_parts_capture_enabled();
+        let inner_kkt_residual = if presented {
             self.inner_kkt_residual_original_basis(
                 pirls_result,
                 bundle.firth_dense_operator.is_some()
@@ -1976,6 +2014,8 @@ impl<'a> RemlState<'a> {
         } else {
             None
         };
+        let inner_kkt_residual =
+            self.presented_inner_kkt_residual(inner_kkt_residual, populate_inner_kkt);
         self.finish_assembly(
             pirls_result,
             ctx,
@@ -2229,6 +2269,16 @@ impl<'a> RemlState<'a> {
             );
         }
         crate::estimate::outer_eval_capture::record_rho_outer_criterion(result.cost, components);
+        crate::estimate::outer_eval_capture::record_certificate_criterion(
+            crate::estimate::outer_eval_capture::CertificateCriterion {
+                cost: result.cost,
+                fixed_beta: components[0],
+                logdet_h: components[1],
+                logdet_s: components[2],
+                kkt: components[3],
+                inner_residual_energy: result.ift_residual_energy,
+            },
+        );
         // This value/derivative tuple is the genuine REML/LAML criterion. An
         // optimizer-only diagnostic must never mutate it: a former hard-gated
         // ALO augmentation introduced a finite objective jump when leverage

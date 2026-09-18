@@ -994,6 +994,33 @@ pub struct RailedCoordinateFact {
     pub upper: f64,
     /// The width-capped margin in force for THIS coordinate.
     pub margin: f64,
+    /// What the bound it is railed at is (#2954). `#[serde(default)]` reads a
+    /// fact stored before this field as [`RailFaceKind::Unrecorded`].
+    #[serde(default)]
+    pub face: RailFaceKind,
+}
+
+/// The kind of box face a railed coordinate sits on (#2954, #2627).
+///
+/// Box-KKT certifies only at a face that belongs to the model. A ρ bound does
+/// when the route derives it from the term's limit model: past a #2812
+/// resolvability edge every direction's effective degrees of freedom are at
+/// their λ → ∞ (null-space fit) or λ → 0 (unpenalized fit) value to within the
+/// criterion gradient's resolution, so the bound is where that limit holds,
+/// not where a search was stopped. Any other bound (the representable
+/// log-strength range, the precision box a term without penalty geometry falls
+/// back to, a box a route declares without deriving it) is a representability
+/// face, and projection-only stationarity there says nothing about the data.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RailFaceKind {
+    /// A bound the route derived from the term's limit model.
+    LimitModel,
+    /// A literal bound: box-KKT does not certify here.
+    Representability,
+    /// A fact stored before certificates recorded the face kind, so which face
+    /// it sat on is unknown. No live certificate records it.
+    #[default]
+    Unrecorded,
 }
 
 impl std::fmt::Display for RailedCoordinateFact {
@@ -1244,6 +1271,56 @@ pub struct OuterCriterionCertificate {
     /// own resolution, and by how much.
     #[serde(default)]
     pub curvature_floor: Option<CurvatureFloorClearance>,
+    /// The Newton steps the mint took from the point the search handed over
+    /// before this certificate judged it (#2954). `None` when none were taken,
+    /// and for a certificate stored before this field existed.
+    #[serde(default)]
+    pub newton_polish: Option<NewtonPolishRecord>,
+}
+
+/// The Newton polish a mint took before certifying (#2954).
+///
+/// The mint's Newton-decrement verdict is stricter than any search stop, so the
+/// point a search hands over can still buy a decrease the arithmetic resolves.
+/// The mint takes Newton steps on the free coordinates while each lowers the
+/// criterion by more than its band, within the step budget quadratic
+/// convergence allows, and judges the point they reach. A coordinate whose
+/// Newton steps stop short of the box bound they head to is railed there when
+/// that lowers the criterion by more than its band (projected Newton), and the
+/// coordinates left free are polished on a budget of their own.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NewtonPolishRecord {
+    /// `λ̂²` at the point the search handed over.
+    pub lambda_sq_before: f64,
+    /// `λ̂²` at the point this certificate judged.
+    pub lambda_sq_after: f64,
+    /// The criterion decrease each accepted step bought, in order.
+    pub decreases: Vec<f64>,
+    /// The step budget quadratic convergence allowed on the current face.
+    pub step_budget: usize,
+    /// The coordinates the polish railed, in order. `#[serde(default)]` so a
+    /// record stored before this field existed still deserializes.
+    #[serde(default)]
+    pub rails: Vec<NewtonPolishRail>,
+    /// The θ point the search handed over, where the polish began.
+    #[serde(default)]
+    pub entry: Vec<f64>,
+}
+
+/// One coordinate a mint's polish moved to its box bound (#2954).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NewtonPolishRail {
+    /// The θ coordinate railed.
+    pub index: usize,
+    /// Its value before the rail, and the bound it was moved to.
+    pub from: f64,
+    pub to: f64,
+    /// `V(from) − V(to)`, never negative.
+    pub decrease: f64,
+    /// How many Newton steps the polish had taken before this rail.
+    pub steps_before: usize,
+    /// The kind of face it was railed at. A polish rails only at a limit model.
+    pub face: RailFaceKind,
 }
 
 impl OuterCriterionCertificate {
@@ -1874,6 +1951,7 @@ mod tests_certification_refusal_2550 {
             curvature: CurvatureEvidence::Measured { psd: true },
             lambdas_railed: vec![0, 1],
             railed_facts: Vec::new(),
+            newton_polish: None,
             curvature_floor: None,
         }
     }
@@ -1983,6 +2061,7 @@ mod tests_certification_refusal_2550 {
             curvature: CurvatureEvidence::Measured { psd: true },
             lambdas_railed: vec![0],
             railed_facts: Vec::new(),
+            newton_polish: None,
             curvature_floor: None,
         };
         assert!(matches!(
@@ -2082,6 +2161,7 @@ mod rail_tail_evidence_tests {
             curvature: CurvatureEvidence::Measured { psd: true },
             lambdas_railed: vec![0, 1],
             railed_facts: Vec::new(),
+            newton_polish: None,
             curvature_floor: None,
         }
     }
@@ -3505,6 +3585,7 @@ mod assembly_inner_status_gate_tests {
             curvature: CurvatureEvidence::Measured { psd: true },
             lambdas_railed: Vec::new(),
             railed_facts: Vec::new(),
+            newton_polish: None,
             curvature_floor: None,
         });
         parts.outer_gradient_norm = Some(2e-7);
@@ -3553,6 +3634,7 @@ mod assembly_inner_status_gate_tests {
             curvature: CurvatureEvidence::Measured { psd: true },
             lambdas_railed: Vec::new(),
             railed_facts: Vec::new(),
+            newton_polish: None,
             curvature_floor: None,
         });
         parts.outer_gradient_norm = Some(2e-7);
@@ -3698,6 +3780,122 @@ mod assembly_inner_status_gate_tests {
         let decoded: UnifiedFitResult =
             serde_json::from_value(absent).expect("a fit without the status parses");
         assert!(decoded.edf_rank_bound().is_empty(), "{:?}", decoded.edf_rank_bound());
+    }
+
+    /// #2954: a certificate saves its Newton polish and each railed coordinate's
+    /// face kind, and one saved before either existed parses back with no polish
+    /// and every face `Unrecorded`, never as a face kind it did not record.
+    #[test]
+    fn a_certificate_saved_before_the_polish_and_face_kinds_reads_them_as_unrecorded_2954() {
+        let certificate = OuterCriterionCertificate {
+            stationarity: OuterStationarityCertificate::AnalyticGradient {
+                grad_norm: 2e-7,
+                projected_grad_norm: 2e-7,
+                bound: 1e-5,
+                rung: CertifiedRung {
+                    label: "newton-decrement".to_string(),
+                    derived_standard: true,
+                },
+            },
+            curvature: CurvatureEvidence::Measured { psd: true },
+            lambdas_railed: vec![0],
+            railed_facts: vec![RailedCoordinateFact {
+                index: 0,
+                theta: 20.0,
+                lower: -20.0,
+                upper: 20.0,
+                margin: 0.5,
+                face: RailFaceKind::LimitModel,
+            }],
+            newton_polish: Some(NewtonPolishRecord {
+                lambda_sq_before: 1.0e-4,
+                lambda_sq_after: 0.0,
+                decreases: vec![6.3e-5],
+                step_budget: 2,
+                rails: vec![NewtonPolishRail {
+                    index: 0,
+                    from: 17.0,
+                    to: 20.0,
+                    decrease: 1.2e-5,
+                    steps_before: 1,
+                    face: RailFaceKind::LimitModel,
+                }],
+                entry: vec![17.0],
+            }),
+            curvature_floor: None,
+        };
+        let encoded = serde_json::to_value(&certificate).expect("serialize the certificate");
+        let decoded: OuterCriterionCertificate =
+            serde_json::from_value(encoded.clone()).expect("the certificate parses back");
+        assert_eq!(decoded.railed_facts[0].face, RailFaceKind::LimitModel);
+        let polish = decoded.newton_polish.expect("the polish round-trips");
+        assert_eq!(polish.rails.len(), 1);
+        assert_eq!(polish.rails[0].face, RailFaceKind::LimitModel);
+
+        let mut older = encoded;
+        older
+            .as_object_mut()
+            .expect("the certificate serializes as an object")
+            .remove("newton_polish")
+            .expect("the polish was written");
+        older["railed_facts"][0]
+            .as_object_mut()
+            .expect("a railed fact serializes as an object")
+            .remove("face")
+            .expect("the face kind was written");
+        let decoded: OuterCriterionCertificate =
+            serde_json::from_value(older).expect("an older certificate parses");
+        assert!(decoded.newton_polish.is_none());
+        assert_eq!(decoded.railed_facts[0].face, RailFaceKind::Unrecorded);
+    }
+
+    /// #2954: a coordinate the certificate's polish carried onto a face seeds
+    /// another search from the interior value the search handed the polish; the
+    /// published `λ` and the rest of the seed are the fit's own.
+    #[test]
+    fn a_polish_railed_coordinate_seeds_the_next_search_from_its_entry_2954() {
+        let log_lambdas = ndarray::array![-19.63, 2.5];
+        let mut certificate = OuterCriterionCertificate {
+            stationarity: OuterStationarityCertificate::AnalyticGradient {
+                grad_norm: 2e-7,
+                projected_grad_norm: 2e-7,
+                bound: 1e-5,
+                rung: CertifiedRung {
+                    label: "newton-decrement".to_string(),
+                    derived_standard: true,
+                },
+            },
+            curvature: CurvatureEvidence::Measured { psd: true },
+            lambdas_railed: vec![0],
+            railed_facts: vec![RailedCoordinateFact {
+                index: 0,
+                theta: -19.63,
+                lower: -19.63,
+                upper: 20.0,
+                margin: 0.5,
+                face: RailFaceKind::LimitModel,
+            }],
+            newton_polish: None,
+            curvature_floor: None,
+        };
+        assert_eq!(
+            search_seed_from(log_lambdas.clone(), Some(&certificate)),
+            log_lambdas,
+            "without a polish the fit's own log λ seeds"
+        );
+        certificate.newton_polish = Some(NewtonPolishRecord {
+            lambda_sq_before: 1.0e-4,
+            lambda_sq_after: 0.0,
+            decreases: vec![1.0e-6],
+            step_budget: 1,
+            rails: Vec::new(),
+            entry: vec![-17.05, 2.49],
+        });
+        assert_eq!(
+            search_seed_from(log_lambdas, Some(&certificate)),
+            ndarray::array![-17.05, 2.5],
+            "the railed coordinate seeds from its entry, the free one from the fit"
+        );
     }
 
     /// #2955: a covariance whose diagonal `se_from_covariance` refuses is refused
@@ -3861,6 +4059,7 @@ mod assembly_inner_status_gate_tests {
             curvature: CurvatureEvidence::NoEstimand,
             lambdas_railed: Vec::new(),
             railed_facts: Vec::new(),
+            newton_polish: None,
             curvature_floor: None,
         });
         parts.outer_gradient_norm = Some(0.0);
@@ -4471,12 +4670,48 @@ macro_rules! bail_fit_result_invariant {
     };
 }
 
+/// [`UnifiedFitResult::search_seed_log_lambdas`] over a fit's `log λ` and its
+/// certificate (#2954).
+fn search_seed_from(
+    mut seed: Array1<f64>,
+    certificate: Option<&OuterCriterionCertificate>,
+) -> Array1<f64> {
+    let Some(certificate) = certificate else {
+        return seed;
+    };
+    let Some(polish) = certificate.newton_polish.as_ref() else {
+        return seed;
+    };
+    for fact in &certificate.railed_facts {
+        let entry = polish.entry.get(fact.index).copied();
+        if let (Some(value), Some(entry)) = (seed.get_mut(fact.index), entry)
+            && entry.is_finite()
+        {
+            *value = entry;
+        }
+    }
+    seed
+}
+
 impl UnifiedFitResult {
     /// Proof carried by every fitted model. Callers never need to re-check a
     /// convergence boolean; construction has already consumed and validated
     /// the inner and outer evidence.
     pub fn convergence_evidence(&self) -> &FitConvergenceEvidence {
         &self.convergence
+    }
+
+    /// The log smoothing strengths another search seeded from this fit starts
+    /// at (#2954). A coordinate the certificate's Newton polish carried onto a
+    /// box face, by a rail or a clamped step, is a fact about this fit's
+    /// criterion, not a place to start another one: it seeds from the interior
+    /// value the search handed the polish. Every other coordinate seeds from
+    /// the fit's own `λ`.
+    pub fn search_seed_log_lambdas(&self) -> Array1<f64> {
+        search_seed_from(
+            self.lambdas.mapv(f64::ln),
+            self.artifacts.criterion_certificate.as_ref(),
+        )
     }
 
     /// Number of original training rows / experimental units.
@@ -5775,6 +6010,7 @@ mod curvature_evidence_serialized_contract_2561_tests {
                 curvature,
                 lambdas_railed: Vec::new(),
                 railed_facts: Vec::new(),
+                newton_polish: None,
                 curvature_floor: None,
             }
         };
@@ -5869,6 +6105,7 @@ mod curvature_evidence_serialized_contract_2561_tests {
                 curvature,
                 lambdas_railed: Vec::new(),
                 railed_facts: Vec::new(),
+                newton_polish: None,
                 curvature_floor: None,
             }
         };

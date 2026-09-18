@@ -824,6 +824,7 @@ fn decode_invariant_test_parts() -> UnifiedFitResultParts {
                 curvature: crate::model_types::CurvatureEvidence::Measured { psd: true },
                 lambdas_railed: Vec::new(),
                 railed_facts: Vec::new(),
+                newton_polish: None,
                 curvature_floor: None,
             }),
             ..Default::default()

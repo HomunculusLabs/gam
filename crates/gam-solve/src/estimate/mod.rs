@@ -128,6 +128,8 @@ pub use summary::{
 #[cfg(test)]
 mod binomial_reml_outer_cost_1575_tests;
 #[cfg(test)]
+mod inner_residual_charge_2954_tests;
+#[cfg(test)]
 mod ridge_continuity_tests;
 #[cfg(test)]
 mod continuous_order_tests;

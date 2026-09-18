@@ -415,6 +415,16 @@ impl<'dp> InnerAssembly<'dp> {
                 result.criterion_components.kkt,
             ],
         );
+        crate::estimate::outer_eval_capture::record_certificate_criterion(
+            crate::estimate::outer_eval_capture::CertificateCriterion {
+                cost: result.cost,
+                fixed_beta: result.criterion_components.fixed_beta,
+                logdet_h: result.criterion_components.logdet_h,
+                logdet_s: result.criterion_components.logdet_s,
+                kkt: result.criterion_components.kkt,
+                inner_residual_energy: result.ift_residual_energy,
+            },
+        );
         Ok(result)
     }
 }

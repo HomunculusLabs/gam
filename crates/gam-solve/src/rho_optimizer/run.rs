@@ -1,3 +1,5 @@
+use super::decrement_bands::{decrement_stationarity_bound, outer_decrement_verdict};
+use super::newton_polish::resolvable_decrease_evidence;
 use super::*;
 use gam_problem::{DominanceRefusalKind, StationarityRung, StationarityStandard};
 
@@ -124,6 +126,14 @@ pub(crate) struct OuterConfig {
     /// The model's canonical feasible outer domain. Every stationarity
     /// certificate and rail report reasons against this box.
     pub(crate) model_domain_bounds: Option<(Array1<f64>, Array1<f64>)>,
+    /// Which faces of `model_domain_bounds` are the route's derived limit model,
+    /// per coordinate, lower then upper (#2954, #2627). A face is one when the
+    /// route derived it from the term's own limit (a #2812 resolvability edge,
+    /// past which the term is at its null-space or unpenalized fit to the
+    /// gradient's resolution); every other face is a representability literal,
+    /// and box-KKT certifies nothing about the data there. `None`: the route
+    /// declared none.
+    pub(crate) model_domain_limit_faces: Option<(Vec<bool>, Vec<bool>)>,
     /// A temporary algorithmic subspace used only by an active-set polish.
     /// It may narrow the model domain but never changes the feasible cone that
     /// screening or mint is allowed to certify.
@@ -347,6 +357,7 @@ impl Default for OuterConfig {
             require_measured_psd: false,
             max_iter: UNBOUNDED_OUTER_ITERATIONS,
             model_domain_bounds: None,
+            model_domain_limit_faces: None,
             search_bounds_override: None,
             seed_config: gam_problem::SeedConfig::default(),
             heuristic_log_lambdas: None,
@@ -403,6 +414,7 @@ pub struct OuterProblem {
     require_measured_psd: bool,
     max_iter: usize,
     bounds: Option<(Array1<f64>, Array1<f64>)>,
+    limit_faces: Option<(Vec<bool>, Vec<bool>)>,
     seed_config: gam_problem::SeedConfig,
     heuristic_log_lambdas: Option<Vec<f64>>,
     initial_rho: Option<Array1<f64>>,
@@ -442,6 +454,7 @@ impl OuterProblem {
             require_measured_psd: false,
             max_iter: UNBOUNDED_OUTER_ITERATIONS,
             bounds: None,
+            limit_faces: None,
             seed_config: gam_problem::SeedConfig::default(),
             heuristic_log_lambdas: None,
             initial_rho: None,
@@ -537,6 +550,12 @@ impl OuterProblem {
     }
     pub fn with_bounds(mut self, lo: Array1<f64>, hi: Array1<f64>) -> Self {
         self.bounds = Some((lo, hi));
+        self
+    }
+    /// Declare which faces of the bounds are derived limit models (#2954), lower
+    /// then upper, one flag per coordinate.
+    pub fn with_limit_faces(mut self, lower: Vec<bool>, upper: Vec<bool>) -> Self {
+        self.limit_faces = Some((lower, upper));
         self
     }
     pub fn with_seed_config(mut self, sc: gam_problem::SeedConfig) -> Self {
@@ -793,6 +812,7 @@ impl OuterProblem {
             require_measured_psd: self.require_measured_psd,
             max_iter: self.max_iter,
             model_domain_bounds: self.bounds.clone(),
+            model_domain_limit_faces: self.limit_faces.clone(),
             search_bounds_override: None,
             seed_config: self.seed_config,
             heuristic_log_lambdas: self.heuristic_log_lambdas.clone(),
@@ -3218,222 +3238,6 @@ fn shifted_newton_predicted_decrease(
     Some(0.5 * quad)
 }
 
-/// Is outer coordinate `k` pinned within [`coordinate_rail_margin`] of either
-/// of its own box bounds?
-///
-/// Factored out so the λ-block REPORT and the θ-wide certificate FACE below
-/// cannot drift apart about what "railed" means for the same coordinate: they
-/// differ only in which coordinates they scan, never in the test.
-///
-/// The margin is the shared width-capped one, so this is the exact-bound test on
-/// [`rail_relaxed_bounds`]' relaxed endpoints. It used to be a flat
-/// [`CERTIFICATE_RAIL_MARGIN`] while the residual projector capped the same
-/// constant at a quarter-width, and a box narrower than `2 ×
-/// CERTIFICATE_RAIL_MARGIN` — the raw-κ chart window on any standardised
-/// feature set — was then covered end to end by its own two margin bands: every
-/// κ read railed, flat κ = 0 included, and the certificate's reduced Hessian
-/// lost every row it was supposed to judge (#2462).
-///
-/// Comparing against the relaxed endpoints rather than `|θ_k − bound|` also
-/// keeps an infeasible coordinate railed. Under the absolute-value form a point
-/// *outside* the box by more than the margin reported interior, which is the one
-/// reading that can never be right.
-fn outer_coordinate_is_railed(theta: &Array1<f64>, k: usize, config: &OuterConfig) -> bool {
-    RailTest::evaluate(theta, k, config).is_railed()
-}
-
-/// One coordinate's rail test: the verdict together with the interval and the
-/// margin it was decided against (#2465).
-///
-/// The predicate above computed `(lo, hi)`, derived a margin from them, compared
-/// against the relaxed endpoints, and returned a bare `bool` — so `railed=[3]`
-/// reached the reader with everything that produced it already destroyed, and
-/// recovering the interval on #2462 took a thirteen-point seeding sweep.
-///
-/// #2462 made carrying it necessary rather than merely useful: the margin is now
-/// [`coordinate_rail_margin`], **width-capped per coordinate**, so two
-/// coordinates in the same fit can be judged railed against different margins.
-/// `railed=[1, 3]` is no longer even one statement, and the flag alone cannot
-/// say which band either coordinate met.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct RailTest {
-    /// Index into the θ vector.
-    pub(crate) index: usize,
-    /// The coordinate's value at the judged point.
-    pub(crate) theta: f64,
-    /// The interval it was tested against. `None` means the configured box does
-    /// not cover this coordinate at all — which is itself the reason the verdict
-    /// is `false`, a distinction the bare bool erased.
-    pub(crate) box_bounds: Option<(f64, f64)>,
-    /// The width-capped margin in force for THIS coordinate, from
-    /// [`coordinate_rail_margin`]. Zero when the box does not cover it.
-    pub(crate) margin: f64,
-    /// The coordinate `index` names in the caller's native order, which is what a
-    /// refusal prints: a test taken inside a canonical run is rendered through
-    /// [`native_coordinate`] (#2817).
-    pub(crate) native_index: usize,
-}
-
-impl RailTest {
-    fn evaluate(theta: &Array1<f64>, k: usize, config: &OuterConfig) -> Self {
-        let box_bounds = match config.model_domain_bounds.as_ref() {
-            Some((lo, hi)) if k < lo.len() && k < hi.len() => Some((lo[k], hi[k])),
-            Some(_) => None,
-            None => Some((gam_problem::LOG_STRENGTH_MIN, gam_problem::LOG_STRENGTH_MAX)),
-        };
-        Self {
-            // Indexed, not `get`-ed: every caller scans an index range derived
-            // from `theta.len()`, so an out-of-range k is a caller bug and the
-            // predicate this replaced panicked on it. Softening that to a silent
-            // `false` would turn a bug into a coordinate quietly reported
-            // un-railed.
-            theta: theta[k],
-            index: k,
-            native_index: native_coordinate(config.native_coordinate_order.as_deref(), k),
-            margin: box_bounds.map_or(0.0, |(lo, hi)| coordinate_rail_margin(lo, hi)),
-            box_bounds,
-        }
-    }
-
-    /// Pinned at or past either relaxed endpoint. This is the ONLY definition of
-    /// railed in this file; both the λ-block report and the θ-wide certificate
-    /// face route through it, and the relaxed-endpoint form (rather than
-    /// `|θ_k − bound|`) is what keeps an infeasible coordinate railed (#2462).
-    pub(crate) fn is_railed(self) -> bool {
-        match self.box_bounds {
-            Some((lo, hi)) => self.theta <= lo + self.margin || self.theta >= hi - self.margin,
-            None => false,
-        }
-    }
-}
-
-impl std::fmt::Display for RailTest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.box_bounds {
-            Some((lo, hi)) => write!(
-                f,
-                "#{} theta={:.6e} box=[{:.6e}, {:.6e}] margin={:.3e} railed_at=(<={:.6e} or >={:.6e})",
-                self.native_index,
-                self.theta,
-                lo,
-                hi,
-                self.margin,
-                lo + self.margin,
-                hi - self.margin,
-            ),
-            None => write!(
-                f,
-                "#{} theta={:.6e} box=NOT-COVERED-BY-CONFIGURED-BOUNDS",
-                self.native_index, self.theta,
-            ),
-        }
-    }
-}
-
-/// The certificate-facing facts for `indices`: the interval and margin each
-/// railed coordinate was judged against (#2530).
-///
-/// Built from [`RailTest`], which is the single definition of railed, so the
-/// certificate reports what the predicate actually decided rather than a second
-/// derivation of it. A coordinate the configured box does not cover contributes
-/// nothing: it was not judged against an interval, so there is no interval to
-/// report.
-pub(crate) fn railed_coordinate_facts(
-    theta: &Array1<f64>,
-    indices: &[usize],
-    config: &OuterConfig,
-) -> Vec<RailedCoordinateFact> {
-    indices
-        .iter()
-        .filter_map(|&k| {
-            let test = RailTest::evaluate(theta, k, config);
-            test.box_bounds.map(|(lower, upper)| RailedCoordinateFact {
-                index: test.index,
-                theta: test.theta,
-                lower,
-                upper,
-                margin: test.margin,
-            })
-        })
-        .collect()
-}
-
-/// Render the rail tests for `indices`, so a refusal naming railed coordinates
-/// also states the interval and margin each was judged against (#2465).
-pub(crate) fn rail_test_summary(
-    theta: &Array1<f64>,
-    indices: &[usize],
-    config: &OuterConfig,
-) -> String {
-    indices
-        .iter()
-        .map(|&k| RailTest::evaluate(theta, k, config).to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Smoothing coordinates (leading ρ block) railed against the outer box.
-///
-/// This is the **report**. `OuterCriterionCertificate::lambdas_railed` indexes
-/// *smoothing parameters*, and every consumer reads it that way — gam-report's
-/// "λ railed" warning, the pyffi certificate surface, `is_clean`. It is
-/// deliberately NOT the set the certificate reasons with; see
-/// [`certificate_railed_coordinates`].
-pub(crate) fn certificate_railed_lambdas(
-    rho: &Array1<f64>,
-    rho_dim: usize,
-    config: &OuterConfig,
-) -> Vec<usize> {
-    (0..rho_dim.min(rho.len()))
-        .filter(|&k| outer_coordinate_is_railed(rho, k, config))
-        .collect()
-}
-
-/// **Every** outer coordinate railed against its own box bound — the ρ block
-/// *and* the trailing non-ρ blocks that a joint search carries in the same θ
-/// vector under the same box: the spatial log-κ ψ coordinates and the
-/// auxiliary coordinates.
-///
-/// This is the set every *decision* in [`certify_outer_optimality`] must use,
-/// and using the λ-only report there instead was a real defect. The active-set
-/// reasoning at a box-constrained optimum is a statement about coordinates, not
-/// about what a coordinate happens to parameterize:
-///
-/// * the second-order condition only has to hold on the **feasible tangent
-///   subspace**, so `certificate_hessian_is_psd_off_railed` deletes the railed
-///   rows and columns. `layout.rho_dim()` is `n_params − psi_dim`, so a ψ
-///   coordinate pinned on its data-derived κ window stayed *inside* that
-///   sub-block and its saturated (and, near a window edge, routinely negative)
-///   curvature row decided `hessian_psd = false` for the whole fit. That is
-///   precisely the failure the block's own comment says must not happen — "a
-///   rail-caused indefiniteness would disable the very certificate that exists
-///   to certify a railed optimum (#2299)" — it was simply never extended past
-///   the ρ block;
-/// * the same omission hid the coordinate from the asymptote-rail mint
-///   (#2348 Inc 1), from tail-snap, from `interior_curvature_floor_clearance`,
-///   from the #2155 saddle escape, and from the #2392 wrong-rail pull-back and
-///   active-set reduction. A κ search whose rail is a ψ coordinate could
-///   therefore never be certified *by construction*, no matter how correct its
-///   gradient was;
-/// * and it made the refusal message actively misleading, because
-///   `project_gradient_vector` DOES project every coordinate against its own
-///   bound. So `|g|` could collapse to a small `|Pg|` while `railed=[]`
-///   reported nothing responsible for the collapse — the exact disagreement
-///   #979 measured from the other side and could not explain.
-///
-/// Relaxing nothing: a coordinate near a bound whose gradient still points
-/// *into* the box keeps its feasible-descent component in `|Pg|`
-/// ([`project_gradient_vector`] zeros only the outward half), so a genuinely
-/// unconverged interior direction is still refused.
-pub(crate) fn certificate_railed_coordinates(
-    theta: &Array1<f64>,
-    config: &OuterConfig,
-) -> Vec<usize> {
-    (0..theta.len())
-        .filter(|&k| outer_coordinate_is_railed(theta, k, config))
-        .collect()
-}
-
 /// Which term of the stationarity bound's `max` chain actually set it.
 ///
 /// `certify_outer_optimality` does not compute *a* bound; it takes the maximum of
@@ -3494,6 +3298,21 @@ pub(crate) enum StationarityBoundSource {
     /// certified this and the caller would not" -- a distinction that matters
     /// because the second is not a defect in the fit.
     CallerRequirement,
+    /// `|Pg|·√((band_f − band_λ²)/(½λ̂²))` (#2954): the Newton-decrement verdict
+    /// on rounding bands only, rendered as a gradient bound along the measured
+    /// direction. It certifies iff `½λ̂² + band_λ² ≤ band_f`, so no caller
+    /// tolerance and no scale anchor enters, and it may TIGHTEN every rung above.
+    NewtonDecrement,
+    /// The decrement verdict was taken and could not certify anything: its own
+    /// rounding reached the objective band, a flat direction carried gradient,
+    /// or the reduced Hessian did not decompose (#2954). The bound is `0`.
+    NewtonDecrementUndecided,
+    /// A mint whose polish stopped short of a box face its step heads to, where
+    /// that face is a representability literal rather than the term's derived
+    /// limit model (#2954, #2627). Box-KKT certifies nothing about the data
+    /// there, so the point is refused by this type instead of railed. The bound
+    /// is the decrement verdict's.
+    RepresentabilityFace,
 }
 
 impl StationarityBoundSource {
@@ -3505,6 +3324,9 @@ impl StationarityBoundSource {
             Self::GradientReproducibility => "gradient-reproducibility",
             Self::FixedPointResidual => "fixed-point-residual",
             Self::CallerRequirement => "caller-requirement",
+            Self::NewtonDecrement => "newton-decrement",
+            Self::NewtonDecrementUndecided => "newton-decrement-undecided",
+            Self::RepresentabilityFace => "representability-face",
         }
     }
 
@@ -3518,7 +3340,10 @@ impl StationarityBoundSource {
         // curvature rung, because a bound estimated by the code doing the
         // judging is not the same evidence and pretending otherwise is what
         // made the tiering invisible in the first place.
-        matches!(self, Self::CurvatureResolvability)
+        matches!(
+            self,
+            Self::CurvatureResolvability | Self::NewtonDecrement | Self::NewtonDecrementUndecided
+        )
     }
 
     /// The neutral projection carried on the refusal, so a red states its own
@@ -3615,7 +3440,7 @@ fn native_certificate_summary(certificate: &OuterCriterionCertificate, config: &
     }
 }
 
-fn outer_nonconvergence_error(
+pub(super) fn outer_nonconvergence_error(
     context: &str,
     reason: &str,
     result: &OuterResult,
@@ -4020,6 +3845,7 @@ fn certify_fixed_point_optimality(
             &certificate_railed_coordinates(&result.rho, config),
             config,
         ),
+        newton_polish: None,
         curvature_floor: None,
     };
     result.criterion_certificate = Some(certificate.clone());
@@ -4109,8 +3935,9 @@ pub(crate) fn certify_outer_optimality_with_fidelity(
         // bimodal at `rho_star`.
         obj.reset();
     }
-    let outcome =
-        certify_outer_optimality_at_terminal_fidelity(obj, config, context, result, true, fidelity);
+    let outcome = certify_outer_optimality_at_terminal_fidelity(
+        obj, config, context, result, true, fidelity, None,
+    );
     drop(terminal_cap_guard);
     if outcome.is_err() {
         result.termination.refuse_certificate();
@@ -4118,13 +3945,16 @@ pub(crate) fn certify_outer_optimality_with_fidelity(
     outcome
 }
 
-fn certify_outer_optimality_at_terminal_fidelity(
+pub(super) fn certify_outer_optimality_at_terminal_fidelity(
     obj: &mut dyn OuterObjective,
     config: &OuterConfig,
     context: &str,
     result: &mut OuterResult,
     allow_tail_snap: bool,
     fidelity: CertificationFidelity,
+    // The Newton polish the mint has taken so far, `None` on the first call
+    // (#2954).
+    polish: Option<super::newton_polish::PolishWalk>,
 ) -> Result<OuterCriterionCertificate, EstimationError> {
     let capability = obj.capability();
     let layout = capability.theta_layout();
@@ -4189,6 +4019,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             curvature: CurvatureEvidence::NoEstimand,
             lambdas_railed: Vec::new(),
             railed_facts: Vec::new(),
+            newton_polish: None,
             curvature_floor: None,
         };
         result.final_value = value;
@@ -4318,7 +4149,18 @@ fn certify_outer_optimality_at_terminal_fidelity(
     } else {
         OuterEvalOrder::ValueAndGradient
     };
-    let evaluation = obj.eval_with_order(&result.rho, order).map_err(|err| {
+    // #2954: the decrement verdict charges each gradient component on the
+    // magnitudes of the channels it was summed from, which only this
+    // evaluation's own parts carry. The capture is taken before the error is
+    // surfaced, so a failed evaluation leaves it disarmed.
+    crate::estimate::outer_eval_capture::begin_certificate_parts_capture();
+    let evaluation = obj.eval_with_order(&result.rho, order);
+    let terminal_evidence = super::newton_polish::terminal_certificate_evidence(
+        &result.rho,
+        polish.as_ref(),
+        crate::estimate::outer_eval_capture::take_certificate_evidence(),
+    );
+    let evaluation = evaluation.map_err(|err| {
         outer_nonconvergence_error(
             context,
             &format!("analytic final-point evaluation failed: {err}"),
@@ -4715,7 +4557,65 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // always `None` and this reads `analytic_hessian` exactly as before; at
     // `Screening` it is `Some` only on the would-refuse path, and it feeds THIS
     // rung and nothing else.
-    if let Some(hessian) = analytic_hessian
+    //
+    // #2954: where the route declares its size the decrement on rounding bands IS
+    // the standard, and it may tighten every first-order band above as well as
+    // widen them. A genuine saddle keeps the first-order ladder, so the
+    // negative-curvature adjudication below still runs on it.
+    //
+    // The coordinates railed on their domain faces (the infinite-smoothing ceiling). Their
+    // saturated curvature direction makes the FULL Hessian indefinite, so the
+    // flatness certificate below — and the final curvature gate — judge PSD on the
+    // interior (un-railed) sub-block instead, or a rail-caused indefiniteness would
+    // disable the very certificate that exists to certify a railed optimum (#2299).
+    // The FACE the certificate reasons on: every θ coordinate against its own
+    // bound, ρ and non-ρ alike. See `certificate_railed_coordinates` for why
+    // the λ-block report cannot be used here.
+    let certificate_railed = certificate_railed_coordinates(&result.rho, config);
+    let decrement_decided = analytic_hessian
+        .as_ref()
+        .or(screening_bound_curvature.as_ref())
+        .and_then(|hessian| {
+            match outer_decrement_verdict(
+                config,
+                hessian,
+                &projected_gradient,
+                &certificate_railed,
+                evaluation.cost,
+                &terminal_evidence,
+            ) {
+                Ok(decision) => Some(decision),
+                Err(reason) => {
+                    log::info!(
+                        "[CERTIFICATE] {context}: Newton-decrement verdict not taken: {reason}; \
+                         the first-order ladder decides (#2954)"
+                    );
+                    None
+                }
+            }
+        })
+        .and_then(|decision| {
+            decrement_stationarity_bound(projected_grad_norm, &decision.verdict)
+                .map(|decided| (decision, decided))
+        });
+    if let Some((decision, (bound, source))) = decrement_decided.as_ref() {
+        let verdict = &decision.verdict;
+        log::info!(
+            "[CERTIFICATE] {context}: Newton-decrement verdict {verdict:?} (band_f = channels \
+             {:.3e} + factor {:.3e} + inner residual {:.3e}); face {:?}, released {:?}; bound \
+             {bound:.3e} (rung {}) replaces {stationarity_bound:.3e} (rung {}) at \
+             |Pg|={projected_grad_norm:.3e} (#2954)",
+            decision.objective_band.channels,
+            decision.objective_band.factor,
+            decision.objective_band.inner_residual,
+            decision.face,
+            decision.released,
+            source.label(),
+            bound_source.label(),
+        );
+        stationarity_bound = *bound;
+        bound_source = *source;
+    } else if let Some(hessian) = analytic_hessian
         .as_ref()
         .or(screening_bound_curvature.as_ref())
         // At the criterion's curvature resolution, the same standard the ARC
@@ -4753,6 +4653,31 @@ fn certify_outer_optimality_at_terminal_fidelity(
         }
     }
 
+    // #2954: a resolvable decrement at the mint is polished, railed at a limit
+    // model, or refused by name (`newton_polish::polish_the_mint`); it never
+    // reaches the first-order ladder below.
+    if matches!(fidelity, CertificationFidelity::Mint)
+        && let Some((decision, _)) = decrement_decided.as_ref()
+        && let Some(evidence) = resolvable_decrease_evidence(&decision.verdict)
+    {
+        let inputs = super::newton_polish::MintPolish {
+            allow_tail_snap,
+            fidelity,
+            polish,
+            decision,
+            evidence,
+            cost: evaluation.cost,
+            analytic_hessian: &analytic_hessian,
+            projected_gradient: &projected_gradient,
+            projected_grad_norm,
+            bounds: &bounds,
+            layout,
+            stationarity_bound,
+            bound_source,
+        };
+        return super::newton_polish::polish_the_mint(obj, config, context, result, inputs);
+    }
+
     // Gradient-reproducibility floor (#2299 fully-saturated smooth). A
     // stationarity certificate cannot resolve below the reproducibility of its
     // own measuring instrument: at a rail-adjacent optimum (λ ~ 1e12, the term
@@ -4772,7 +4697,12 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // cancellation noise decorrelates (spread ~ |Pg|). The widening is gated
     // on the two measurements' objective VALUES agreeing to the same relative
     // floor the cost-stall guard uses, and the PSD gate below is unchanged.
-    if projected_grad_norm > stationarity_bound
+    //
+    // A decrement verdict is not widened here (#2954): measured gradient noise can
+    // only make its decrement unresolvable, never make a resolvable decrease
+    // stationary.
+    if decrement_decided.is_none()
+        && projected_grad_norm > stationarity_bound
         && let Some(prior_gradient) = run_recorded_gradient.as_ref()
         && layout
             .validate_gradient_len(prior_gradient, "outer run-recorded gradient")
@@ -4855,15 +4785,6 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // noise in hand, and only probes coordinates whose curvature row is below the
     // roundoff floor — so a well-conditioned objective (every scripted mock at its
     // certification point) probes nothing and pays zero extra evaluations.
-    // The coordinates railed on their domain faces (the infinite-smoothing ceiling). Their
-    // saturated curvature direction makes the FULL Hessian indefinite, so the
-    // flatness certificate below — and the final curvature gate — judge PSD on the
-    // interior (un-railed) sub-block instead, or a rail-caused indefiniteness would
-    // disable the very certificate that exists to certify a railed optimum (#2299).
-    // The FACE the certificate reasons on: every θ coordinate against its own
-    // bound, ρ and non-ρ alike. See `certificate_railed_coordinates` for why
-    // the λ-block report cannot be used here.
-    let certificate_railed = certificate_railed_coordinates(&result.rho, config);
     // #2676: the directions along which THIS criterion is exactly constant by
     // construction of its penalty map. Read once, at the certified point, and
     // threaded to every curvature test below, so the certificate and the
@@ -4988,6 +4909,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         &certificate_railed,
                         config,
                     ),
+                    newton_polish: None,
                     curvature_floor: None,
                 };
                 // Move the certified curvature onto the result; the mint path returns
@@ -5110,6 +5032,36 @@ fn certify_outer_optimality_at_terminal_fidelity(
                  gradient reduced from {projected_grad_norm:.3e} to \
                  {certified_projected_grad_norm:.3e}"
             );
+            // #2954: the saturated-flat coordinates join the face, and the decrement
+            // is taken again on what remains.
+            if decrement_decided.is_some() {
+                let mut face = certificate_railed.clone();
+                let mut reduced = projected_gradient.clone();
+                for &k in &saturated_flat {
+                    reduced[k] = 0.0;
+                    face.push(k);
+                }
+                if let Ok(decision) = outer_decrement_verdict(
+                    config,
+                    hessian,
+                    &reduced,
+                    &face,
+                    evaluation.cost,
+                    &terminal_evidence,
+                ) && let Some((bound, source)) =
+                    decrement_stationarity_bound(certified_projected_grad_norm, &decision.verdict)
+                {
+                    let verdict = &decision.verdict;
+                    log::info!(
+                        "[CERTIFICATE] {context}: Newton-decrement verdict {verdict:?} with the \
+                         saturated-flat coordinate(s) on the face; bound {bound:.3e} (rung {}) at \
+                         |Pg|={certified_projected_grad_norm:.3e} (#2954)",
+                        source.label(),
+                    );
+                    stationarity_bound = bound;
+                    bound_source = source;
+                }
+            }
         }
         // `eval_cost` warm-starts the inner solve, so the probes moved the objective
         // off the certified point. Restore it to ρ̂ once iff we actually probed, so
@@ -5169,6 +5121,16 @@ fn certify_outer_optimality_at_terminal_fidelity(
         // spatial route the psi coordinate is the only one carrying gradient,
         // and it was the one coordinate the refusal could not print.
         railed_facts: railed_coordinate_facts(&result.rho, &certificate_railed, config),
+        // #2954: the Newton steps the mint took before judging, with `λ̂²` at the
+        // judged point.
+        newton_polish: polish.map(|walk| walk.record).map(|mut record| {
+            if let Some((decision, _)) = decrement_decided.as_ref()
+                && let opt::DecrementVerdict::Certified(evidence) = &decision.verdict
+            {
+                record.lambda_sq_after = evidence.lambda_sq;
+            }
+            record
+        }),
         // The floor's verdict on that same curvature, recorded beside it.
         curvature_floor: analytic_hessian.as_ref().and_then(|hessian| {
             interior_curvature_floor_clearance(
@@ -5271,6 +5233,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         &certificate_railed,
                         config,
                     ),
+                    newton_polish: None,
                     curvature_floor: None,
                 };
                 result.final_hessian = analytic_hessian;
@@ -8106,6 +8069,16 @@ fn canonicalize_outer_config(config: &OuterConfig, perm: &[usize]) -> OuterConfi
     if let Some((lower, upper)) = config.model_domain_bounds.as_ref() {
         canonical.model_domain_bounds = Some((permute_arr(lower), permute_arr(upper)));
     }
+    if let Some((lower, upper)) = config.model_domain_limit_faces.as_ref() {
+        let permute_faces = |faces: &[bool]| -> Vec<bool> {
+            if faces.len() == perm.len() {
+                perm.iter().map(|&i| faces[i]).collect()
+            } else {
+                faces.to_vec()
+            }
+        };
+        canonical.model_domain_limit_faces = Some((permute_faces(lower), permute_faces(upper)));
+    }
     if let Some((lower, upper)) = config.search_bounds_override.as_ref() {
         canonical.search_bounds_override = Some((permute_arr(lower), permute_arr(upper)));
     }
@@ -8741,6 +8714,12 @@ pub(super) fn install_objective_domain(
                     "outer objective-domain lower bound[{native}] must be finite; got {value}"
                 )));
             }
+            if value > lower[index]
+                && let Some((faces, _)) = config.model_domain_limit_faces.as_mut()
+                && let Some(face) = faces.get_mut(index)
+            {
+                *face = false;
+            }
             lower[index] = lower[index].max(value);
         }
         if let Some(domain) = objective_upper.as_ref() {
@@ -8749,6 +8728,14 @@ pub(super) fn install_objective_domain(
                 return Err(EstimationError::InvalidInput(format!(
                     "outer objective-domain upper bound[{native}] must be finite; got {value}"
                 )));
+            }
+            if value < upper[index]
+                && let Some((_, faces)) = config.model_domain_limit_faces.as_mut()
+                && let Some(face) = faces.get_mut(index)
+            {
+                // The objective's own face cut the limit model's: the bound in
+                // force is no longer the limit model (#2954).
+                *face = false;
             }
             upper[index] = upper[index].min(value);
         }

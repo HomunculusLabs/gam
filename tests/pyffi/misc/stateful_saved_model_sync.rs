@@ -66,6 +66,8 @@ const EXPECTED_SAVED_MODEL_ROOT_FIELD_COUNT: usize = 2;
 // `FitInference`'s four covariance/SE copies inside the fit result (#2955).
 // Schema 20 adds `FitInference::edf_rank_bound` there (#2901). Neither is a
 // payload key or a stateful-link slot.
+// Schema 22 records the #2954 certificate's Newton polish and each railed coordinate's
+// face kind inside the fit artifacts: neither is a payload key or a stateful-link slot.
 const EXPECTED_MODEL_PAYLOAD_FIELD_COUNT: usize = 99;
 const EXPECTED_STANDARD_FAMILY_FIELD_COUNT: usize = 6;
 

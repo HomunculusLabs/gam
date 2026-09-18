@@ -6038,6 +6038,7 @@ fn strict_curvature_requirement_does_not_reinterpret_floor_clearance_as_psd() {
         curvature: CurvatureEvidence::Measured { psd: false },
         lambdas_railed: Vec::new(),
         railed_facts: Vec::new(),
+        newton_polish: None,
         curvature_floor: Some(CurvatureFloorClearance {
             interior_min_eigenvalue: -0.05,
             gradient_floor: 0.1,
@@ -6083,6 +6084,7 @@ fn strict_curvature_requirement_does_not_reinterpret_floor_clearance_as_psd() {
 
     let measured_psd = OuterCriterionCertificate {
         curvature: CurvatureEvidence::Measured { psd: true },
+        newton_polish: None,
         curvature_floor: None,
         ..floor_cleared
     };
@@ -6097,6 +6099,7 @@ fn strict_curvature_requirement_does_not_reinterpret_floor_clearance_as_psd() {
         curvature: CurvatureEvidence::NotAvailable,
         lambdas_railed: Vec::new(),
         railed_facts: Vec::new(),
+        newton_polish: None,
         curvature_floor: None,
     };
     assert!(
@@ -6459,6 +6462,11 @@ mod criterion_invariance_certificate_tests_2676;
 // curvature. Split out for the source-file length budget.
 #[path = "run_plan_stationarity_band_tests.rs"]
 mod run_plan_stationarity_band_tests;
+
+// The Newton-decrement standard on rounding bands where curvature is in hand,
+// at 2,000 to 200,000 rows (#2954).
+#[path = "newton_decrement_certificate_2954_tests.rs"]
+mod newton_decrement_certificate_2954_tests;
 
 // The dense-ARC route's online stop on the test its own certificate applies:
 // the Newton decrement against the criterion's resolution, not an absolute
