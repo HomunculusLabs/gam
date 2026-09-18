@@ -112,7 +112,10 @@ runs:
         if [ -n "$failed_steps" ]; then
           failed_numbers=$(printf '%s\n' "$failed_steps" | cut -f1 | paste -sd, - | sed 's/,/, /g')
           status_label="job status: ${JOB_STATUS} at step(s) ${failed_numbers}"
-          failed_detail=$(printf '%s\n' "$failed_steps" | sed 's/\t/ /' | paste -sd';' - | sed 's/;/; /g')
+          # Joined without rewriting the names, which may hold `;` themselves. Run
+          # 35327329208's body read "streaming;  full" when the `;` join was
+          # respaced.
+          failed_detail=$(printf '%s\n' "$failed_steps" | awk -F'\t' 'NR > 1 { printf " | " } { printf "step %s: %s", $1, $2 }')
         elif [ "${JOB_STATUS:-}" = failure ]; then
           status_label="job status: failure, failing step not reported by the jobs API"
           failed_detail=""

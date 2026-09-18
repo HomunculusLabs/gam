@@ -200,3 +200,40 @@ fn test_reference_quality_metric_column_keeps_only_the_tests_own_figures() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The results commit names the steps that failed before publishing, each name
+/// verbatim. Run 35327329208's body read "streaming;  full": the list was joined on
+/// `;` and respaced, which also rewrote the `;` inside step 8's own name.
+#[test]
+fn test_publish_action_names_failed_steps_verbatim() {
+    let action = std::fs::read_to_string(".github/actions/publish-gha-results/action.yml").unwrap();
+    let assignment = |name: &str| -> String {
+        action
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with(&format!("{name}=$(printf '%s\\n' \"$failed_steps\"")))
+            .unwrap_or_else(|| panic!("the action builds `{name}` from `$failed_steps`"))
+            .to_string()
+    };
+    let script = format!(
+        "failed_steps=$(printf '8\\tRun quality suite (resilient + streaming; full per-test capture)\\n9\\tAggregate quality pairs (#1561 gate + #2395 paired power)')\n{}\n{}\nprintf '%s\\n%s' \"$failed_numbers\" \"$failed_detail\"\n",
+        assignment("failed_numbers"),
+        assignment("failed_detail"),
+    );
+    let output = Command::new("bash").arg("-c").arg(&script).output().unwrap();
+    assert!(
+        output.status.success(),
+        "the failed-step labels did not build: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let (numbers, detail) = stdout
+        .split_once('\n')
+        .expect("the numbers line, then the detail line");
+    assert_eq!(numbers, "8, 9");
+    assert_eq!(
+        detail,
+        "step 8: Run quality suite (resilient + streaming; full per-test capture) | \
+         step 9: Aggregate quality pairs (#1561 gate + #2395 paired power)"
+    );
+}
