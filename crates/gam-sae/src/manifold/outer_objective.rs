@@ -1028,7 +1028,10 @@ impl SaeManifoldOuterObjective {
         };
         let atoms = match evaluated {
             Ok(_) => return Ok(None),
-            Err(err @ SaeCriterionError::IndefiniteObservedInformation { .. }) => {
+            Err(
+                err @ (SaeCriterionError::IndefiniteObservedInformation { .. }
+                | SaeCriterionError::OrbitCriterionUnavailableOnArrowRoute { .. }),
+            ) => {
                 return Err(err.to_string());
             }
             Err(SaeCriterionError::Numerical(message)) => return Err(message),
@@ -2101,6 +2104,11 @@ impl SaeManifoldOuterObjective {
                 return Ok((f64::INFINITY, beta_hat));
             }
             Err(SaeCriterionError::Numerical(message)) => return Err(message),
+            // #2234 — the arrow route lacks the capability to price this state at ANY ρ, so the
+            // refusal is fatal to the fit, not an infeasible probe to steer away from.
+            Err(err @ SaeCriterionError::OrbitCriterionUnavailableOnArrowRoute { .. }) => {
+                return Err(err.to_string());
+            }
         };
         if penalized_quasi_laplace_cost.is_finite() {
             self.adopt_collapse_prevention_gates_from_root();
@@ -2639,6 +2647,10 @@ impl SaeManifoldOuterObjective {
                 ));
             }
             Err(SaeCriterionError::Numerical(err)) => return Err(err),
+            // #2234 — a missing route capability, fatal at every ρ rather than infeasible here.
+            Err(err @ SaeCriterionError::OrbitCriterionUnavailableOnArrowRoute { .. }) => {
+                return Err(err.to_string());
+            }
         };
         let cost = evaluation.cost;
         self.record_fit_data_collapse_verdict(&rho)?;
@@ -3606,6 +3618,10 @@ impl OuterObjective for SaeManifoldOuterObjective {
                 }
                 Err(SaeCriterionError::Numerical(err)) => {
                     return Err(EstimationError::RemlOptimizationFailed(err));
+                }
+                // #2234 — a missing route capability, fatal at every ρ rather than infeasible here.
+                Err(err @ SaeCriterionError::OrbitCriterionUnavailableOnArrowRoute { .. }) => {
+                    return Err(EstimationError::RemlOptimizationFailed(err.to_string()));
                 }
             };
         let cost = evaluation.cost;

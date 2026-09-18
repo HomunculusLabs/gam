@@ -4613,6 +4613,20 @@ impl SaeManifoldTerm {
             &options,
             true,
         )?;
+        // #2234 — the arrow route factors `A` itself, so it cannot price the orbit-eliminated
+        // criterion the dense route prices for a closure-certified circle orbit. It refuses by name
+        // at every such state, off the same predicate the dense route stiffens on, so the two
+        // routes never price one state differently without saying so.
+        if let Some(atom) = self
+            .compact_orbit_pricing(rho, &converged_cache)?
+            .iter()
+            .find_map(|pricing| match pricing {
+                CompactOrbitPricing::ExactCircle(generator) => Some(generator.atom),
+                CompactOrbitPricing::Laplace { .. } => None,
+            })
+        {
+            return Err(SaeCriterionError::OrbitCriterionUnavailableOnArrowRoute { atom });
+        }
         // #9: accumulate the per-atom Grams + N_eff in the same log-det pass.
         // These are required by the canonical rank-charge criterion.
         let mut rank_inputs = StreamingRankInputs::default();

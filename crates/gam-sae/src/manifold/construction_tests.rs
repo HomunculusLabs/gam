@@ -701,6 +701,7 @@ mod exact_stationarity_solve_1418_tests {
             metric_frobenius: scale * (dimension as f64).sqrt(),
             band,
             band_metric_images,
+            orbit: None,
         };
         for index in 0..dimension {
             let realised = block.rank_floor(index) * scale;

@@ -145,6 +145,10 @@ pub(crate) struct ExactHessianSpectralBlock {
     /// right-hand side.
     band: Vec<usize>,
     band_metric_images: Array2<f64>,
+    /// #2234 — present when this block prices the orbit-stiffened `A_s` of a dense evaluation:
+    /// the exact-`A` pseudo-inverse through the eliminated orbit coordinate, which every solve
+    /// and response consumer reads instead of `A_s⁺`.
+    orbit: Option<OrbitElimination>,
 }
 
 thread_local! {
@@ -617,6 +621,10 @@ impl ExactHessianSpectralBlock {
     /// `|μ|` and band edge, so a caller that needs the band component reads it there. `Err`
     /// means only that the solve failed a certificate or its input was malformed.
     fn solve_stationarity(&self, rhs: &SaeArrowVector) -> Result<ExactStationaritySolve, String> {
+        // #2234 — an orbit-stiffened block prices `A_s`, but the solve belongs to `A`.
+        if let Some(orbit) = self.orbit.as_ref() {
+            return self.solve_orbit_eliminated_stationarity(orbit, rhs);
+        }
         let total_t = rhs.t.len();
         let dim = total_t + rhs.beta.len();
         let spectral_dim = self.eigenvalues.len();
@@ -796,6 +804,9 @@ pub(crate) struct DenseExactAGeometry {
     /// `E`'s decoder-prior border block (#2828).
     e_beta: Option<Array2<f64>>,
     total_t: usize,
+    /// #2234 — the closure-certified circle orbit `block` was stiffened along, when there is one.
+    /// The value and its derivative price the orbit from it, off the same eliminated block.
+    orbit_generator: Option<CircleOrbitGenerator>,
 }
 
 /// Value and classified basin spectrum, without realizing a dense differential.
@@ -4678,7 +4689,29 @@ impl SaeManifoldTerm {
             min_retained_over_floor,
             max_band_over_floor,
         );
-        Ok((joint_pricing.log_det, geometry))
+        // #2234 — the orbit coordinate integrated exactly: `½log|A|` becomes
+        // `½log|A_s| − ½log det N − log I + ½log 2π`, priced only once the complement classified
+        // without refusal, so its coupling form is nonnegative.
+        let orbit_correction = match geometry.orbit_generator.as_ref() {
+            Some(generator) => {
+                let value = Self::price_compact_orbit(generator, &geometry.block)?;
+                log::info!(
+                    "[SAE-EXACT-ORBIT] atom={} priced: nodes={} log I={:.6e} log det N={:.6e} \
+                     coupling=[{:.3e}, {:.3e}, {:.3e}] correction={:.6e}",
+                    generator.atom,
+                    value.integral.angles.len(),
+                    value.integral.log_integral,
+                    value.log_gram_det,
+                    value.coupling_forms[0],
+                    value.coupling_forms[1],
+                    value.coupling_forms[2],
+                    value.log_det_correction,
+                );
+                value.log_det_correction
+            }
+            None => 0.0,
+        };
+        Ok((joint_pricing.log_det + orbit_correction, geometry))
     }
 
     /// The generalized eigensystem of one already-materialized exact-Hessian block in the
@@ -4818,6 +4851,7 @@ impl SaeManifoldTerm {
             metric_frobenius,
             band,
             band_metric_images,
+            orbit: None,
         };
         let crossings = block.resolution_band_crossings();
         if crossings > 0 {
@@ -5188,12 +5222,47 @@ impl SaeManifoldTerm {
         let (a, e_beta) =
             self.materialize_exact_hessian_dense_with_gap_border(rho, target, cache)?;
         let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
-        let block = Self::exact_hessian_spectral_block(a, &ArrowMetric::Joint(cache).prepare()?)?;
+        let metric = ArrowMetric::Joint(cache).prepare()?;
+        // #2234 — a closure-certified circle orbit is integrated exactly rather than priced by its
+        // chord curvature: the block prices the stiffened `A_s`, and its solves eliminate the orbit
+        // coordinate to return `A⁺`, off this one decomposition.
+        let mut orbit_generator = None;
+        for pricing in self.compact_orbit_pricing(rho, cache)? {
+            match pricing {
+                CompactOrbitPricing::ExactCircle(generator) => {
+                    log::info!(
+                        "[SAE-EXACT-ORBIT] atom={} exact circle orbit: period={:e} eta={:e} \
+                         closure residual={:.3e} band={:.3e}",
+                        generator.atom,
+                        generator.period,
+                        generator.eta,
+                        generator.closure_residual,
+                        generator.closure_band,
+                    );
+                    orbit_generator = Some(generator);
+                }
+                CompactOrbitPricing::Laplace { atom, reason } => {
+                    if reason != CompactOrbitLaplaceReason::NotAPeriodicChart {
+                        log::info!("[SAE-EXACT-ORBIT] atom={atom} keeps Laplace pricing: {reason:?}");
+                    }
+                }
+            }
+        }
+        let tangents = match orbit_generator.as_ref() {
+            Some(generator) => generator.tangent.clone().insert_axis(ndarray::Axis(1)),
+            None => Array2::<f64>::zeros((a.nrows(), 0)),
+        };
+        let (operator, stiffening) = Self::stiffen_compact_orbits(a, tangents, &metric)?;
+        let mut block = Self::exact_hessian_spectral_block(operator, &metric)?;
+        if let Some(stiffening) = stiffening {
+            block.orbit = Some(stiffening.eliminate(&block, &metric)?);
+        }
         Ok(DenseExactAGeometry {
             block,
             e_diag,
             e_beta,
             total_t,
+            orbit_generator,
         })
     }
 
@@ -5624,6 +5693,32 @@ impl SaeManifoldTerm {
         // dA. Chain its remaining explicit dE term to rho and theta here.
         let (priced_joint_trace, priced_joint_gamma) =
             self.priced_clamp_adjoint_extras(rho, cache, &pricing)?;
+        // #2234 — an orbit-stiffened block prices `log|A_s| − log det N − 2·log I + log 2π`. Its
+        // differential replaces the block's own `dA` and `dΦ` weights and adds the legs that reach
+        // neither operator: the orbit integral's coordinate and log-precision legs and the tangent's
+        // border legs.
+        let (pricing, orbit_legs) = match geometry.orbit_generator.as_ref() {
+            Some(generator) => {
+                let differential = Self::compact_orbit_differential(
+                    generator,
+                    &geometry.block,
+                    &pricing,
+                    &ArrowMetric::Joint(cache).prepare()?,
+                    geometry.total_t,
+                )?;
+                let legs = (differential.theta, differential.log_precision, generator.atom);
+                (
+                    ExactHessianPricing {
+                        a_derivative: differential.operator_weight,
+                        metric_derivative: differential.metric_weight,
+                        clamp_diagonal_derivative: pricing.clamp_diagonal_derivative,
+                        clamp_border_derivative: pricing.clamp_border_derivative,
+                    },
+                    Some(legs),
+                )
+            }
+            None => (pricing, None),
+        };
         let a_pinv = &pricing.a_derivative;
         // This value diagonalizes `A_raw = B_raw + ΔC`; differentiate that raw
         // operator, not the row-conditioned operator carried by arrow factors.
@@ -5673,6 +5768,14 @@ impl SaeManifoldTerm {
         logdet_trace += &metric_trace;
         gamma.t += &metric_gamma.t;
         gamma.beta += &metric_gamma.beta;
+        // #2234 — the orbit legs that reach neither `A` nor `Φ`.
+        if let Some((theta, log_precision, atom)) = orbit_legs {
+            gamma.t += &theta.t;
+            gamma.beta += &theta.beta;
+            if !rho.log_ard[atom].is_empty() {
+                logdet_trace[rho.ard_flat_index(atom, 0)] += 0.5 * log_precision;
+            }
+        }
         // #2267 — the caller's rank-charge derivative, read off the same block.
         gamma.t.scaled_add(2.0, &rank_charge_theta.t);
         gamma.beta.scaled_add(2.0, &rank_charge_theta.beta);

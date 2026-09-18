@@ -177,6 +177,7 @@ mod certificate;
 mod chart_atlas;
 mod chart_degeneracy;
 mod chart_gauges;
+mod compact_orbit;
 mod construction;
 mod construction_ard;
 mod construction_arrow_schur_assembly;
@@ -506,6 +507,9 @@ mod tests_crosscoder_olmo;
 
 #[cfg(test)]
 mod tests_stall_diagnostic_2234;
+
+#[cfg(test)]
+mod tests_compact_orbit_2234;
 
 #[cfg(test)]
 mod tests_barrier_curvature_2731;

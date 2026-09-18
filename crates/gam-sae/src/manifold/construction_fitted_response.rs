@@ -389,14 +389,9 @@ impl SaeManifoldTerm {
                 geometry.eigenvectors.dim()
             ));
         }
-        let retained: Vec<usize> = (0..dim)
-            .filter(|&index| geometry.eigenvalues[index].abs() > geometry.rank_floor(index))
-            .collect();
-        let basis = geometry.eigenvectors.select(ndarray::Axis(1), &retained);
-        let inverse: Vec<f64> = retained
-            .iter()
-            .map(|&index| 1.0 / geometry.eigenvalues[index])
-            .collect();
+        // #2234 — `A⁺ = B·diag(w)·Bᵀ` over the resolved directions, from the block's one owner, so an
+        // orbit-stiffened block hands out the exact-`A` response rather than `A_s⁺`.
+        let (basis, inverse) = geometry.retained_pseudo_inverse_factors();
         let project = |gram: ResponseOutputGram| -> Result<Array2<f64>, String> {
             let curvature = curvature(gram)?;
             if curvature.dim() != (dim, dim) {
