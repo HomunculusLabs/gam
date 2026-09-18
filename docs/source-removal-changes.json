@@ -322,5 +322,35 @@
     ],
     "reason": "#932: the order-four flex partition's moment degree was the hand-set literal 32 in partition.rs. It is now derived as 4 + 6·<Jet4 as FlexJet>::ORDER = 28, the highest index base_moment_jets reads, and it moves into flex_jet.rs beside FLEX_ORDER_FIVE_MOMENT_DEGREE, which is derived the same way from Jet5. The name, its pub(crate) visibility and every consumer are kept; partition.rs and contracted.rs read it as super::flex_jet::FLEX_ORDER_FOUR_MOMENT_DEGREE.",
     "evidence": "At the base, git grep -w finds FLEX_ORDER_FOUR_MOMENT_DEGREE only in crates/gam-models/src/survival/marginal_slope/timepoint_exact: its declaration at partition.rs:162, one use at partition.rs:85 and two at contracted.rs:89 and :235. This commit rewrites all three uses to the flex_jet.rs declaration, and in the landing tree partition.rs declares it 0 times. gam-pyffi names it 0 times. Gate job 1220614 at fb8a68cf39 with this commit's code files (patch md5 66452ceb76fdb51df51d2fc93af88fae): workspace --all-targets check RC 0, gam-models lib tests 29 passed 0 failed, and source_removal_guard.py listed exactly this identity."
+  },
+  {
+    "base": "b8cbb86901d9133f93469c8f2695bd2365d1ddf6",
+    "items": [
+      "crates/gam-sae/src/manifold/support_term.rs:fn:atom",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:beta_operator_apply_serially",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:beta_operator_blocks_diagonal_and_dense_match_column_probes",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:beta_operator_fan_out_is_bit_identical_to_the_serial_sweep",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:beta_operator_fan_out_is_stable_across_repeated_application",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:beta_operator_fixture",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:euclidean_patch_affine_gauge_profile_lowers_the_prior_at_a_fixed_fit_2576",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:exact_generalized_mode_escapes_a_periodic_saddle_2634",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:exact_newton_displacement_sees_the_orbit_the_diagonal_misses_2933_f08",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:fixed_point_certifies_a_state_converged_to_roundoff_2933_f08",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:fixed_point_certifies_the_orbit_optimum_not_its_crawl_2933_f08",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:frozen_decoder_solve_certifies_a_slow_row_past_256_sweeps_2469",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:frozen_decoder_solve_refuses_a_motionless_sweep_2469",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:linear_affine_gauge_profile_lowers_the_prior_at_a_fixed_fit_2576",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:majorizer_inverse_folds_the_dense_spectrum_bundle_into_the_arrow_inverse_2576",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:penalized_solve_agrees_with_the_assembled_matrix_where_that_is_conditioned",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:penalized_solve_fixture",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:penalized_solve_survives_the_smoothing_fellner_schall_actually_produces",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:planted_decoder_offset_refuses_under_the_roundoff_floor_2933_f08",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:scale_orbit_fixture_2933",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:shifted_pd_certificate_decides_at_its_band_in_both_directions_2634",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:support_first_order_screen_survives_raw_global_refusal_2634",
+      "crates/gam-sae/src/manifold/support_term.rs:fn:support_outer_fixture_2933"
+    ],
+    "reason": "#2576 move, not deletion. support_term.rs had reached 9901 lines, and #2576's change took it past the root build.rs #780 10k-line limit (pre-push check-only job 1223088 refused it at 10068). Its #[cfg(test)] mod tests therefore moves verbatim to crates/gam-sae/src/manifold/support_term_tests.rs, which support_term.rs declares as #[cfg(test)] #[path = \"support_term_tests.rs\"] mod tests;. The module path stays support_term::tests, so each of these 23 test-scoped items (17 tests and 6 fixtures) keeps its name, its module and its callers. Only the file holding it changes, and this guard's path:kind:name identity reads that as a removal.",
+    "evidence": "Job 1245673 (pool-gx5, the split at c098f269f3, patch md5 4765576a) names exactly these 23 identities, all test_scoped and non-public with removed_declarations 1. In that job cargo check --workspace --all-targets --exclude gam-pyffi, cargo check -p gam-pyffi and public_api_census all exit 0 (12638 public functions before and after), and support_term::tests plus support_outer::tests pass 27 of 27 with a per-test status list byte-identical to the unpatched base job 1245674 (md5 fc5f47fe). A git grep at c098f269f3 finds each of the 23 fns declared once in support_term.rs, and support_term_tests.rs declares each once. Re-indenting support_term_tests.rs's body by four spaces reproduces the removed block byte for byte."
   }
 ]
