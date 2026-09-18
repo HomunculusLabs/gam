@@ -22,8 +22,10 @@ Stage S0 is torch only; ``registry`` and ``execute`` are the torch end of S1.
     ``W_O.0`` block is zeroed at.
   * It runs the same float64 forward through the runner under all-on, the head zeroed at every
     position, and the head zeroed at each declared position.
-  * It writes every stage a native receipt compares: per layer the residual in, attention pattern,
-    mixed head outputs, the write and the residual out, then the logits. One two-axis float64
+  * It writes every stage a native receipt compares: per layer the residual in, the attention scores
+    (before the causal mask, so every entry is finite; the entries at key positions up to the query
+    are the softmax logits), the attention pattern, the mixed head outputs, the write and the residual
+    out, then the logits. One two-axis float64
     ``.npy`` per stage holds every setting's rows, in setting order.
   * ``execute.json`` names the harvest, the declared settings, the settings run, the edit's factors,
     the executor's dtype, device and TF32 flag, and every file's md5.
@@ -54,7 +56,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-STAGES = ("resid_pre", "pattern", "mixed", "write", "resid_post")
+STAGES = ("resid_pre", "scores", "pattern", "mixed", "write", "resid_post")
 
 
 class InductionTransformer(torch.nn.Module):
@@ -110,8 +112,8 @@ class InductionTransformer(torch.nn.Module):
             x = x + write
             patterns.append(pattern)
             if self.captured is not None:
-                self.captured.append({"resid_pre": resid_pre, "pattern": pattern, "mixed": mixed,
-                                      "write": write, "resid_post": x})
+                self.captured.append({"resid_pre": resid_pre, "scores": scores, "pattern": pattern,
+                                      "mixed": mixed, "write": write, "resid_post": x})
         logits = F.linear(x, self.W_U)
         if self.captured is not None:
             self.captured.append({"logits": logits})
@@ -688,7 +690,7 @@ def execute(args):
         "edit": {"tensor_id": "W_O.0", "ordinal": 0, "head": head, "left": "edit.left", "right": "edit.right"},
         "settings": ran,
         # Every stage array stacks the settings in order; within a setting rows run over sequence and
-        # position, and pattern rows over sequence, head and query position.
+        # position, and scores and pattern rows over sequence, head and query position.
         "rows_per_setting": {array_id: blocks[0].shape[0] for array_id, blocks in rows.items()},
         # What a receipt's bands assume: the executed dtype, the device and whether TF32 matmul was on.
         "external_dtype": executed.dtype,
