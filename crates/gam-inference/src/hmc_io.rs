@@ -3244,53 +3244,91 @@ mod tests {
     }
 
     #[test]
-    fn an_axis_that_never_contracts_is_refused_typed_at_its_first_judged_order_784() {
-        // The paired difference stays at 1e-2 at every order. Order 5 ties the running
-        // minimum, so it is judged, and the minimum did not move: no representable order
-        // resolves the axis. The search refuses typed there, instead of raising the axis until
-        // its rule underflows. The corrector evaluates no rule, so the two requests are the
-        // whole cost, and requests past the script would be refused as exhausted.
-        let (outcome, requests) = scripted_search(vec![1e-2; 3], 1e-6);
-        assert_eq!(requests, vec![vec![4], vec![5]], "requests {requests:?}");
+    fn an_axis_that_never_contracts_is_refused_at_the_largest_representable_order_784() {
+        // The paired difference stays at 1e-2 at every order, so no representable order
+        // resolves the axis. The search raises it one order at a time to the largest
+        // representable order and refuses typed there, measured, without asking for an order
+        // past it. The corrector evaluates no rule, so the requests cost nothing but their
+        // count.
+        let max_order =
+            gam_math::quadrature::max_representable_standard_normal_gauss_hermite_order();
+        let (outcome, requests) = scripted_search(vec![1e-2; max_order - 3], 1e-6);
+        assert_eq!(requests.len(), max_order - 3, "one request per order 4..={max_order}");
+        assert_eq!(requests.last(), Some(&vec![max_order]), "no request past the ceiling");
         let refusal = outcome.expect_err("a non-contracting axis must be refused");
         assert_eq!(refusal.axis, 0);
-        assert_eq!(refusal.axis_orders, vec![5]);
+        assert_eq!(refusal.axis_orders, vec![max_order]);
         assert!(
             matches!(
                 refusal.cause,
                 super::BlockQuadratureRefusal::UnresolvableAtRepresentableOrders {
-                    order: 5,
-                    contraction_rate,
-                    projected_resolving_order: None,
-                    ..
-                } if contraction_rate == 1.0
+                    order,
+                    running_minimum,
+                    max_representable_order,
+                } if order == max_order
+                    && running_minimum == 1e-2
+                    && max_representable_order == max_order
             ),
-            "typed non-contracting refusal expected, got {refusal}"
+            "typed refusal at order {max_order} expected, got {refusal}"
         );
     }
 
     #[test]
-    fn an_axis_that_contracts_too_slowly_to_resolve_is_refused_typed_784() {
-        // The paired difference contracts by 0.99 per order from 0.5, so resolving 1e-6
-        // needs about ln(0.495/1e-6)/ln(1/0.99) ≈ 1306 more raises. That is past the largest
-        // representable order, so the search refuses typed at order 5 with that projection.
-        let script = vec![0.5, 0.5 * 0.99, 0.5 * 0.99 * 0.99];
-        let (outcome, requests) = scripted_search(script, 1e-6);
-        assert_eq!(requests, vec![vec![4], vec![5]], "requests {requests:?}");
-        let refusal = outcome.expect_err("a too-slow axis must be refused");
+    fn an_axis_that_contracts_too_slowly_to_resolve_is_refused_at_the_largest_representable_order_784()
+    {
+        // The paired difference contracts by 0.99 per order from 0.5, so at the largest
+        // representable order it is still about 1e-2, far above 1e-6. The search raises the
+        // axis to that order and refuses typed there; no rate is extrapolated on the way.
         let max_order =
             gam_math::quadrature::max_representable_standard_normal_gauss_hermite_order();
+        let script: Vec<f64> = (0..max_order - 3)
+            .map(|raise| 0.5 * 0.99_f64.powi(raise as i32))
+            .collect();
+        let smallest = *script.last().expect("the script reaches the ceiling");
+        let (outcome, requests) = scripted_search(script, 1e-6);
+        assert_eq!(requests.len(), max_order - 3, "one request per order 4..={max_order}");
+        let refusal = outcome.expect_err("a too-slow axis must be refused");
         assert!(
             matches!(
                 refusal.cause,
                 super::BlockQuadratureRefusal::UnresolvableAtRepresentableOrders {
-                    order: 5,
-                    projected_resolving_order: Some(projected),
+                    order,
+                    running_minimum,
                     max_representable_order,
-                    ..
-                } if projected > max_representable_order && max_representable_order == max_order
+                } if order == max_order
+                    && running_minimum == smallest
+                    && max_representable_order == max_order
             ),
-            "typed projection refusal past order {max_order} expected, got {refusal}"
+            "typed refusal at order {max_order} expected, got {refusal}"
+        );
+    }
+
+    #[test]
+    fn an_axis_whose_first_ratio_is_near_one_resolves_instead_of_refusing_784() {
+        // q8's measured decline (job 1208513, q8.log.gz line 76): axis 1 of the m = 6 block
+        // at [5, 5, 4, 4, 4, 4], paired difference 5.9602e-4 against target 1.4005e-6, and
+        // the step 4 → 5 into it at rate 0.98887. A stop that projected from that step put
+        // resolution at order 546, past the ceiling, and refused at order 5. The next step
+        // here contracts ×0.1 per order, inside the ×0.044 to ×0.14 that probe 1215221
+        // measured at 5 → 6 on the q5 axes, and the axis resolves at order 8.
+        let target = 1.4005e-6;
+        let at_five = 5.9602e-4;
+        let script = vec![
+            at_five / 0.98887,
+            at_five,
+            at_five * 1e-1,
+            at_five * 1e-2,
+            at_five * 1e-3,
+        ];
+        let (outcome, requests) = scripted_search(script, target);
+        let marginal = outcome.unwrap_or_else(|refusal| {
+            panic!("an axis that resolves at order 8 must not be refused: {refusal}")
+        });
+        assert_eq!(marginal.axis_orders, vec![8]);
+        assert_eq!(
+            requests,
+            vec![vec![4], vec![5], vec![6], vec![7], vec![8]],
+            "requests {requests:?}"
         );
     }
 
@@ -3310,11 +3348,11 @@ mod tests {
 
     #[test]
     fn an_axis_that_rises_and_never_returns_is_refused_at_the_largest_representable_order_784() {
-        // The paired difference doubles once and stays there, so no order after 4 sets a new
-        // running minimum and the rate never judges the axis. The search raises it one order
-        // at a time to the largest representable order and refuses typed there, without
-        // asking for an order past it. The corrector evaluates no rule, so the requests cost
-        // nothing but their count.
+        // The paired difference doubles once and stays there, so the running minimum is the
+        // order-4 value. The search raises the axis one order at a time to the largest
+        // representable order and refuses typed there, naming that minimum, without asking
+        // for an order past it. The corrector evaluates no rule, so the requests cost nothing
+        // but their count.
         let max_order =
             gam_math::quadrature::max_representable_standard_normal_gauss_hermite_order();
         let mut script = vec![1e-2];
@@ -3326,7 +3364,7 @@ mod tests {
         assert!(
             matches!(
                 refusal.cause,
-                super::BlockQuadratureRefusal::NoNewMinimumThroughRepresentableOrders {
+                super::BlockQuadratureRefusal::UnresolvableAtRepresentableOrders {
                     order,
                     running_minimum,
                     max_representable_order,
@@ -3334,7 +3372,7 @@ mod tests {
                     && running_minimum == 1e-2
                     && max_representable_order == max_order
             ),
-            "typed no-new-minimum refusal at order {max_order} expected, got {refusal}"
+            "typed refusal at order {max_order} expected, got {refusal}"
         );
     }
 
