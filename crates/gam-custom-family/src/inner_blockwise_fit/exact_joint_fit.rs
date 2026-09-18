@@ -86,6 +86,101 @@ fn penalty_rounding_bands(
     (local_bands, joint_bands)
 }
 
+/// The data term of the stationarity rounding band per coefficient, where the
+/// workspace measures the row summands of its gradient: `γ_depth · Σ|products|ⱼ`
+/// (#2976). `None` when it measures none.
+fn measured_gradient_rounding_bands(
+    workspace: Option<&Arc<dyn ExactNewtonJointHessianWorkspace>>,
+    total_p: usize,
+) -> Result<Option<Array1<f64>>, CustomFamilyError> {
+    let Some(workspace) = workspace else {
+        return Ok(None);
+    };
+    let Some(accumulation) = workspace.joint_gradient_accumulation()? else {
+        return Ok(None);
+    };
+    if accumulation.absolute_sums.len() != total_p {
+        return Err(CustomFamilyError::DimensionMismatch { reason: format!(
+            "joint Newton gradient accumulation has {} coordinates for {total_p} coefficients",
+            accumulation.absolute_sums.len()
+        ) });
+    }
+    if !accumulation.absolute_sums.iter().all(|value| value.is_finite()) {
+        return Err(CustomFamilyError::trial_point(
+            "joint Newton gradient accumulation is not finite at the returned mode".to_string(),
+        ));
+    }
+    let growth = gam_linalg::roundoff::accumulation_growth(accumulation.accumulation_depth);
+    Ok(Some(accumulation.absolute_sums.mapv(|sum| growth * sum)))
+}
+
+/// `data_bands` plus the penalty product's band per coefficient
+/// ([`penalty_rounding_bands`]).
+fn with_penalty_rounding_bands(
+    mut data_bands: Array1<f64>,
+    s_lambdas: &[Array2<f64>],
+    block_betas: &[&Array1<f64>],
+    joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
+) -> Result<Array1<f64>, CustomFamilyError> {
+    let (local_bands, joint_bands) = penalty_rounding_bands(s_lambdas, block_betas, joint_bundle);
+    if local_bands.len() != data_bands.len() {
+        return Err(CustomFamilyError::DimensionMismatch { reason: format!(
+            "joint Newton penalty rounding bands have {} coordinates for {} coefficients",
+            local_bands.len(),
+            data_bands.len()
+        ) });
+    }
+    for (j, band) in data_bands.iter_mut().enumerate() {
+        *band += local_bands[j] + joint_bands[j];
+    }
+    Ok(data_bands)
+}
+
+/// The resolution a returned mode's Newton decrements settle within, read off
+/// `spectrum`, whose right-hand side is the full-width stationarity system
+/// `∇ℓ − Sβ + ∇Φ` at `states` (#2977). One owner for the two settling heads and
+/// the two decrement certificates that mark states for them.
+///
+/// The right-hand side's rounding band per coefficient is its data term (the
+/// measured row-sum band where the workspace measures its summands, otherwise
+/// `γ_n · ‖∇ℓ‖∞`, the lower bound [`joint_stationarity_rounding_band`] reads) plus
+/// the penalty product's band. `tangent` maps it onto a spectrum decomposed on an
+/// active face, `Zᵀ rhs`, as `|Z|ᵀ b`. The Jeffreys score's rounding is not
+/// charged, so the band can only be too narrow. Each decrement's band is then
+/// [`whitened_spectrum::WhitenedHessianSpectrum::decrement_rounding_bands`], raised
+/// to `objective_resolution`, the change one evaluation of the objective
+/// resolves there ([`returned_mode_objective_resolution`]); the certificate that
+/// reports bands alone passes `0`.
+pub(super) fn spectrum_decrement_resolution(
+    spectrum: &whitened_spectrum::WhitenedHessianSpectrum,
+    tangent: Option<&Array2<f64>>,
+    workspace: Option<&Arc<dyn ExactNewtonJointHessianWorkspace>>,
+    data_gradient_inf: f64,
+    total_n: usize,
+    s_lambdas: &[Array2<f64>],
+    states: &[ParameterBlockState],
+    joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
+    objective_resolution: f64,
+) -> Result<DecrementResolution, CustomFamilyError> {
+    let block_betas: Vec<&Array1<f64>> = states.iter().map(|state| &state.beta).collect();
+    let total_p: usize = block_betas.iter().map(|beta| beta.len()).sum();
+    let data_bands = match measured_gradient_rounding_bands(workspace, total_p)? {
+        Some(bands) => bands,
+        None => Array1::from_elem(
+            total_p,
+            gam_linalg::roundoff::accumulation_growth(total_n.max(1)) * data_gradient_inf.abs(),
+        ),
+    };
+    let rhs_band = with_penalty_rounding_bands(data_bands, s_lambdas, &block_betas, joint_bundle)?;
+    let chart_band = match tangent {
+        Some(z) => z.t().mapv(f64::abs).dot(&rhs_band),
+        None => rhs_band,
+    };
+    Ok(spectrum
+        .decrement_rounding_bands(&chart_band)?
+        .with_objective_resolution(objective_resolution))
+}
+
 /// The stationarity residual a returned mode settles on where the workspace
 /// measures the row summands of its gradient (#2976).
 ///
@@ -122,24 +217,10 @@ fn returned_mode_band_shrunk_residual(
     block_active_sets: &[Option<Vec<usize>>],
     joint_lower_bounds: Option<&Array1<f64>>,
 ) -> Result<Option<f64>, CustomFamilyError> {
-    let Some(workspace) = workspace else {
-        return Ok(None);
-    };
-    let Some(accumulation) = workspace.joint_gradient_accumulation()? else {
-        return Ok(None);
-    };
     let total_p = kkt_gradient.len();
-    if accumulation.absolute_sums.len() != total_p {
-        return Err(CustomFamilyError::DimensionMismatch { reason: format!(
-            "joint Newton gradient accumulation has {} coordinates for {total_p} coefficients",
-            accumulation.absolute_sums.len()
-        ) });
-    }
-    if !accumulation.absolute_sums.iter().all(|value| value.is_finite()) {
-        return Err(CustomFamilyError::trial_point(
-            "joint Newton gradient accumulation is not finite at the returned mode".to_string(),
-        ));
-    }
+    let Some(data_bands) = measured_gradient_rounding_bands(workspace, total_p)? else {
+        return Ok(None);
+    };
     let joint_score = joint_penalty_stationarity_score(options, specs, states);
     let mut residual =
         exact_newton_joint_stationarity_vector_from_gradient(kkt_gradient, states, specs, s_lambdas)?;
@@ -147,20 +228,12 @@ fn returned_mode_band_shrunk_residual(
         residual += score;
     }
     let block_betas: Vec<&Array1<f64>> = states.iter().map(|state| &state.beta).collect();
-    let (local_bands, joint_bands) = penalty_rounding_bands(s_lambdas, &block_betas, joint_bundle);
-    if local_bands.len() != total_p {
-        return Err(CustomFamilyError::DimensionMismatch { reason: format!(
-            "joint Newton penalty rounding bands have {} coordinates for {total_p} coefficients",
-            local_bands.len()
-        ) });
-    }
-    let data_growth = gam_linalg::roundoff::accumulation_growth(accumulation.accumulation_depth);
+    let bands = with_penalty_rounding_bands(data_bands, s_lambdas, &block_betas, joint_bundle)?;
     // The projection forms `r = Sβ − g + score`, so the gradient that yields `r′`
     // is `g + (r̂ − r′)`.
     let mut shrunk_gradient = kkt_gradient.clone();
     for j in 0..total_p {
-        let band = data_growth * accumulation.absolute_sums[j] + local_bands[j] + joint_bands[j];
-        let shrunk = (residual[j].abs() - band).max(0.0).copysign(residual[j]);
+        let shrunk = (residual[j].abs() - bands[j]).max(0.0).copysign(residual[j]);
         shrunk_gradient[j] += residual[j] - shrunk;
     }
     exact_newton_joint_stationarity_inf_norm_from_gradient(
@@ -1025,10 +1098,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             let escape_block_constraints =
                 collect_block_linear_constraints(family, &states, specs)?;
             let escape_objective_tol = inner_tol * (1.0 + lastobjective.abs());
-            let decrement_resolution = returned_mode_decrement_resolution(
-                lastobjective,
-                objective_resolution_witness.measured(),
-            );
             // The state being settled is the tentative one. The mark that made it
             // tentative recorded its projected stationarity residual and the target
             // at that same state. The previous cycle's pre-step target is not this
@@ -1050,7 +1119,10 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 saddle_escapes_used,
                 previous_escape_lambda_min,
                 escape_objective_tol,
-                decrement_resolution,
+                returned_mode_objective_resolution(
+                    lastobjective,
+                    objective_resolution_witness.measured(),
+                ),
                 tentative_residual,
                 tentative_residual_target,
                 &mut jeffreys_completion_calls,
@@ -1066,9 +1138,12 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 ConstrainedModeResolution::Unresolved {
                     newton_decrement,
                     weakly_identified_decrement,
+                    decrement_resolution,
                 } => {
                     log::info!(
-                        "[PIRLS/joint-Newton mode certificate] tentative constrained convergence revoked at cycle {cycle}: residual={tentative_residual:.3e}/{tentative_residual_target:.3e}, decrement={newton_decrement:.3e}, weak={weakly_identified_decrement:.3e} against resolution={decrement_resolution:.3e}",
+                        "[PIRLS/joint-Newton mode certificate] tentative constrained convergence revoked at cycle {cycle}: residual={tentative_residual:.3e}/{tentative_residual_target:.3e}, decrement={newton_decrement:.3e}, weak={weakly_identified_decrement:.3e} against resolution={:.3e}, weak resolution={:.3e}",
+                        decrement_resolution.identified,
+                        decrement_resolution.weakly_identified,
                     );
                     if family.joint_jeffreys_term_required() {
                         arm_jeffreys_completion_endgame(
@@ -2895,11 +2970,21 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // 642073 and 646303): warm-started probes certified at a residual near
             // 1e-3 priced the rho 0 LAML slope at 6.954 (0.083 before the
             // correction). Solved to r -> 0, the same probes give 0.7519732223,
-            // the analytic gradient to nine digits.
-            let decrement_resolution = returned_mode_decrement_resolution(
-                lastobjective,
-                objective_resolution_witness.measured(),
-            );
+            // the analytic gradient to nine digits. The resolution is the rounding
+            // the decrement's own inputs carry, or the objective's resolution
+            // (#2977): a decrement within its band is indistinguishable from zero on
+            // the arithmetic that formed it.
+            let decrement_resolution = spectrum_decrement_resolution(
+                returned_spectrum,
+                None,
+                hessian_workspace_for_cycle.as_ref(),
+                grad_inf,
+                total_joint_n,
+                &s_lambdas,
+                &states,
+                joint_bundle,
+                returned_mode_objective_resolution(lastobjective, objective_resolution_witness.measured()),
+            )?;
             // The residual at its target is necessary, and a decrement at
             // resolution is not a substitute for it (#2627). A decrement speaks
             // about the step model, which on an inexact Hessian (Louis
@@ -4923,12 +5008,23 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 // The decrement is judged at the settlement's own resolution
                 // (#2977): the head that settles this mark asks exactly that, and a
                 // looser bar here only marks states the head revokes. On a
-                // fully-rejected cycle β is reverted and `lastobjective` is
-                // unchanged by construction, so both read the same iterate.
-                let stall_decrement_resolution = returned_mode_decrement_resolution(
-                    lastobjective,
-                    objective_resolution_witness.measured(),
-                );
+                // fully-rejected cycle β is reverted to the head state, whose
+                // spectrum, gradient and workspace (handed back to
+                // `cached_joint_workspace` above) all read the same iterate.
+                let stall_decrement_resolution = match joint_spectrum.as_ref() {
+                    Some(spectrum) => Some(spectrum_decrement_resolution(
+                        spectrum,
+                        None,
+                        cached_joint_workspace.as_ref(),
+                        grad_inf,
+                        total_joint_n,
+                        &s_lambdas,
+                        &states,
+                        joint_bundle,
+                        returned_mode_objective_resolution(lastobjective, objective_resolution_witness.measured()),
+                    )?),
+                    None => None,
+                };
                 let stall_decrement = joint_spectrum
                     .as_ref()
                     .map(|spectrum| spectrum.newton_decrement());
@@ -4947,7 +5043,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     "[PIRLS/joint-Newton convergence] cycle {cycle:>3} | #2485 stall-certificate \
                      spectrum={} decrement={stall_decrement:?} weak={stall_weak_decrement:?} \
                      null_score={stall_numerical_null_stationarity:?} \
-                     resolution={stall_decrement_resolution:.3e}",
+                     resolution={stall_decrement_resolution:?}",
                     joint_spectrum.is_some()
                 );
                 if head_jeffreys_term.is_some()
@@ -4966,22 +5062,25 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     );
                     continue 'joint_newton_cycles;
                 }
-                if let (Some(decrement), Some(weak_decrement), Some(null_score)) = (
+                if let (Some(decrement), Some(weak_decrement), Some(null_score), Some(resolution)) = (
                     stall_decrement,
                     stall_weak_decrement,
                     stall_numerical_null_stationarity,
+                    stall_decrement_resolution,
                 ) && joint_newton_decrement_certifies(
                     decrement,
                     weak_decrement,
                     null_score,
-                    stall_decrement_resolution,
+                    resolution,
                     residual_tol,
                 ) {
                     log::info!(
                         "[PIRLS/joint-Newton convergence] cycle {cycle:>3} | #2485 fully-rejected \
                          stall certified: radius={joint_trust_radius:.3e}, decrement={decrement:.3e}, \
                          weak={weak_decrement:.3e}, null_score={null_score:.3e}, \
-                         resolution={stall_decrement_resolution:.3e}; no resolvable descent remains"
+                         resolution={:.3e}/{:.3e}; no resolvable descent remains",
+                        resolution.identified,
+                        resolution.weakly_identified,
                     );
                     // Same exit every other certificate takes — so this one is
                     // ALSO tentative until the next cycle head has certified the
@@ -5775,27 +5874,36 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // stopping rule, one place, so the two sites cannot disagree again. Its
         // bar is the settlement's own decrement resolution (#2977): the head that
         // settles this mark asks exactly that, and `objective_tol` here marked
-        // states whose decrement the head then revoked.
-        let decrement_resolution = returned_mode_decrement_resolution(
-            lastobjective,
-            objective_resolution_witness.measured(),
-        );
-        if decrement_precondition
-            && let Some(decrement) = joint_spectrum
-                .as_ref()
-                .map(|spectrum| spectrum.newton_decrement())
-            && let Some(weak_decrement) = joint_spectrum
-                .as_ref()
-                .map(|spectrum| spectrum.weakly_identified_decrement())
-            && let Some(null_score) = numerical_null_stationarity
-            && joint_newton_decrement_certifies(
-                decrement,
-                weak_decrement,
-                null_score,
-                decrement_resolution,
-                residual_tol,
-            )
-        {
+        // states whose decrement the head then revoked. The spectrum is this
+        // cycle's head spectrum and the band is read at the marked state; the head
+        // that settles the mark re-derives both at that one state.
+        let decrement_certificate = match (joint_spectrum.as_ref(), numerical_null_stationarity) {
+            (Some(spectrum), Some(null_score)) if decrement_precondition => {
+                let decrement = spectrum.newton_decrement();
+                let weak_decrement = spectrum.weakly_identified_decrement();
+                let decrement_resolution = spectrum_decrement_resolution(
+                    spectrum,
+                    None,
+                    cached_joint_workspace.as_ref(),
+                    grad_inf,
+                    total_joint_n,
+                    &s_lambdas,
+                    &states,
+                    joint_bundle,
+                    returned_mode_objective_resolution(lastobjective, objective_resolution_witness.measured()),
+                )?;
+                joint_newton_decrement_certifies(
+                    decrement,
+                    weak_decrement,
+                    null_score,
+                    decrement_resolution,
+                    residual_tol,
+                )
+                .then_some((decrement, null_score, decrement_resolution))
+            }
+            _ => None,
+        };
+        if let Some((decrement, null_score, decrement_resolution)) = decrement_certificate {
             // Audit witness (#1082): the residual mass this certificate
             // EXCLUDES as gauge-null. The decrement bound is sound only when
             // that excluded mass truly lies on penalty-null directions; if it
@@ -5826,7 +5934,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 cycles_since_residual_improved,
                 objective_change,
                 decrement,
-                decrement_resolution,
+                decrement_resolution.identified,
                 null_score,
                 residual_tol,
             );

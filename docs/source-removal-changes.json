@@ -1046,5 +1046,13 @@
     ],
     "reason": "#2946 T2 (Stage A census): renames with no value change. The Tier-0 rho-posterior 'certificate' is a PSIS tail-shape diagnostic: k_hat is fitted to ceil(sqrt(M)) tail excesses and at the default M = 64 has a standard error of about 0.27 at the 0.7 cutoff, so its grade certifies nothing. RhoCertificate becomes RhoProposalAdequacy (PlugInCertified -> PlugInAdequate), RhoPosteriorCertificate becomes RhoPosteriorAdequacy (field certificate -> adequacy), PLUG_IN_CERTIFIED_K_HAT becomes PLUG_IN_ADEQUATE_K_HAT, the escalator trait method and the gam-inference producer rho_posterior_certificate become rho_posterior_adequacy, the private CERTIFICATE_SEED becomes ADEQUACY_SEED, and six tests and helpers are renamed to match.",
     "evidence": "A git grep of the whole tree at origin/main fe8a7a4ffe on lane sw2c finds these names only in crates/gam-problem/src/rho_posterior.rs, crates/gam-inference/src/rho_posterior.rs, crates/gam-solve/src/reml/eval.rs (the seam that calls the escalator and matches RhoPosteriorOutcome) and tests/perf_scale/misc/rho_posterior_tier0_real_fit.rs. No gamfit, gam-pyffi, gam-cli, docs or fixture file holds them. Every occurrence is renamed in this commit. Gates: pre-gate gx6 job 1251077 (workspace --all-targets, gam-pyffi, both ledger scripts, the gam-problem, gam-solve psis and gam-inference rho_posterior unit tests, and a mutant deleting the Certified alias that made the legacy-read pin fail); landing gate direct lane dy4 tag fr-census-t2 (workspace, gam-pyffi, both ledger scripts and the gam-models payload-version tests on the exact landing tree)."
+  },
+  {
+    "base": "b434849823327e1032207e2af8e5acbfd2b772c9",
+    "items": [
+      "crates/gam-custom-family/src/inner_blockwise_fit.rs:fn:returned_mode_decrement_resolution"
+    ],
+    "reason": "Renamed to returned_mode_objective_resolution (#2977 C). It still returns joint_objective_roundoff_slack(objective, objective, measured), but that value is no longer the decrement bar: it is the floor under the derived decrement band (DecrementResolution::with_objective_resolution). Its four callers in exact_joint_fit.rs (the constrained and the unconstrained settling head, the #2485 fully-rejected stall mark and the decrement certificate) now pass the renamed helper's value to spectrum_decrement_resolution.",
+    "evidence": "dy6 gate i2283-2977-C3 (direct-dy6-i2283-2977-C3.log) at b78a4a2f5e: RC_CHECK=0, RC_PYFFI=0, RC_TEST=0 over the gam-custom-family lib (335 tests); the landed tree names returned_mode_decrement_resolution nowhere."
   }
 ]

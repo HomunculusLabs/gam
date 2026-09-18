@@ -3224,7 +3224,7 @@ pub(crate) fn joint_newton_decrement_certifies(
     decrement: f64,
     weakly_identified_decrement: f64,
     numerical_null_stationarity: f64,
-    decrement_resolution: f64,
+    decrement_resolution: DecrementResolution,
     residual_tol: f64,
 ) -> bool {
     joint_newton_decrements_at_resolution(decrement, weakly_identified_decrement, decrement_resolution)
@@ -3233,17 +3233,49 @@ pub(crate) fn joint_newton_decrement_certifies(
 }
 
 /// Whether the Newton decrements over the identified and the weakly identified
-/// modes are both within `decrement_resolution`: the decrement arm of the
+/// modes are each within their resolution: the decrement arm of the
 /// returned-mode settlement, and of the certificates that mark states for it.
 pub(crate) fn joint_newton_decrements_at_resolution(
     decrement: f64,
     weakly_identified_decrement: f64,
-    decrement_resolution: f64,
+    decrement_resolution: DecrementResolution,
 ) -> bool {
     decrement.is_finite()
-        && decrement <= decrement_resolution
+        && decrement <= decrement_resolution.identified
         && weakly_identified_decrement.is_finite()
-        && weakly_identified_decrement <= decrement_resolution
+        && weakly_identified_decrement <= decrement_resolution.weakly_identified
+}
+
+/// The smallest Newton decrement that promises a correction the returned state
+/// can act on, one per mode set (#2977).
+///
+/// A decrement settles when it is within the rounding its own inputs carry
+/// ([`whitened_spectrum::WhitenedHessianSpectrum::decrement_rounding_bands`]),
+/// so that it is indistinguishable from zero, or within the change one
+/// evaluation of the objective resolves, so that no trust region can referee the
+/// correction (#2695). Each mode set has its own band: the weakly identified
+/// modes' small curvatures magnify their inputs' rounding, and a band shared with
+/// the identified modes would loosen those by it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DecrementResolution {
+    /// The resolution of the decrement over the identified modes.
+    pub(crate) identified: f64,
+    /// The resolution of the decrement over the weakly identified modes.
+    pub(crate) weakly_identified: f64,
+}
+
+impl DecrementResolution {
+    /// Each band raised to `objective_resolution`, the change one evaluation of
+    /// the objective resolves at the returned state: a correction whose promised
+    /// decrease one evaluation cannot resolve is no correction the trust region
+    /// can referee (#2695).
+    pub(crate) fn with_objective_resolution(self, objective_resolution: f64) -> Self {
+        let floor = if objective_resolution.is_finite() { objective_resolution.max(0.0) } else { 0.0 };
+        Self {
+            identified: self.identified.max(floor),
+            weakly_identified: self.weakly_identified.max(floor),
+        }
+    }
 }
 
 /// Per-iterate diagnostic snapshot assembled when the joint Newton inner solve
@@ -3836,6 +3868,77 @@ pub(crate) mod whitened_spectrum {
                 }
             }
             0.5 * acc
+        }
+
+        /// The rounding the two Newton decrements carry, given the rounding band
+        /// `rhs_band` of the right-hand side this spectrum was decomposed with,
+        /// per coordinate and in that right-hand side's own coordinates (#2977).
+        ///
+        /// Each decrement is `½ Σ_k c_k²/|γ_k|` over its mode set, with
+        /// `c = Vᵀ D^{-1/2} rhs`. A right-hand side read to within `b` moves each
+        /// `c_k` by at most `δc_k = Σ_i |v_ik| D^{-1/2}_i b_i`, so `c_k²` by at most
+        /// `δc_k (2|c_k| + δc_k)`. The eigensolver resolves each `γ_k` to within the
+        /// spectrum's numerical floor `f` (Weyl), which moves `1/|γ_k|` by at most
+        /// `f / (|γ_k| (|γ_k| − f))`. Summing both over the mode set and adding the
+        /// sum's own rounding gives the band: a decrement within it is
+        /// indistinguishable from zero on the arithmetic that formed it. The
+        /// rounding of the eigenvectors, of `D`, and of the right-hand side's
+        /// terms before their sum is not charged, so the band can only be too
+        /// narrow, never settle a resolvable correction.
+        ///
+        /// Measured on ad-2627a's settle-head print (job 1232311): of 59,466
+        /// constrained revokes whose residual met its target, 32,644 had an
+        /// identified decrement within `P/2`, where `P` is this band without the
+        /// `½` and with the first-order Weyl term `c²f/γ²` (so this band is at
+        /// least `P/2`), and `64ε(1 + 2|f|)` revoked every one of them.
+        pub(crate) fn decrement_rounding_bands(
+            &self,
+            rhs_band: &Array1<f64>,
+        ) -> Result<DecrementResolution, CustomFamilyError> {
+            let p = self.gamma.len();
+            if rhs_band.len() != p {
+                return Err(CustomFamilyError::DimensionMismatch { reason: format!(
+                    "decrement rounding bands: right-hand-side band has {} coordinates for a \
+                     spectrum of dimension {p}",
+                    rhs_band.len()
+                ) });
+            }
+            let numerical_floor = joint_hessian_numerical_eigenvalue_floor(self.lambda_max_abs, p);
+            let whitened_band: Vec<f64> =
+                (0..p).map(|i| self.d_inv_sqrt[i] * rhs_band[i].abs()).collect();
+            let (mut identified, mut weak) = (0.0_f64, 0.0_f64);
+            let (mut identified_terms, mut weak_terms) = (0usize, 0usize);
+            let (mut identified_decrement, mut weak_decrement) = (0.0_f64, 0.0_f64);
+            for k in 0..p {
+                let abs_gamma = self.gamma[k].abs();
+                if abs_gamma <= numerical_floor {
+                    continue;
+                }
+                let coefficient = self.c[k].abs();
+                let coefficient_band: f64 =
+                    (0..p).map(|i| self.evecs[[i, k]].abs() * whitened_band[i]).sum();
+                let term = 0.5 * coefficient * coefficient / abs_gamma;
+                let band = 0.5
+                    * (coefficient_band * (2.0 * coefficient + coefficient_band) / abs_gamma
+                        + (coefficient + coefficient_band).powi(2) * numerical_floor
+                            / (abs_gamma * (abs_gamma - numerical_floor)));
+                if abs_gamma > self.null_cutoff {
+                    identified += band;
+                    identified_terms += 1;
+                    identified_decrement += term;
+                } else {
+                    weak += band;
+                    weak_terms += 1;
+                    weak_decrement += term;
+                }
+            }
+            Ok(DecrementResolution {
+                identified: identified
+                    + gam_linalg::roundoff::accumulation_growth(identified_terms.max(1))
+                        * identified_decrement,
+                weakly_identified: weak
+                    + gam_linalg::roundoff::accumulation_growth(weak_terms.max(1)) * weak_decrement,
+            })
         }
 
         /// Infinity norm of the original-coordinate score carried by the
@@ -4468,7 +4571,7 @@ mod trust_region_subproblem_tests {
                 spec.newton_decrement(),
                 spec.weakly_identified_decrement(),
                 null_stationarity,
-                1.0,
+                super::DecrementResolution { identified: 1.0, weakly_identified: 1.0 },
                 1e-8,
             ),
             "a null Hessian direction with non-zero score is locally linear, not converged"
@@ -4483,11 +4586,83 @@ mod trust_region_subproblem_tests {
                 gauge_spec.newton_decrement(),
                 gauge_spec.weakly_identified_decrement(),
                 gauge_spec.numerical_null_stationarity_inf(),
-                1.0,
+                super::DecrementResolution { identified: 1.0, weakly_identified: 1.0 },
                 1e-8,
             ),
             "a structurally invariant null direction has zero score and remains admissible"
         );
+    }
+
+    /// #2977: a Newton decrement settles within the rounding its own inputs
+    /// carry, and a decrement well above that band does not.
+    ///
+    /// On a diagonal `H` with metric `D` the whitened eigenbasis is the
+    /// coordinate basis, so each mode's band has a closed form to check against:
+    /// `½ [b̃ (2|c| + b̃)/γ + (|c| + b̃)² f / (γ (γ − f))]` with `c = rᵢ/√Dᵢ`,
+    /// `b̃ = bᵢ/√Dᵢ`, `γ = Hᵢᵢ/Dᵢ` and `f` the spectrum's numerical floor, plus the
+    /// sum's own rounding. A right-hand side read to within `b ~ 1e-5` and lying
+    /// inside that band promises a decrement of `2.0e-11`: the objective-scaled
+    /// bar `64ε(1 + 2|f|)` at `f = 0` is `1.4e-14` and refuses it, while the band,
+    /// `~1e-10`, settles it. The same system at a right-hand side `1e-3`, far
+    /// outside its band, promises `1.75e-6` and does not settle.
+    #[test]
+    pub(crate) fn a_decrement_within_its_rounding_band_settles_and_one_above_it_does_not_2977() {
+        let h = array![[3.0, 0.0], [0.0, 8.0]];
+        let d = array![1.0, 4.0];
+        let rhs_band = array![1.0e-5, 2.0e-5];
+        let within = array![6.0e-6, -1.5e-5];
+        let spectrum =
+            WhitenedHessianSpectrum::decompose(&h, &within, &d, KKT_REFUSAL_RANK_TOL).unwrap();
+        let bands = spectrum.decrement_rounding_bands(&rhs_band).unwrap();
+        let floor = spectrum.numerical_floor;
+        let mode = |r: f64, b: f64, h: f64, d: f64| {
+            let (c, band, gamma) = (r.abs() / d.sqrt(), b / d.sqrt(), h / d);
+            0.5 * (band * (2.0 * c + band) / gamma
+                + (c + band).powi(2) * floor / (gamma * (gamma - floor)))
+        };
+        let decrement = spectrum.newton_decrement();
+        let expected = mode(within[0], rhs_band[0], 3.0, 1.0)
+            + mode(within[1], rhs_band[1], 8.0, 4.0)
+            + gam_linalg::roundoff::accumulation_growth(2) * decrement;
+        assert!(
+            (bands.identified - expected).abs() <= 1e-12 * expected,
+            "identified band {} against the closed form {expected}",
+            bands.identified
+        );
+        assert_eq!(bands.weakly_identified, 0.0, "no mode is weakly identified here");
+        let literal = 64.0 * f64::EPSILON;
+        assert!(
+            decrement > literal,
+            "the fixture's decrement {decrement:.3e} must exceed the literal bar {literal:.3e}"
+        );
+        assert!(
+            super::joint_newton_decrements_at_resolution(
+                decrement,
+                spectrum.weakly_identified_decrement(),
+                bands,
+            ),
+            "a decrement {decrement:.3e} of a right-hand side inside its own band must settle \
+             within that band {:.3e}",
+            bands.identified
+        );
+        // Negative control: the same system read far outside its band still
+        // promises a correction.
+        let descending = array![3.0e-3, -2.0e-3];
+        let spectrum =
+            WhitenedHessianSpectrum::decompose(&h, &descending, &d, KKT_REFUSAL_RANK_TOL).unwrap();
+        let bands = spectrum.decrement_rounding_bands(&rhs_band).unwrap();
+        assert!(
+            !super::joint_newton_decrements_at_resolution(
+                spectrum.newton_decrement(),
+                spectrum.weakly_identified_decrement(),
+                bands,
+            ),
+            "a decrement {:.3e} far above its band {:.3e} must not settle",
+            spectrum.newton_decrement(),
+            bands.identified
+        );
+        // A band of the wrong width is refused, not read.
+        assert!(spectrum.decrement_rounding_bands(&array![1.0e-5]).is_err());
     }
 
     /// gam#979/#1449 (completes #1082): a weakly-identified mode below the

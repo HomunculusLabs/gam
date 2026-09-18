@@ -100,6 +100,10 @@ pub(crate) struct ExactJointModeCurvatureCertificate {
     /// can be a mode; the decrements say how much the local model still promises.
     pub(crate) newton_decrement: f64,
     pub(crate) weakly_identified_decrement: f64,
+    /// The rounding band of each decrement, from the rounding of the
+    /// stationarity system it was formed from (#2977). The settlement raises it
+    /// to the objective's measured resolution.
+    pub(crate) decrement_bands: DecrementResolution,
 }
 
 impl ExactJointModeCurvatureCertificate {
@@ -2418,7 +2422,10 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
             {
                 rhs += score;
             }
-            Some(rhs)
+            let gradient_inf = likelihood_gradient
+                .iter()
+                .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+            Some((rhs, gradient_inf))
         }
         _ => None,
     };
@@ -2457,6 +2464,10 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
                     negative_curvature_direction: None,
                     newton_decrement: 0.0,
                     weakly_identified_decrement: 0.0,
+                    decrement_bands: DecrementResolution {
+                        identified: 0.0,
+                        weakly_identified: 0.0,
+                    },
                 });
             }
             ActiveConstraintTangentGeometry::Tangent(z) => {
@@ -2477,8 +2488,8 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
         None => (hessian, metric, None),
     };
     let certificate_rhs = match (stationarity_rhs.as_ref(), tangent.as_ref()) {
-        (Some(rhs), Some(z)) => z.t().dot(rhs),
-        (Some(rhs), None) => rhs.clone(),
+        (Some((rhs, _)), Some(z)) => z.t().dot(rhs),
+        (Some((rhs, _)), None) => rhs.clone(),
         (None, _) => Array1::<f64>::zeros(certificate_matrix.nrows()),
     };
     let spectrum = whitened_spectrum::WhitenedHessianSpectrum::decompose(
@@ -2533,6 +2544,27 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
     } else {
         None
     };
+    // The decrements' own rounding band on this face (#2977): the stationarity
+    // system's band per coefficient, through `|Z|ᵀ` onto the face and into this
+    // spectrum's whitened eigenbasis. Without a joint gradient there are no
+    // decrements to band.
+    let decrement_bands = match stationarity_rhs.as_ref() {
+        Some((_, gradient_inf)) => exact_joint_fit::spectrum_decrement_resolution(
+            &spectrum,
+            tangent.as_ref(),
+            workspace.as_ref(),
+            *gradient_inf,
+            joint_observation_count(states),
+            s_lambdas,
+            states,
+            joint_bundle,
+            0.0,
+        )?,
+        None => DecrementResolution {
+            identified: f64::NAN,
+            weakly_identified: f64::NAN,
+        },
+    };
     Ok(ExactJointModeCurvatureCertificate {
         workspace,
         minimum_whitened_eigenvalue,
@@ -2549,6 +2581,7 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
         } else {
             f64::NAN
         },
+        decrement_bands,
     })
 }
 
@@ -2603,6 +2636,8 @@ enum ConstrainedModeResolution {
     Unresolved {
         newton_decrement: f64,
         weakly_identified_decrement: f64,
+        /// The resolution the decrements were judged against.
+        decrement_resolution: DecrementResolution,
     },
 }
 
@@ -2612,20 +2647,21 @@ enum ConstrainedModeResolution {
 /// constrained head. The stationarity residual
 /// measured at the returned state must be within the target computed at that
 /// same state, and the Newton decrement the local model still promises, over the
-/// identified and the weakly identified modes, must be within the objective's
-/// resolution. Each site passes the decrements of its own spectrum.
+/// identified and the weakly identified modes, must be within its resolution.
+/// Each site passes the decrements of its own spectrum and their resolution
+/// ([`exact_joint_fit::spectrum_decrement_resolution`]).
 ///
 /// Its two arms have one owner each, and the sites that mark a state tentative
 /// ask the same ones (#2977): the residual arm is [`joint_inner_kkt_converged`],
 /// which every mark asks of the residual and target it records, and the
-/// decrement arm is [`joint_newton_decrements_at_resolution`] at
-/// [`returned_mode_decrement_resolution`], which both decrement certificates ask.
+/// decrement arm is [`joint_newton_decrements_at_resolution`], which both
+/// decrement certificates ask.
 fn returned_mode_settles(
     residual: f64,
     residual_target: f64,
     newton_decrement: f64,
     weakly_identified_decrement: f64,
-    decrement_resolution: f64,
+    decrement_resolution: DecrementResolution,
 ) -> bool {
     joint_inner_kkt_converged(residual, residual_target)
         && joint_newton_decrements_at_resolution(
@@ -2635,12 +2671,13 @@ fn returned_mode_settles(
         )
 }
 
-/// The objective resolution a returned mode's Newton decrements settle within:
-/// the change one evaluation of the objective at `objective` resolves, with the
-/// solve's own measurement `measured_resolution` when it has one (#2695). One
-/// owner for the two settling heads and the two decrement certificates that
-/// mark states for them (#2977).
-fn returned_mode_decrement_resolution(objective: f64, measured_resolution: f64) -> f64 {
+/// The change one evaluation of the objective at `objective` resolves, with the
+/// solve's own measurement `measured_resolution` when it has one (#2695): a
+/// correction promising less than this is none the trust region can referee.
+/// One owner for the two settling heads and the two decrement certificates
+/// that mark states for them (#2977), which raise each decrement's own rounding
+/// band to it.
+fn returned_mode_objective_resolution(objective: f64, measured_resolution: f64) -> f64 {
     joint_objective_roundoff_slack(objective, objective, measured_resolution)
 }
 
@@ -2664,7 +2701,7 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
     saddle_escapes_used: usize,
     previous_escape_lambda_min: Option<f64>,
     objective_tol: f64,
-    decrement_resolution: f64,
+    objective_resolution: f64,
     tentative_residual: f64,
     tentative_residual_target: f64,
     jeffreys_completion_calls: &mut usize,
@@ -2701,7 +2738,7 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
         saddle_escapes_used,
         previous_escape_lambda_min,
         objective_tol,
-        decrement_resolution,
+        objective_resolution,
         tentative_residual,
         tentative_residual_target,
         jeffreys_completion_calls,
@@ -2728,7 +2765,7 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
     saddle_escapes_used: usize,
     previous_escape_lambda_min: Option<f64>,
     objective_tol: f64,
-    decrement_resolution: f64,
+    objective_resolution: f64,
     tentative_residual: f64,
     tentative_residual_target: f64,
     jeffreys_completion_calls: &mut usize,
@@ -2761,7 +2798,11 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
         // decrease the objective can resolve. Without the decrement here,
         // warm-started probes of the #2904 FD pin certified with a pending
         // correction and priced the rho 0 LAML slope at 6.954 against the analytic
-        // 0.7520.
+        // 0.7520. The decrements settle within their own rounding band on this
+        // face, or within the objective's resolution (#2977).
+        let decrement_resolution = certificate
+            .decrement_bands
+            .with_objective_resolution(objective_resolution);
         if !returned_mode_settles(
             tentative_residual,
             tentative_residual_target,
@@ -2770,11 +2811,14 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
             decrement_resolution,
         ) {
             log::info!(
-                "[PIRLS/joint-Newton mode certificate] constrained returned beta has PSD face curvature (lambda_min={lambda_min:.6e}, floor={numerical_floor:.6e}) but does not settle: residual={tentative_residual:.3e}/{tentative_residual_target:.3e}, decrement={newton_decrement:.3e}, weak={weakly_identified_decrement:.3e} against the objective resolution {decrement_resolution:.3e}; iterating on",
+                "[PIRLS/joint-Newton mode certificate] constrained returned beta has PSD face curvature (lambda_min={lambda_min:.6e}, floor={numerical_floor:.6e}) but does not settle: residual={tentative_residual:.3e}/{tentative_residual_target:.3e}, decrement={newton_decrement:.3e}, weak={weakly_identified_decrement:.3e} against the resolution {:.3e}, weak resolution {:.3e}; iterating on",
+                decrement_resolution.identified,
+                decrement_resolution.weakly_identified,
             );
             return Ok(ConstrainedModeResolution::Unresolved {
                 newton_decrement,
                 weakly_identified_decrement,
+                decrement_resolution,
             });
         }
         log::info!(
@@ -3009,7 +3053,7 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
             saddle_escapes_used,
             previous_escape_lambda_min,
             objective_tol,
-            decrement_resolution,
+            objective_resolution,
             tentative_residual,
             tentative_residual_target,
             jeffreys_completion_calls,
