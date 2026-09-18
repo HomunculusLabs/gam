@@ -783,19 +783,22 @@ pub fn build_row_kernel_cache<const K: usize>(
                         let start = block_idx * block_rows;
                         let end = (start + block_rows).min(n);
                         let mut chunk = Vec::with_capacity(end - start);
+                        let mut block_progress = progress_ticker.as_ref().map(|ticker| {
+                            ticker.chunk(|progress, elapsed| {
+                                log::info!(
+                                    "[STAGE] row-kernel cache (all) progress={}/{} ({:.1}%) elapsed={:.1}s threads={}",
+                                    progress.min(n),
+                                    n,
+                                    100.0 * progress.min(n) as f64 / n.max(1) as f64,
+                                    elapsed,
+                                    rayon::current_num_threads(),
+                                );
+                            })
+                        });
                         for row in start..end {
                             let out = kern.row_kernel(row)?;
-                            if let Some(ticker) = progress_ticker.as_ref() {
-                                ticker.tick(1, |progress, elapsed| {
-                                    log::info!(
-                                        "[STAGE] row-kernel cache (all) progress={}/{} ({:.1}%) elapsed={:.1}s threads={}",
-                                        progress.min(n),
-                                        n,
-                                        100.0 * progress.min(n) as f64 / n.max(1) as f64,
-                                        elapsed,
-                                        rayon::current_num_threads(),
-                                    );
-                                });
+                            if let Some(block_progress) = block_progress.as_mut() {
+                                block_progress.advance(1);
                             }
                             chunk.push(out);
                         }
@@ -825,19 +828,22 @@ pub fn build_row_kernel_cache<const K: usize>(
                 .par_chunks(block_rows)
                 .map(|row_chunk| {
                     let mut chunk = Vec::with_capacity(row_chunk.len());
+                    let mut block_progress = progress_ticker.as_ref().map(|ticker| {
+                        ticker.chunk(|progress, elapsed| {
+                            log::info!(
+                                "[STAGE] row-kernel cache (subsample) progress={}/{} ({:.1}%) elapsed={:.1}s threads={}",
+                                progress.min(total),
+                                total,
+                                100.0 * progress.min(total) as f64 / total.max(1) as f64,
+                                elapsed,
+                                rayon::current_num_threads(),
+                            );
+                        })
+                    });
                     for r in row_chunk {
                         let out = kern.row_kernel(r.index).map(|out| (r.index, out))?;
-                        if let Some(ticker) = progress_ticker.as_ref() {
-                            ticker.tick(1, |progress, elapsed| {
-                                log::info!(
-                                    "[STAGE] row-kernel cache (subsample) progress={}/{} ({:.1}%) elapsed={:.1}s threads={}",
-                                    progress.min(total),
-                                    total,
-                                    100.0 * progress.min(total) as f64 / total.max(1) as f64,
-                                    elapsed,
-                                    rayon::current_num_threads(),
-                                );
-                            });
+                        if let Some(block_progress) = block_progress.as_mut() {
+                            block_progress.advance(1);
                         }
                         chunk.push(out);
                     }
@@ -2932,5 +2938,68 @@ mod gram_inner_contraction_tests {
                  identical to the per-axis loop it replaced",
             );
         }
+    }
+
+    /// #2984 — above `ROW_KERNEL_CACHE_PROGRESS_MIN_ROWS` rows the cache build counts
+    /// its rows through per-block progress chunks. The progress count must not touch
+    /// the numerics: every cached slot holds its own row's kernel words, bit for bit,
+    /// over all rows and over a subsample, and the unsampled slots stay at zero.
+    #[test]
+    fn a_ticked_cache_build_stores_each_rows_own_kernel_words_2984() {
+        let n = 2 * ROW_KERNEL_CACHE_PROGRESS_MIN_ROWS;
+        let kern = SyntheticKernel::new(n, 3, 0x2984);
+        let words = |value: f64, gradient: &[f64; 4], hessian: &[[f64; 4]; 4]| -> Vec<u64> {
+            std::iter::once(value)
+                .chain(gradient.iter().copied())
+                .chain(hessian.iter().flatten().copied())
+                .map(f64::to_bits)
+                .collect()
+        };
+        let own_words = |row: usize| {
+            let (value, gradient, hessian) = kern.row_kernel(row).expect("synthetic row kernel");
+            words(value, &gradient, &hessian)
+        };
+        let cached_words = |cache: &RowKernelCache<4>, row: usize| {
+            words(cache.nll[row], &cache.gradients[row], &cache.hessians[row])
+        };
+
+        let all = build_row_kernel_cache(&kern, &RowSet::All).expect("full-row cache");
+        let all_mismatches = (0..n)
+            .filter(|&row| cached_words(&all, row) != own_words(row))
+            .count();
+        assert_eq!(
+            all_mismatches, 0,
+            "{all_mismatches} of {n} cached rows differ from their own kernel's words"
+        );
+
+        let sampled: Vec<crate::outer_subsample::WeightedOuterRow> = (0..n)
+            .step_by(2)
+            .map(|index| crate::outer_subsample::WeightedOuterRow {
+                index,
+                weight: 2.0,
+                stratum: 0,
+            })
+            .collect();
+        assert!(
+            sampled.len() >= ROW_KERNEL_CACHE_PROGRESS_MIN_ROWS,
+            "the subsample must be large enough to turn the progress count on"
+        );
+        let subsample = RowSet::Subsample {
+            rows: Arc::new(sampled),
+            n_full: n,
+        };
+        let partial = build_row_kernel_cache(&kern, &subsample).expect("subsample cache");
+        let zero = words(0.0, &[0.0; 4], &[[0.0; 4]; 4]);
+        let partial_mismatches = (0..n)
+            .filter(|&row| {
+                let expected = if row % 2 == 0 { own_words(row) } else { zero.clone() };
+                cached_words(&partial, row) != expected
+            })
+            .count();
+        assert_eq!(
+            partial_mismatches, 0,
+            "{partial_mismatches} of {n} subsample cache slots differ from their row's own \
+             kernel words (sampled) or from zero (unsampled)"
+        );
     }
 }
