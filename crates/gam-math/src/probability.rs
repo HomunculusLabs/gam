@@ -3650,6 +3650,116 @@ mod tests {
         }
     }
 
+    /// The same tower in both tails, which the table above does not reach (#932):
+    /// its bound floors the reference at `1e-3`, so a right-tail entry of `1e-12` or
+    /// less passes it unexamined. Every entry here is held to that table's `1e-11`
+    /// relative contract with no floor, across the continued-fraction left tail,
+    /// the origin, and the signed log-magnitude right tail. mpmath 1.3, 100 decimal
+    /// digits, independently differentiating `log(ncdf(x))` on MSI; the same run
+    /// reproduced the table above at `x = −4, −2, 2` digit for digit.
+    #[test]
+    fn normal_logcdf_derivatives_match_high_precision_reference_in_both_tails_932() {
+        let refs: &[(f64, [f64; 5])] = &[
+            (
+                -100.0,
+                [
+                    -5005.5242086942050886,
+                    100.00999800099926071,
+                    -0.99990005995005173655,
+                    1.9976029958623432462e-6,
+                    5.9880209627737542408e-8,
+                ],
+            ),
+            (
+                -20.0,
+                [
+                    -203.91715537109726394,
+                    20.049753068527850542,
+                    -0.9975367383849478364,
+                    2.4272657893584202383e-4,
+                    3.5703551588456591599e-5,
+                ],
+            ),
+            (
+                -8.0,
+                [
+                    -35.013437159914549896,
+                    8.1213681122361126807,
+                    -0.98567511655665908982,
+                    3.2918765663441355071e-3,
+                    1.1052920954551626932e-3,
+                ],
+            ),
+            (
+                0.0,
+                [
+                    -0.69314718055994530942,
+                    0.79788456080286535588,
+                    -0.63661977236758134308,
+                    0.21801361414499016069,
+                    0.11477068205421885765,
+                ],
+            ),
+            (
+                8.0,
+                [
+                    -6.2209605742717860585e-16,
+                    5.0522710835368954309e-15,
+                    -4.0418168668295188973e-14,
+                    3.1829307826282502476e-13,
+                    -2.4655082887660163036e-12,
+                ],
+            ),
+            (
+                20.0,
+                [
+                    -2.7536241186062773386e-89,
+                    5.5209483621597631896e-88,
+                    -1.1041896724319526379e-86,
+                    2.2028583965017455126e-85,
+                    -4.3836329995548519725e-84,
+                ],
+            ),
+        ];
+        let rows: Vec<(f64, usize, f64, f64, f64)> = refs
+            .iter()
+            .flat_map(|&(x, reference)| {
+                let got = normal_logcdf_derivatives(x);
+                (0..5).map(move |order| {
+                    let (g, r) = (got[order], reference[order]);
+                    (x, order, g, r, (g - r).abs() / r.abs())
+                })
+            })
+            .collect();
+        for &(x, order, g, r, rel) in &rows {
+            eprintln!("[932 logcdf tails] x={x} order={order} got={g:.17e} ref={r:.17e} rel={rel:.3e}");
+        }
+        for &(x, order, g, r, rel) in &rows {
+            assert!(
+                rel < 1.0e-11,
+                "normal_logcdf_derivatives({x})[{order}] = {g:.17e}, reference {r:.17e}, \
+                 rel {rel:.3e} >= 1e-11"
+            );
+        }
+        // At x = 38.6 the value and first derivative round to zero, while the
+        // polynomially weighted second through fourth stay subnormal. A 450-digit
+        // reference holds them to the fifth's four subnormal ulps.
+        let got = normal_logcdf_derivatives(38.6);
+        for (order, reference) in [
+            (2, -4.43398523103014815e-323_f64),
+            (3, 1.7103695983405827434e-321),
+            (4, -6.5931586791325890931e-320),
+        ] {
+            eprintln!("[932 logcdf tails] x=38.6 order={order} got={:e} ref={reference:e}", got[order]);
+            assert!(got[order].signum() == reference.signum() && got[order] != 0.0);
+            assert!(
+                (got[order] - reference).abs() <= 4.0 * f64::from_bits(1),
+                "normal_logcdf_derivatives(38.6)[{order}] = {:e}, reference {reference:e}",
+                got[order]
+            );
+        }
+    }
+
     // ── standard_normal_quantile ──────────────────────────────────────────────
 
     #[test]
