@@ -54,10 +54,13 @@ use super::attention::{
 };
 use super::precision::{DecodableArtifact, DeclaredPrecision, LatticeCode};
 use super::supports::{EvidenceStatus, EvidenceStatusError, ExactBasis};
+use super::apply::{ApplyError, native_linear};
+use super::lift::{LiftError, TensorId, TensorRegistry, TieOrientation, UseMap, UseSiteId};
 use gam_linalg::roundoff::accumulation_growth;
+use gam_runtime::resource::{Governed, MemoryGovernor, MemoryReservationError};
 use ndarray::{Array1, Array2, ArrayView2};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// The serialized schema tag of a [`Program`] document.
@@ -189,8 +192,11 @@ impl NativeActivation {
 /// A primitive of the source network.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum NativePrimitive {
-    /// Rows mapped through a parameter matrix: `y = x Theta^T`.
-    Linear { weight: ParameterSlot },
+    /// Rows mapped through a parameter matrix: `y = x A^T`, with `A = Theta` for an
+    /// identity use and `A = Theta^T` for a transposed one (`lift::TieOrientation`).
+    /// The orientation is the map the consuming operation applies, and it must equal
+    /// the registered use site's `UseMap::Linear` orientation ([`Program::bind_use_sites`]).
+    Linear { weight: ParameterSlot, orientation: TieOrientation },
     /// A parameter vector added to every row.
     AddBias { bias: ParameterSlot },
     /// The source's elementwise activation.
@@ -243,11 +249,19 @@ impl NativePrimitive {
 
     /// The formal parameters this primitive reads.
     pub fn parameters(&self) -> Vec<ParameterSlot> {
+        self.parameter_maps().into_iter().map(|(parameter, _)| parameter).collect()
+    }
+
+    /// Each formal parameter this primitive reads, in [`Self::parameters`] order, with
+    /// what the node does with it: a Linear node multiplies by its matrix in its
+    /// orientation, and every other reader uses the stored values.
+    pub fn parameter_maps(&self) -> Vec<(ParameterSlot, UseMap)> {
         match self {
-            Self::Linear { weight: parameter }
-            | Self::AddBias { bias: parameter }
-            | Self::RmsNorm { gain: parameter, .. } => vec![*parameter],
-            Self::LayerNorm { gain, bias, .. } => vec![*gain, *bias],
+            Self::Linear { weight, orientation } => vec![(*weight, UseMap::Linear(*orientation))],
+            Self::AddBias { bias: parameter } | Self::RmsNorm { gain: parameter, .. } => {
+                vec![(*parameter, UseMap::Stored)]
+            }
+            Self::LayerNorm { gain, bias, .. } => vec![(*gain, UseMap::Stored), (*bias, UseMap::Stored)],
             Self::Activation { .. }
             | Self::Hadamard
             | Self::CoordinateMask { .. }
@@ -924,23 +938,27 @@ pub struct ParameterUse<'a> {
 /// Binds formal parameters to the source's tensors. The rows handed to
 /// [`ParameterSource::apply_linear`] are the current input of that use, after
 /// every upstream intervention, and an implementation applies its tensor to them
-/// without materializing an edited copy. At controls all `1` it executes the
-/// original tensor.
+/// in the node's orientation without materializing an edited copy, returning the
+/// product under the memory reservation that accounts for it. At controls all `1`
+/// it executes the original tensor.
 pub trait ParameterSource {
     type Error: std::error::Error;
 
-    /// `x Theta^T` for the matrix parameter at this use.
+    /// `x A^T` for the matrix parameter at this use, with `A = Theta` for an
+    /// identity use and `A = Theta^T` for a transposed one.
     fn apply_linear(
         &self,
         parameter: ParameterUse<'_>,
+        orientation: TieOrientation,
         rows: ArrayView2<'_, f64>,
-    ) -> Result<Array2<f64>, Self::Error>;
+    ) -> Result<Governed<Array2<f64>>, Self::Error>;
 
     /// The vector parameter at this use.
     fn vector(&self, parameter: ParameterUse<'_>) -> Result<Array1<f64>, Self::Error>;
 }
 
-/// A refused execution: the program itself, or the parameter binding at one use.
+/// A refused execution: the program itself, the parameter binding at one use, or
+/// the memory reservation of the execution's output.
 #[derive(Debug)]
 pub enum ExecutionError<E> {
     Program(ProgramError),
@@ -950,6 +968,8 @@ pub enum ExecutionError<E> {
         parameter: ParameterSlot,
         error: E,
     },
+    /// The output's footprint does not fit the process memory budget.
+    Memory { error: MemoryReservationError },
 }
 
 impl<E> From<ProgramError> for ExecutionError<E> {
@@ -967,6 +987,7 @@ impl<E: fmt::Display> fmt::Display for ExecutionError<E> {
                 "parameter {} at node {} of body {}: {error}",
                 parameter.0, node.0, body.0
             ),
+            Self::Memory { error } => write!(formatter, "mechanism program output: {error}"),
         }
     }
 }
@@ -1025,10 +1046,11 @@ impl MaskAssignment {
     }
 }
 
-/// The entry body's output and the final state slots.
-#[derive(Clone, Debug, PartialEq)]
+/// The entry body's output, under the memory reservation that accounts for it, and
+/// the final state slots.
+#[derive(Debug)]
 pub struct Execution {
-    pub output: Array2<f64>,
+    pub output: Governed<Array2<f64>>,
     pub slots: Vec<Option<Array2<f64>>>,
 }
 
@@ -1088,6 +1110,48 @@ impl Program {
     }
 }
 
+/// A node's value in the executor: a Linear product under the memory reservation of
+/// the source that formed it, or rows the executor or a primitive's owner formed as
+/// plain arrays. It reads as the rows either way, so the product is never copied out
+/// of its reservation.
+enum NodeValue {
+    Governed(Governed<Array2<f64>>),
+    Plain(Array2<f64>),
+}
+
+impl std::ops::Deref for NodeValue {
+    type Target = Array2<f64>;
+
+    fn deref(&self) -> &Array2<f64> {
+        match self {
+            Self::Governed(rows) => rows,
+            Self::Plain(rows) => rows,
+        }
+    }
+}
+
+impl std::ops::DerefMut for NodeValue {
+    fn deref_mut(&mut self) -> &mut Array2<f64> {
+        match self {
+            Self::Governed(rows) => rows,
+            Self::Plain(rows) => rows,
+        }
+    }
+}
+
+impl NodeValue {
+    /// The value under a reservation of its footprint: a governed product as it is,
+    /// and plain rows reserved here and moved under the reservation, not copied.
+    fn governed(self) -> Result<Governed<Array2<f64>>, MemoryReservationError> {
+        match self {
+            Self::Governed(rows) => Ok(rows),
+            Self::Plain(rows) => Ok(MemoryGovernor::global()
+                .try_reserve_dense_f64(rows.nrows(), rows.ncols(), "mechanism program output")?
+                .bind(rows)),
+        }
+    }
+}
+
 struct Executor<'a, S> {
     program: &'a Program,
     source: &'a S,
@@ -1136,9 +1200,10 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
         })
     }
 
-    fn run(&mut self, inputs: Vec<Array2<f64>>) -> Result<Array2<f64>, ExecutionError<S::Error>> {
+    fn run(&mut self, inputs: Vec<Array2<f64>>) -> Result<Governed<Array2<f64>>, ExecutionError<S::Error>> {
         let mut path = Vec::new();
-        self.body(self.program.parts.entry, inputs, &mut path)
+        let output = self.body(self.program.parts.entry, inputs, &mut path)?;
+        output.governed().map_err(|error| ExecutionError::Memory { error })
     }
 
     /// The value of a control at an invocation path: its group's deepest
@@ -1193,7 +1258,7 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
         body_id: BodyId,
         inputs: Vec<Array2<f64>>,
         path: &mut Vec<CallSite>,
-    ) -> Result<Array2<f64>, ExecutionError<S::Error>> {
+    ) -> Result<NodeValue, ExecutionError<S::Error>> {
         let program = self.program;
         let body = &program.parts.bodies[body_id.index()];
         if inputs.len() != body.inputs as usize {
@@ -1205,26 +1270,29 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
             .into());
         }
         let mut remaining = program.use_counts[body_id.index()].clone();
-        let mut values: Vec<Option<Array2<f64>>> = vec![None; body.nodes.len()];
+        let mut values: Vec<Option<NodeValue>> =
+            std::iter::repeat_with(|| None).take(body.nodes.len()).collect();
         for (i, node) in body.nodes.iter().enumerate() {
             let node_id = NodeId(i as u32);
             let site = CallSite { body: body_id, node: node_id, stage: 0 };
             let value = match node {
-                Node::Input { port } => inputs[*port as usize].clone(),
-                Node::Read { slot } => self.slots[slot.index()]
-                    .clone()
-                    .ok_or(ProgramError::SlotUnwritten { slot: *slot })?,
+                Node::Input { port } => NodeValue::Plain(inputs[*port as usize].clone()),
+                Node::Read { slot } => NodeValue::Plain(
+                    self.slots[slot.index()]
+                        .clone()
+                        .ok_or(ProgramError::SlotUnwritten { slot: *slot })?,
+                ),
                 Node::Write { slot, value } => {
                     let written = argument(&values, body_id, *value)?.clone();
                     self.slots[slot.index()] = Some(written.clone());
-                    written
+                    NodeValue::Plain(written)
                 }
                 Node::Native { primitive, arguments } => {
                     self.native(site, primitive, arguments, &values, path)?
                 }
-                Node::Sum { terms } => self.sum(site, terms, &values, path)?,
+                Node::Sum { terms } => NodeValue::Plain(self.sum(site, terms, &values, path)?),
                 Node::Compose { value, stages } => {
-                    let mut current = argument(&values, body_id, *value)?.clone();
+                    let mut current = NodeValue::Plain(argument(&values, body_id, *value)?.clone());
                     for (k, stage) in stages.iter().enumerate() {
                         let m = stage
                             .control
@@ -1233,9 +1301,9 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
                             continue;
                         }
                         path.push(CallSite { stage: k as u32, ..site });
-                        let staged = self.body(stage.body, vec![current.clone()], path);
+                        let staged = self.body(stage.body, vec![(*current).clone()], path);
                         path.pop();
-                        let staged = staged?;
+                        let mut staged = staged?;
                         if staged.dim() != current.dim() {
                             return Err(ProgramError::ShapeMismatch {
                                 body: body_id,
@@ -1245,15 +1313,12 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
                             }
                             .into());
                         }
-                        current = if m == 1.0 {
-                            staged
-                        } else {
-                            let mut interpolated = staged;
-                            interpolated -= &current;
-                            interpolated *= m;
-                            interpolated += &current;
-                            interpolated
-                        };
+                        if m != 1.0 {
+                            *staged -= &*current;
+                            *staged *= m;
+                            *staged += &*current;
+                        }
+                        current = staged;
                     }
                     current
                 }
@@ -1293,13 +1358,13 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
         site: CallSite,
         primitive: &NativePrimitive,
         arguments: &[NodeId],
-        values: &[Option<Array2<f64>>],
+        values: &[Option<NodeValue>],
         path: &[CallSite],
-    ) -> Result<Array2<f64>, ExecutionError<S::Error>> {
+    ) -> Result<NodeValue, ExecutionError<S::Error>> {
         let (body, node) = (site.body, site.node);
         let x = argument(values, body, arguments[0])?;
-        match primitive {
-            NativePrimitive::Linear { weight } => {
+        let rows: Result<Array2<f64>, ExecutionError<S::Error>> = match primitive {
+            NativePrimitive::Linear { weight, orientation } => {
                 let controls = self.parameter_controls(*weight, path);
                 let parameter_use = ParameterUse {
                     parameter: *weight,
@@ -1310,7 +1375,7 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
                 };
                 let rows = self
                     .source
-                    .apply_linear(parameter_use, x.view())
+                    .apply_linear(parameter_use, *orientation, x.view())
                     .map_err(|error| ExecutionError::Source { body, node, parameter: *weight, error })?;
                 if rows.nrows() != x.nrows() {
                     return Err(ProgramError::RowCountChanged {
@@ -1321,7 +1386,7 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
                     }
                     .into());
                 }
-                Ok(rows)
+                return Ok(NodeValue::Governed(rows));
             }
             NativePrimitive::AddBias { bias } => {
                 let vector = self.parameter_vector(*bias, site, path)?;
@@ -1420,14 +1485,15 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
                 }
                 Ok(rows)
             }
-        }
+        };
+        Ok(NodeValue::Plain(rows?))
     }
 
     fn sum(
         &self,
         site: CallSite,
         terms: &[SumTerm],
-        values: &[Option<Array2<f64>>],
+        values: &[Option<NodeValue>],
         path: &[CallSite],
     ) -> Result<Array2<f64>, ExecutionError<S::Error>> {
         let first = argument(values, site.body, terms[0].value)?;
@@ -1470,7 +1536,7 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
         mechanism: BodyId,
         arguments: Vec<Array2<f64>>,
         path: &mut Vec<CallSite>,
-    ) -> Result<Array2<f64>, ExecutionError<S::Error>> {
+    ) -> Result<NodeValue, ExecutionError<S::Error>> {
         let program = self.program;
         let all_on = program.controls_below[mechanism.index()]
             .iter()
@@ -1495,7 +1561,12 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
         let evidence_error =
             |error| ExecutionError::Program(ProgramError::Evidence { body: site.body, node: site.node, error });
         let (difference_value, difference_at) =
-            extremal_entry((&mechanism_output - &native_output).iter().map(|entry| entry.abs()));
+            extremal_entry(
+                mechanism_output
+                    .iter()
+                    .zip(native_output.iter())
+                    .map(|(mechanism_entry, native_entry)| (mechanism_entry - native_entry).abs()),
+            );
         let (scale_value, scale_at) = extremal_entry(native_output.iter().map(|entry| entry.abs()));
         // The bound is rounded up, so the computed error band is never below the real
         // `gamma_1 * value`.
@@ -1528,17 +1599,17 @@ impl<'a, S: ParameterSource> Executor<'a, S> {
 }
 
 fn argument<E>(
-    values: &[Option<Array2<f64>>],
+    values: &[Option<NodeValue>],
     body: BodyId,
     node: NodeId,
 ) -> Result<&Array2<f64>, ExecutionError<E>> {
     values[node.index()]
-        .as_ref()
+        .as_deref()
         .ok_or(ExecutionError::Program(ProgramError::ValueReleased { body, node }))
 }
 
 fn collect_arguments<E>(
-    values: &[Option<Array2<f64>>],
+    values: &[Option<NodeValue>],
     body: BodyId,
     arguments: &[NodeId],
 ) -> Result<Vec<Array2<f64>>, ExecutionError<E>> {
@@ -1684,7 +1755,7 @@ impl Program {
                 Node::Native { primitive, arguments } => {
                     let x = values[arguments[0].index()].clone();
                     match primitive {
-                        NativePrimitive::Linear { weight } => {
+                        NativePrimitive::Linear { weight, .. } => {
                             x.product(&self.parameter_mask_dependence(*weight))
                         }
                         NativePrimitive::AddBias { bias } => {
@@ -1844,7 +1915,9 @@ pub enum DenseParameterError {
     Unbound { parameter: ParameterSlot },
     NotAMatrix { parameter: ParameterSlot },
     NotAVector { parameter: ParameterSlot },
-    WidthMismatch { parameter: ParameterSlot, expected: usize, found: usize },
+    /// The matrix-free owner refused the product, e.g. rows whose width is not the
+    /// matrix's width in the node's orientation.
+    Apply { parameter: ParameterSlot, error: ApplyError },
     /// A dense tensor has no component anchor for controls to act on.
     Controlled { parameter: ParameterSlot },
 }
@@ -1861,11 +1934,9 @@ impl fmt::Display for DenseParameterError {
             Self::NotAVector { parameter } => {
                 write!(formatter, "formal parameter {} is bound to a matrix, not a vector", parameter.0)
             }
-            Self::WidthMismatch { parameter, expected, found } => write!(
-                formatter,
-                "formal parameter {} takes rows of width {expected}, got {found}",
-                parameter.0
-            ),
+            Self::Apply { parameter, error } => {
+                write!(formatter, "formal parameter {}: {error}", parameter.0)
+            }
             Self::Controlled { parameter } => write!(
                 formatter,
                 "formal parameter {} declares anchor controls, which a dense tensor cannot apply",
@@ -1900,20 +1971,16 @@ impl ParameterSource for DenseParameters {
     fn apply_linear(
         &self,
         parameter_use: ParameterUse<'_>,
+        orientation: TieOrientation,
         rows: ArrayView2<'_, f64>,
-    ) -> Result<Array2<f64>, Self::Error> {
+    ) -> Result<Governed<Array2<f64>>, Self::Error> {
         let parameter = parameter_use.parameter;
         match self.tensor(parameter_use)? {
-            DenseTensor::Matrix(matrix) => {
-                if matrix.ncols() != rows.ncols() {
-                    return Err(DenseParameterError::WidthMismatch {
-                        parameter,
-                        expected: matrix.ncols(),
-                        found: rows.ncols(),
-                    });
-                }
-                Ok(rows.dot(&matrix.t()))
+            DenseTensor::Matrix(matrix) => match orientation {
+                TieOrientation::Identity => native_linear(matrix.view(), rows),
+                TieOrientation::Transpose => native_linear(matrix.t(), rows),
             }
+            .map_err(|error| DenseParameterError::Apply { parameter, error }),
             DenseTensor::Vector(..) => Err(DenseParameterError::NotAMatrix { parameter }),
         }
     }
@@ -1929,8 +1996,9 @@ impl ParameterSource for DenseParameters {
 
 /// The node-label alphabet of a program codeword: Input, Read, Write, Linear,
 /// AddBias, Relu, ExactGelu, Silu, Hadamard, CoordinateMask, Sum, Compose, Call,
-/// Refine, RmsNorm, LayerNorm, CausalSelfAttention and SwiGlu.
-pub const PROGRAM_LABEL_ALPHABET: usize = 18;
+/// Refine, RmsNorm, LayerNorm, CausalSelfAttention, SwiGlu and transposed Linear. A
+/// Linear node's orientation is its label, as an activation's kind is.
+pub const PROGRAM_LABEL_ALPHABET: usize = 19;
 
 fn node_label(node: &Node) -> usize {
     match node {
@@ -1938,7 +2006,8 @@ fn node_label(node: &Node) -> usize {
         Node::Read { .. } => 1,
         Node::Write { .. } => 2,
         Node::Native { primitive, .. } => match primitive {
-            NativePrimitive::Linear { .. } => 3,
+            NativePrimitive::Linear { orientation: TieOrientation::Identity, .. } => 3,
+            NativePrimitive::Linear { orientation: TieOrientation::Transpose, .. } => 18,
             NativePrimitive::AddBias { .. } => 4,
             NativePrimitive::Activation { activation } => match activation {
                 NativeActivation::Relu => 5,
@@ -2137,7 +2206,7 @@ impl Program {
                 encode_fixed_index(out, slot.index(), parts.slots.len())
             }
             Node::Native { primitive, .. } => match primitive {
-                NativePrimitive::Linear { weight: parameter }
+                NativePrimitive::Linear { weight: parameter, .. }
                 | NativePrimitive::AddBias { bias: parameter } => {
                     encode_fixed_index(out, parameter.index(), parts.parameters.len())
                 }
@@ -2280,10 +2349,11 @@ fn decode_node(
             let value = single(&arguments)?;
             Node::Write { slot: SlotId(decode_fixed_index(reader, slots)? as u32), value }
         }
-        3 => native(
-            NativePrimitive::Linear { weight: ParameterSlot(decode_fixed_index(reader, parameters)? as u32) },
-            arguments,
-        ),
+        3 | 18 => {
+            let orientation = if label == 3 { TieOrientation::Identity } else { TieOrientation::Transpose };
+            let weight = ParameterSlot(decode_fixed_index(reader, parameters)? as u32);
+            native(NativePrimitive::Linear { weight, orientation }, arguments)
+        }
         4 => native(
             NativePrimitive::AddBias { bias: ParameterSlot(decode_fixed_index(reader, parameters)? as u32) },
             arguments,
@@ -2368,6 +2438,172 @@ fn decode_node(
     })
 }
 
+/// One read of a formal parameter on the teacher's path, bound to its registered use
+/// site.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoundRead {
+    pub parameter: ParameterSlot,
+    pub body: BodyId,
+    pub node: NodeId,
+    pub invocation: Vec<CallSite>,
+    pub site: UseSiteId,
+    pub map: UseMap,
+}
+
+/// A refused binding of the program's reads to a tensor registry.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BindingError {
+    /// A declared parameter's name, or a registered site's name, is not registered.
+    Registry { parameter: ParameterSlot, error: LiftError },
+    /// A read on the teacher's path has no registered use site at its ordinal.
+    UnregisteredRead { parameter: ParameterSlot, body: BodyId, node: NodeId, site: UseSiteId },
+    /// The registered site reads different storage than the parameter names.
+    StorageMismatch { site: UseSiteId, declared: TensorId, registered: TensorId },
+    /// The registered site does something else with the parameter than the node does: a
+    /// Linear node in the other orientation, a Linear node on a stored read, or a stored
+    /// reader on a linear site.
+    MapMismatch { site: UseSiteId, declared: UseMap, registered: UseMap },
+    /// A registered use site of a storage the program reads is reached by no read, so a
+    /// global edit of that storage would reach a site the program does not execute.
+    UnreadSite { storage: TensorId, site: UseSiteId },
+}
+
+impl fmt::Display for BindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Registry { parameter, error } => {
+                write!(formatter, "formal parameter {}: {error}", parameter.0)
+            }
+            Self::UnregisteredRead { parameter, body, node, site } => write!(
+                formatter,
+                "formal parameter {} read at node {} of body {} has no registered use site {}",
+                parameter.0, node.0, body.0, site.0
+            ),
+            Self::StorageMismatch { site, declared, registered } => write!(
+                formatter,
+                "use site {} reads {}, not the declared storage {}",
+                site.0, registered.0, declared.0
+            ),
+            Self::MapMismatch { site, declared, registered } => write!(
+                formatter,
+                "use site {} is registered as {registered:?}, but its node does {declared:?}",
+                site.0
+            ),
+            Self::UnreadSite { storage, site } => write!(
+                formatter,
+                "use site {} of {} is reached by no read of the program",
+                site.0, storage.0
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BindingError {}
+
+impl Program {
+    /// Binds every parameter read on the teacher's path to its registered use site.
+    ///
+    /// The teacher's path is the all-on execution: every composition stage, the native
+    /// body of every refinement, and every call. A declared parameter names storage or an
+    /// alias of it, and the `k`-th read of a storage tensor along the path, in execution
+    /// order, binds to `UseSiteId::read(storage, k)`, which must be registered, read that
+    /// storage and do what the node does. Every registered site of a storage the program
+    /// reads must be reached, so a global edit of that storage reaches exactly the bound
+    /// reads. Two reads of one storage with the same map and swapped ordinals pass every
+    /// check here; only an end-to-end receipt against the teacher (A12) detects them. A
+    /// mechanism body's reads are not on the teacher's path and are not bound.
+    pub fn bind_use_sites(&self, registry: &TensorRegistry) -> Result<Vec<BoundRead>, BindingError> {
+        let storage = self
+            .parts
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(p, decl)| {
+                registry
+                    .storage_of(&TensorId(decl.name.clone()))
+                    .cloned()
+                    .map_err(|error| BindingError::Registry { parameter: ParameterSlot(p as u32), error })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut raw = Vec::new();
+        let mut path = Vec::new();
+        self.teacher_reads(self.parts.entry, &mut path, &mut raw);
+        let mut ordinals: BTreeMap<TensorId, usize> = BTreeMap::new();
+        let mut reads = Vec::with_capacity(raw.len());
+        for (parameter, body, node, invocation, map) in raw {
+            let read_storage = &storage[parameter.index()];
+            let ordinal = ordinals.entry(read_storage.clone()).or_insert(0);
+            let site = UseSiteId::read(read_storage, *ordinal);
+            *ordinal += 1;
+            let registered = match registry.resolve_use_site(&site) {
+                Ok(registered) => registered,
+                Err(LiftError::UnknownUseSite(..)) => {
+                    return Err(BindingError::UnregisteredRead { parameter, body, node, site });
+                }
+                Err(error) => return Err(BindingError::Registry { parameter, error }),
+            };
+            if registered.storage != *read_storage {
+                return Err(BindingError::StorageMismatch {
+                    site,
+                    declared: read_storage.clone(),
+                    registered: registered.storage,
+                });
+            }
+            if registered.map != map {
+                return Err(BindingError::MapMismatch { site, declared: map, registered: registered.map });
+            }
+            reads.push(BoundRead { parameter, body, node, invocation, site, map });
+        }
+        for read_storage in ordinals.keys() {
+            let reached: BTreeSet<&UseSiteId> = reads
+                .iter()
+                .filter(|read| storage[read.parameter.index()] == *read_storage)
+                .map(|read| &read.site)
+                .collect();
+            if let Some(site) = registry
+                .use_sites_of(read_storage)
+                .into_iter()
+                .find(|site| !reached.contains(site))
+            {
+                return Err(BindingError::UnreadSite { storage: read_storage.clone(), site: site.clone() });
+            }
+        }
+        Ok(reads)
+    }
+
+    /// Every parameter read of `body_id` on the teacher's path, in execution order.
+    fn teacher_reads(
+        &self,
+        body_id: BodyId,
+        path: &mut Vec<CallSite>,
+        out: &mut Vec<(ParameterSlot, BodyId, NodeId, Vec<CallSite>, UseMap)>,
+    ) {
+        for (i, node) in self.parts.bodies[body_id.index()].nodes.iter().enumerate() {
+            let site = CallSite { body: body_id, node: NodeId(i as u32), stage: 0 };
+            match node {
+                Node::Native { primitive, .. } => {
+                    for (parameter, map) in primitive.parameter_maps() {
+                        out.push((parameter, site.body, site.node, path.clone(), map));
+                    }
+                }
+                Node::Compose { stages, .. } => {
+                    for (k, stage) in stages.iter().enumerate() {
+                        path.push(CallSite { stage: k as u32, ..site });
+                        self.teacher_reads(stage.body, path, out);
+                        path.pop();
+                    }
+                }
+                Node::Call { body: callee, .. } | Node::Refine { native: callee, .. } => {
+                    path.push(site);
+                    self.teacher_reads(*callee, path, out);
+                    path.pop();
+                }
+                Node::Input { .. } | Node::Read { .. } | Node::Write { .. } | Node::Sum { .. } => {}
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Fixtures whose entries and mask values are dyadic rationals with small
@@ -2402,7 +2638,10 @@ mod tests {
     }
 
     fn linear(parameter: u32, argument: u32) -> Node {
-        native(NativePrimitive::Linear { weight: ParameterSlot(parameter) }, &[argument])
+        native(
+            NativePrimitive::Linear { weight: ParameterSlot(parameter), orientation: TieOrientation::Identity },
+            &[argument],
+        )
     }
 
     fn mask(indices: &[u32], argument: u32) -> Node {
@@ -2439,6 +2678,7 @@ mod tests {
             .execute(source, masks, vec![x.clone()], Vec::new(), &row_positions(x))
             .expect("execution of a valid program")
             .output
+            .to_owned()
     }
 
     #[test]
@@ -2664,7 +2904,7 @@ mod tests {
         let (execution, residuals) = program
             .refinement_residuals(&source, &MaskAssignment::all_on(), vec![x.clone()], Vec::new(), &row_positions(&x))
             .expect("residual execution");
-        assert_eq!(execution.output, native_output);
+        assert_eq!(*execution.output, native_output);
         assert_eq!(residuals.len(), 1);
         let residual = &residuals[0];
         assert!(residual.all_on);
@@ -2689,7 +2929,7 @@ mod tests {
             .refinement_residuals(&source, &half, vec![x.clone()], Vec::new(), &row_positions(&x))
             .expect("residual execution");
         assert!(!half_residuals[0].all_on);
-        assert_eq!(half_execution.output, run(&program, &source, &half, &x));
+        assert_eq!(*half_execution.output, run(&program, &source, &half, &x));
     }
 
     #[test]
@@ -2963,7 +3203,7 @@ mod tests {
             .execute(&source, &MaskAssignment::all_on(), Vec::new(), vec![Some(x.clone())], &[0])
             .expect("a written slot");
         let updated = &x + &row_map(&x, &w);
-        assert_eq!(execution.output, updated);
+        assert_eq!(*execution.output, updated);
         assert_eq!(execution.slots, vec![Some(updated)]);
         assert!(matches!(
             program.execute(&source, &MaskAssignment::all_on(), Vec::new(), vec![None], &[0]),
@@ -3101,9 +3341,9 @@ mod tests {
             .execute(&source, &MaskAssignment::all_on(), vec![gate.clone(), up.clone()], Vec::new(), &row_positions(&gate))
             .expect("SwiGLU execution")
             .output;
-        assert_eq!(output, swiglu_hidden(gate.view(), up.view()).expect("finite rows of one shape"));
+        assert_eq!(*output, swiglu_hidden(gate.view(), up.view()).expect("finite rows of one shape"));
         // Positive control: the gate passes through SiLU, so the node is not the plain product.
-        assert_ne!(output, &gate * &up);
+        assert_ne!(*output, &gate * &up);
         // The owner's shape refusal reaches the caller unchanged.
         assert!(matches!(
             program.execute(
@@ -3185,14 +3425,14 @@ mod tests {
             )
             .expect("owner attention")
             .mixed;
-        assert_eq!(output, expected);
+        assert_eq!(*output, expected);
         // Positive control: moving one position changes the rotary scores, so the
         // execution's positions reach the node.
         let shifted = program
             .execute(&source, &MaskAssignment::all_on(), vec![x.clone()], Vec::new(), &[0, 1, 5])
             .expect("attention execution")
             .output;
-        assert_ne!(shifted, output);
+        assert_ne!(*shifted, *output);
         // Construction refuses key/value heads that do not divide the query heads.
         assert!(matches!(
             Program::new(attention_fixture(AttentionGeometry { model_dim: 4, n_heads: 3, n_kv_heads: 2, head_dim: 2 })),
@@ -3354,6 +3594,200 @@ mod tests {
         assert!(matches!(
             Program::decode(&hostile),
             Err(ProgramError::Codec { error: CodecError::InvalidCodeword(..) })
+        ));
+    }
+
+    fn oriented(parameter: u32, orientation: TieOrientation, argument: u32) -> Node {
+        native(NativePrimitive::Linear { weight: ParameterSlot(parameter), orientation }, &[argument])
+    }
+
+    #[test]
+    fn a_transposed_linear_node_multiplies_by_the_stored_matrix_through_the_owner() {
+        let w = array![[1.0, -0.5, 0.25], [0.5, 2.0, -1.0]];
+        let x = array![[1.0, -2.0], [0.5, 4.0]];
+        let build = |orientation: TieOrientation| {
+            Program::new(ProgramParts {
+                parameters: free_parameters(1),
+                slots: Vec::new(),
+                controls: Vec::new(),
+                mask_groups: Vec::new(),
+                bodies: vec![body("entry", 1, vec![Node::Input { port: 0 }, oriented(0, orientation, 0)])],
+                entry: BodyId(0),
+            })
+            .expect("a valid program")
+        };
+        let source = DenseParameters::new(vec![DenseTensor::Matrix(w.clone())]);
+        let transposed = build(TieOrientation::Transpose);
+        // `x A^T` with `A = Theta^T` is `x Theta`.
+        assert_eq!(run(&transposed, &source, &MaskAssignment::all_on(), &x), x.dot(&w));
+        // Positive control: an identity use of the same matrix takes rows of width 3, and
+        // the owner refuses rows of width 2.
+        assert!(matches!(
+            build(TieOrientation::Identity).execute(
+                &source,
+                &MaskAssignment::all_on(),
+                vec![x.clone()],
+                Vec::new(),
+                &row_positions(&x),
+            ),
+            Err(ExecutionError::Source { error: DenseParameterError::Apply { .. }, .. })
+        ));
+        // The orientation travels in the document and, as its own label, in the codeword.
+        let text = transposed.to_json().expect("a serializable program");
+        assert!(text.contains("\"orientation\":\"Transpose\""));
+        assert_eq!(Program::from_json(&text).expect("a round trip"), transposed);
+        let decoded = Program::decode(&transposed.encode(lattice()).expect("an encodable program"))
+            .expect("the codeword of a valid program");
+        assert_eq!(decoded.parts(), &unnamed(transposed.parts()));
+        assert_ne!(decoded.parts(), &unnamed(build(TieOrientation::Identity).parts()));
+    }
+
+    /// The registry of a tied embedding `embed` (4, 3) and a bias (4), with the use sites
+    /// `(storage, ordinal, map)`.
+    fn registry_with(sites: &[(&str, usize, UseMap)]) -> TensorRegistry {
+        let mut registry = TensorRegistry::default();
+        registry
+            .register_storage(TensorId("embed".to_string()), Array2::<f64>::zeros((4, 3)).view().into_dyn())
+            .expect("a new storage name");
+        registry
+            .register_storage(TensorId("bias".to_string()), Array1::<f64>::zeros(4).view().into_dyn())
+            .expect("a new storage name");
+        for &(storage, ordinal, map) in sites {
+            let storage = TensorId(storage.to_string());
+            registry
+                .register_use_site(UseSiteId::read(&storage, ordinal), storage, map)
+                .expect("a new use site of registered storage");
+        }
+        registry
+    }
+
+    fn named_program(names: &[&str], nodes: Vec<Node>) -> Program {
+        Program::new(ProgramParts {
+            parameters: names
+                .iter()
+                .map(|name| ParameterDecl { name: name.to_string(), controls: Vec::new() })
+                .collect(),
+            slots: Vec::new(),
+            controls: Vec::new(),
+            mask_groups: Vec::new(),
+            bodies: vec![body("entry", 1, nodes)],
+            entry: BodyId(0),
+        })
+        .expect("a valid program")
+    }
+
+    /// `embed` read as `x embed^T`, a bias added, then the head read as `x embed`.
+    fn tied_nodes(head: u32) -> Vec<Node> {
+        vec![
+            Node::Input { port: 0 },
+            oriented(0, TieOrientation::Identity, 0),
+            native(NativePrimitive::AddBias { bias: ParameterSlot(1) }, &[1]),
+            oriented(head, TieOrientation::Transpose, 2),
+        ]
+    }
+
+    const TIED_SITES: [(&str, usize, UseMap); 3] = [
+        ("embed", 0, UseMap::Linear(TieOrientation::Identity)),
+        ("bias", 0, UseMap::Stored),
+        ("embed", 1, UseMap::Linear(TieOrientation::Transpose)),
+    ];
+
+    #[test]
+    fn use_sites_bind_teacher_reads_in_execution_order() {
+        let registry = registry_with(&TIED_SITES);
+        let reads = named_program(&["embed", "bias"], tied_nodes(0))
+            .bind_use_sites(&registry)
+            .expect("the tied fixture binds");
+        let bound: Vec<(String, UseMap)> = reads.iter().map(|read| (read.site.0.clone(), read.map)).collect();
+        assert_eq!(
+            bound,
+            vec![
+                ("embed#0".to_string(), UseMap::Linear(TieOrientation::Identity)),
+                ("bias#0".to_string(), UseMap::Stored),
+                ("embed#1".to_string(), UseMap::Linear(TieOrientation::Transpose)),
+            ]
+        );
+        // A global edit of the storage reaches exactly its bound reads.
+        let global: BTreeSet<&UseSiteId> =
+            registry.use_sites_of(&TensorId("embed".to_string())).into_iter().collect();
+        let bound_embed: BTreeSet<&UseSiteId> =
+            reads.iter().filter(|read| read.parameter == ParameterSlot(0)).map(|read| &read.site).collect();
+        assert_eq!(global, bound_embed);
+    }
+
+    #[test]
+    fn use_site_binding_refuses_every_map_disagreement() {
+        let tied = named_program(&["embed", "bias"], tied_nodes(0));
+        let mut flipped = TIED_SITES;
+        flipped[2].2 = UseMap::Linear(TieOrientation::Identity);
+        assert_eq!(
+            tied.bind_use_sites(&registry_with(&flipped)),
+            Err(BindingError::MapMismatch {
+                site: UseSiteId("embed#1".to_string()),
+                declared: UseMap::Linear(TieOrientation::Transpose),
+                registered: UseMap::Linear(TieOrientation::Identity),
+            })
+        );
+        let mut stored = TIED_SITES;
+        stored[0].2 = UseMap::Stored;
+        assert_eq!(
+            tied.bind_use_sites(&registry_with(&stored)),
+            Err(BindingError::MapMismatch {
+                site: UseSiteId("embed#0".to_string()),
+                declared: UseMap::Linear(TieOrientation::Identity),
+                registered: UseMap::Stored,
+            })
+        );
+        // A matrix read by a stored use (a bias here, a lookup in a model) where the registry
+        // records a linear use.
+        let lookup = named_program(
+            &["embed"],
+            vec![Node::Input { port: 0 }, native(NativePrimitive::AddBias { bias: ParameterSlot(0) }, &[0])],
+        );
+        assert_eq!(
+            lookup.bind_use_sites(&registry_with(&[("embed", 0, UseMap::Linear(TieOrientation::Identity))])),
+            Err(BindingError::MapMismatch {
+                site: UseSiteId("embed#0".to_string()),
+                declared: UseMap::Stored,
+                registered: UseMap::Linear(TieOrientation::Identity),
+            })
+        );
+    }
+
+    #[test]
+    fn use_site_binding_refuses_a_missing_or_an_unreached_site() {
+        let tied = named_program(&["embed", "bias"], tied_nodes(0));
+        assert!(matches!(
+            tied.bind_use_sites(&registry_with(&TIED_SITES[..2])),
+            Err(BindingError::UnregisteredRead { site, .. }) if site == UseSiteId("embed#1".to_string())
+        ));
+        let mut extra = TIED_SITES.to_vec();
+        extra.push(("embed", 2, UseMap::Linear(TieOrientation::Identity)));
+        assert_eq!(
+            tied.bind_use_sites(&registry_with(&extra)),
+            Err(BindingError::UnreadSite {
+                storage: TensorId("embed".to_string()),
+                site: UseSiteId("embed#2".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn a_parameter_named_by_an_alias_shares_its_storage_ordinals() {
+        let mut registry = registry_with(&TIED_SITES);
+        registry
+            .register_alias(TensorId("lm_head".to_string()), TensorId("embed".to_string()))
+            .expect("an alias of registered storage");
+        let reads = named_program(&["embed", "bias", "lm_head"], tied_nodes(2))
+            .bind_use_sites(&registry)
+            .expect("an alias binds to its storage");
+        // The head's read is the storage's second read, not the alias's first.
+        assert_eq!(reads[2].parameter, ParameterSlot(2));
+        assert_eq!(reads[2].site, UseSiteId("embed#1".to_string()));
+        // Positive control: an unregistered name is refused as such.
+        assert!(matches!(
+            named_program(&["embed", "bias", "decoder"], tied_nodes(2)).bind_use_sites(&registry),
+            Err(BindingError::Registry { parameter: ParameterSlot(2), error: LiftError::UnknownTensor(..) })
         ));
     }
 }
