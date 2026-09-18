@@ -58,6 +58,87 @@ mod exact_hessian_fixture_tests {
         (term, target, rho, cache)
     }
 
+    /// #2080/#2228 — the polish tests' entry: the PD-basin fixture's term and `rho`
+    /// at a state that still carries a live residual.
+    ///
+    /// `converged_state_with_residual` prices through the criterion, and the criterion
+    /// carries an accepted state to its root before pricing it (`refine_accepted_root`,
+    /// ae0d368e20). At that root the gradient sits inside the KKT tolerance and no
+    /// polish step resolves a decrease: bis2 (job 1162220) read the entry `‖g‖` as
+    /// 4.67e-16 at ae0d368e20 against 1.01e-4 at its parent, with byte-identical test
+    /// bodies. A polish test built on it measures an early return.
+    ///
+    /// This state is the majorized evidence inner loop's own fixed point instead: the
+    /// same term and `rho` re-enter `run_joint_fit_arrow_schur_for_quasi_laplace` until
+    /// a whole re-entry finds no strict decrease. That drive has no acceptance,
+    /// refinement or polish site, so nothing on its path carries the state to the
+    /// root, and the exact-A step the polish takes still resolves descent there. The
+    /// premise is a property of the state, asserted with the criterion's own KKT gate
+    /// (`quasi_laplace_kkt_stationary` at `SAE_MANIFOLD_INNER_GRAD_REL_TOL ·
+    /// inner_iterate_scale`), and printed before it is asserted.
+    pub(super) fn majorized_fixed_point_with_residual()
+    -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
+        use crate::manifold::term::SAE_MANIFOLD_INNER_GRAD_REL_TOL;
+        use crate::manifold::tests::gamma_fd_tiny_fixture;
+
+        let (mut term, target, mut rho) = gamma_fd_tiny_fixture();
+        rho.log_lambda_sparse = 0.0;
+        for value in rho.log_lambda_smooth.iter_mut() {
+            *value = -1.0;
+        }
+        for axis in rho.log_ard.iter_mut() {
+            for value in axis.iter_mut() {
+                *value = -1.0;
+            }
+        }
+        // Each re-entry that is not a fixed point committed a strict decrease of the
+        // penalized objective under its own gates, so the loop ends where the drive
+        // itself stops moving the state.
+        let mut reentries = 0usize;
+        loop {
+            let outcome = term
+                .run_joint_fit_arrow_schur_for_quasi_laplace(
+                    target.view(),
+                    &mut rho,
+                    None,
+                    40,
+                    0.4,
+                    1.0e-6,
+                    1.0e-6,
+                )
+                .expect("the majorized evidence drive must run on the PD-basin fixture");
+            reentries += 1;
+            if outcome.fixed_point {
+                break;
+            }
+        }
+        let system = term
+            .assemble_arrow_schur(target.view(), &rho, None)
+            .expect("arrow-Schur assembly at the majorized fixed point");
+        let grad_norm_sq = SaeManifoldTerm::system_grad_norm_sq(&system);
+        let lambda_smooth = rho.lambda_smooth_vec().expect("smoothness strengths");
+        let quotient_grad_norm =
+            term.quotient_gradient_norm_from_system(&system, grad_norm_sq, &lambda_smooth);
+        let tolerance = SAE_MANIFOLD_INNER_GRAD_REL_TOL * term.inner_iterate_scale();
+        eprintln!(
+            "[#2080 polish fixture] majorized fixed point after {reentries} re-entries: \
+             ‖g‖={:.6e} ‖Π⊥null g‖={quotient_grad_norm:.6e} tol={tolerance:.6e}",
+            grad_norm_sq.sqrt(),
+        );
+        assert!(
+            !SaeManifoldTerm::quasi_laplace_kkt_stationary(
+                grad_norm_sq.sqrt(),
+                quotient_grad_norm,
+                tolerance,
+            ),
+            "#2080 polish fixture premise: the majorized fixed point must carry a live \
+             residual the criterion's KKT gate refuses: ‖g‖={:.6e} ‖Π⊥null g‖=\
+             {quotient_grad_norm:.6e} tol={tolerance:.6e}",
+            grad_norm_sq.sqrt(),
+        );
+        (term, target, rho)
+    }
+
     /// #2330/#2336 PRICING-branch companion to `converged_state_with_residual`.
     /// The historical softmax `gamma_fd_tiny_fixture` target is NOT ordered-Beta--
     /// Bernoulli reachable, so its majorizer-converged mode is an exact-A saddle
@@ -878,11 +959,12 @@ mod exact_stationarity_solve_1418_tests {
     /// former residual-monotonicity assertion was itself wrong: objective descent
     /// along resolved negative curvature necessarily increases `||g||`.  Driving
     /// with an unreachable tolerance forces a real step and pins the scalar
-    /// currency on which terminal globalization is now accepted.
+    /// currency on which terminal globalization is now accepted. The entry is the
+    /// majorized fixed point, whose live residual the fixture asserts.
     #[test]
     fn terminal_polish_never_raises_the_penalized_objective_2080() {
-        let (mut term, target, rho, _cache) =
-            super::exact_hessian_fixture_tests::converged_state_with_residual();
+        let (mut term, target, rho) =
+            super::exact_hessian_fixture_tests::majorized_fixed_point_with_residual();
         let lambda_smooth = rho.lambda_smooth_vec().expect("smoothness strengths");
         let options = ArrowSolveOptions::direct()
             .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
@@ -942,11 +1024,12 @@ mod exact_stationarity_solve_1418_tests {
     /// fixture's live residual, the shifted Newton step on the arrow exact-A system
     /// predicts a positive decrease, commits an Armijo decrease, and reports both
     /// objectives exactly as an independent evaluation at the entry and committed
-    /// states reads them.
+    /// states reads them. The entry is the majorized fixed point, whose live residual
+    /// the fixture asserts.
     #[test]
     fn arrow_exact_a_polish_step_commits_objective_descent_2283() {
-        let (mut term, target, rho, _cache) =
-            super::exact_hessian_fixture_tests::converged_state_with_residual();
+        let (mut term, target, rho) =
+            super::exact_hessian_fixture_tests::majorized_fixed_point_with_residual();
         let options = term.evidence_factor_options();
         let majorizer = term
             .assemble_arrow_schur(target.view(), &rho, None)
