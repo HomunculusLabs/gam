@@ -155,6 +155,11 @@ use serde::{Deserialize, Serialize};
 
 mod boundary_mode;
 pub use boundary_mode::{BoundaryModeApproximation, BoundaryModeCertificate, BoundaryModeRefusal};
+mod cone_normalizer;
+pub use cone_normalizer::{
+    ConeCoordinateMotion, ConeFirstOrder, ConeNormalizer, ConeNormalizerRefusal, ConePairMotion,
+    OrthantLogMass,
+};
 
 /// Relative accuracy demanded of the orthant-moment cubature, measured against
 /// the PRE-TRUNCATION scale `sd_i = sqrt(W_ii)` so the criterion is invariant
