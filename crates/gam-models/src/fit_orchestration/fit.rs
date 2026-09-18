@@ -1784,7 +1784,7 @@ fn optimize_survival_transformation_smoothing(
     penalty_blocks: &[PenaltyBlock],
     beta0: &Array1<f64>,
     structural_lower_bounds: Option<&Array1<f64>>,
-) -> Result<Option<SurvivalSmoothingSelection>, String> {
+) -> Result<Option<SurvivalSmoothingSelection>, FitFailure> {
     use gam_problem::{Derivative, HessianValue, OuterEval};
     use gam_solve::rho_optimizer::{OuterEvalOrder, OuterProblem};
     // One outer coordinate per penalty block: every block is REML-selected.
@@ -1799,7 +1799,10 @@ fn optimize_survival_transformation_smoothing(
         .enumerate()
         .map(|(coordinate, value)| {
             gam_problem::checked_log_strength(value).map_err(|error| {
-                format!("survival transformation seed lambda {coordinate}: {error}")
+                FitFailure::raised(
+                    gam_problem::FailureCategory::Numerical,
+                    format!("survival transformation seed lambda {coordinate}: {error}"),
+                )
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2074,10 +2077,13 @@ fn optimize_survival_transformation_smoothing(
     // space to working precision.
     let (lower, upper) = model.resolvability_rho_domain();
     if lower.len() != num_smoothing {
-        return Err(format!(
-            "survival smoothing domain has {} coordinates for {num_smoothing} smoothing \
-             coordinates",
-            lower.len()
+        return Err(FitFailure::raised(
+            gam_problem::FailureCategory::Invariant,
+            format!(
+                "survival smoothing domain has {} coordinates for {num_smoothing} smoothing \
+                 coordinates",
+                lower.len()
+            ),
         ));
     }
     let context =
@@ -2150,22 +2156,30 @@ fn optimize_survival_transformation_smoothing(
                 -> Result<gam_problem::EfsEval, gam_solve::estimate::EstimationError>,
         >,
     );
-    let result = problem.run(&mut obj, &context).map_err(|error| error.to_string())?;
+    let result = problem.run(&mut obj, &context).map_err(FitFailure::from)?;
     let outer_iterations = result.iterations;
     let criterion_certificate = result.criterion_certificate;
     let outer_hessian = result.final_hessian;
     let outer_gradient = result.final_gradient;
     let selected_rho = result.rho;
     if selected_rho.len() != num_smoothing {
-        return Err(format!(
-            "survival transformation smoothing selector returned {} coordinates for \
-             {num_smoothing} smoothing parameters; selected-rho checkpoint={:?}",
-            selected_rho.len(),
-            selected_rho.to_vec(),
+        return Err(FitFailure::raised(
+            gam_problem::FailureCategory::Invariant,
+            format!(
+                "survival transformation smoothing selector returned {} coordinates for \
+                 {num_smoothing} smoothing parameters; selected-rho checkpoint={:?}",
+                selected_rho.len(),
+                selected_rho.to_vec(),
+            ),
         ));
     }
     let lambdas = gam_problem::checked_exp_log_strengths(selected_rho.iter().copied())
-        .map_err(|error| format!("survival transformation selected rho: {error}"))?;
+        .map_err(|error| {
+            FitFailure::raised(
+                gam_problem::FailureCategory::Numerical,
+                format!("survival transformation selected rho: {error}"),
+            )
+        })?;
     Ok(Some(SurvivalSmoothingSelection {
         lambdas,
         outer_iterations,
@@ -2978,13 +2992,17 @@ fn hash_workflow_design_matrix(
 
 fn survival_transformation_log_lambdas(
     penalty_blocks: &[crate::survival::PenaltyBlock],
-) -> Result<Vec<f64>, String> {
+) -> Result<Vec<f64>, FitFailure> {
     penalty_blocks
         .iter()
         .enumerate()
         .map(|(coordinate, block)| {
-            gam_problem::checked_log_strength(block.lambda)
-                .map_err(|error| format!("survival transformation penalty {coordinate}: {error}"))
+            gam_problem::checked_log_strength(block.lambda).map_err(|error| {
+                FitFailure::raised(
+                    gam_problem::FailureCategory::Numerical,
+                    format!("survival transformation penalty {coordinate}: {error}"),
+                )
+            })
         })
         .collect()
 }
@@ -3148,7 +3166,7 @@ fn store_survival_transformation_persistent_warm_start(
 
 pub(crate) fn fit_survival_transformation_model(
     request: SurvivalTransformationFitRequest<'_>,
-) -> Result<SurvivalTransformationFitResult, String> {
+) -> Result<SurvivalTransformationFitResult, FitFailure> {
     use crate::survival::{PenaltyBlock, PenaltyBlocks, SurvivalMonotonicityPenalty, SurvivalSpec};
 
     let SurvivalTransformationFitRequest {
@@ -3157,13 +3175,19 @@ pub(crate) fn fit_survival_transformation_model(
         persistent_warm_start_store,
     } = request;
     let mut baseline_cfg = spec.baseline_cfg.clone();
-    let covariate_design =
-        build_term_collection_design(data, &spec.covariate_spec).map_err(|err| err.to_string())?;
+    let covariate_design = build_term_collection_design(data, &spec.covariate_spec)
+        .map_err(|err| {
+            let reason = err.to_string();
+            FitFailure::raised(
+                gam_solve::estimate::EstimationError::from(err).failure_category(),
+                reason,
+            )
+        })?;
     let resolvedspec = crate::fit_orchestration::drivers::freeze_term_collection_from_design(
         &spec.covariate_spec,
         &covariate_design,
     )
-    .map_err(|err| err.to_string())?;
+    .map_err(FitFailure::from)?;
     // Densified once, on the governor's ledger, and shared by every working model
     // the baseline search builds rather than copied into each one (#2900).
     let dense_cov_design = std::sync::Arc::new(
@@ -3173,7 +3197,7 @@ pub(crate) fn fit_survival_transformation_model(
     );
     let p_cov = dense_cov_design.ncols();
     let cause_count = crate::survival::cause_count_from_event_codes(spec.event_target.view())
-        .into_workflow_result()?;
+        .map_err(|err| FitFailure::raised(err.failure_category(), err.to_string()))?;
     let exact_derivative_guard = survival_derivative_guard_for_likelihood(spec.likelihood_mode);
 
     let build_working_model =
@@ -3308,18 +3332,30 @@ pub(crate) fn fit_survival_transformation_model(
                         derivative_offset_exit: Some(prepared.derivative_offset_exit.view()),
                     },
                 )
-                .map_err(|err| format!("failed to construct survival model: {err}"))?;
+                .map_err(|err| {
+                    FitFailure::raised(
+                        err.failure_category(),
+                        format!("failed to construct survival model: {err}"),
+                    )
+                })?;
             if spec.likelihood_mode != SurvivalLikelihoodMode::Weibull {
                 model
                     .set_structural_monotonicity(true, p_time_total)
-                    .map_err(|err| format!("failed to enable structural monotonicity: {err}"))?;
+                    .map_err(|err| {
+                        FitFailure::from(err).context("failed to enable structural monotonicity")
+                    })?;
             }
             let mut beta0 = Array1::<f64>::zeros(p);
             if spec.likelihood_mode == SurvivalLikelihoodMode::Weibull && spec.timewiggle.is_none()
             {
                 let (scale, shape) = spec
                     .weibull_seed
-                    .ok_or_else(|| "weibull survival fit missing scale/shape seed".to_string())?;
+                    .ok_or_else(|| {
+                        FitFailure::raised(
+                            gam_problem::FailureCategory::Invariant,
+                            "weibull survival fit missing scale/shape seed",
+                        )
+                    })?;
                 // #2301: the built-in Weibull time basis is now a single `log t`
                 // column carrying the shape. The `−shape·log_scale` LOCATION that
                 // the dropped constant column used to seed is folded into the mean
@@ -3330,17 +3366,20 @@ pub(crate) fn fit_survival_transformation_model(
                 // is ever lifted, the location has no home and the fit must refuse
                 // here rather than silently mis-seed a singular direction.
                 if p_time_total < 1 {
-                    return Err(format!(
-                        "weibull built-in time basis has {p_time_total} columns but needs 1 for the shape"
+                    return Err(FitFailure::raised(
+                        gam_problem::FailureCategory::Invariant,
+                        format!(
+                            "weibull built-in time basis has {p_time_total} columns but needs 1 for the shape"
+                        ),
                     ));
                 }
                 if covariate_design.intercept_range.is_empty() {
-                    return Err(
+                    return Err(FitFailure::raised(
+                        gam_problem::FailureCategory::Input,
                         "weibull survival fit requires a mean intercept to carry the baseline \
                          location, but the covariate design has none (intercept suppression such \
-                         as `~ x - 1` is unsupported; see formula_dsl.rs:2456)"
-                            .to_string(),
-                    );
+                         as `~ x - 1` is unsupported; see formula_dsl.rs:2456)",
+                    ));
                 }
                 beta0[0] = shape;
                 let intercept_col = p_time_total + covariate_design.intercept_range.start;
@@ -3357,7 +3396,7 @@ pub(crate) fn fit_survival_transformation_model(
                 } else {
                     None
                 };
-            Ok::<_, String>((prepared, penalty_blocks, beta0, structural_lower_bounds, model))
+            Ok::<_, FitFailure>((prepared, penalty_blocks, beta0, structural_lower_bounds, model))
         };
 
     if baseline_cfg.target != SurvivalBaselineTarget::Linear {
@@ -3386,8 +3425,10 @@ pub(crate) fn fit_survival_transformation_model(
             spec.age_exit.view(),
             "workflow survival transformation baseline",
             |candidate| {
+                // The baseline search takes text (survival construction), so a
+                // candidate's failure is rendered here, at that boundary.
                 let (_, _, beta0, structural_lower_bounds, mut model) =
-                    build_working_model(candidate)?;
+                    build_working_model(candidate).map_err(|failure| failure.to_string())?;
                 let opts = gam_solve::pirls::WorkingModelPirlsOptions {
                     max_iterations: SURVIVAL_TRANSFORMATION_PIRLS_MAX_ITERATIONS,
                     convergence_tolerance: SURVIVAL_TRANSFORMATION_PIRLS_CONVERGENCE_TOL,
@@ -3470,7 +3511,8 @@ pub(crate) fn fit_survival_transformation_model(
             exact_derivative_guard,
             &spec.penalty_block_gamma_priors,
             persistent_warm_start_store.clone(),
-        );
+        )
+        .map_err(FitFailure::from);
     }
     // REML/LAML-select the time-smoothing λ (issue #563). With λ pinned at its
     // seed the monotone I-spline baseline oversmooths toward an affine
@@ -3493,7 +3535,7 @@ pub(crate) fn fit_survival_transformation_model(
     )? {
         model
             .set_penalty_lambdas(&selection.lambdas)
-            .map_err(|e| e.to_string())?;
+            .map_err(FitFailure::from)?;
         for (block, &lam) in penalty_blocks.iter_mut().zip(selection.lambdas.iter()) {
             block.lambda = lam;
         }
@@ -3576,11 +3618,13 @@ pub(crate) fn fit_survival_transformation_model(
         }),
     )
     .map_err(|error| {
-        format!(
-            "survival transformation final fixed-lambda PIRLS failed at \
-             parameter_checkpoint={rho_for_cache:?} (warm_start_key=\
-             {persistent_warm_start_key}): {error}; no fit was minted"
-        )
+        FitFailure::from(error)
+            .context(format!(
+                "survival transformation final fixed-lambda PIRLS failed at \
+                 parameter_checkpoint={rho_for_cache:?} (warm_start_key=\
+                 {persistent_warm_start_key})"
+            ))
+            .annotated("no fit was minted")
     })?;
     let beta = summary.beta.as_ref().to_owned();
     // Persist every finite accepted iterate before enforcing the certificate:
@@ -3602,10 +3646,11 @@ pub(crate) fn fit_survival_transformation_model(
         "survival transformation final fixed-lambda PIRLS",
         &rho_for_cache,
         checkpoint_persisted.then_some(persistent_warm_start_key.as_str()),
-    )?;
+    )
+    .map_err(|reason| FitFailure::raised(gam_problem::FailureCategory::Convergence, reason))?;
     let state = model
         .update_state(&beta)
-        .map_err(|err| format!("failed to evaluate survival optimum: {err}"))?;
+        .map_err(|err| FitFailure::from(err).context("failed to evaluate survival optimum"))?;
     let lambdas = Array1::from_iter(penalty_blocks.iter().map(|block| block.lambda));
     let fitted_baseline_cfg =
         if spec.likelihood_mode == SurvivalLikelihoodMode::Weibull && spec.timewiggle.is_none() {
@@ -3614,8 +3659,10 @@ pub(crate) fn fit_survival_transformation_model(
                 .to_owned();
             fitted_weibull_baseline_from_linear_time_beta(&time_beta, spec.time_anchor).ok_or_else(
                 || {
-                    "failed to recover fitted Weibull scale/shape from the linear time coefficients"
-                        .to_string()
+                    FitFailure::raised(
+                        gam_problem::FailureCategory::Numerical,
+                        "failed to recover fitted Weibull scale/shape from the linear time coefficients",
+                    )
                 },
             )?
         } else {

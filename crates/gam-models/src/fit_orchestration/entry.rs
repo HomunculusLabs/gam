@@ -138,9 +138,8 @@ pub fn fit_model(request: FitRequest<'_>) -> Result<FitResult, WorkflowError> {
     // no outer search is left to step away from it (#2943).
     let wrap_solver_err =
         |failure: FitFailure| -> WorkflowError { WorkflowError::from(failure.ending_the_fit()) };
-    // The survival transformation and location-scale helpers still hand back
-    // text; it is recorded as unclassified rather than given a category it
-    // does not carry.
+    // The survival location-scale helper still hands back text; it is recorded
+    // as unclassified rather than given a category it does not carry.
     let wrap_untyped_solver_err =
         |reason: String| -> WorkflowError { WorkflowError::from(FitFailure::from(reason)) };
     match request {
@@ -169,7 +168,7 @@ pub fn fit_model(request: FitRequest<'_>) -> Result<FitResult, WorkflowError> {
             .map_err(wrap_untyped_solver_err),
         FitRequest::SurvivalTransformation(request) => fit_survival_transformation_model(request)
             .map(FitResult::SurvivalTransformation)
-            .map_err(wrap_untyped_solver_err),
+            .map_err(wrap_solver_err),
         FitRequest::BernoulliMarginalSlope(request) => fit_bernoulli_marginal_slope_model(request)
             .map(FitResult::BernoulliMarginalSlope)
             .map_err(wrap_solver_err),

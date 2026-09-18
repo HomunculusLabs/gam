@@ -56,6 +56,33 @@ impl From<SurvivalError> for String {
     }
 }
 
+impl SurvivalError {
+    /// The fixed category of this refusal, so a fit that stops on it raises the
+    /// class that names what failed (#2937).
+    #[must_use]
+    pub fn failure_category(&self) -> gam_problem::FailureCategory {
+        use gam_problem::FailureCategory;
+        match self {
+            // The one-hazard engine's contract on the arrays it is handed.
+            Self::DimensionMismatch
+            | Self::NonFiniteInput
+            | Self::UnsupportedSpec(_)
+            | Self::InvalidIntegrationSetup
+            | Self::InvalidTimeGrid
+            | Self::InvalidInput { .. }
+            | Self::EventCodeInvalid { .. } => FailureCategory::Input,
+            // The cause-specific blocks are assembled by the fit from one
+            // validated dataset, so their layouts disagreeing is an internal
+            // inconsistency.
+            Self::CauseSpecificDimensionMismatch { .. } => FailureCategory::Invariant,
+            Self::NonMonotoneCumulativeHazard
+            | Self::NonPositiveHazard
+            | Self::NumericalFailure { .. } => FailureCategory::Numerical,
+            Self::CauseSpecificBlock { source, .. } => source.failure_category(),
+        }
+    }
+}
+
 impl From<crate::block_layout::block_count::BlockCountMismatch> for SurvivalError {
     fn from(err: crate::block_layout::block_count::BlockCountMismatch) -> SurvivalError {
         SurvivalError::CauseSpecificDimensionMismatch {
@@ -3665,6 +3692,54 @@ fn observed_information_band(dimension: usize, eigenvalues: &Array1<f64>) -> f64
 mod tests {
     use super::*;
     use ndarray::{Array1, Array2, Array3, array, s};
+
+    /// #2937: a fit that stops on a `SurvivalError` raises the class of the
+    /// refusal's category, and a cause-specific wrapper raises its source's.
+    #[test]
+    fn survival_error_failure_categories_2937() {
+        use gam_problem::FailureCategory;
+        let numerical = || SurvivalError::NumericalFailure {
+            reason: "hazard overflow".to_string(),
+        };
+        let cases = [
+            (SurvivalError::DimensionMismatch, FailureCategory::Input),
+            (SurvivalError::NonFiniteInput, FailureCategory::Input),
+            (SurvivalError::UnsupportedSpec("crude"), FailureCategory::Input),
+            (SurvivalError::InvalidIntegrationSetup, FailureCategory::Input),
+            (SurvivalError::InvalidTimeGrid, FailureCategory::Input),
+            (
+                SurvivalError::InvalidInput {
+                    reason: "negative weight".to_string(),
+                },
+                FailureCategory::Input,
+            ),
+            (
+                SurvivalError::EventCodeInvalid {
+                    reason: "multi-cause label 3".to_string(),
+                },
+                FailureCategory::Input,
+            ),
+            (
+                SurvivalError::CauseSpecificDimensionMismatch {
+                    reason: "beta length mismatch".to_string(),
+                },
+                FailureCategory::Invariant,
+            ),
+            (SurvivalError::NonMonotoneCumulativeHazard, FailureCategory::Numerical),
+            (SurvivalError::NonPositiveHazard, FailureCategory::Numerical),
+            (numerical(), FailureCategory::Numerical),
+            (
+                SurvivalError::CauseSpecificBlock {
+                    block: 1,
+                    source: Box::new(numerical()),
+                },
+                FailureCategory::Numerical,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.failure_category(), expected, "{error}");
+        }
+    }
 
     /// #2900 row 10.3 — the family builds each block's inequality system once, on the
     /// memory governor, and both consumers read it. The constrained solve's rows must be
