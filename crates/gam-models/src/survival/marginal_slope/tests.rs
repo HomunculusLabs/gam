@@ -8909,3 +8909,84 @@ fn survival_intercept_root_does_not_follow_its_warm_seed_2971() {
          a_warm={a_warm:.15e} gap={gap:.3e} > bound={bound:.3e}"
     );
 }
+
+/// #2900 row 6.11: the rigid survival row jet reaches the device through the
+/// dispatch policy's fused-kernel crossover, and the device returns the per-row
+/// CPU program. On a CUDA host the fixture is sized at the probed runtime's
+/// `fused_kernel_min_n`, so the production cache build selects the device, and
+/// every channel of every row is compared with `row_kernel(row)` at the
+/// `RowKernel::batched_value_grad_hess_all` contract (≤ 1e-9). Two rows in
+/// seven are shifted 5 units into either probability tail. On a host without a
+/// device, nothing is admitted: the check reduces to admission, and the report
+/// says `device_selected=false`.
+#[test]
+fn rigid_row_jet_device_admission_and_parity_2900() {
+    use crate::gpu_kernels::survival_rowjet::survival_rigid_row_vgh_device_selected;
+    use crate::row_kernel::{RowKernel, RowSet, build_row_kernel_cache};
+    use gam_gpu::policy::GpuDispatchPolicy;
+
+    let floor = GpuDispatchPolicy::MIN_CALIBRATABLE_FUSED_KERNEL_N;
+    assert!(
+        !survival_rigid_row_vgh_device_selected(floor - 1).expect("admission below the floor"),
+        "no reachable policy admits a fused batch below {floor} rows"
+    );
+    let runtime = gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::global_policy())
+        .expect("CUDA runtime resolution must not fault");
+    let n = runtime.map_or(64, |runtime| runtime.policy().fused_kernel_min_n.max(floor));
+
+    let mut family = make_closed_form_test_family(n);
+    let into_tails = |values: &Array1<f64>| {
+        Array1::from_iter(values.iter().enumerate().map(|(row, &value)| match row % 7 {
+            3 => value + 5.0,
+            5 => value - 5.0,
+            _ => value,
+        }))
+    };
+    family.offset_entry = Arc::new(into_tails(&family.offset_entry));
+    family.offset_exit = Arc::new(into_tails(&family.offset_exit));
+    let block_states = closed_form_block_states(&family, 0.4);
+    let kernel = SurvivalMarginalSlopeRowKernel::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>::new(
+        family,
+        block_states,
+    );
+
+    let selected =
+        survival_rigid_row_vgh_device_selected(n).expect("survival row-jet admission must not fault");
+    assert_eq!(
+        selected,
+        runtime.is_some(),
+        "a {n}-row batch at the probed runtime's fused-kernel crossover must reach the device \
+         exactly when a device resolves"
+    );
+    let cache = build_row_kernel_cache(&kernel, &RowSet::All).expect("rigid row-kernel cache");
+    let mut worst_gap = 0.0_f64;
+    let mut worst_row = 0;
+    for row in 0..n {
+        let (value, grad, hess) = RowKernel::row_kernel(&kernel, row).expect("per-row CPU program");
+        let channels = std::iter::once((cache.nll[row], value))
+            .chain(cache.gradients[row].iter().copied().zip(grad))
+            .chain(
+                cache.hessians[row]
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .zip(hess.iter().flatten().copied()),
+            );
+        for (batched, per_row) in channels {
+            let gap = (batched - per_row).abs() / 1.0_f64.max(batched.abs()).max(per_row.abs());
+            if !(gap <= worst_gap) {
+                worst_gap = gap;
+                worst_row = row;
+            }
+        }
+    }
+    eprintln!(
+        "#2900 survival row jet: n={n} device_selected={selected} \
+         worst_relative_gap={worst_gap:.3e} at row {worst_row}"
+    );
+    assert!(
+        worst_gap <= 1e-9,
+        "survival row jet: batched channel differs from the per-row program by {worst_gap:e} \
+         (relative) at row {worst_row}, device_selected={selected}"
+    );
+}

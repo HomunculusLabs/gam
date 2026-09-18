@@ -459,10 +459,11 @@ pub fn solve_arrow_newton_step(
                 ) => {}
             }
         }
-        // Layer D admission: when the system shape passes the
-        // (Σ p³ ≥ 1e5 OR R ≥ 16) heuristic and `p ≤ MAX_FUSED_P`, the fused
-        // NVRTC kernel replaces the cuSOLVER/cuBLAS Layer A+B+C path with a
-        // single per-row block. Layer C↔D parity (math block 3 §16 test 6)
+        // Layer D admission: wherever the kernel supports the shape
+        // (`p ≤ MAX_FUSED_P` and a templated `R`), the fused NVRTC kernel
+        // replaces the cuSOLVER/cuBLAS Layer A+B+C path with a single per-row
+        // block. Both paths take the same device-dispatch gate, so this chooses
+        // between two device paths (#2900 row 6.11). Layer C↔D parity (math block 3 §16 test 6)
         // requires both paths to agree to 1e-10 on identical inputs.
         if crate::gpu_kernels::arrow_schur_nvrtc::system_admits_fused_path(sys) {
             match cuda::solve_fused(
