@@ -1,11 +1,15 @@
 //! Rust-owned serde schema for the fitted `ManifoldSAE` model artifact (#2091).
 //!
 //! The fitted SAE-manifold model is serialized to a JSON payload tagged
-//! `"gamfit.ManifoldSAE/v7"` schema. Version 6 was deliberately breaking: it
+//! `"gamfit.ManifoldSAE/v8"` schema. Version 6 was deliberately breaking: it
 //! persists each atom's constructor-validated geometry plan as the sole source
 //! of topology, chart dimension, analytic resolution, basis width, center set,
 //! and reference metric. Version 7 adds each atom's row-sandwich robust band
 //! `shape_band_sd_robust` beside the model-based `shape_band_sd` (#2933 F41).
+//! Version 8 lets a geometry plan carry `decoder_transport`, the accumulated
+//! chart transport of an atom the accepted-iterate affine gauge re-charted, so a
+//! reloaded plan rebuilds the Gram saved beside its decoder (#2935, #2947). A v7
+//! reader cannot parse that plan, so the version moves with it.
 //! Historically the schema lived only in the Python dataclass
 //! `gamfit/_sae_manifold.py::ManifoldSAE`
 //! (`to_dict` / `from_dict`), so a field-name / default / None-handling change
@@ -33,9 +37,77 @@ use serde_json::Value;
 
 use gam::terms::sae::manifold::SaeAtomGeometryPlan;
 
-/// The on-disk schema tag. `from_json` rejects any other value, matching the
-/// Python `from_dict` guard.
-pub(crate) const SCHEMA_TAG: &str = "gamfit.ManifoldSAE/v7";
+/// The on-disk schema tag. `from_json` refuses any other value with a
+/// [`SchemaRefusal`], matching the Python `from_dict` guard.
+pub(crate) const SCHEMA_TAG: &str = "gamfit.ManifoldSAE/v8";
+
+/// The version [`SCHEMA_TAG`] names, which a refusal compares a payload's version with.
+const SCHEMA_VERSION: u32 = 8;
+
+/// Prefix every dense `ManifoldSAE` schema tag carries before its version number.
+const SCHEMA_VERSION_PREFIX: &str = "gamfit.ManifoldSAE/v";
+
+/// Why `from_json` refuses a payload's `schema` tag. There is no migration: an
+/// artifact written under another version is refused by its version, never read
+/// field by field against this schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SchemaRefusal {
+    /// A dense `ManifoldSAE` artifact written under an older schema version.
+    Older { found: String, version: u32 },
+    /// A dense `ManifoldSAE` artifact written under a newer schema version.
+    Newer { found: String, version: u32 },
+    /// A tag that names no dense `ManifoldSAE` schema version, or no string tag.
+    Unrecognized { found: Option<String> },
+}
+
+impl SchemaRefusal {
+    /// `Ok` exactly for [`SCHEMA_TAG`]; every other tag is refused by kind.
+    pub(crate) fn check(found: Option<&str>) -> Result<(), Self> {
+        let Some(tag) = found else {
+            return Err(Self::Unrecognized { found: None });
+        };
+        if tag == SCHEMA_TAG {
+            return Ok(());
+        }
+        let version = tag
+            .strip_prefix(SCHEMA_VERSION_PREFIX)
+            .and_then(|digits| digits.parse::<u32>().ok());
+        Err(match version {
+            Some(version) if version < SCHEMA_VERSION => Self::Older {
+                found: tag.to_string(),
+                version,
+            },
+            Some(version) => Self::Newer {
+                found: tag.to_string(),
+                version,
+            },
+            None => Self::Unrecognized {
+                found: Some(tag.to_string()),
+            },
+        })
+    }
+}
+
+impl std::fmt::Display for SchemaRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Older { found, version } => write!(
+                formatter,
+                "ManifoldSAE.from_json: unsupported schema {found:?}: version {version} is older \
+                 than this reader's {SCHEMA_TAG:?}, and there is no migration; refit the model \
+                 with this version"
+            ),
+            Self::Newer { found, version } => write!(
+                formatter,
+                "ManifoldSAE.from_json: unsupported schema {found:?}: version {version} is newer \
+                 than this reader's {SCHEMA_TAG:?}; load it with the newer gamfit"
+            ),
+            Self::Unrecognized { found } => {
+                write!(formatter, "ManifoldSAE.from_json: unsupported schema {found:?}")
+            }
+        }
+    }
+}
 
 /// Per-atom payload (`atoms[k]`), one per `SaeManifoldAtomFit`.
 ///
@@ -244,25 +316,26 @@ impl ManifoldSaePayload {
         "functional_evidence",
     ];
 
-    /// Parse the exact v7 artifact schema. Missing optional-valued fields are
+    /// Parse the exact v8 artifact schema. Missing optional-valued fields are
     /// still errors: `null` is the explicit absence representation.
+    ///
+    /// The schema tag is read before any other field, so an artifact written under
+    /// another version is refused by its version, not by the first field the two
+    /// versions disagree on.
     pub(crate) fn from_json(json: &str) -> Result<Self, String> {
         let value: Value =
             serde_json::from_str(json).map_err(|e| format!("ManifoldSAE.from_json: {e}"))?;
         let object = value.as_object().ok_or_else(|| {
             "ManifoldSAE.from_json: model artifact must be a JSON object".to_string()
         })?;
+        if object.contains_key("schema") {
+            SchemaRefusal::check(object.get("schema").and_then(Value::as_str))
+                .map_err(|refusal| refusal.to_string())?;
+        }
         for field in Self::REQUIRED_FIELDS {
             if !object.contains_key(*field) {
                 return Err(format!("ManifoldSAE.from_json: missing field {field:?}"));
             }
-        }
-        let schema = object.get("schema").and_then(Value::as_str);
-        if schema != Some(SCHEMA_TAG) {
-            return Err(format!(
-                "ManifoldSAE.from_json: unsupported schema {:?}",
-                schema
-            ));
         }
         if let Some(atoms) = object.get("atoms").and_then(Value::as_array) {
             for (index, atom) in atoms.iter().enumerate() {
@@ -585,5 +658,95 @@ mod manifold_sae_payload_serde_tests {
         );
         let error = roundtrip_json(&serde_json::to_string(&legacy).unwrap()).unwrap_err();
         assert!(error.contains("unsupported schema"), "unexpected: {error}");
+    }
+
+    /// #2935/#2947 — v8 is the version a geometry plan's decoder transport arrived
+    /// with. The refusal names its kind, and a v7 artifact is refused by its version
+    /// before any field is read, here one that also lacks a required field.
+    #[test]
+    fn an_older_schema_is_refused_by_its_version_before_any_field_2935() {
+        assert_eq!(
+            SCHEMA_TAG,
+            format!("{SCHEMA_VERSION_PREFIX}{SCHEMA_VERSION}"),
+            "SCHEMA_VERSION must be the version SCHEMA_TAG names"
+        );
+        assert_eq!(SchemaRefusal::check(Some(SCHEMA_TAG)), Ok(()));
+        assert_eq!(
+            SchemaRefusal::check(Some("gamfit.ManifoldSAE/v7")),
+            Err(SchemaRefusal::Older {
+                found: "gamfit.ManifoldSAE/v7".to_string(),
+                version: 7,
+            })
+        );
+        assert_eq!(
+            SchemaRefusal::check(Some("gamfit.ManifoldSAE/v9")),
+            Err(SchemaRefusal::Newer {
+                found: "gamfit.ManifoldSAE/v9".to_string(),
+                version: 9,
+            })
+        );
+        assert_eq!(
+            SchemaRefusal::check(Some("gamfit.ManifoldSAE/support-v2")),
+            Err(SchemaRefusal::Unrecognized {
+                found: Some("gamfit.ManifoldSAE/support-v2".to_string()),
+            })
+        );
+        assert_eq!(
+            SchemaRefusal::check(None),
+            Err(SchemaRefusal::Unrecognized { found: None })
+        );
+
+        let mut older = load_value("golden_full.json");
+        older["schema"] = Value::String("gamfit.ManifoldSAE/v7".to_string());
+        older
+            .as_object_mut()
+            .unwrap()
+            .remove("functional_evidence");
+        let error = roundtrip_json(&serde_json::to_string(&older).unwrap()).unwrap_err();
+        assert!(
+            error.contains("unsupported schema") && error.contains("version 7 is older"),
+            "a v7 artifact must be refused by its version, not by a missing field: {error}"
+        );
+    }
+
+    /// #2935/#2947 — a geometry plan the affine gauge re-charted persists its decoder
+    /// transport, and the round trip stays a fixed point. A transport that does not fit
+    /// the plan's basis is refused by the plan's own validator.
+    #[test]
+    fn a_transported_geometry_plan_round_trips_and_a_misfit_transport_is_refused_2935() {
+        let mut golden = load_value("golden_full.json");
+        // Plan 0 is the order-2 periodic plan, whose basis has five columns.
+        let width = 5usize;
+        let unit_upper: Vec<f64> = (0..width * width)
+            .map(|entry| {
+                let (row, col) = (entry / width, entry % width);
+                if row == col {
+                    1.0
+                } else if col > row {
+                    0.125 * (1 + row + col) as f64
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        golden["geometry_plans"][0]["decoder_transport"] =
+            serde_json::json!({"v": 1, "dim": [width, width], "data": unit_upper});
+        let raw = serde_json::to_string(&golden).unwrap();
+        let back: Value =
+            serde_json::from_str(&roundtrip_json(&raw).expect("a transported plan round-trips"))
+                .unwrap();
+        assert_eq!(back["geometry_plans"][0], golden["geometry_plans"][0]);
+        assert_eq!(back, golden, "the round trip must be a fixed point with a transported plan");
+
+        let misfit: Vec<f64> = (0..16)
+            .map(|entry| if entry % 5 == 0 { 1.0 } else { 0.0 })
+            .collect();
+        golden["geometry_plans"][0]["decoder_transport"] =
+            serde_json::json!({"v": 1, "dim": [4, 4], "data": misfit});
+        let error = roundtrip_json(&serde_json::to_string(&golden).unwrap()).unwrap_err();
+        assert!(
+            error.contains("decoder transport must be a finite (5, 5) matrix"),
+            "{error}"
+        );
     }
 }

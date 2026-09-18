@@ -12,11 +12,12 @@
 //!   S'(κ) = (T⁻¹)ᵀ S(κ) T⁻¹     for every κ
 //! ```
 //!
-//! The geometry plan (reference rows and κ) is not re-charted. Every trial κ runs
-//! `prepare_constant_curvature`, which rebuilds `S(κ)` and `∂S/∂κ` from that plan
-//! (`at_constant_curvature` keeps the old-chart reference rows). So a trial κ installs
-//! the OLD-chart Gram on an atom whose decoder is `T·B`, and misprices the penalty
-//! energy itself, not only its derivative.
+//! Every trial κ runs `prepare_constant_curvature`, which rebuilds `S(κ)` and `∂S/∂κ`
+//! from the atom's geometry plan. The plan keeps its reference rows and κ in the
+//! declared chart, so it also carries the gauge's decoder transport and moves every
+//! Gram it builds by the same congruence. A plan left in the old chart installed the
+//! OLD-chart Gram on an atom whose decoder is `T·B`, which mispriced the penalty energy
+//! itself, not only its derivative.
 //!
 //! The fixture's coordinates are deliberately off-canonical (non-zero mean, rms far
 //! from 1), so the gauge must act. #2935's anchor never exercised it (job 1160070: the
@@ -25,10 +26,10 @@
 //!   the gauge moves the coordinates to mean 0 and rms 1, and the installed `S` and
 //!   `∂S/∂κ` are the congruence of the pre-gauge pair.
 //! - `trial_curvature_after_the_affine_gauge_installs_the_transported_gram_2935`: a
-//!   trial κ on the gauged atom must install `(T⁻¹)ᵀ S(κ) T⁻¹` and the matching
-//!   `∂S/∂κ`. It fails while the plan stays in the old chart. A repair that carries the
-//!   κ family through the re-chart turns it green; a repair that instead refuses the
-//!   gauge for curvature atoms replaces both tests.
+//!   trial κ on the gauged atom installs `(T⁻¹)ᵀ S(κ) T⁻¹` and the matching `∂S/∂κ`.
+//! - `the_gauged_plan_persists_its_transport_and_rebuilds_the_installed_gram_2935`: the
+//!   gauged plan survives a serialization round trip and rebuilds the installed Gram,
+//!   so a saved model's plan prices the decoder it is saved with.
 #![cfg(test)]
 use super::outer_objective::{solve_basis_transport, transport_smooth_penalty_for_decoder};
 use super::*;
@@ -276,4 +277,65 @@ fn trial_curvature_after_the_affine_gauge_installs_the_transported_gram_2935() {
              {derivative_tolerance:.3e})"
         );
     }
+}
+
+/// A gauged plan is model data: a serialization round trip must keep its decoder
+/// transport, and the plan must rebuild the Gram installed beside the decoder it is
+/// saved with. A plan that rebuilt the old chart's Gram would price a reloaded model's
+/// decoder `T·B` with the penalty of its pre-image `B`.
+#[test]
+fn the_gauged_plan_persists_its_transport_and_rebuilds_the_installed_gram_2935() {
+    let (mut term, _) = off_canonical_curvature_term();
+    let old_penalty = term.atoms[0].smooth_penalty().clone();
+
+    term.canonicalize_affine_gauge_after_accept(None)
+        .expect("the gauge admits Poincare atoms");
+
+    let atom = &term.atoms[0];
+    let plan = atom
+        .geometry_plan()
+        .expect("the gauged atom keeps its geometry plan")
+        .clone();
+    let json = serde_json::to_string(&plan).expect("a geometry plan serializes");
+    let reloaded: SaeAtomGeometryPlan =
+        serde_json::from_str(&json).expect("a serialized geometry plan reloads through its validator");
+    let installed_penalty = atom.smooth_penalty().clone();
+    let installed_derivative = kappa_derivative(atom);
+    let rebuilt_penalty = reloaded
+        .build_reference_penalty()
+        .expect("the reloaded plan builds its Gram");
+    let rebuilt_derivative = reloaded
+        .build_reference_penalty_kappa_derivative()
+        .expect("the reloaded plan builds its curvature derivative")
+        .expect("a constant-curvature plan carries ∂S/∂κ");
+    let penalty_gap = max_abs_difference(&rebuilt_penalty, &installed_penalty);
+    let penalty_tolerance = gram_tolerance(&rebuilt_penalty, &installed_penalty);
+    let derivative_gap = max_abs_difference(&rebuilt_derivative, &installed_derivative);
+    let derivative_tolerance = gram_tolerance(&rebuilt_derivative, &installed_derivative);
+    let chart_moved = max_abs_difference(&installed_penalty, &old_penalty);
+    println!(
+        "[#2935 persisted plan] S moved {chart_moved:.3e}; rebuilt S gap {penalty_gap:.3e} \
+         (tolerance {penalty_tolerance:.3e}); rebuilt ∂S/∂κ gap {derivative_gap:.3e} \
+         (tolerance {derivative_tolerance:.3e}); round trip equal {}",
+        reloaded == plan
+    );
+    assert!(
+        chart_moved > 1.0e3 * penalty_tolerance,
+        "the gauge must materially change S for the rebuild check to mean anything \
+         ({chart_moved:.3e} vs tolerance {penalty_tolerance:.3e})"
+    );
+    assert_eq!(
+        reloaded, plan,
+        "a serialization round trip must keep the gauged plan, decoder transport included"
+    );
+    assert!(
+        penalty_gap <= penalty_tolerance,
+        "the reloaded plan does not rebuild the installed Gram (gap {penalty_gap:.3e}, \
+         tolerance {penalty_tolerance:.3e})"
+    );
+    assert!(
+        derivative_gap <= derivative_tolerance,
+        "the reloaded plan does not rebuild the installed ∂S/∂κ (gap {derivative_gap:.3e}, \
+         tolerance {derivative_tolerance:.3e})"
+    );
 }

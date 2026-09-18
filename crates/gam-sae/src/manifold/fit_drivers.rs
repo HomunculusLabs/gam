@@ -1103,7 +1103,6 @@ impl SaeManifoldTerm {
         }
         let transport = solve_basis_transport(new_phi.view(), old_phi.view())?;
         let old_decoder = self.atoms[atom_idx].decoder_coefficients().clone();
-        let old_smooth_penalty = self.atoms[atom_idx].smooth_penalty().clone();
         let new_decoder = fast_ab(&transport, &old_decoder);
         let (image_scale, max_abs) = image_invariance_extremes(
             old_phi.view(),
@@ -1116,28 +1115,15 @@ impl SaeManifoldTerm {
             return Ok(());
         }
 
-        // ∂S/∂κ is a Gram on the same basis, so it moves by the same congruence.
-        let transported_kappa_derivative = self.atoms[atom_idx]
-            .smooth_penalty_kappa_derivative()?
-            .map(|derivative| {
-                transport_smooth_penalty_for_decoder(transport.view(), derivative.view())
-            })
-            .transpose()?;
         let flat = Array1::from_iter(new_coords.iter().copied());
         self.assignment.coords[atom_idx].set_flat(flat.view());
         let atom = &mut self.atoms[atom_idx];
         let base: Arc<dyn SaeBasisEvaluator> = new_evaluator.clone();
         atom.basis_evaluator = Some(base);
         atom.basis_second_jet = Some(new_evaluator);
-        let transported_penalty =
-            transport_smooth_penalty_for_decoder(transport.view(), old_smooth_penalty.view())?;
-        atom.install_reparameterized_basis(
-            new_phi,
-            new_jet,
-            new_decoder,
-            transported_penalty,
-            transported_kappa_derivative,
-        )?;
+        // S, ∂S/∂κ and the geometry plan all move by the transport's congruence, so
+        // a trial κ after this gauge rebuilds S(κ) in the new chart (#2935, #2947).
+        atom.install_chart_transport(new_phi, new_jet, new_decoder, transport.view())?;
         Ok(())
     }
 

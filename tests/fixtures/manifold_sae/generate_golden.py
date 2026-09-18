@@ -159,7 +159,7 @@ def build_payload() -> dict[str, Any]:
     selected_log_ard = [np.array([0.1]), np.array([0.2, -0.3]), np.array([0.4, 0.5])]
 
     return {
-        "schema": "gamfit.ManifoldSAE/v7",
+        "schema": "gamfit.ManifoldSAE/v8",
         "atoms": atoms,
         "assignment": "topk",
         "assignment_label": "topk",
