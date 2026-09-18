@@ -2652,6 +2652,9 @@ mod device {
     }
 }
 
+#[path = "sae_rowjet_bilinear.rs"]
+pub(crate) mod bilinear;
+
 #[cfg(test)]
 mod tests {
     use super::*;

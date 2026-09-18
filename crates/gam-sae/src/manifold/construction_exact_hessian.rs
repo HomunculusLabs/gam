@@ -1305,6 +1305,8 @@ struct PreparedSoftmaxRowJetTile {
     path: crate::gpu_kernels::sae_rowjet::SaeRowJetPath,
     inputs: Vec<crate::gpu_kernels::sae_rowjet::SaeSoftmaxRowJetInput>,
     probe: Vec<f64>,
+    /// The CPU tile's per-state contractions, when the governor admits them.
+    bilinear: Option<crate::gpu_kernels::sae_rowjet::bilinear::SaeRowJetBilinearContractions>,
 }
 
 struct PreparedResidualCurvatureRow {

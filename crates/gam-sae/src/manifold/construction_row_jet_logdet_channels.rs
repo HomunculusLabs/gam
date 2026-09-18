@@ -785,16 +785,19 @@ impl SaeManifoldTerm {
                 v_t.extend_from_slice(&v_t_row);
                 v_beta.extend_from_slice(v_beta_row);
             }
-            let tile = crate::gpu_kernels::sae_rowjet::execute_softmax_row_jet_tile_contracted(
-                &tile_plan.inputs,
-                1.0 / temperature,
-                tile_plan.path,
-                crate::gpu_kernels::sae_rowjet::SaeRowJetContraction::Bilinear {
-                    probe: &tile_plan.probe,
-                    v_t: &v_t,
-                    v_beta: &v_beta,
-                },
-            )?;
+            let tile = match tile_plan.bilinear.as_ref() {
+                Some(kept) => kept.apply(&v_t, &v_beta)?,
+                None => crate::gpu_kernels::sae_rowjet::execute_softmax_row_jet_tile_contracted(
+                    &tile_plan.inputs,
+                    1.0 / temperature,
+                    tile_plan.path,
+                    crate::gpu_kernels::sae_rowjet::SaeRowJetContraction::Bilinear {
+                        probe: &tile_plan.probe,
+                        v_t: &v_t,
+                        v_beta: &v_beta,
+                    },
+                )?,
+            };
             if tile.n_rows != tile_rows || tile.q != q || tile.n_beta != n_beta {
                 return Err(format!(
                     "contracted SAE row-jet tile returned shape ({}, {}, {}); expected ({tile_rows}, {q}, {n_beta})",
@@ -935,12 +938,24 @@ impl SaeManifoldTerm {
                 }
                 probe.extend_from_slice(&probe_row);
             }
+            let bilinear = match (plan.path, self.assignment.mode) {
+                (
+                    crate::gpu_kernels::sae_rowjet::SaeRowJetPath::Cpu,
+                    AssignmentMode::Softmax { temperature, .. },
+                ) => crate::gpu_kernels::sae_rowjet::bilinear::prepare_bilinear_contractions(
+                    &inputs,
+                    1.0 / temperature,
+                    &probe,
+                )?,
+                _ => None,
+            };
             tiles.push(PreparedSoftmaxRowJetTile {
                 start,
                 q,
                 path: plan.path,
                 inputs,
                 probe,
+                bilinear,
             });
             start += tile_rows;
         }
