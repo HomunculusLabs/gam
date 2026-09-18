@@ -3473,15 +3473,23 @@ pub(crate) fn fit_survival_transformation_model(
         // (contracted by baseline_chain_rule_gradient). See the derivation header
         // on baseline_chain_rule_gradient. BFGS over this exact gradient converges
         // in ≲10 outer evaluations on the 2–3 dim surface.
+        // The search takes text (survival construction), so a candidate's
+        // failure is kept typed here (#2937). The outer engine never retries a
+        // thrown objective error: it ends the search, so the kept failure is the
+        // one that stopped it.
+        let candidate_failure = std::cell::RefCell::new(None::<FitFailure>);
+        let stop_on = |failure: FitFailure| {
+            let reason = failure.to_string();
+            *candidate_failure.borrow_mut() = Some(failure);
+            reason
+        };
         baseline_cfg = optimize_survival_baseline_config_with_gradient_only(
             &baseline_cfg,
             spec.age_exit.view(),
             "workflow survival transformation baseline",
             |candidate| {
-                // The baseline search takes text (survival construction), so a
-                // candidate's failure is rendered here, at that boundary.
                 let (_, _, beta0, structural_lower_bounds, mut model) =
-                    build_working_model(candidate).map_err(|failure| failure.to_string())?;
+                    build_working_model(candidate).map_err(stop_on)?;
                 let opts = gam_solve::pirls::WorkingModelPirlsOptions {
                     max_iterations: SURVIVAL_TRANSFORMATION_PIRLS_MAX_ITERATIONS,
                     convergence_tolerance: SURVIVAL_TRANSFORMATION_PIRLS_CONVERGENCE_TOL,
@@ -3492,7 +3500,9 @@ pub(crate) fn fit_survival_transformation_model(
                     linear_constraints: None,
                     initial_lm_lambda: None,
                 };
-                let parameter_checkpoint = survival_baseline_parameter_checkpoint(candidate)?;
+                // The candidate is the search's own point on its domain.
+                let parameter_checkpoint = survival_baseline_parameter_checkpoint(candidate)
+                    .map_err(|reason| stop_on(FitFailure::invariant(reason)))?;
                 let summary = gam_solve::pirls::runworking_model_pirls(
                     &mut model,
                     gam_problem::Coefficients::new(beta0),
@@ -3511,9 +3521,13 @@ pub(crate) fn fit_survival_transformation_model(
                     }),
                 )
                 .map_err(|error| {
-                    format!(
-                        "survival baseline PIRLS failed at parameter_checkpoint=\
-                         {parameter_checkpoint:?}: {error}; no fit was minted"
+                    stop_on(
+                        FitFailure::from(error)
+                            .context(format!(
+                                "survival baseline PIRLS failed at parameter_checkpoint=\
+                                 {parameter_checkpoint:?}"
+                            ))
+                            .annotated("no fit was minted"),
                     )
                 })?;
                 require_certified_survival_pirls(
@@ -3521,14 +3535,20 @@ pub(crate) fn fit_survival_transformation_model(
                     "survival transformation baseline profile",
                     &parameter_checkpoint,
                     None,
-                )?;
+                )
+                .map_err(|reason| {
+                    stop_on(FitFailure::raised(gam_problem::FailureCategory::Convergence, reason))
+                })?;
                 let beta = summary.beta.as_ref().to_owned();
                 let state = model.update_state(&beta).map_err(|err| {
-                    format!("failed to evaluate survival baseline candidate: {err}")
+                    stop_on(FitFailure::from(err).context("failed to evaluate survival baseline candidate"))
                 })?;
                 let cost = state.penalized_objective();
                 let residuals = model.offset_channel_residuals(&beta).map_err(|err| {
-                    format!("failed to form survival baseline offset residuals: {err}")
+                    stop_on(
+                        FitFailure::from(err)
+                            .context("failed to form survival baseline offset residuals"),
+                    )
                 })?;
                 let gradient = baseline_chain_rule_gradient(
                     spec.age_entry.view(),
@@ -3539,17 +3559,19 @@ pub(crate) fn fit_survival_transformation_model(
                     spec.age_exit.view(),
                     candidate,
                     &residuals,
-                )?
+                )
+                .map_err(|reason| stop_on(FitFailure::unclassified(reason)))?
                 .ok_or_else(|| {
-                    "workflow survival transformation baseline unexpectedly has no theta gradient"
-                        .to_string()
+                    stop_on(FitFailure::invariant(
+                        "workflow survival transformation baseline unexpectedly has no theta gradient",
+                    ))
                 })?;
                 Ok((cost, gradient))
             },
         )
-        // The search returns its own verdict and its candidates' failures as
-        // one text (survival construction), so no category is known here.
-        .map_err(FitFailure::unclassified)?;
+        // A candidate that stopped the search raises its own failure. Otherwise
+        // the search's typed verdict, or its configuration refusal, stands.
+        .map_err(|search| candidate_failure.take().unwrap_or_else(|| FitFailure::from(search)))?;
     }
 
     let (prepared, mut penalty_blocks, beta0, structural_lower_bounds, mut model) =

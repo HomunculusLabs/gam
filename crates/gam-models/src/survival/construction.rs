@@ -1008,7 +1008,7 @@ fn run_baseline_theta_optimizer<Fc, Fe>(
     contract: BaselineDerivativeContract,
     cost_fn: Fc,
     eval_fn: Fe,
-) -> Result<SurvivalBaselineConfig, String>
+) -> Result<SurvivalBaselineConfig, crate::fit_orchestration::WorkflowError>
 where
     Fc: FnMut(&mut (), &Array1<f64>) -> Result<f64, crate::model_types::EstimationError>,
     Fe: FnMut(
@@ -1016,8 +1016,12 @@ where
         &Array1<f64>,
     ) -> Result<gam_problem::OuterEval, crate::model_types::EstimationError>,
 {
+    use crate::fit_orchestration::{FitFailure, WorkflowError};
     use gam_solve::rho_optimizer::OuterProblem;
-    let Some(seed) = survival_baseline_theta_from_config(initial)? else {
+    // The initial config and its search domain are configuration; what the
+    // search itself reaches is a fit's failure, kept typed (#2937).
+    let config = |reason: String| WorkflowError::InvalidConfig { reason };
+    let Some(seed) = survival_baseline_theta_from_config(initial).map_err(config)? else {
         return Ok(initial.clone());
     };
     let dim = seed.len();
@@ -1026,7 +1030,7 @@ where
     // one the frozen offset chart owns. Neither the private `seed ± 6` box that
     // decided the survival time-block λ until a03438645 (#2670) nor the
     // engine's ±30 fallback applies (#2902 row 8).
-    let (lower, upper) = survival_baseline_theta_domain(target, &seed, age_exit)?;
+    let (lower, upper) = survival_baseline_theta_domain(target, &seed, age_exit).map_err(config)?;
     let problem = contract
         .configure(OuterProblem::new(dim).with_prefer_gradient_only(true))
         .with_bounds(lower, upper)
@@ -1051,19 +1055,21 @@ where
     );
     let result = problem
         .run(&mut obj, context)
-        .map_err(|e| format!("{context} failed: {e}"))?;
+        .map_err(|e| WorkflowError::from(FitFailure::from(e).context(format!("{context} failed"))))?;
     if !result.converged() {
-        return Err(SurvivalConstructionError::InvalidConfig {
-            reason: format!(
+        return Err(WorkflowError::from(FitFailure::raised(
+            gam_problem::FailureCategory::Convergence,
+            format!(
                 "{context} did not converge after {} iterations (final_objective={:.6e}, final_grad_norm={})",
                 result.iterations,
                 result.final_value,
                 result.final_grad_norm_report(),
             ),
-        }
-        .into());
+        )));
     }
+    // The theta is the search's own optimum on the target it was seeded from.
     survival_baseline_config_from_theta(target, &result.rho)
+        .map_err(|reason| WorkflowError::from(FitFailure::invariant(reason)))
 }
 
 /// Shared engine for the two derivative-carrying baseline-config optimizers.
@@ -1084,7 +1090,7 @@ fn run_baseline_theta_optimizer_with_eval<F>(
     context: &str,
     contract: BaselineDerivativeContract,
     objective: F,
-) -> Result<SurvivalBaselineConfig, String>
+) -> Result<SurvivalBaselineConfig, crate::fit_orchestration::WorkflowError>
 where
     F: FnMut(&SurvivalBaselineConfig) -> Result<gam_problem::OuterEval, String>,
 {
@@ -1171,7 +1177,7 @@ pub fn optimize_survival_baseline_config_with_gradient_only<F>(
     age_exit: ndarray::ArrayView1<'_, f64>,
     context: &str,
     mut objective: F,
-) -> Result<SurvivalBaselineConfig, String>
+) -> Result<SurvivalBaselineConfig, crate::fit_orchestration::WorkflowError>
 where
     F: FnMut(&SurvivalBaselineConfig) -> Result<(f64, Array1<f64>), String>,
 {
