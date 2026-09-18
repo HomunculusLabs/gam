@@ -1970,11 +1970,12 @@ fn nuclear_norm_tie_guard_refuses_only_an_unresolved_gap_2469() {
 }
 
 /// #2469: a row joins the wide-block joint row-space basis when its residual is
-/// resolved above `gram_schmidt_residual_band`, not above `1e-13·‖row‖`. In
-/// `d = 40`, `T = e₀` and `V = e₀ + 5e-14·e₁` leave `V` a residual of `5e-14`. That
-/// is above the band for one direction (`2·γ₄₄ ≈ 9.8e-15`) and below the replaced
-/// cutoff, so the basis has two directions. A row exactly in the span (`V = 3·e₀`)
-/// adds none, and a zero row is skipped.
+/// resolved, not above `1e-13·‖row‖`. In `d = 40`, `T = e₀` and `V = e₀ + 5e-14·e₁`
+/// leave `V` a residual of `5e-14`. `e₀` is exact, so its direction carries no
+/// error, and the residual only has to clear `V`'s own band for one direction
+/// (`2·γ₄₄ ≈ 9.8e-15`), which is below the replaced cutoff. The basis has two
+/// directions. A row exactly in the span (`V = 3·e₀`) adds none, and a zero row is
+/// skipped.
 #[test]
 fn nuclear_norm_joint_row_space_basis_admits_a_residual_above_its_band_2469() {
     use crate::analytic_penalties::nuclear_norm::joint_row_space_basis;
@@ -2003,6 +2004,36 @@ fn nuclear_norm_joint_row_space_basis_admits_a_residual_above_its_band_2469() {
     let mut in_span = Array2::<f64>::zeros((1, d));
     in_span[[0, 0]] = 3.0;
     assert_eq!(joint_row_space_basis(t.view(), in_span.view()).len(), 1);
+}
+
+/// #2469: the joint row space does not take a row whose residual only its own
+/// band resolves. `T` holds six near-collinear unit rows of `(1, x, …, x⁷)` at
+/// nodes `1, 1.05, …, 1.25` (#2600), and `V` their unit fourth difference, which
+/// is in their span by construction. Its weights on the six sum to about 8000,
+/// so the directions it is measured against are too coarse to resolve it, and
+/// the basis keeps six directions.
+#[test]
+fn nuclear_norm_joint_row_space_skips_a_near_collinear_difference_2469() {
+    use crate::analytic_penalties::nuclear_norm::joint_row_space_basis;
+    let d = 8usize;
+    let mut t = Array2::<f64>::zeros((6, d));
+    for index in 0..6 {
+        let node = 1.0 + 0.05 * index as f64;
+        let mut power = 1.0_f64;
+        for column in 0..d {
+            t[[index, column]] = power;
+            power *= node;
+        }
+        let norm = t.row(index).dot(&t.row(index)).sqrt();
+        t.row_mut(index).mapv_inplace(|value| value / norm);
+    }
+    let mut difference = Array1::<f64>::zeros(d);
+    for (index, weight) in [1.0_f64, -4.0, 6.0, -4.0, 1.0].iter().enumerate() {
+        difference.scaled_add(*weight, &t.row(index));
+    }
+    let length = difference.dot(&difference).sqrt();
+    let v = (&difference / length).insert_axis(ndarray::Axis(0));
+    assert_eq!(joint_row_space_basis(t.view(), v.view()).len(), 6);
 }
 
 #[test]

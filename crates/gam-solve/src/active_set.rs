@@ -4,6 +4,7 @@ use gam_linalg::faer_ndarray::{
     FaerArrayView, FaerCholesky, FaerLinalgError, FaerSvd, array1_to_col_matmut,
     col_piv_qr_solve_lstsq, default_rrqr_rank_alpha, rrqr_nullspace_basis,
 };
+use gam_linalg::gram_schmidt::ReorthogonalizedRowBasis;
 use gam_linalg::utils::{KahanSum, StableSolver, array_is_finite};
 use gam_problem::{
     ConstraintRowId, ConstraintSet, KhatriRaoConeConstraints, LinearInequalityConstraints,
@@ -2535,13 +2536,13 @@ fn independent_violated_operator_rows(
     }
 
     // Every gathered row is unit-normalized. A row adds a normal-space direction
-    // when its reorthogonalized residual is resolved above the Gram–Schmidt
-    // arithmetic's own band (`gram_schmidt_residual_band`).
-    let mut basis = Vec::<Array1<f64>>::with_capacity(p);
+    // when `ReorthogonalizedRowBasis` resolves its residual: above its own
+    // Gram–Schmidt band plus the error the held directions carry (#2469).
+    let mut basis = ReorthogonalizedRowBasis::new();
     if !active.is_empty() {
         let active_rows = ops.gather_unit_rows(active)?;
         for row in active_rows.a.rows() {
-            extend_operator_normal_basis(&mut basis, row);
+            basis.admit(row);
         }
     }
 
@@ -2551,7 +2552,7 @@ fn independent_violated_operator_rows(
         let chunk_ids = chunk.iter().map(|(row, _)| *row).collect::<Vec<_>>();
         let gathered = ops.gather_unit_rows(&chunk_ids)?;
         for (position, &row) in chunk_ids.iter().enumerate() {
-            if extend_operator_normal_basis(&mut basis, gathered.a.row(position)) {
+            if basis.admit(gathered.a.row(position)) {
                 selected.push(row);
                 if selected.len() == max_new || basis.len() == p {
                     return Ok(selected);
@@ -2560,35 +2561,6 @@ fn independent_violated_operator_rows(
         }
     }
     Ok(selected)
-}
-
-/// Reorthogonalized modified Gram--Schmidt append for one unit constraint
-/// normal. Returns true exactly when the row adds a resolved normal-space
-/// direction: its residual after `GRAM_SCHMIDT_PASSES` passes exceeds
-/// `gam_math::roundoff::gram_schmidt_residual_band` (#2469).
-fn extend_operator_normal_basis(basis: &mut Vec<Array1<f64>>, row: ArrayView1<'_, f64>) -> bool {
-    let band = gam_math::roundoff::gram_schmidt_residual_band(
-        gam_math::roundoff::GRAM_SCHMIDT_PASSES,
-        basis.len(),
-        row.len(),
-        row.dot(&row).sqrt(),
-    );
-    let mut residual = row.to_owned();
-    // The second pass prevents a long, nearly dependent active basis from
-    // manufacturing a false new direction through first-pass roundoff.
-    for _ in 0..gam_math::roundoff::GRAM_SCHMIDT_PASSES {
-        for direction in basis.iter() {
-            let projection = residual.dot(direction);
-            residual.scaled_add(-projection, direction);
-        }
-    }
-    let residual_norm = residual.dot(&residual).sqrt();
-    if !(residual_norm.is_finite() && residual_norm > band) {
-        return false;
-    }
-    residual /= residual_norm;
-    basis.push(residual);
-    true
 }
 
 /// Retain only candidate row ids that are genuinely tight at `beta`.
@@ -2981,41 +2953,20 @@ const ACTIVE_SET_DUAL_DEPENDENCE_TOL: f64 = 1e-11;
 /// Thin QR by reorthogonalized modified Gram--Schmidt: `columns = Q R` with `Q`
 /// orthonormal (returned as its column list) and `R` upper triangular.
 ///
-/// Returns `None` when a column is numerically dependent on its predecessors.
+/// Returns `None` when a column is numerically dependent on its predecessors, as
+/// `ReorthogonalizedRowBasis` decides it (#2469).
 /// The dual active-set solve maintains an independent face by construction, so
 /// `None` is a genuine numerical breakdown rather than an expected branch, and
 /// the caller converts it into a typed refusal.
 fn thin_qr_reorthogonalized(columns: &[Array1<f64>]) -> Option<(Vec<Array1<f64>>, Array2<f64>)> {
-    let k = columns.len();
-    let mut q: Vec<Array1<f64>> = Vec::with_capacity(k);
-    let mut r = Array2::<f64>::zeros((k, k));
-    for (column_index, column) in columns.iter().enumerate() {
-        let scale = column.dot(column).sqrt();
-        let band = gam_math::roundoff::gram_schmidt_residual_band(
-            gam_math::roundoff::GRAM_SCHMIDT_PASSES,
-            q.len(),
-            column.len(),
-            scale,
-        );
-        let mut residual = column.clone();
-        // Two passes: one sweep leaves a long, nearly dependent basis able to
-        // manufacture a false orthogonal direction out of first-pass roundoff.
-        for _ in 0..gam_math::roundoff::GRAM_SCHMIDT_PASSES {
-            for (basis_index, basis) in q.iter().enumerate() {
-                let projection = residual.dot(basis);
-                r[[basis_index, column_index]] += projection;
-                residual.scaled_add(-projection, basis);
-            }
-        }
-        let norm = residual.dot(&residual).sqrt();
-        if !(norm.is_finite() && scale.is_finite() && norm > band) {
+    let mut basis = ReorthogonalizedRowBasis::new();
+    for column in columns {
+        if !basis.admit(column.view()) {
             return None;
         }
-        r[[column_index, column_index]] = norm;
-        residual /= norm;
-        q.push(residual);
     }
-    Some((q, r))
+    let r = basis.triangular_factor();
+    Some((basis.into_directions(), r))
 }
 
 /// Back substitution against an upper-triangular `R` (`R x = y`).
@@ -3995,11 +3946,13 @@ pub fn solve_quadratic_with_linear_constraints(
 #[cfg(test)]
 mod tests {
 
-    /// #2469: a direction joins a Gram–Schmidt basis when its reorthogonalized
-    /// residual is resolved above the arithmetic's own band `2·k·γ_{p+4}·‖x‖`.
-    /// Against `e₁` in three dimensions, `(1, 1e-14, 0)` leaves a residual of
-    /// `1e-14`. That is above the band (`≈1.6e-15`) and below the `100·p·ε ≈ 6.7e-14`
-    /// cutoff both appends used before. A vector already in the span is refused.
+    /// #2469: a direction joins the active set's Gram–Schmidt bases when
+    /// `ReorthogonalizedRowBasis` resolves its residual. Against `e₁` in three
+    /// dimensions, `(1, 1e-14, 0)` leaves a residual of `1e-14`. That is above the band
+    /// (`≈1.6e-15`) and below the `100·p·ε ≈ 6.7e-14` cutoff both appends used
+    /// before. A vector already in the span is refused. On the #2600 face the
+    /// dual's thin QR refuses the fourth-difference column that the band alone
+    /// would admit, and factors the six rows it is a difference of.
     #[test]
     fn gram_schmidt_appends_admit_a_residual_resolved_above_their_band_2469() {
         use ndarray::array;
@@ -4016,11 +3969,23 @@ mod tests {
              replaced cutoff {:.3e}",
             100.0 * 3.0 * f64::EPSILON
         );
-        let mut basis = vec![array![1.0_f64, 0.0, 0.0]];
-        assert!(super::extend_operator_normal_basis(&mut basis, array![1.0_f64, gap, 0.0].view()));
+        let mut basis = super::ReorthogonalizedRowBasis::new();
+        assert!(basis.admit(array![1.0_f64, 0.0, 0.0].view()));
+        assert!(basis.admit(array![1.0_f64, gap, 0.0].view()));
         assert_eq!(basis.len(), 2);
-        assert!(!super::extend_operator_normal_basis(&mut basis, array![0.6_f64, 0.8, 0.0].view()));
+        assert!(!basis.admit(array![0.6_f64, 0.8, 0.0].view()));
         assert_eq!(basis.len(), 2);
+
+        let face = ill_conditioned_face_2600();
+        let columns: Vec<Array1<f64>> = face.rows().into_iter().map(|row| row.to_owned()).collect();
+        assert!(
+            super::thin_qr_reorthogonalized(&columns[..6]).is_some(),
+            "the six near-collinear rows are independent"
+        );
+        assert!(
+            super::thin_qr_reorthogonalized(&columns).is_none(),
+            "their fourth difference is in their span"
+        );
 
         let columns = vec![array![2.0_f64, 0.0, 0.0], array![2.0_f64, 2.0 * gap, 0.0]];
         let (q, r) = super::thin_qr_reorthogonalized(&columns)
@@ -4041,14 +4006,77 @@ mod tests {
             "a column in its predecessors' span is dependent"
         );
 
-        // A zero vector has a zero band and a zero residual, so `residual > band`
-        // is false: it adds no direction to a basis, and a thin QR over it is the
-        // dependent-column refusal. Upstream, `gather_unit_rows` refuses a zero-norm
-        // row typed before either append sees it.
-        let mut empty = Vec::new();
-        assert!(!super::extend_operator_normal_basis(&mut empty, array![0.0_f64, 0.0, 0.0].view()));
+        // A zero vector is never admitted: it adds no direction to a basis, and a
+        // thin QR over it is the dependent-column refusal. Upstream,
+        // `gather_unit_rows` refuses a zero-norm row typed before either append
+        // sees it.
+        let mut empty = super::ReorthogonalizedRowBasis::new();
+        assert!(!empty.admit(array![0.0_f64, 0.0, 0.0].view()));
         assert!(empty.is_empty());
         assert!(super::thin_qr_reorthogonalized(&[array![0.0_f64, 0.0, 0.0]]).is_none());
+    }
+
+    /// #2469: batch separation adds a violated row only when it adds a resolved
+    /// normal direction to the active face. With the six near-collinear #2600 rows
+    /// active and all eight rows violated at the origin, their fourth difference is
+    /// in the face's span and is not selected, though its residual clears its own
+    /// band. `e₈` is resolved and is selected.
+    #[test]
+    fn batch_separation_skips_a_violated_row_in_a_near_collinear_face_span_2469() {
+        let face = ill_conditioned_face_2600();
+        let mut a = Array2::<f64>::zeros((8, 8));
+        a.slice_mut(ndarray::s![..7, ..]).assign(&face);
+        a[[7, 7]] = 1.0;
+        let set = ConstraintSet::Dense(
+            LinearInequalityConstraints::new(a, Array1::<f64>::ones(8)).expect("dense"),
+        );
+        let ops = ConstraintSetOps::new(&set, 0.0).expect("operator geometry");
+        let values = ops.values(&Array1::<f64>::zeros(8)).expect("values at the origin");
+        let active: Vec<usize> = (0..6).collect();
+        let mut is_active = vec![false; 8];
+        for &row in &active {
+            is_active[row] = true;
+        }
+        let selected =
+            independent_violated_operator_rows(&ops, &values, &active, &is_active, &[false; 8], 2)
+                .expect("batch separation");
+        assert_eq!(
+            selected,
+            vec![7],
+            "the fourth difference is in the active face's span and e₈ is not"
+        );
+    }
+
+    /// Six unit rows of `(1, x, …, x⁷)` at nodes `1, 1.05, …, 1.25`, then their
+    /// unit-normalized fourth difference, which is in their span by construction
+    /// (#2600).
+    fn ill_conditioned_face_2600() -> Array2<f64> {
+        const NODE_SPACING: f64 = 0.05;
+        let p = 8usize;
+        let independent = 6usize;
+        let mut rows = Array2::<f64>::zeros((independent + 1, p));
+        for index in 0..independent {
+            let node = 1.0 + NODE_SPACING * index as f64;
+            let mut power = 1.0_f64;
+            for column in 0..p {
+                rows[[index, column]] = power;
+                power *= node;
+            }
+            let norm = rows.row(index).dot(&rows.row(index)).sqrt();
+            let normalized = &rows.row(index).to_owned() / norm;
+            rows.row_mut(index).assign(&normalized);
+        }
+        // Fourth finite difference of the first five rows: coefficients
+        // 1, -4, 6, -4, 1 — exactly in the span, with an O(1e-3) norm.
+        let difference_weights = [1.0_f64, -4.0, 6.0, -4.0, 1.0];
+        let mut combination = Array1::<f64>::zeros(p);
+        for (index, weight) in difference_weights.iter().enumerate() {
+            combination.scaled_add(*weight, &rows.row(index));
+        }
+        let combination_norm = combination.dot(&combination).sqrt();
+        rows.row_mut(independent)
+            .assign(&(&combination / combination_norm));
+        rows
     }
 
     /// The metric projection's stationarity is judged above its operands'
@@ -4672,31 +4700,9 @@ mod tests {
         // needs and the one that was violated.
         use gam_linalg::faer_ndarray::FaerSvd;
 
-        const NODE_SPACING: f64 = 0.05;
         let p = 8usize;
         let independent = 6usize;
-        let mut rows = Array2::<f64>::zeros((independent + 1, p));
-        for index in 0..independent {
-            let node = 1.0 + NODE_SPACING * index as f64;
-            let mut power = 1.0_f64;
-            for column in 0..p {
-                rows[[index, column]] = power;
-                power *= node;
-            }
-            let norm = rows.row(index).dot(&rows.row(index)).sqrt();
-            let normalized = &rows.row(index).to_owned() / norm;
-            rows.row_mut(index).assign(&normalized);
-        }
-        // Fourth finite difference of the first five rows: coefficients
-        // 1, -4, 6, -4, 1 — exactly in the span, with an O(1e-3) norm.
-        let difference_weights = [1.0_f64, -4.0, 6.0, -4.0, 1.0];
-        let mut combination = Array1::<f64>::zeros(p);
-        for (index, weight) in difference_weights.iter().enumerate() {
-            combination.scaled_add(*weight, &rows.row(index));
-        }
-        let combination_norm = combination.dot(&combination).sqrt();
-        rows.row_mut(independent)
-            .assign(&(&combination / combination_norm));
+        let rows = ill_conditioned_face_2600();
 
         let (_u, singular, _vt) = rows.svd(false, false).expect("face SVD");
         let singular_max = singular.iter().copied().fold(0.0_f64, f64::max);

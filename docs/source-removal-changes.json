@@ -469,5 +469,13 @@
     ],
     "reason": "#2966 (gam-21 and lead ruling): the saved-model envelope {kind, version, model} and SavedModelError have ONE owner, gam_model_api::saved_model, which gam-event-history and gam-models both depend on. gam-event-history's saved.rs is deleted rather than kept beside it. SavedModelKind is replaced by an owner-named &'static str kind, so adding a kind edits nothing shared. saved_model_text, read_saved_model_text, write_saved_model and read_saved_model_file move with their bodies; write_saved_model's temporary name gains a per-call counter. The test moves as documents_refuse_other_kinds_versions_and_non_finite_floats, with an added adversarial f64 round trip. Envelope and name were private helpers of the enum-kind design.",
     "evidence": "Guard-only job 1212841 (base 22f30c2e61, tree 208cc2b8 == the kit's DRY_RUN tree with the deletion appended) listed exactly these 9 identities as guarded removals, each with removed_declarations 1. At origin/main dca31ddc96, `git grep -w` over crates, src, tests, gamfit, examples, scripts and bench finds SavedModelKind, SavedModelError and the four functions only in crates/gam-event-history/src/saved.rs, crates/gam-event-history/src/lib.rs:43 (the re-export, removed in the same commit) and crates/gam-event-history/src/joint/model.rs (import :13-14; save/load :137-154; test asserts :252-265). model.rs now imports gam_model_api::saved_model::{SavedModelError, read_saved_model_file, read_saved_model_text, saved_model_text, write_saved_model}. No CLI, pyffi or gamfit source names any of them; they call JointEventModel::save/load."
+  },
+  {
+    "base": "2c7b330654ac14f9075ec562dbfcb781e0831414",
+    "items": [
+      "crates/gam-solve/src/active_set.rs:fn:extend_operator_normal_basis"
+    ],
+    "reason": "#2469 fix-forward of bf7bf2887c: extend_operator_normal_basis admitted a row whose residual cleared only its own gram_schmidt_residual_band, which ignores the error the held directions carry. Its two callers in independent_violated_operator_rows now admit through gam_linalg::gram_schmidt::ReorthogonalizedRowBasis. That owner charges the row's own band, Σ_j |w_j|·β_j, and the back substitution's γ_k·βᵀ|Û||R̂||ŵ|. Nothing else called the private fn, so it is deleted.",
+    "evidence": "git grep -n -w extend_operator_normal_basis at c646e2a859 finds it only in crates/gam-solve/src/active_set.rs: the private fn, its two calls in independent_violated_operator_rows, and three calls in batch 3's pin gram_schmidt_appends_admit_a_residual_resolved_above_their_band_2469, which this commit moves onto the owner. Gate job 1248645 measured the defect: routed through it, rank_reduce kept 7 rows on the #2600 face where the SVD finds 6."
   }
 ]
