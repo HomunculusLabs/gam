@@ -2177,6 +2177,23 @@ fn iso_kappa_duchon_dx_dpsi_matches_fd() {
 ///        and both of my mechanism hypotheses were wrong.
 ///
 /// `ĉ = −e^ρ·∂V/∂ρ` is reported alongside so the tail law is directly readable.
+/// The ψ = log κ a frozen single-Matérn fixture was built at, `−ln ℓ` for its frozen
+/// length scale ℓ (#2901). Its penalty blocks are rooted at the structural ranks
+/// frozen there (578b781e71). The #2454 fixture's Matérn Grams keep all eleven
+/// eigenvalues resolved only near that ψ: one to two fall inside the rounding band by
+/// ψ = 0 (lane probe 1283290), and those trials are refused. A ρ-gradient check on
+/// that fixture is therefore taken at the ψ its model was fitted at.
+fn frozen_matern_log_kappa(frozen: &TermCollectionSpec) -> f64 {
+    match &frozen.smooth_terms[0].basis {
+        SmoothBasisSpec::Matern { spec, .. } => -spec
+            .length_scale
+            .resolved()
+            .expect("a frozen Matérn length scale")
+            .ln(),
+        other => panic!("the #2454 fixture is a single Matérn term, got {other:?}"),
+    }
+}
+
 #[test]
 fn zz_measure_monotone_fixture_through_checkable_evaluator_2454() {
     let n = 60usize;
@@ -2319,6 +2336,7 @@ fn zz_measure_monotone_fixture_through_checkable_evaluator_2454() {
         for j in 0..rho_dim {
             theta[j] = value;
         }
+        theta.slice_mut(s![rho_dim..]).fill(frozen_matern_log_kappa(&frozen));
         let (cost, grad) = analytic_at(&theta, &mut cache, &mut evaluator);
         let an = grad[0];
         eprintln!("[zz-steplaw15-2454] rho=15 COST={cost:+.12e} analytic_rho0={an:+.8e}");
@@ -2345,6 +2363,7 @@ fn zz_measure_monotone_fixture_through_checkable_evaluator_2454() {
         for j in 0..rho_dim {
             theta[j] = value;
         }
+        theta.slice_mut(s![rho_dim..]).fill(frozen_matern_log_kappa(&frozen));
         let (cost, grad) = analytic_at(&theta, &mut cache, &mut evaluator);
         for j in 0..rho_dim {
             let mut plus = theta.clone();
@@ -2635,6 +2654,7 @@ fn rho_gradient_part_ladder_family_2454(
         for j in 0..rho_dim {
             theta[j] = value;
         }
+        theta.slice_mut(s![rho_dim..]).fill(frozen_matern_log_kappa(&frozen));
         let (cost, audit) = analytic_at(&theta, &mut cache, &mut evaluator);
         let energy = audit.penalty_energy.expect("penalty energy recorded");
         let frame = audit.penalty_frame.as_ref();
