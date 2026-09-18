@@ -563,6 +563,20 @@ impl ExactHessianSpectralBlock {
                 orbit.curvatures.len()
             )
         })?;
+        // Every orbit tangent is stiffened to its metric (`μ = 1`), so the stiffened block's
+        // negative directions are `A`'s on the complement; the orbit's own resolved negative
+        // curvatures join them.
+        let negative_curvature = ResolvedNegativeCurvature::of_directions(
+            (0..self.eigenvalues.len())
+                .map(|index| (self.eigenvalues[index], self.rank_floor(index)))
+                .chain(
+                    orbit
+                        .curvatures
+                        .iter()
+                        .copied()
+                        .zip(orbit.edges.iter().copied()),
+                ),
+        );
         Ok(ExactStationaritySolve {
             step: SaeArrowVector {
                 t: solution.slice(s![..total_t]).to_owned(),
@@ -570,6 +584,7 @@ impl ExactHessianSpectralBlock {
             },
             band,
             retained_rank,
+            negative_curvature,
         })
     }
 }

@@ -737,7 +737,48 @@ impl ExactHessianSpectralBlock {
                 })
                 .collect(),
             retained_rank,
+            negative_curvature: ResolvedNegativeCurvature::of_directions(
+                (0..spectral_dim).map(|index| (self.eigenvalues[index], self.rank_floor(index))),
+            ),
         })
+    }
+}
+
+/// The resolved negative curvature a dense stationarity solve retained (#2228): how many
+/// directions sit below `−edge`, and the most negative curvature with its band edge.
+/// `A⁺` keeps these directions, so its step moves along them toward a saddle of the
+/// penalized objective, not toward the mode the inner solve seeks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ResolvedNegativeCurvature {
+    pub(crate) directions: usize,
+    pub(crate) min_curvature: f64,
+    pub(crate) edge: f64,
+}
+
+impl ResolvedNegativeCurvature {
+    /// The resolved negative directions among `(curvature, edge)` pairs, or `None` when
+    /// every curvature is at or above its own `−edge`.
+    fn of_directions(directions: impl Iterator<Item = (f64, f64)>) -> Option<Self> {
+        let mut found: Option<Self> = None;
+        for (curvature, edge) in directions.filter(|&(curvature, edge)| curvature < -edge) {
+            found = Some(match found {
+                Some(found) if found.min_curvature <= curvature => Self {
+                    directions: found.directions + 1,
+                    ..found
+                },
+                Some(found) => Self {
+                    directions: found.directions + 1,
+                    min_curvature: curvature,
+                    edge,
+                },
+                None => Self {
+                    directions: 1,
+                    min_curvature: curvature,
+                    edge,
+                },
+            });
+        }
+        found
     }
 }
 
@@ -750,11 +791,13 @@ pub(crate) struct ExactABandDirection {
 }
 
 /// A dense exact-stationarity solve (#2228): `A⁺rhs` on the resolvable complement, the
-/// band directions it held out, and how many directions the complement retained.
+/// band directions it held out, how many directions the complement retained, and the
+/// resolved negative curvature among them.
 pub(crate) struct ExactStationaritySolve {
     pub(crate) step: SaeArrowVector,
     pub(crate) band: Vec<ExactABandDirection>,
     pub(crate) retained_rank: usize,
+    pub(crate) negative_curvature: Option<ResolvedNegativeCurvature>,
 }
 
 /// #2228 / #2933 F07 — outcomes of the dense root refinement's pencil solves. Every clone of a
@@ -768,6 +811,9 @@ pub(crate) struct EvidenceRootCounters {
     band_holds: std::sync::atomic::AtomicUsize,
     band_skips: std::sync::atomic::AtomicUsize,
     solve_failures: std::sync::atomic::AtomicUsize,
+    negative_curvature_no_steps: std::sync::atomic::AtomicUsize,
+    ridge_escalation_no_steps: std::sync::atomic::AtomicUsize,
+    uncertified_refinements: std::sync::atomic::AtomicUsize,
 }
 
 /// A snapshot of [`EvidenceRootTelemetry`].
@@ -779,6 +825,14 @@ pub(crate) struct EvidenceRootCounts {
     pub(crate) band_skips: usize,
     /// The geometry or its solve failed, so no root step was taken.
     pub(crate) solve_failures: usize,
+    /// The dense pencil resolved a negative curvature, so no root step was taken.
+    pub(crate) negative_curvature_no_steps: usize,
+    /// The arrow exact-A solve escalated its ridge, so its step was not the Newton step and
+    /// none was taken.
+    pub(crate) ridge_escalation_no_steps: usize,
+    /// A refinement moved the state and recurred, but the refined root did not certify, so
+    /// the accepted state was priced.
+    pub(crate) uncertified_refinements: usize,
 }
 
 impl EvidenceRootTelemetry {
@@ -788,6 +842,12 @@ impl EvidenceRootTelemetry {
             band_holds: self.0.band_holds.load(Ordering::Relaxed),
             band_skips: self.0.band_skips.load(Ordering::Relaxed),
             solve_failures: self.0.solve_failures.load(Ordering::Relaxed),
+            negative_curvature_no_steps: self
+                .0
+                .negative_curvature_no_steps
+                .load(Ordering::Relaxed),
+            ridge_escalation_no_steps: self.0.ridge_escalation_no_steps.load(Ordering::Relaxed),
+            uncertified_refinements: self.0.uncertified_refinements.load(Ordering::Relaxed),
         }
     }
 }
@@ -2422,6 +2482,19 @@ impl SaeManifoldTerm {
                 return None;
             }
         };
+        // #2228 — `A⁺` retains a resolved negative direction with `1/μ < 0`, so `−A⁺g` would
+        // step toward the saddle along it. The root this phase refines is a mode.
+        if let Some(negative) = solve.negative_curvature {
+            counters.negative_curvature_no_steps.fetch_add(1, Ordering::Relaxed);
+            log::info!(
+                "[SAE-ROOT] no root step: the pencil resolves {} negative curvature direction(s) \
+                 (min μ={:.6e} below −{:.6e})",
+                negative.directions,
+                negative.min_curvature,
+                negative.edge,
+            );
+            return None;
+        }
         // Every edge is at least the pencil floor `√ε`; the ranking cross-multiplies, so no
         // ratio is formed.
         let nearest_edge = solve.band.iter().copied().max_by(|left, right| {

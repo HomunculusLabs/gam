@@ -226,14 +226,15 @@ fn the_audit_congruence_keeps_the_retained_subspace_the_solve_and_the_value_2933
 
 /// #2228 contract. A non-empty band is not a failed solve: the solve steps on the resolvable
 /// complement and lists each direction it held out with its `|μ|` and edge. The root
-/// refinement counts the hold and takes that complement step, and skips only where the band
-/// holds every direction.
+/// refinement counts the hold and takes that complement step, skips where the band holds
+/// every direction, and takes no step where the solve resolves a negative curvature, since
+/// `−A⁺g` moves along it toward a saddle.
 #[test]
 fn a_band_direction_yields_the_complement_step_and_is_counted_by_the_root_refinement_2933() {
     let identity = Array2::<f64>::eye(3);
     let held = 1.0e-13_f64;
-    let block = pencil_block(&Array2::from_diag(&array![3.0, held, -2.0]), &identity, &identity);
-    assert_eq!(census(&block), (1, 1, 1), "the fixture must hold exactly one direction in the band");
+    let block = pencil_block(&Array2::from_diag(&array![3.0, held, 2.0]), &identity, &identity);
+    assert_eq!(census(&block), (2, 1, 0), "the fixture must hold exactly one direction in the band");
 
     let rhs = array![6.0, 5.0, 4.0];
     let solve = block
@@ -241,10 +242,11 @@ fn a_band_direction_yields_the_complement_step_and_is_counted_by_the_root_refine
         .expect("#2228: a non-empty band is not a failed solve");
     let step = flatten(&solve.step);
     assert!(
-        (step[0] - 2.0).abs() <= 1.0e-12 && step[1].abs() <= 1.0e-12 && (step[2] + 2.0).abs() <= 1.0e-12,
+        (step[0] - 2.0).abs() <= 1.0e-12 && step[1].abs() <= 1.0e-12 && (step[2] - 2.0).abs() <= 1.0e-12,
         "the step must be A⁺rhs on the resolvable complement, got {step:?}"
     );
-    assert_eq!(solve.retained_rank, 2, "the complement retains the positive and the negative direction");
+    assert_eq!(solve.retained_rank, 2, "the complement retains both positive directions");
+    assert_eq!(solve.negative_curvature, None, "the fixture resolves no negative curvature");
     assert_eq!(solve.band.len(), 1, "the band list must name the held direction");
     // `dim·ε·‖A‖₂` is the eigensolver's backward error on this fixture.
     assert!(
@@ -254,40 +256,68 @@ fn a_band_direction_yields_the_complement_step_and_is_counted_by_the_root_refine
         solve.band[0]
     );
 
-    // `(band holds, band skips, solve failures)`.
+    // `(band holds, band skips, solve failures, negative-curvature no-steps)`.
     let counts = |term: &SaeManifoldTerm| {
         let counts = term.evidence_root_telemetry.counts();
-        (counts.band_holds, counts.band_skips, counts.solve_failures)
+        (
+            counts.band_holds,
+            counts.band_skips,
+            counts.solve_failures,
+            counts.negative_curvature_no_steps,
+        )
     };
     let term = crate::manifold::tests::trivial_k1_euclidean_term();
-    assert_eq!(counts(&term), (0, 0, 0), "a fresh term starts with an empty ledger");
+    assert_eq!(counts(&term), (0, 0, 0, 0), "a fresh term starts with an empty ledger");
     let root_step = flatten(
         &term
             .evidence_root_step_from_pencil(Ok(solve))
             .expect("the resolvable complement carries a root step"),
     );
     assert_eq!(root_step, -&step, "the root step is −A⁺g on the resolvable complement");
-    assert_eq!(counts(&term), (1, 0, 0), "a band hold that still steps is a hold");
+    assert_eq!(counts(&term), (1, 0, 0, 0), "a band hold that still steps is a hold");
 
-    let resolved = pencil_block(&Array2::from_diag(&array![3.0, 1.0, -2.0]), &identity, &identity);
+    let resolved = pencil_block(&Array2::from_diag(&array![3.0, 1.0, 2.0]), &identity, &identity);
     let resolved_solve = resolved
         .solve_stationarity(&border(&rhs))
         .expect("a full-rank solve");
     assert!(resolved_solve.band.is_empty(), "the resolved fixture must have an empty band");
     term.evidence_root_step_from_pencil(Ok(resolved_solve))
         .expect("a full-rank solve carries a root step");
-    assert_eq!(counts(&term), (1, 0, 0), "an empty band must not be counted");
+    assert_eq!(counts(&term), (1, 0, 0, 0), "an empty band must not be counted");
 
+    // A resolved negative curvature: `A⁺` keeps it with `1/μ < 0`, so `−A⁺g` would climb it.
+    let saddle = pencil_block(&Array2::from_diag(&array![3.0, 1.0, -2.0]), &identity, &identity);
+    let saddle_solve = saddle
+        .solve_stationarity(&border(&rhs))
+        .expect("an indefinite full-rank solve is not a failed solve");
+    let negative = saddle_solve
+        .negative_curvature
+        .expect("the solve must report the resolved negative curvature");
+    // `dim·ε·‖A‖₂` is the eigensolver's backward error on this fixture.
+    assert!(
+        negative.directions == 1
+            && (negative.min_curvature + 2.0).abs() <= 9.0 * f64::EPSILON
+            && negative.edge == sae_exact_a_pencil_floor(),
+        "the report must carry the one negative direction, its μ and its edge, got {negative:?}"
+    );
+    assert!(
+        term.evidence_root_step_from_pencil(Ok(saddle_solve)).is_none(),
+        "a resolved negative curvature leaves no root step"
+    );
+    assert_eq!(counts(&term), (1, 0, 0, 1), "a negative curvature is its own no-step");
+
+    // `−held` sits inside the band, so no direction here is a resolved negative curvature.
     let flat = pencil_block(&Array2::from_diag(&array![held, 2.0 * held, -held]), &identity, &identity);
     let flat_solve = flat
         .solve_stationarity(&border(&rhs))
         .expect("#2228: a band holding every direction is not a failed solve");
     assert_eq!((flat_solve.retained_rank, flat_solve.band.len()), (0, 3));
+    assert_eq!(flat_solve.negative_curvature, None, "an in-band negative μ is not resolved");
     assert!(
         term.evidence_root_step_from_pencil(Ok(flat_solve)).is_none(),
         "a band holding every direction leaves no root step"
     );
-    assert_eq!(counts(&term), (1, 1, 0), "a band holding every direction is a skip, not a hold");
+    assert_eq!(counts(&term), (1, 1, 0, 1), "a band holding every direction is a skip, not a hold");
 
     // The outer objective restores a saved clone after a value probe; the ledger is shared, so
     // an outcome recorded on the clone that runs the probe survives the restore.
@@ -298,7 +328,7 @@ fn a_band_direction_yields_the_complement_step_and_is_counted_by_the_root_refine
             .is_none(),
         "a failed solve leaves no root step"
     );
-    assert_eq!(counts(&term), (1, 1, 1), "a failed solve is counted on the shared ledger");
+    assert_eq!(counts(&term), (1, 1, 1, 1), "a failed solve is counted on the shared ledger");
 }
 
 /// A declared gauge direction keeps its unit pin in both `Φ` and `A` (the raw restoration skips
