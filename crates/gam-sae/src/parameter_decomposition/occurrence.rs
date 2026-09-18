@@ -347,6 +347,11 @@ pub fn edit_cotangent(
 /// An edit that reached the wrong use is a different experiment, even when its numbers
 /// agree. So every use a record reaches must be substituted exactly once, and no other use
 /// may be.
+///
+/// Comparing ordinals needs the registry to number the `n` sites of each storage tensor
+/// as its reads `storage#0` to `storage#(n-1)`. `TensorRegistry::register_use_site` accepts
+/// any id, so a registered site outside that numbering, a gap or another name, is refused
+/// first, as a registry defect, before any discovered read is blamed for it.
 pub fn check_substitutions(
     registry: &TensorRegistry,
     records: &[ParameterEditRecord],
@@ -359,6 +364,21 @@ pub fn check_substitutions(
             record: record.registry,
             registry: found,
         });
+    }
+    for storage in registry.storage_ids() {
+        let sites = registry.use_sites_of(storage);
+        let reads: BTreeSet<UseSiteId> = (0..sites.len())
+            .map(|ordinal| UseSiteId::read(storage, ordinal))
+            .collect();
+        // The sites are distinct and as many as the reads, so they are the reads exactly
+        // when each is one of them.
+        if let Some(use_site) = sites.into_iter().find(|use_site| !reads.contains(*use_site)) {
+            return Err(OccurrenceError::UnnumberedUseSite {
+                use_site: use_site.clone(),
+                storage: storage.clone(),
+                reads: reads.len(),
+            });
+        }
     }
     let mut next_ordinal: BTreeMap<TensorId, usize> = BTreeMap::new();
     let mut seen = BTreeSet::new();
@@ -461,6 +481,14 @@ pub enum OccurrenceError {
     },
     /// The cotangent refused the pulled-back terms.
     Cotangent(String),
+    /// The registry holds `reads` use sites of `storage`, and `use_site` is not one of
+    /// its reads `storage#0` to `storage#(reads-1)`, so no ordinal of an executed forward
+    /// addresses it.
+    UnnumberedUseSite {
+        use_site: UseSiteId,
+        storage: TensorId,
+        reads: usize,
+    },
     /// The executor discovered a use site the registry does not hold.
     UnregisteredDiscovery(UseSiteId),
     /// The executor reported one use site as discovered twice.
@@ -554,6 +582,15 @@ impl fmt::Display for OccurrenceError {
                 use_site.0
             ),
             Self::Cotangent(reason) => write!(f, "occurrence: invalid cotangent: {reason}"),
+            Self::UnnumberedUseSite {
+                use_site,
+                storage,
+                reads,
+            } => write!(
+                f,
+                "occurrence: the registry holds {reads} use sites of storage {}, which must be its reads {}#0 onward with no gap; registered use site {} is not one of them",
+                storage.0, storage.0, use_site.0
+            ),
             Self::UnregisteredDiscovery(use_site) => write!(
                 f,
                 "occurrence: the executor discovered use site {}, which the registry does not hold",
@@ -1480,6 +1517,61 @@ mod tests {
             Err(OccurrenceError::RegistryMismatch {
                 record: registry.teacher_fingerprint(),
                 registry: decode.teacher_fingerprint(),
+            })
+        );
+    }
+
+    #[test]
+    fn substitutions_refuse_a_registry_whose_sites_are_not_numbered_as_reads() {
+        let chain = Chain::rectangular();
+        let storage = TensorId("weight".to_string());
+        let read = |ordinal: usize| UseSiteId::read(&storage, ordinal);
+        let registry_holding = |sites: &[UseSiteId]| {
+            let mut registry = TensorRegistry::default();
+            registry
+                .register_storage(storage.clone(), chain.weight.view().into_dyn())
+                .expect("the storage registers");
+            for site in sites {
+                registry
+                    .register_use_site(
+                        site.clone(),
+                        storage.clone(),
+                        UseMap::Linear(TieOrientation::Identity),
+                    )
+                    .expect("the use site registers");
+            }
+            registry
+        };
+
+        // Eleven reads, the fewest with a two-digit ordinal, registered last to first. Id
+        // order puts weight#10 before weight#2 and registration order is reversed; only the
+        // ordinals give the forward order, and the forward that reads them in it passes.
+        let eleven: Vec<UseSiteId> = (0..11).map(read).collect();
+        let backwards: Vec<UseSiteId> = eleven.iter().rev().cloned().collect();
+        let numbered = registry_holding(&backwards);
+        assert_eq!(check_substitutions(&numbered, &[], &eleven, &[]), Ok(()));
+
+        // A gap: two sites registered as reads 0 and 2. A forward that reads the tensor twice
+        // reports reads 0 and 1, and the registry is refused, not the forward.
+        let gapped = registry_holding(&[read(0), read(2)]);
+        assert_eq!(
+            check_substitutions(&gapped, &[], &[read(0), read(1)], &[]),
+            Err(OccurrenceError::UnnumberedUseSite {
+                use_site: read(2),
+                storage: storage.clone(),
+                reads: 2,
+            })
+        );
+
+        // A site registered under another name than its read.
+        let named = UseSiteId("decoder".to_string());
+        let renamed = registry_holding(&[read(0), named.clone()]);
+        assert_eq!(
+            check_substitutions(&renamed, &[], &[read(0), read(1)], &[]),
+            Err(OccurrenceError::UnnumberedUseSite {
+                use_site: named,
+                storage: storage.clone(),
+                reads: 2,
             })
         );
     }
