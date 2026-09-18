@@ -4374,6 +4374,12 @@ impl FittedModel {
             }
         })?;
         let lambdas = &fit.lambdas;
+        saved_lambdas_index_rebuilt_layout(
+            &spec,
+            design.penalties.len(),
+            fit,
+            "measure-jet extrapolation variance",
+        )?;
         // λ̂ are fitted on Frobenius-normalized penalties. The term loop
         // unnormalizes them to physical precisions before pricing; multiplying
         // by the coefficient-covariance scale puts Var_extrap on the same
@@ -5935,6 +5941,61 @@ fn validate_frozen_term_collectionspec(
         .map_err(|reason| FittedModelError::SchemaMismatch { reason })
 }
 
+/// Refuse a rebuilt penalty layout that the saved smoothing parameters don't
+/// index.
+///
+/// A saved fit carries one λ per penalty block of the layout it was fitted in,
+/// and every replay reads them by global index through the design rebuilt from
+/// `spec`. A rebuild that emits a different number of blocks shifts every later
+/// index while staying in bounds, so the read silently takes another block's λ.
+/// The known cause is #2953: an anisotropic ν ≥ 5/2 Matérn term now carries the
+/// third-order operator penalty, as the isotropic one always did, so a model
+/// saved before that has one λ fewer for each such term. The refusal names those
+/// terms when the spec has any.
+///
+/// `spec` is the mean predictor's spec, so the saved count is the Mean block's
+/// λ when the fit records one, and the fit's λ otherwise.
+pub fn saved_lambdas_index_rebuilt_layout(
+    spec: &TermCollectionSpec,
+    rebuilt_penalties: usize,
+    fit: &UnifiedFitResult,
+    context: &str,
+) -> Result<(), FittedModelError> {
+    let saved_lambdas = fit
+        .block_by_role(BlockRole::Mean)
+        .map_or(fit.lambdas.len(), |block| block.lambdas.len());
+    if rebuilt_penalties == saved_lambdas {
+        return Ok(());
+    }
+    let third_order_terms: Vec<&str> = spec
+        .smooth_terms
+        .iter()
+        .filter(|term| {
+            matches!(
+                &term.basis,
+                gam_terms::smooth::SmoothBasisSpec::Matern { spec, .. }
+                    if spec.aniso_log_scales.is_some() && spec.nu.admits_third_order_operator()
+            )
+        })
+        .map(|term| term.name.as_str())
+        .collect();
+    let cause = if third_order_terms.is_empty() {
+        "the saved smoothing parameters index a different penalty layout".to_string()
+    } else {
+        format!(
+            "the anisotropic ν ≥ 5/2 Matérn term(s) {third_order_terms:?} carry the third-order \
+             operator penalty since #2953, and a model saved before it was added has one λ fewer \
+             for each"
+        )
+    };
+    Err(FittedModelError::SchemaMismatch {
+        reason: format!(
+            "{context}: the rebuilt design has {rebuilt_penalties} penalty blocks but the saved \
+             fit has {saved_lambdas} smoothing parameters; {cause}. Refit the model."
+        ),
+    })
+}
+
 impl Deref for FittedModel {
     type Target = FittedModelPayload;
 
@@ -6410,11 +6471,17 @@ mod tests {
 
     fn saved_fit(blocks: Vec<FittedBlock>) -> UnifiedFitResult {
         let p: usize = blocks.iter().map(|block| block.beta.len()).sum();
+        // Assembly requires the top-level λ to be the blocks' λ in block order,
+        // and log λ their logarithm.
+        let lambdas: Array1<f64> = blocks
+            .iter()
+            .flat_map(|block| block.lambdas.iter().copied())
+            .collect();
         UnifiedFitResult::try_from_parts(gam_solve::estimate::UnifiedFitResultParts {
             blocks,
             training_sample_size: 16,
-            log_lambdas: Array1::zeros(0),
-            lambdas: Array1::zeros(0),
+            log_lambdas: lambdas.mapv(f64::ln),
+            lambdas,
             likelihood_family: Some(LikelihoodSpec::binomial_probit()),
             // Binomial carries a fixed unit dispersion; fit assembly now requires
             // it to be stated explicitly (Unspecified is rejected for binomial).
@@ -7461,5 +7528,143 @@ mod tests {
             .expect_err("partial #2141 shift metadata must fail loudly");
         assert!(error.to_string().contains("shift has 1 entries"));
         assert!(error.to_string().contains("mean design has 2 columns"));
+    }
+
+    /// A Matérn term over `(x, z)` on five fixed centers, anisotropic when `aniso`.
+    fn matern_termspec_2953(aniso: Option<Vec<f64>>) -> TermCollectionSpec {
+        use gam_terms::basis::{
+            CenterStrategy, MaternBasisSpec, MaternIdentifiability, MaternLengthScale, MaternNu,
+        };
+        use gam_terms::smooth::{ShapeConstraint, SmoothBasisSpec, SmoothTermSpec};
+        TermCollectionSpec {
+            linear_terms: vec![],
+            random_effect_terms: vec![],
+            smooth_terms: vec![SmoothTermSpec {
+                frozen_parametric_residualization: None,
+                name: "matern(x, z)".to_string(),
+                basis: SmoothBasisSpec::Matern {
+                    feature_cols: vec![0, 1],
+                    spec: MaternBasisSpec {
+                        periodic: None,
+                        center_strategy: CenterStrategy::UserProvided(array![
+                            [0.0, 0.0],
+                            [0.7, 0.1],
+                            [0.2, 0.9],
+                            [1.1, 0.8],
+                            [0.5, 0.45]
+                        ]),
+                        length_scale: MaternLengthScale::fixed(0.8),
+                        nu: MaternNu::FiveHalves,
+                        include_intercept: false,
+                        double_penalty: false,
+                        identifiability: MaternIdentifiability::CenterSumToZero,
+                        aniso_log_scales: aniso,
+                    },
+                    input_scale: None,
+                },
+                shape: ShapeConstraint::None,
+                joint_null_rotation: None,
+            }],
+        }
+    }
+
+    fn mean_block_fit_2953(width: usize, saved_lambdas: usize) -> UnifiedFitResult {
+        saved_fit(vec![FittedBlock {
+            beta: Array1::zeros(width),
+            role: BlockRole::Mean,
+            edf: 1.0,
+            lambdas: Array1::ones(saved_lambdas),
+        }])
+    }
+
+    /// #2953: saved smoothing parameters are read by global index through a
+    /// rebuilt penalty layout, so a count mismatch refuses. It names the
+    /// anisotropic ν ≥ 5/2 Matérn terms that gained the third-order block, and
+    /// gives the generic cause for any other mismatch.
+    #[test]
+    fn a_rebuilt_layout_the_saved_lambdas_do_not_index_refuses_2953() {
+        let fit = mean_block_fit_2953(1, 3);
+        let anisotropic = matern_termspec_2953(Some(vec![0.0, 0.0]));
+        assert!(saved_lambdas_index_rebuilt_layout(&anisotropic, 3, &fit, "replay").is_ok());
+        let named = saved_lambdas_index_rebuilt_layout(&anisotropic, 4, &fit, "replay")
+            .expect_err("a rebuild with one block more than the saved lambdas must refuse")
+            .to_string();
+        for needle in ["matern(x, z)", "third-order", "4 penalty blocks", "3 smoothing parameters"] {
+            assert!(named.contains(needle), "missing {needle:?} in {named}");
+        }
+        let generic =
+            saved_lambdas_index_rebuilt_layout(&matern_termspec_2953(None), 4, &fit, "replay")
+                .expect_err("an isotropic layout mismatch must refuse too")
+                .to_string();
+        assert!(generic.contains("different penalty layout"), "{generic}");
+        assert!(!generic.contains("third-order"), "{generic}");
+    }
+
+    /// #2953, through a real replay: the saved per-smooth summary rebuilds the
+    /// frozen design and walks the fit's per-penalty record by its global
+    /// index. A fit saved with one λ fewer than an anisotropic ν = 5/2 Matérn now
+    /// carries must refuse by name instead of producing a table.
+    #[test]
+    fn the_per_smooth_summary_refuses_a_fit_saved_before_the_third_order_block_2953() {
+        let data = array![
+            [0.0, 0.0],
+            [0.7, 0.1],
+            [0.2, 0.9],
+            [1.1, 0.8],
+            [0.5, 0.45],
+            [0.9, 0.3],
+            [0.3, 0.6],
+            [0.8, 0.7]
+        ];
+        let spec = matern_termspec_2953(Some(vec![0.0, 0.0]));
+        let design = gam_terms::smooth::build_term_collection_design(data.view(), &spec)
+            .expect("Matérn design");
+        let frozen = gam_terms::smooth::freeze_term_collection_from_design(&spec, &design)
+            .expect("frozen spec");
+        let blocks = design.penalties.len();
+        assert_eq!(blocks, 4, "an anisotropic ν = 5/2 Matérn carries four operator blocks");
+        let width = design.design.ncols();
+        let summary_with = |saved_lambdas: usize| {
+            let fit = mean_block_fit_2953(width, saved_lambdas);
+            let mut payload = FittedModelPayload::new(
+                MODEL_PAYLOAD_VERSION,
+                "y ~ matern(x, z)".to_string(),
+                ModelKind::Standard,
+                FittedFamily::Standard {
+                    likelihood: LikelihoodSpec::binomial_probit(),
+                    link: Some(StandardLink::Probit),
+                    latent_cloglog_state: None,
+                    mixture_state: None,
+                    sas_state: None,
+                },
+                "binomial".to_string(),
+            );
+            payload.fit_result = Some(fit.clone());
+            payload.unified = Some(fit);
+            payload.resolved_termspec = Some(frozen.clone());
+            payload.set_training_feature_metadata(
+                vec!["x".to_string(), "z".to_string()],
+                vec![(0.0, 1.1), (0.0, 0.9)],
+            );
+            crate::inference::saved_summary::saved_model_summary(&FittedModel::from_payload(payload))
+                .expect("the summary itself succeeds")
+        };
+        let old_shape = summary_with(blocks - 1);
+        let reason = old_shape
+            .smooth_terms_unavailable
+            .expect("a fit saved with one λ fewer must not produce a per-smooth table");
+        assert!(
+            reason.contains("matern(x, z)") && reason.contains("third-order"),
+            "the refusal must name the term and the cause: {reason}"
+        );
+        let current = summary_with(blocks);
+        assert!(
+            current
+                .smooth_terms_unavailable
+                .as_deref()
+                .is_none_or(|reason| !reason.contains("smoothing parameters")),
+            "a fit whose λ index the rebuilt layout must pass the check: {:?}",
+            current.smooth_terms_unavailable
+        );
     }
 }

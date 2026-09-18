@@ -5290,7 +5290,7 @@ pub fn matern_operator_penalty_triplet_at_length_scale(
     // it therefore retains mass only (#707). The matching topology gate lives
     // at `DuchonOperatorPenaltySpec::matern_for_smoothness`. The third-order
     // energy is appended below whenever the collocation builder emitted its
-    // Gram (`MaternNu::admits_third_order_operator`, isotropic metric).
+    // Gram (`MaternNu::admits_third_order_operator`, under either metric).
     // `m` and every `min_order` are small half-integers, which f64 represents
     // exactly, so the order gate is an exact comparison.
     let d = penalty_centers.ncols();

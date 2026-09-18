@@ -1623,9 +1623,9 @@ pub enum PenaltySource {
     OperatorMass,
     OperatorTension,
     OperatorStiffness,
-    /// Collocated third-derivative energy `Σ_abc (∂³f/∂x_a∂x_b∂x_c)²` of an
-    /// isotropic Matérn smooth whose kernel admits it
-    /// ([`MaternNu::admits_third_order_operator`]): the order-3 term of the
+    /// Collocated third-derivative energy `Σ_abc (∂³f/∂x_a∂x_b∂x_c)²` of a
+    /// Matérn smooth whose kernel admits it, under the isotropic or an
+    /// anisotropic metric ([`MaternNu::admits_third_order_operator`]): the order-3 term of the
     /// kernel's Sobolev norm, which mass, tension and stiffness do not control.
     OperatorThirdOrder,
     /// One per input axis `a` of a multivariate Duchon smooth: the gradient
