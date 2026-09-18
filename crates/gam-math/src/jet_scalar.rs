@@ -3030,22 +3030,34 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicTwoSeedBatch<'arena> {
     fn mul(&self, other: &Self) -> Self {
         self.assert_compatible(other);
         let arena = self.base.arena;
+        // Every lane of a product is a sum of order-two products, written as one
+        // block instead of a chain of products and sums that each stream their
+        // own `n + n²` block (gam#2922).
         let eps = arena.alloc_slice_fill_with(self.lanes(), |lane| {
-            self.base
-                .mul(&other.eps[lane])
-                .add(&self.eps[lane].mul(&other.base))
+            DynamicOrder2::scaled_product_sum(
+                &[1.0, 1.0],
+                &[self.base, self.eps[lane]],
+                &[other.eps[lane], other.base],
+            )
         });
         let del = arena.alloc_slice_fill_with(self.lanes(), |lane| {
-            self.base
-                .mul(&other.del[lane])
-                .add(&self.del[lane].mul(&other.base))
+            DynamicOrder2::scaled_product_sum(
+                &[1.0, 1.0],
+                &[self.base, self.del[lane]],
+                &[other.del[lane], other.base],
+            )
         });
         let eps_del = arena.alloc_slice_fill_with(self.lanes(), |lane| {
-            self.base
-                .mul(&other.eps_del[lane])
-                .add(&self.eps[lane].mul(&other.del[lane]))
-                .add(&self.del[lane].mul(&other.eps[lane]))
-                .add(&self.eps_del[lane].mul(&other.base))
+            DynamicOrder2::scaled_product_sum(
+                &[1.0, 1.0, 1.0, 1.0],
+                &[self.base, self.eps[lane], self.del[lane], self.eps_del[lane]],
+                &[
+                    other.eps_del[lane],
+                    other.del[lane],
+                    other.eps[lane],
+                    other.base,
+                ],
+            )
         });
         Self {
             base: self.base.mul(&other.base),
@@ -3095,13 +3107,322 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicTwoSeedBatch<'arena> {
         let eps = arena.alloc_slice_fill_with(self.lanes(), |lane| fprime.mul(&self.eps[lane]));
         let del = arena.alloc_slice_fill_with(self.lanes(), |lane| fprime.mul(&self.del[lane]));
         let eps_del = arena.alloc_slice_fill_with(self.lanes(), |lane| {
-            fsecond
-                .mul(&self.eps[lane])
-                .mul(&self.del[lane])
-                .add(&fprime.mul(&self.eps_del[lane]))
+            let spread = self.eps[lane].mul(&self.del[lane]);
+            DynamicOrder2::scaled_product_sum(
+                &[1.0, 1.0],
+                &[fsecond, fprime],
+                &[spread, self.eps_del[lane]],
+            )
         });
         Self {
             base: self.base.compose_unary(derivatives),
+            eps,
+            del,
+            eps_del,
+        }
+    }
+
+    #[inline(always)]
+    fn multiply_add(&self, right: &Self, addend: &Self) -> Self {
+        self.assert_compatible(right);
+        self.assert_compatible(addend);
+        let arena = self.base.arena;
+        let eps = arena.alloc_slice_fill_with(self.lanes(), |lane| {
+            DynamicOrder2::product_pair_sum_plus(
+                &self.base,
+                &right.eps[lane],
+                &self.eps[lane],
+                &right.base,
+                &addend.eps[lane],
+            )
+        });
+        let del = arena.alloc_slice_fill_with(self.lanes(), |lane| {
+            DynamicOrder2::product_pair_sum_plus(
+                &self.base,
+                &right.del[lane],
+                &self.del[lane],
+                &right.base,
+                &addend.del[lane],
+            )
+        });
+        let eps_del = arena.alloc_slice_fill_with(self.lanes(), |lane| {
+            let crossed = DynamicOrder2::product_pair_sum_plus(
+                &self.eps[lane],
+                &right.del[lane],
+                &self.del[lane],
+                &right.eps[lane],
+                &addend.eps_del[lane],
+            );
+            DynamicOrder2::product_pair_sum_plus(
+                &self.base,
+                &right.eps_del[lane],
+                &self.eps_del[lane],
+                &right.base,
+                &crossed,
+            )
+        });
+        Self {
+            base: self.base.multiply_add(&right.base, &addend.base),
+            eps,
+            del,
+            eps_del,
+        }
+    }
+
+    #[inline(always)]
+    fn linear_combination(
+        inputs: &[Self],
+        weights: &[f64],
+        dimension: usize,
+        workspace: &'arena DynamicJetBatchWorkspace,
+    ) -> Self {
+        assert_eq!(inputs.len(), weights.len());
+        // An empty combination is the zero jet, which is what the generic
+        // default's fold over no terms returns.
+        if inputs.is_empty() {
+            return Self::constant(0.0, dimension, workspace);
+        }
+        let lanes = workspace.lanes;
+        assert!(
+            inputs
+                .iter()
+                .all(|input| input.lanes() == lanes && input.dimension() == dimension),
+            "dynamic two-seed linear-combination jets must share lanes and dimension"
+        );
+        let arena = &workspace.arena;
+        let bases: &[DynamicOrder2<'arena>] =
+            arena.alloc_slice_fill_with(inputs.len(), |term| inputs[term].base);
+        let eps = arena.alloc_slice_fill_with(lanes, |lane| {
+            let terms: &[DynamicOrder2<'arena>] =
+                arena.alloc_slice_fill_with(inputs.len(), |term| inputs[term].eps[lane]);
+            DynamicOrder2::linear_combination(terms, weights, dimension, arena)
+        });
+        let del = arena.alloc_slice_fill_with(lanes, |lane| {
+            let terms: &[DynamicOrder2<'arena>] =
+                arena.alloc_slice_fill_with(inputs.len(), |term| inputs[term].del[lane]);
+            DynamicOrder2::linear_combination(terms, weights, dimension, arena)
+        });
+        let eps_del = arena.alloc_slice_fill_with(lanes, |lane| {
+            let terms: &[DynamicOrder2<'arena>] =
+                arena.alloc_slice_fill_with(inputs.len(), |term| inputs[term].eps_del[lane]);
+            DynamicOrder2::linear_combination(terms, weights, dimension, arena)
+        });
+        Self {
+            base: DynamicOrder2::linear_combination(bases, weights, dimension, arena),
+            eps,
+            del,
+            eps_del,
+        }
+    }
+
+    /// `addend + Σ_i L_i · f_i(R)` with ONE shared composition point, lane by
+    /// lane, on top of the base type's fused form.
+    ///
+    /// With `X = b + ε·e + δ·d + εδ·c`, `f(R)` carries `f'(R.b)·R.e` in ε and
+    /// `f''(R.b)·R.e·R.d + f'(R.b)·R.c` in εδ, so
+    ///
+    /// ```text
+    /// ε_l  = Σ_i L_i.e·f_i(R.b) + R.e·[Σ_i L_i.b·f_i'(R.b)]
+    /// εδ_l = Σ_i L_i.c·f_i(R.b) + R.d·[Σ_i L_i.e·f_i'(R.b)] + R.e·[Σ_i L_i.d·f_i'(R.b)]
+    ///      + R.e·R.d·[Σ_i L_i.b·f_i''(R.b)] + R.c·[Σ_i L_i.b·f_i'(R.b)]
+    /// ```
+    ///
+    /// and every bracket is the base type's `weighted_compose_sum` at `R.b`, with
+    /// the stacks shifted by one or two. The two brackets over `L_i.b` do not
+    /// depend on the lane, so they are formed once. The loop this replaces wrote
+    /// `O(N)` blocks in every channel of every lane: on the flexible
+    /// marginal-slope row's link-deviation loop that was 59.78% of an exact
+    /// Jeffreys completion cycle's samples, streaming blocks in memmove
+    /// (gam#2922).
+    #[inline]
+    fn weighted_compose_sum(
+        lefts: &[Self],
+        right: &Self,
+        derivative_stacks: &[[f64; 5]],
+        addend: &Self,
+    ) -> Self {
+        assert_eq!(
+            lefts.len(),
+            derivative_stacks.len(),
+            "weighted compose sum needs one derivative stack per left factor"
+        );
+        for left in lefts {
+            addend.assert_compatible(left);
+        }
+        addend.assert_compatible(right);
+        let arena = addend.base.arena;
+        let terms = lefts.len();
+        let left_bases: &[DynamicOrder2<'arena>] =
+            arena.alloc_slice_fill_with(terms, |term| lefts[term].base);
+        let first: &[[f64; 5]] = arena.alloc_slice_fill_with(terms, |term| {
+            let stack = derivative_stacks[term];
+            [stack[1], stack[2], stack[3], stack[4], stack[4]]
+        });
+        let second: &[[f64; 5]] = arena.alloc_slice_fill_with(terms, |term| {
+            let stack = derivative_stacks[term];
+            [stack[2], stack[3], stack[4], stack[4], stack[4]]
+        });
+        let zero = addend.base.constant_like(0.0);
+        let base_first = DynamicOrder2::weighted_compose_sum(left_bases, &right.base, first, &zero);
+        let base_second =
+            DynamicOrder2::weighted_compose_sum(left_bases, &right.base, second, &zero);
+        let lanes = addend.lanes();
+        let eps = arena.alloc_slice_fill_with(lanes, |lane| {
+            let left_eps: &[DynamicOrder2<'arena>] =
+                arena.alloc_slice_fill_with(terms, |term| lefts[term].eps[lane]);
+            let carried = DynamicOrder2::weighted_compose_sum(
+                left_eps,
+                &right.base,
+                derivative_stacks,
+                &addend.eps[lane],
+            );
+            base_first.multiply_add(&right.eps[lane], &carried)
+        });
+        let del = arena.alloc_slice_fill_with(lanes, |lane| {
+            let left_del: &[DynamicOrder2<'arena>] =
+                arena.alloc_slice_fill_with(terms, |term| lefts[term].del[lane]);
+            let carried = DynamicOrder2::weighted_compose_sum(
+                left_del,
+                &right.base,
+                derivative_stacks,
+                &addend.del[lane],
+            );
+            base_first.multiply_add(&right.del[lane], &carried)
+        });
+        let eps_del = arena.alloc_slice_fill_with(lanes, |lane| {
+            let left_eps: &[DynamicOrder2<'arena>] =
+                arena.alloc_slice_fill_with(terms, |term| lefts[term].eps[lane]);
+            let left_del: &[DynamicOrder2<'arena>] =
+                arena.alloc_slice_fill_with(terms, |term| lefts[term].del[lane]);
+            let left_eps_del: &[DynamicOrder2<'arena>] =
+                arena.alloc_slice_fill_with(terms, |term| lefts[term].eps_del[lane]);
+            let carried = DynamicOrder2::weighted_compose_sum(
+                left_eps_del,
+                &right.base,
+                derivative_stacks,
+                &addend.eps_del[lane],
+            );
+            let eps_first = DynamicOrder2::weighted_compose_sum(left_eps, &right.base, first, &zero);
+            let del_first = DynamicOrder2::weighted_compose_sum(left_del, &right.base, first, &zero);
+            let crossed = DynamicOrder2::product_pair_sum_plus(
+                &eps_first,
+                &right.del[lane],
+                &del_first,
+                &right.eps[lane],
+                &carried,
+            );
+            let spread = right.eps[lane].mul(&right.del[lane]);
+            DynamicOrder2::product_pair_sum_plus(
+                &base_second,
+                &spread,
+                &base_first,
+                &right.eps_del[lane],
+                &crossed,
+            )
+        });
+        Self {
+            base: DynamicOrder2::weighted_compose_sum(
+                left_bases,
+                &right.base,
+                derivative_stacks,
+                &addend.base,
+            ),
+            eps,
+            del,
+            eps_del,
+        }
+    }
+
+    #[inline(always)]
+    fn affine_composed_sum(
+        inputs: &[Self],
+        input_scales: &[f64],
+        derivative_stacks: &[[f64; 5]],
+        dimension: usize,
+        workspace: &'arena DynamicJetBatchWorkspace,
+    ) -> Self {
+        assert_eq!(inputs.len(), input_scales.len());
+        assert_eq!(inputs.len(), derivative_stacks.len());
+        // A sum over no terms is the zero jet.
+        if inputs.is_empty() {
+            return Self::constant(0.0, dimension, workspace);
+        }
+        let lanes = workspace.lanes;
+        assert!(
+            inputs
+                .iter()
+                .all(|input| input.lanes() == lanes && input.dimension() == dimension),
+            "dynamic two-seed composed-sum jets must share lanes and dimension"
+        );
+        let arena = &workspace.arena;
+        let terms = inputs.len();
+        let bases: &[DynamicOrder2<'arena>] =
+            arena.alloc_slice_fill_with(terms, |term| inputs[term].base);
+        // `g_k = f_k(s_k·x + c_k)` moves ε by `g_k'·ε` and εδ by
+        // `g_k''·ε·δ + g_k'·εδ`, with `g_k' = s_k·f_k'` and `g_k'' = s_k²·f_k''`
+        // as order-two jets of the base. Both are shared by every lane, and each
+        // lane channel is one scaled product sum.
+        let firsts: &[DynamicOrder2<'arena>] = arena.alloc_slice_fill_with(terms, |term| {
+            let scale = input_scales[term];
+            let stack = derivative_stacks[term];
+            inputs[term].base.compose_unary([
+                stack[1] * scale,
+                stack[2] * scale * scale,
+                stack[3] * scale * scale * scale,
+                stack[4] * scale * scale * scale * scale,
+                stack[4] * scale * scale * scale * scale,
+            ])
+        });
+        let seconds: &[DynamicOrder2<'arena>] = arena.alloc_slice_fill_with(terms, |term| {
+            let scale = input_scales[term];
+            let stack = derivative_stacks[term];
+            inputs[term].base.compose_unary([
+                stack[2] * scale * scale,
+                stack[3] * scale * scale * scale,
+                stack[4] * scale * scale * scale * scale,
+                stack[4] * scale * scale * scale * scale,
+                stack[4] * scale * scale * scale * scale,
+            ])
+        });
+        let ones: &[f64] = arena.alloc_slice_fill_with(terms, |_| 1.0);
+        let both_ones: &[f64] = arena.alloc_slice_fill_with(2 * terms, |_| 1.0);
+        let curvature_then_slope: &[DynamicOrder2<'arena>] =
+            arena.alloc_slice_fill_with(2 * terms, |slot| {
+                if slot < terms {
+                    seconds[slot]
+                } else {
+                    firsts[slot - terms]
+                }
+            });
+        let eps = arena.alloc_slice_fill_with(lanes, |lane| {
+            let lane_inputs: &[DynamicOrder2<'arena>] =
+                arena.alloc_slice_fill_with(terms, |term| inputs[term].eps[lane]);
+            DynamicOrder2::scaled_product_sum(ones, firsts, lane_inputs)
+        });
+        let del = arena.alloc_slice_fill_with(lanes, |lane| {
+            let lane_inputs: &[DynamicOrder2<'arena>] =
+                arena.alloc_slice_fill_with(terms, |term| inputs[term].del[lane]);
+            DynamicOrder2::scaled_product_sum(ones, firsts, lane_inputs)
+        });
+        let eps_del = arena.alloc_slice_fill_with(lanes, |lane| {
+            let lane_inputs: &[DynamicOrder2<'arena>] =
+                arena.alloc_slice_fill_with(2 * terms, |slot| {
+                    if slot < terms {
+                        inputs[slot].eps[lane].mul(&inputs[slot].del[lane])
+                    } else {
+                        inputs[slot - terms].eps_del[lane]
+                    }
+                });
+            DynamicOrder2::scaled_product_sum(both_ones, curvature_then_slope, lane_inputs)
+        });
+        Self {
+            base: DynamicOrder2::affine_composed_sum(
+                bases,
+                input_scales,
+                derivative_stacks,
+                dimension,
+                arena,
+            ),
             eps,
             del,
             eps_del,
@@ -6714,6 +7035,134 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// gam#2922: the two-seed batch's fused `linear_combination`, `multiply_add`,
+    /// `weighted_compose_sum` and `affine_composed_sum`, with its fused `mul` and
+    /// `compose_unary` lanes, reproduce the fixed packed algebra lane by lane. The
+    /// fixed algebra's defaults fold the same algebra through its primitives, so it
+    /// is an independent oracle.
+    #[test]
+    fn dynamic_two_seed_batch_fused_primitives_match_fixed_packed_algebra_2922() {
+        fn expression<'arena, S: RuntimeJetScalar<'arena>>(
+            vars: &[S],
+            dimension: usize,
+            workspace: &'arena S::Workspace,
+        ) -> S {
+            let u = S::linear_combination(&vars[0..2], &[1.0, -0.6], dimension, workspace);
+            let score = S::linear_combination(&vars[2..4], &[0.8, 0.3], dimension, workspace);
+            let inside = vars[1].multiply_add(&score, &u);
+            let link_stacks = [
+                [0.4, -0.3, 0.2, -0.1, 0.05],
+                [-0.2, 0.5, -0.4, 0.3, -0.25],
+            ];
+            let warped = S::weighted_compose_sum(&vars[3..5], &u, &link_stacks, &inside);
+            let etas = [warped.clone(), u.clone()];
+            let calibrated = S::affine_composed_sum(
+                &etas,
+                &[0.7, -1.3],
+                &[
+                    [0.1, 0.6, -0.2, 0.15, -0.05],
+                    [0.3, -0.4, 0.25, -0.2, 0.1],
+                ],
+                dimension,
+                workspace,
+            );
+            calibrated.mul(&warped.compose_unary([0.2, -0.3, 0.45, -0.35, 0.3]))
+        }
+
+        const K: usize = 5;
+        let values = [0.2, -0.7, 0.4, 1.1, -0.3];
+        let direction_u = [0.5, -0.2, 0.7, -0.4, 0.1];
+        let direction_v = [-0.3, 0.8, 0.2, 0.6, -0.5];
+        let close = |actual: f64, expected: f64| {
+            let tolerance = 1.0e-12 * (1.0 + actual.abs().max(expected.abs()));
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "{actual:+.16e} vs {expected:+.16e}"
+            );
+        };
+        let fixed = |u: &[f64; K], v: &[f64; K]| {
+            let vars: Vec<FixedRuntimeJet<TwoSeed<K>, K>> = (0..K)
+                .map(|axis| FixedRuntimeJet {
+                    inner: TwoSeed::seed(values[axis], axis, u[axis], v[axis]),
+                })
+                .collect();
+            expression(&vars, K, &())
+        };
+        let fixed_uv = fixed(&direction_u, &direction_v);
+        let fixed_vu = fixed(&direction_v, &direction_u);
+
+        let workspace = DynamicJetBatchWorkspace::new(2);
+        let direction_pairs = [(direction_u, direction_v), (direction_v, direction_u)];
+        let vars = workspace.alloc_slice_fill_with(K, |axis| {
+            DynamicTwoSeedBatch::seed_direction_pairs(values[axis], axis, K, &workspace, |lane| {
+                (direction_pairs[lane].0[axis], direction_pairs[lane].1[axis])
+            })
+        });
+        let batch = expression(vars, K, &workspace);
+        assert_eq!(batch.lanes(), 2);
+        close(batch.value(), fixed_uv.value());
+        let expected_fourths = [
+            fixed_uv.into_inner().contracted_fourth(),
+            fixed_vu.into_inner().contracted_fourth(),
+        ];
+        for (lane, expected) in expected_fourths.iter().enumerate() {
+            for a in 0..K {
+                for b in 0..K {
+                    close(batch.contracted_fourth(lane)[a * K + b], expected[a][b]);
+                }
+            }
+        }
+    }
+
+    /// gam#2922: the two-seed batch's `weighted_compose_sum` writes a fixed number
+    /// of blocks, so the arena one call needs grows with its inputs, not with its
+    /// term count. Folded through `compose_unary`, `mul` and `add`, the call
+    /// streamed `O(terms)` fresh `(1 + 3·lanes)·(n + n²)` blocks: the copies that
+    /// took 59.78% of an exact Jeffreys completion cycle's samples on a flexible
+    /// marginal-slope fit (MSI job 1217186).
+    ///
+    /// The inputs are `terms + 2` jets of four `n + n²` blocks. The fused call
+    /// writes three shared blocks and ten per lane, under half the inputs' blocks
+    /// at 36 terms, and the bump allocator at most doubles what it is asked for.
+    #[test]
+    fn dynamic_two_seed_batch_weighted_compose_sum_arena_scales_with_inputs_2922() {
+        const N: usize = 20;
+        const TERMS: usize = 36;
+        let arena_bytes = |evaluate: bool| -> usize {
+            let workspace = DynamicJetBatchWorkspace::new(1);
+            let seed = |index: usize| {
+                DynamicTwoSeedBatch::seed_direction_pairs(
+                    0.05 * index as f64 - 0.4,
+                    index % N,
+                    N,
+                    &workspace,
+                    |_| (0.3 + 0.01 * index as f64, -0.2 + 0.02 * index as f64),
+                )
+            };
+            let lefts: Vec<DynamicTwoSeedBatch<'_>> = (0..TERMS).map(|index| seed(index)).collect();
+            let right = seed(TERMS + 7);
+            let addend = seed(TERMS + 11);
+            if evaluate {
+                let stacks: Vec<[f64; 5]> = (0..TERMS)
+                    .map(|term| {
+                        let t = term as f64;
+                        [0.1 * t, -0.2, 0.3, -0.05 * t, 0.07]
+                    })
+                    .collect();
+                let sum =
+                    DynamicTwoSeedBatch::weighted_compose_sum(&lefts, &right, &stacks, &addend);
+                assert!(sum.contracted_fourth(0).iter().all(|value| value.is_finite()));
+            }
+            workspace.allocated_bytes()
+        };
+        let inputs_only = arena_bytes(false);
+        let with_sum = arena_bytes(true);
+        assert!(
+            with_sum <= 3 * inputs_only,
+            "a {TERMS}-term two-seed weighted_compose_sum at width {N} grew the arena from {inputs_only} to {with_sum} bytes"
+        );
     }
 
     /// The laned three-seed batch reproduces the analytic fifth derivative of a
