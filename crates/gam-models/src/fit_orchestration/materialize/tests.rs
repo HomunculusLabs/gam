@@ -2398,10 +2398,14 @@ fn survival_location_scale_wiggle_rejects_unsupported_inverse_link() {
         .expect("valid SAS state"),
     );
 
-    let err = match fit_survival_location_scale_model(request) {
+    // Through the fit boundary: the refusal keeps its category (#2937).
+    let err = match fit_model(FitRequest::SurvivalLocationScale(request)) {
         Ok(_) => panic!("survival link wiggle should reject unsupported inverse links"),
         Err(e) => e,
     };
+    assert_eq!(err.failure_category(), gam_problem::FailureCategory::Input, "{err}");
+    assert_eq!(err.variant_name(), "FitFailure::Input", "{err}");
+    let err = err.to_string();
 
     assert!(err.contains("survival link wiggle"));
     assert!(err.contains("does not support"));

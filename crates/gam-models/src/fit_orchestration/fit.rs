@@ -3695,7 +3695,7 @@ pub(crate) fn fit_survival_transformation_model(
 
 pub(crate) fn fit_survival_location_scale_model(
     request: SurvivalLocationScaleFitRequest<'_>,
-) -> Result<SurvivalLocationScaleFitResult, String> {
+) -> Result<SurvivalLocationScaleFitResult, FitFailure> {
     // Fit one coherent survival subproblem: select/apply the link-wiggle basis,
     // then solve the full penalized location-scale fit, whose outer selects the
     // inverse-link shape together with ρ (#2904).
@@ -3704,12 +3704,15 @@ pub(crate) fn fit_survival_location_scale_model(
         spec: SurvivalLocationScaleTermSpec,
         wiggle: Option<LinkWiggleConfig>,
         kappa_options: &SpatialLengthScaleOptimizationOptions,
-    ) -> Result<SurvivalLocationScaleProfile, String> {
+    ) -> Result<SurvivalLocationScaleProfile, FitFailure> {
         let mut wiggle_knots = None;
         let mut wiggle_degree = None;
 
         let fit = if let Some(wiggle) = wiggle {
-            require_inverse_link_supports_joint_wiggle(&spec.inverse_link, "survival link wiggle")?;
+            require_inverse_link_supports_joint_wiggle(&spec.inverse_link, "survival link wiggle")
+                .map_err(|reason| {
+                    FitFailure::raised(gam_problem::FailureCategory::Input, reason)
+                })?;
             let mut pilot_spec = spec.clone();
             pilot_spec.linkwiggle_block = None;
             let pilot = fit_survival_location_scale_terms(data, pilot_spec, kappa_options)?;

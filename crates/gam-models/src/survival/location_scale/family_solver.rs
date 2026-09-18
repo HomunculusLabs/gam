@@ -111,7 +111,7 @@ impl SurvivalLocationScaleFamily {
         specs: &[ParameterBlockSpec],
         max_iter: usize,
         obj_tol: f64,
-    ) -> Result<(Vec<ParameterBlockState>, f64, Array2<f64>), String> {
+    ) -> Result<(Vec<ParameterBlockState>, f64, Array2<f64>), SurvivalLocationScaleError> {
         use gam_linalg::faer_ndarray::FaerCholesky;
 
         self.validate_joint_specs(

@@ -1,4 +1,5 @@
 use super::*;
+use crate::fit_orchestration::FitFailure;
 
 /// Run the direct parametric-AFT MLE for a fully reduced constant-scale model
 /// and assemble the same [`UnifiedFitResult`] the coupled path would produce.
@@ -19,7 +20,7 @@ use super::*;
 pub(crate) fn fit_reduced_parametric_aft(
     prepared: &PreparedSurvivalLocationScaleModel,
     options: &BlockwiseFitOptions,
-) -> Result<UnifiedFitResult, String> {
+) -> Result<UnifiedFitResult, FitFailure> {
     use gam_linalg::faer_ndarray::FaerCholesky;
 
     let specs = &prepared.blockspecs;
@@ -114,7 +115,7 @@ pub(crate) fn fit_reduced_parametric_aft(
         },
         &assembly_specs,
     )
-    .map_err(|error| error.to_string())
+    .map_err(FitFailure::from)
 }
 
 /// Variant that also returns the offset-channel residuals + curvatures at the
@@ -134,7 +135,7 @@ enum SurvivalLocationScaleFitAuthority<'a> {
 fn fit_survival_location_scale_with_geometry_authority(
     spec: SurvivalLocationScaleSpec,
     authority: SurvivalLocationScaleFitAuthority<'_>,
-) -> Result<(UnifiedFitResult, SurvivalLocationScaleConvergedGeometry), String> {
+) -> Result<(UnifiedFitResult, SurvivalLocationScaleConvergedGeometry), FitFailure> {
     let prepared = prepare_survival_location_scale_model(&spec)?;
     let options = survival_blockwise_fit_options(&spec);
     // Fully reduced constant-scale PARAMETRIC AFT regime (issue #736/#735/#721):
@@ -152,7 +153,7 @@ fn fit_survival_location_scale_with_geometry_authority(
             fit_reduced_parametric_aft(&prepared, &options)?
         }
         SurvivalLocationScaleFitAuthority::Direct => {
-            fit_custom_family_arming_on_evidence(&prepared.family, &prepared.blockspecs, &options).map_err(|error| error.to_string())?
+            fit_custom_family_arming_on_evidence(&prepared.family, &prepared.blockspecs, &options)?
         }
         // A reduced fit carries no smoothing coordinate, so it reaches this arm
         // only through the inverse-link shape axes (#2904): the certificate is
@@ -166,7 +167,7 @@ fn fit_survival_location_scale_with_geometry_authority(
                 mode,
                 theta,
                 outer,
-            ).map_err(|error| error.to_string())?
+            )?
         }
     };
     // `finalize_survival_location_scale_fit` indexes the populated block
@@ -181,13 +182,14 @@ fn fit_survival_location_scale_with_geometry_authority(
         .into());
     }
     let (residuals, curvatures) = prepared.family.offset_channel_geometry(&fit.block_states)?;
-    let finalized = finalize_survival_location_scale_fit(&prepared, &fit)?;
+    let finalized = finalize_survival_location_scale_fit(&prepared, &fit)
+        .map_err(|reason| FitFailure::raised(gam_problem::FailureCategory::Invariant, reason))?;
     Ok((finalized, (residuals, curvatures)))
 }
 
 pub(crate) fn fit_survival_location_scale_with_geometry(
     spec: SurvivalLocationScaleSpec,
-) -> Result<(UnifiedFitResult, SurvivalLocationScaleConvergedGeometry), String> {
+) -> Result<(UnifiedFitResult, SurvivalLocationScaleConvergedGeometry), FitFailure> {
     fit_survival_location_scale_with_geometry_authority(
         spec,
         SurvivalLocationScaleFitAuthority::Direct,
@@ -199,7 +201,7 @@ fn fit_survival_location_scale_with_geometry_from_outer(
     theta: &Array1<f64>,
     outer: &gam_solve::rho_optimizer::CertifiedOuterResult,
     mode: crate::custom_family::CustomFamilyOwnedMode,
-) -> Result<(UnifiedFitResult, SurvivalLocationScaleConvergedGeometry), String> {
+) -> Result<(UnifiedFitResult, SurvivalLocationScaleConvergedGeometry), FitFailure> {
     fit_survival_location_scale_with_geometry_authority(
         spec,
         SurvivalLocationScaleFitAuthority::Certified { theta, outer, mode },
@@ -265,15 +267,18 @@ pub(crate) fn select_survival_link_wiggle_basis_from_pilot(
     pilot: &SurvivalLocationScaleTermFitResult,
     wiggle_cfg: &WiggleBlockConfig,
     wiggle_penalty_orders: &[usize],
-) -> Result<SelectedWiggleBasis, String> {
+) -> Result<SelectedWiggleBasis, FitFailure> {
+    // The pilot's own designs applied to its own coefficients (#2937).
+    let pilot_invariant =
+        |error: String| FitFailure::raised(gam_problem::FailureCategory::Invariant, error);
     let eta_threshold = pilot
         .threshold_design
         .apply(pilot.fit.beta_threshold().view())
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| pilot_invariant(error.to_string()))?;
     let eta_log_sigma = pilot
         .log_sigma_design
         .apply(pilot.fit.beta_log_sigma().view())
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| pilot_invariant(error.to_string()))?;
     let q_seed = Array1::from_iter(
         eta_threshold
             .iter()
@@ -289,6 +294,7 @@ pub(crate) fn select_survival_link_wiggle_basis_from_pilot(
         wiggle_penalty_orders,
         crate::wiggle::WarpKnotEnds::Simple,
     )
+    .map_err(crate::gamlss::wiggle_basis_failure)
 }
 
 pub(crate) fn linkwiggle_block_input_from_selected_basis(
@@ -324,7 +330,7 @@ pub(crate) fn fit_survival_location_scale_terms_with_selected_wiggle(
     mut spec: SurvivalLocationScaleTermSpec,
     selected_wiggle_basis: SelectedWiggleBasis,
     kappa_options: &SpatialLengthScaleOptimizationOptions,
-) -> Result<SurvivalLocationScaleTermFitResult, String> {
+) -> Result<SurvivalLocationScaleTermFitResult, FitFailure> {
     spec.linkwiggle_block = Some(linkwiggle_block_input_from_selected_basis(
         selected_wiggle_basis,
     ));
@@ -335,30 +341,32 @@ pub(crate) fn fit_survival_location_scale_terms(
     data: ndarray::ArrayView2<'_, f64>,
     spec: SurvivalLocationScaleTermSpec,
     kappa_options: &SpatialLengthScaleOptimizationOptions,
-) -> Result<SurvivalLocationScaleTermFitResult, String> {
-    let threshold_boot_design =
-        build_term_collection_design(data, &spec.thresholdspec).map_err(|e| e.to_string())?;
-    let log_sigma_boot_design =
-        build_term_collection_design(data, &spec.log_sigmaspec).map_err(|e| e.to_string())?;
+) -> Result<SurvivalLocationScaleTermFitResult, FitFailure> {
+    let threshold_boot_design = build_term_collection_design(data, &spec.thresholdspec)?;
+    let log_sigma_boot_design = build_term_collection_design(data, &spec.log_sigmaspec)?;
     let threshold_bootspec =
-        freeze_term_collection_from_design(&spec.thresholdspec, &threshold_boot_design)
-            .map_err(|e| e.to_string())?;
+        freeze_term_collection_from_design(&spec.thresholdspec, &threshold_boot_design)?;
     let log_sigma_bootspec =
-        freeze_term_collection_from_design(&spec.log_sigmaspec, &log_sigma_boot_design)
-            .map_err(|e| e.to_string())?;
+        freeze_term_collection_from_design(&spec.log_sigmaspec, &log_sigma_boot_design)?;
 
+    // The psi derivatives differentiate the designs built above, so failing to
+    // build them is an engine defect (#2937).
+    let derivative_invariant =
+        |reason: String| FitFailure::raised(gam_problem::FailureCategory::Invariant, reason);
     let threshold_boot_derivs = build_survival_covariate_block_psi_derivatives(
         data,
         &threshold_bootspec,
         &threshold_boot_design,
         &spec.threshold_template,
-    )?;
+    )
+    .map_err(derivative_invariant)?;
     let log_sigma_boot_derivs = build_survival_covariate_block_psi_derivatives(
         data,
         &log_sigma_bootspec,
         &log_sigma_boot_design,
         &spec.log_sigma_template,
-    )?;
+    )
+    .map_err(derivative_invariant)?;
     let analytic_joint_gradient_available =
         threshold_boot_derivs.is_some() && log_sigma_boot_derivs.is_some();
     // The inverse-link shape parameters are outer coordinates of their own
@@ -652,8 +660,7 @@ pub(crate) fn fit_survival_location_scale_terms(
         &spec.thresholdspec,
         &spec.log_sigmaspec,
         rho0,
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
     // θ = [ρ | log κ | inverse-link shape]. A shape coordinate may be any finite
     // real, so the only bound it has is the one working precision imposes.
     let joint_setup = if link_shape0.is_empty() {
@@ -831,7 +838,7 @@ pub(crate) fn fit_survival_location_scale_terms(
         };
         crate::custom_family::OuterDerivativePolicy { capability }
     };
-    let solved = optimize_spatial_length_scale_exact_joint(
+    let solved = optimize_spatial_length_scale_exact_joint_typed(
         data,
         &[spec.thresholdspec.clone(), spec.log_sigmaspec.clone()],
         &[threshold_terms, log_sigma_terms],
@@ -843,9 +850,15 @@ pub(crate) fn fit_survival_location_scale_terms(
         true,
         None,
         outer_policy,
+        // The final fit: the solver's error is carried whole (#2937). Its link and
+        // spec are rebuilt at a theta the driver produced, from specs validated
+        // at entry, so failing to rebuild them is an engine defect.
         |theta, specs: &[TermCollectionSpec], designs: &[TermCollectionDesign], provenance| {
             let rho = theta.slice(s![..joint_setup.rho_dim()]).to_owned();
-            let inverse_link = inverse_link_at(theta)?;
+            let rebuild_invariant = |reason: String| {
+                FitFailure::raised(gam_problem::FailureCategory::Invariant, reason)
+            };
+            let inverse_link = inverse_link_at(theta).map_err(rebuild_invariant)?;
             let assembled = build_spec(
                 &rho,
                 inverse_link.clone(),
@@ -853,7 +866,8 @@ pub(crate) fn fit_survival_location_scale_terms(
                 &specs[1],
                 &designs[0],
                 &designs[1],
-            )?;
+            )
+            .map_err(rebuild_invariant)?;
             let (fit, geom) = match provenance {
                 SpatialFitProvenance::NoOuterOptimization => {
                     fit_survival_location_scale_with_geometry(assembled)?
@@ -1064,8 +1078,10 @@ pub(crate) fn fit_survival_location_scale_terms(
         .borrow_mut()
         .take()
         .ok_or_else(|| {
-            "survival location-scale exact-joint driver returned a fit its fit closure did not produce"
-                .to_string()
+            FitFailure::raised(
+                gam_problem::FailureCategory::Invariant,
+                "survival location-scale exact-joint driver returned a fit its fit closure did not produce",
+            )
         })?;
     Ok(SurvivalLocationScaleTermFitResult {
         fit: solved.fit,

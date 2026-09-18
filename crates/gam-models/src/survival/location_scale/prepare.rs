@@ -192,7 +192,7 @@ pub(crate) fn validate_survival_location_scale_spec(
             });
         }
         if !spec.event_target[i].is_finite() || !(0.0..=1.0).contains(&spec.event_target[i]) {
-            return Err(SurvivalLocationScaleError::ConstraintViolation {
+            return Err(SurvivalLocationScaleError::InvalidConfiguration {
                 reason: format!(
                     "fit_survival_location_scale: event_target must be in [0,1], found {} at row {}",
                     spec.event_target[i],
@@ -206,7 +206,7 @@ pub(crate) fn validate_survival_location_scale_spec(
 
 pub(crate) fn prepare_survival_location_scale_model(
     spec: &SurvivalLocationScaleSpec,
-) -> Result<PreparedSurvivalLocationScaleModel, String> {
+) -> Result<PreparedSurvivalLocationScaleModel, SurvivalLocationScaleError> {
     validate_survival_location_scale_spec(spec)?;
     let n = spec.event_target.len();
     let protected_timewiggle_cols = spec.timewiggle_block.as_ref().map_or(0, |w| w.ncols);

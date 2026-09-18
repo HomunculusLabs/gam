@@ -666,6 +666,14 @@ impl From<gam_problem::BasisError> for FitFailure {
     }
 }
 
+/// A survival location-scale refusal, under its variant's category, with its
+/// own text.
+impl From<crate::survival::location_scale::SurvivalLocationScaleError> for FitFailure {
+    fn from(err: crate::survival::location_scale::SurvivalLocationScaleError) -> Self {
+        Self::raised(err.failure_category(), err.to_string())
+    }
+}
+
 impl From<WorkflowError> for FitFailure {
     fn from(err: WorkflowError) -> Self {
         match err {
