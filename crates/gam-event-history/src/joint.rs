@@ -32,7 +32,7 @@ mod constant_rate_inference;
 // [unlanded: decoder.rs]
 
 // emission.rs (jls-law): measurement observation channels
-// [unlanded: emission.rs]
+mod emission;
 
 // category_prior.rs (jls-law): simplex measure on binary and ordinal baselines
 // [unlanded: category_prior.rs]

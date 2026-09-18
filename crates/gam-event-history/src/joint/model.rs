@@ -7,6 +7,7 @@
 //! the training records. Save → reload → forecast reproduces the in-memory
 //! forecast bit for bit.
 
+use super::law::JointLikelihood;
 use super::constant_rate_inference::ConstantRatePosterior;
 use super::law::{JointSpecification, invalid};
 use crate::saved::{
@@ -18,8 +19,9 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Version of the saved joint event model.
-const JOINT_EVENT_MODEL_VERSION: u64 = 1;
+/// Version of the saved joint event model. Version 2 saves the full law
+/// specification, so version 1 payloads are refused.
+const JOINT_EVENT_MODEL_VERSION: u64 = 2;
 
 /// The posterior a model integrates when it forecasts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -88,9 +90,14 @@ pub fn fit_joint_event_model(
     if subjects.is_empty() {
         return Err(invalid("the joint event model needs at least one subject"));
     }
+    let validated = JointLikelihood::new(specification.clone())?;
     let posterior = ConstantRatePosterior::infer(
         &specification.marks,
-        subjects.iter().map(|subject| specification.history(subject)),
+        subjects.iter().map(|subject| {
+            specification
+                .history(subject)
+                .and_then(|history| validated.validate_history(&history).map(|()| history))
+        }),
     )?;
     Ok(JointEventModel {
         mark_names,
@@ -115,6 +122,7 @@ impl JointEventModel {
     ) -> Result<ConditionedJointModel<'_>, EventHistoryError> {
         let marks = &self.specification.marks;
         let nodes = self.specification.history(history)?;
+        JointLikelihood::new(self.specification.clone())?.validate_history(&nodes)?;
         let at_risk = nodes.open_risk_set(marks).ok_or_else(|| {
             invalid(format!(
                 "subject {:?}: a terminal event ended this history, so there is nothing to forecast",
@@ -154,6 +162,12 @@ impl JointEventModel {
         let inconsistent = |reason| SavedModelError::Inconsistent { reason };
         let specification =
             JointSpecification::new(model.specification.marks.clone()).map_err(inconsistent)?;
+        // A rank-zero law holds exactly the rank-zero specification of its marks.
+        if model.specification != specification {
+            return Err(inconsistent(invalid(
+                "a rank-zero joint model holds only the rank-zero specification of its marks",
+            )));
+        }
         validate_mark_names(&model.mark_names, &specification).map_err(inconsistent)?;
         match &model.law {
             JointModelLaw::RankZero(posterior) => {
@@ -251,6 +265,12 @@ mod tests {
             JointEventModel::from_saved_text(&text.replace(&version, "\"version\": 0")),
             Err(SavedModelError::Version { found: Some(0), expected: JOINT_EVENT_MODEL_VERSION, .. })
         ));
+        // A version 1 payload, which held only slice 0's rank-zero specification, is refused.
+        let previous = format!("\"version\": {}", JOINT_EVENT_MODEL_VERSION - 1);
+        assert!(matches!(
+            JointEventModel::from_saved_text(&text.replace(&version, &previous)),
+            Err(SavedModelError::Version { found: Some(1), expected: JOINT_EVENT_MODEL_VERSION, .. })
+        ));
         assert!(matches!(
             JointEventModel::from_saved_text(&text.replace(&format!("{version},"), "")),
             Err(SavedModelError::Version { found: None, .. })
@@ -262,6 +282,14 @@ mod tests {
         assert!(text.contains("\"shape\": 1.0"));
         assert!(matches!(
             JointEventModel::from_saved_text(&text.replacen("\"shape\": 1.0", "\"shape\": 0.5", 1)),
+            Err(SavedModelError::Inconsistent { .. })
+        ));
+        // A rank-zero law refuses any specification beyond its marks' rank-zero one.
+        assert!(text.contains("\"population_columns\": 1"));
+        assert!(matches!(
+            JointEventModel::from_saved_text(
+                &text.replacen("\"population_columns\": 1", "\"population_columns\": 2", 1)
+            ),
             Err(SavedModelError::Inconsistent { .. })
         ));
     }
