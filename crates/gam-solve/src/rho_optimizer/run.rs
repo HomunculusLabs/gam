@@ -1202,10 +1202,11 @@ pub(crate) enum PlanRunOutcome {
 pub(crate) struct DominatedPlateau {
     /// The certified candidate the attempt declined to publish.
     pub(crate) plateau: OuterResult,
-    /// The lowest evaluated state of the attempt, re-evaluated at its own ρ. A
+    /// The lowest evaluated state of the attempt, re-evaluated at its own ρ, or at
+    /// its stored value when the objective refused that re-evaluation (#2953). A
     /// continuation that ends lower moves it there.
     pub(crate) incumbent: OuterResult,
-    /// The plateau's value minus the incumbent's re-evaluated value, at the decline.
+    /// The plateau's value minus the incumbent's value, at the decline.
     pub(crate) gap: f64,
     /// `outer_value_agreement_bound(plateau, incumbent)`, the resolution the gap
     /// was judged against.
@@ -1260,7 +1261,8 @@ pub struct DominatedPlateauRecord {
     pub plateau_rho: Array1<f64>,
     /// The declined optimum's value.
     pub plateau_value: f64,
-    /// `plateau_value` minus the re-evaluated value of the state that beat it.
+    /// `plateau_value` minus the value of the state that beat it: re-evaluated, or
+    /// stored when the objective refused the re-evaluation.
     pub gap: f64,
     /// The criterion's rounding envelope the gap was judged against.
     pub band: f64,
@@ -2682,7 +2684,10 @@ pub(crate) fn adjudicate_negative_curvature(
     // rho" and "every trial evaluated non-finite" are three different failures
     // that all leave `best == None`. Count them so the declined exit below says
     // which one happened, and carry the best cost actually SEEN so the
-    // shortfall against `baseline_cost - strict_floor` is a number.
+    // shortfall against `baseline_cost - strict_floor` is a number. Only a trial
+    // the criterion evaluated to a finite cost is `probed`: an evaluation that
+    // errored or came back non-finite says nothing about the criterion there, so
+    // it cannot falsify the claim.
     let mut probed = 0usize;
     let mut clamped_onto_rho = 0usize;
     let mut eval_failed = 0usize;
@@ -2700,9 +2705,9 @@ pub(crate) fn adjudicate_negative_curvature(
                 clamped_onto_rho += 1;
                 continue;
             }
-            probed += 1;
             match obj.eval_cost(&trial) {
                 Ok(cost) if cost.is_finite() => {
+                    probed += 1;
                     best_seen_cost = best_seen_cost.min(cost);
                     if cost < baseline_cost - strict_floor {
                         best = Some((cost, trial, sign, alpha));
@@ -2774,7 +2779,7 @@ pub(crate) fn adjudicate_negative_curvature(
     }
     log::warn!(
         "[CERTIFICATE] {context}: the criterion CONTRADICTS the reported negative curvature. \
-         lambda_min={lambda_min:.6e} on the judged sub-block, and {probed} feasible trial(s) \
+         lambda_min={lambda_min:.6e} on the judged sub-block, and {probed} evaluated trial(s) \
          along its eigenvector — both signs, steps {:.3e} down to {smallest_step:.3e} — lowered \
          the objective nowhere. The ladder ends where the claim's own predicted decrease \
          (½|λ_min|α² = {predicted_at_smallest:.3e}) reaches the criterion's resolution \
@@ -7583,10 +7588,28 @@ fn dominance_refusal_kind(
     result: &OuterResult,
     untaken_reseed: Option<CertifyReseedKind>,
 ) -> DominanceRefusalKind {
+    use crate::model_types::CurvatureAdmissibility;
+    // Every reseed kind and every curvature verdict is named, so an outcome added
+    // later cannot fall into a kind by default.
+    let untaken_escape = match untaken_reseed {
+        Some(CertifyReseedKind::SaddleEscape) => true,
+        Some(
+            CertifyReseedKind::TailSnap
+            | CertifyReseedKind::WrongRail
+            | CertifyReseedKind::ActiveSet,
+        )
+        | None => false,
+    };
     let measured_saddle = result.criterion_certificate.as_ref().is_some_and(|certificate| {
-        certificate.is_stationary() && !certificate.curvature_not_refused()
+        certificate.is_stationary()
+            && match certificate.curvature_verdict() {
+                CurvatureAdmissibility::Inadmissible { .. } => true,
+                CurvatureAdmissibility::Admissible
+                | CurvatureAdmissibility::Unevaluated { .. }
+                | CurvatureAdmissibility::CriterionContradicted => false,
+            }
     });
-    if untaken_reseed == Some(CertifyReseedKind::SaddleEscape) || measured_saddle {
+    if untaken_escape || measured_saddle {
         DominanceRefusalKind::IncumbentUnescapableSaddle
     } else {
         DominanceRefusalKind::DominanceUnresolved
@@ -9507,6 +9530,10 @@ mod outer_stationarity_band_tests;
 #[cfg(test)]
 #[path = "criterion_curvature_ladder_2748_tests.rs"]
 mod criterion_curvature_ladder_2748_tests;
+
+#[cfg(test)]
+#[path = "saddle_adjudication_evaluable_trials_2665_tests.rs"]
+mod saddle_adjudication_evaluable_trials_2665_tests;
 
 #[cfg(test)]
 #[path = "canonical_checkpoint_order_tests.rs"]

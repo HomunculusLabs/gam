@@ -11,6 +11,9 @@
 //! - The well plus a concave ridge along a second coordinate: the continuation certifies a
 //!   strict saddle whose escape cannot run, and the fit refuses with
 //!   `IncumbentUnescapableSaddle`, or propagates the escape search's fatal failure.
+//! - The well again, where the objective refuses to re-evaluate the checkpoint that beats the
+//!   flat top: the flat top is still declined on the checkpoint's stored value. The fit refuses
+//!   with `DominanceUnresolved`, unless a later plan attempt certifies below the checkpoint.
 
 use super::*;
 use gam_problem::DominanceRefusalKind;
@@ -481,5 +484,243 @@ fn a_fatal_failure_of_the_saddle_escape_search_propagates_as_it_is_2953() {
     assert!(
         armed_refusals.load(Ordering::Relaxed) > 0,
         "the saddle escape must have armed the objective before the fatal failure"
+    );
+}
+
+// The re-entry fixture: the checkpoint that beats the declined optimum cannot be re-evaluated
+// at its own ρ. The objective refuses, as an infeasible trial, a point it evaluated before its
+// latest reset, as an objective does whose inner state at a stored checkpoint a cold solve
+// cannot re-enter. The plan runner re-evaluates the checkpoint from a reset before it may
+// outrank the certified winner, so that re-evaluation is the first refusal. The well is
+// searched from inside its convex core, where a Newton-like step on the declared curvature
+// lands near the centre.
+
+const REENTRY_START: f64 = -3.7;
+const REENTRY_MARKER: &str =
+    "the #2953 re-entry fixture refuses a point it evaluated before its last reset";
+
+struct ReentryState {
+    /// Points evaluated before the latest reset.
+    earlier: Vec<Array1<f64>>,
+    /// Points evaluated since the latest reset.
+    since_reset: Vec<Array1<f64>>,
+    /// How many more re-entries it refuses.
+    refusals_left: usize,
+    refusals: Arc<AtomicUsize>,
+}
+
+fn reentry_refusal(state: &mut ReentryState, rho: &Array1<f64>) -> Result<(), EstimationError> {
+    let reentry = state.earlier.iter().any(|point| {
+        point.len() == rho.len()
+            && point
+                .iter()
+                .zip(rho.iter())
+                .all(|(earlier, now)| earlier.to_bits() == now.to_bits())
+    });
+    if reentry && state.refusals_left > 0 {
+        state.refusals_left -= 1;
+        state.refusals.fetch_add(1, Ordering::Relaxed);
+        return Err(EstimationError::TrialPointRefused {
+            reason: REENTRY_MARKER.to_string(),
+        });
+    }
+    state.since_reset.push(rho.clone());
+    Ok(())
+}
+
+/// The well from `REENTRY_START` under `max_iter`, the neutral seed next in the cascade, with
+/// its analytic curvature declared. `prefer_gradient_only` makes the first attempt BFGS, and
+/// `fallback` decides whether ARC on the declared curvature follows it (#2898).
+fn reentry_problem(
+    max_iter: usize,
+    prefer_gradient_only: bool,
+    fallback: FallbackPolicy,
+    label: &str,
+) -> (tempfile::TempDir, OuterProblem) {
+    let (cache_dir, session) = tmp_cache_session(label);
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense)
+        .with_prefer_gradient_only(prefer_gradient_only)
+        .with_fallback_policy(fallback)
+        .with_bounds(array![-6.0], array![6.0])
+        .with_initial_rho(array![REENTRY_START])
+        .with_screen_initial_rho(false)
+        .with_seed_config(gam_problem::SeedConfig {
+            max_seeds: 1,
+            seed_budget: 1,
+            risk_profile: gam_problem::SeedRiskProfile::Gaussian,
+            ..Default::default()
+        })
+        .with_max_iter(max_iter)
+        .with_cache_session(session);
+    (cache_dir, problem)
+}
+
+macro_rules! reentry_objective {
+    ($problem:expr, $refusals_left:expr, $refusals:expr) => {
+        $problem.build_objective(
+            ReentryState {
+                earlier: Vec::new(),
+                since_reset: Vec::new(),
+                refusals_left: $refusals_left,
+                refusals: $refusals,
+            },
+            |state: &mut ReentryState, rho: &Array1<f64>| {
+                reentry_refusal(state, rho)?;
+                Ok(well_value(rho[0]))
+            },
+            |state: &mut ReentryState, rho: &Array1<f64>| {
+                reentry_refusal(state, rho)?;
+                Ok(OuterEval {
+                    cost: well_value(rho[0]),
+                    gradient: array![well_derivative(rho[0])],
+                    hessian: HessianValue::Dense(array![[well_curvature(rho[0])]]),
+                    inner_beta_hint: None,
+                })
+            },
+            Some(|state: &mut ReentryState| {
+                let since_reset = std::mem::take(&mut state.since_reset);
+                state.earlier.extend(since_reset);
+            }),
+            None::<fn(&mut ReentryState, &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+        )
+    };
+}
+
+/// The iterations an unbounded single-attempt search of the well takes to certify with nothing
+/// refused: BFGS when `prefer_gradient_only`, ARC on the declared curvature otherwise.
+fn reentry_calibration(prefer_gradient_only: bool) -> Result<usize, EstimationError> {
+    let label =
+        format!("re-entry calibration #2953 (prefer_gradient_only={prefer_gradient_only})");
+    let (_cache_dir, problem) =
+        reentry_problem(200, prefer_gradient_only, FallbackPolicy::Disabled, &label);
+    let mut objective = reentry_objective!(problem, 0, Arc::new(AtomicUsize::new(0)));
+    Ok(problem.run(&mut objective, &label)?.iterations)
+}
+
+#[test]
+fn a_checkpoint_that_cannot_be_re_evaluated_still_declines_the_optimum_it_beats_2953() {
+    let bfgs_iterations = reentry_calibration(true)
+        .expect("an unbounded BFGS search of the well from inside its core certifies its centre");
+    assert!(
+        bfgs_iterations >= 2,
+        "the BFGS search must take at least two iterations for a budget to split it; took \
+         {bfgs_iterations}"
+    );
+    let refusals = Arc::new(AtomicUsize::new(0));
+    let (_cache_dir, problem) = reentry_problem(
+        bfgs_iterations - 1,
+        true,
+        FallbackPolicy::Disabled,
+        "re-entry refusal #2953",
+    );
+    let mut objective = reentry_objective!(problem, usize::MAX, Arc::clone(&refusals));
+    let error = problem
+        .run(&mut objective, "re-entry refusal #2953")
+        .expect_err(
+            "a certified optimum that a stored checkpoint beats must not publish because the \
+             checkpoint cannot be re-evaluated",
+        );
+    let EstimationError::DominatedCertifiedPlateau {
+        kind,
+        plateau_rho,
+        plateau_value,
+        incumbent_rho,
+        incumbent_value,
+        gap,
+        band,
+        continuation,
+        terminal_refusal,
+        ..
+    } = error
+    else {
+        panic!("expected the typed dominated-plateau refusal, got {error}");
+    };
+    assert_eq!(kind, DominanceRefusalKind::DominanceUnresolved);
+    assert_eq!(plateau_rho, vec![0.0]);
+    assert_eq!(plateau_value.to_bits(), well_value(0.0).to_bits());
+    // The checkpoint is where the capped search stopped, inside the well, at its stored value:
+    // no re-evaluation replaced it.
+    assert!(
+        (incumbent_rho[0] - CENTER).abs() < WIDTH,
+        "the refused checkpoint must be the capped search inside the well; rho={incumbent_rho:?}"
+    );
+    assert_eq!(incumbent_value.to_bits(), well_value(incumbent_rho[0]).to_bits());
+    assert_eq!(gap.to_bits(), (plateau_value - incumbent_value).to_bits());
+    assert!(
+        band > 0.0 && gap > DEPTH / 2.0 && gap > band,
+        "gap {gap:e} against band {band:e}"
+    );
+    assert!(
+        continuation.contains("re-evaluating the checkpoint at its own rho was refused")
+            && continuation.contains(REENTRY_MARKER),
+        "the continuation must say that no search could start from the refused checkpoint: \
+         {continuation}"
+    );
+    assert!(
+        terminal_refusal.is_trial_point_infeasible(),
+        "the terminal certificate's installation at the checkpoint is refused the same way: \
+         {terminal_refusal}"
+    );
+    assert!(
+        refusals.load(Ordering::Relaxed) >= 2,
+        "both the dominance re-evaluation and the terminal installation must have been refused; \
+         refused {}",
+        refusals.load(Ordering::Relaxed)
+    );
+}
+
+#[test]
+fn a_later_attempt_that_certifies_below_the_refused_checkpoint_publishes_2953() {
+    let bfgs_iterations = reentry_calibration(true)
+        .expect("an unbounded BFGS search of the well from inside its core certifies its centre");
+    let arc_iterations = reentry_calibration(false)
+        .expect("an unbounded ARC search of the well from inside its core certifies its centre");
+    // Under a budget of ARC's own iteration count the BFGS attempt stops short of
+    // certifying, and the ARC attempt that follows it certifies.
+    assert!(
+        arc_iterations < bfgs_iterations,
+        "ARC on the declared curvature must certify in fewer iterations than BFGS for one \
+         budget to split them: ARC {arc_iterations}, BFGS {bfgs_iterations}"
+    );
+    let refusals = Arc::new(AtomicUsize::new(0));
+    let (_cache_dir, problem) = reentry_problem(
+        arc_iterations,
+        true,
+        FallbackPolicy::Automatic,
+        "re-entry continuation #2953",
+    );
+    let mut objective = reentry_objective!(problem, 1, Arc::clone(&refusals));
+    let published = problem
+        .run(&mut objective, "re-entry continuation #2953")
+        .unwrap_or_else(|error| {
+            panic!(
+                "the ARC attempt certifies the well's centre, below the refused checkpoint, and \
+                 must publish: {error}"
+            )
+        });
+    assert!(
+        (published.rho[0] - CENTER).abs() < 1.0e-3,
+        "the published optimum must be the well's centre; rho={:?}",
+        published.rho
+    );
+    assert_eq!(
+        refusals.load(Ordering::Relaxed),
+        1,
+        "the BFGS attempt's dominance re-evaluation must have been the one refusal"
+    );
+    let Some(record) = published.dominated_plateau.as_ref() else {
+        panic!("the BFGS attempt's declined optimum must ride on the published result");
+    };
+    assert_eq!(record.plateau_rho.to_vec(), vec![0.0]);
+    assert!(
+        matches!(
+            &record.continuation,
+            DominanceContinuationStop::Failed { error }
+                if error.contains("re-evaluating the checkpoint at its own rho was refused")
+        ),
+        "the BFGS attempt must have declined on the checkpoint it could not re-evaluate: {}",
+        record.continuation
     );
 }

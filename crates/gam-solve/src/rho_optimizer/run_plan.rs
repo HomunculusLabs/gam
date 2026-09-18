@@ -3126,8 +3126,13 @@ pub(crate) fn run_outer_with_plan(
     // The search continues once from the incumbent, with the same one-shot reseed
     // the tail-snap and saddle-escape retries use. If that does not certify, the
     // attempt returns the typed [`PlanRunOutcome::DominatedPlateau`], and the
-    // incumbent is the resume checkpoint.
+    // incumbent is the resume checkpoint. When the objective refuses to
+    // re-evaluate the incumbent, its stored value, the criterion's own evaluation
+    // at that ρ, decides the gap, and no search continues from a point the
+    // objective refuses (#2953).
     let mut dominance: Option<(f64, f64)> = None;
+    // Why the incumbent could not be re-evaluated at its own ρ, when it could not.
+    let mut reevaluation_refusal: Option<EstimationError> = None;
     if let (Some(certified), Some(incumbent)) = (best.as_ref(), best_checkpoint.as_ref()) {
         let winner_value = certified.result().final_value;
         let cached_band =
@@ -3141,22 +3146,24 @@ pub(crate) fn run_outer_with_plan(
             install_matching_initial_inner_seed(obj, config, &incumbent_rho, context)?;
             let incumbent_value = match obj.eval_cost(&incumbent_rho) {
                 Ok(value) => value,
-                // The stored checkpoint cannot be re-evaluated at its own ρ, so the
-                // gap cannot be judged and the certified winner is published. This
-                // warning is the only trace the branch leaves (#2953).
+                // The stored checkpoint cannot be re-evaluated at its own ρ. Its stored
+                // value is the criterion's evaluation there and beats the winner beyond
+                // the envelope, so the winner is declined on it (#2953).
                 Err(error) if error.is_trial_point_infeasible() => {
                     log::warn!(
                         "[OUTER] {context}: certified winner rho={:?} cost={:.6e} sits above a stored \
                          checkpoint rho={:?} cost={:.6e} by more than the criterion's rounding envelope \
-                         {:.3e}, but re-evaluating that checkpoint was refused ({error}); the dominance is \
-                         unresolved and the winner is published (#2953)",
+                         {:.3e}, and re-evaluating that checkpoint was refused ({error}); the winner is \
+                         declined on the stored value, and no search continues from the checkpoint \
+                         (#2953)",
                         certified.result().rho.to_vec(),
                         winner_value,
                         incumbent_rho.to_vec(),
                         incumbent.final_value,
                         cached_band,
                     );
-                    f64::INFINITY
+                    reevaluation_refusal = Some(error);
+                    incumbent.final_value
                 }
                 Err(error) => return Err(error),
             };
@@ -3175,20 +3182,31 @@ pub(crate) fn run_outer_with_plan(
         let plateau = certified.into_result();
         incumbent.final_value = incumbent_value;
         let gap = plateau.final_value - incumbent.final_value;
-        log::warn!(
-            "[OUTER] {context}: certified winner rho={:?} cost={:.6e} is dominated by an \
-             evaluated state rho={:?} cost={:.6e} (gap {:.3e} > the criterion's rounding \
-             envelope {:.3e}); it is not published, and the search continues from that state \
-             (#2596, #2627)",
-            plateau.rho.to_vec(),
-            plateau.final_value,
-            incumbent.rho.to_vec(),
-            incumbent.final_value,
-            gap,
-            band,
-        );
-        let mut continuation = DominanceContinuationStop::NotRun;
-        if allow_tail_snap_reseed {
+        let reevaluated = reevaluation_refusal.is_none();
+        let mut continuation = match reevaluation_refusal {
+            // No search can start from a point the objective refuses.
+            Some(refusal) => DominanceContinuationStop::Failed {
+                error: format!(
+                    "re-evaluating the checkpoint at its own rho was refused: {refusal}"
+                ),
+            },
+            None => {
+                log::warn!(
+                    "[OUTER] {context}: certified winner rho={:?} cost={:.6e} is dominated by an \
+                     evaluated state rho={:?} cost={:.6e} (gap {:.3e} > the criterion's rounding \
+                     envelope {:.3e}); it is not published, and the search continues from that \
+                     state (#2596, #2627)",
+                    plateau.rho.to_vec(),
+                    plateau.final_value,
+                    incumbent.rho.to_vec(),
+                    incumbent.final_value,
+                    gap,
+                    band,
+                );
+                DominanceContinuationStop::NotRun
+            }
+        };
+        if allow_tail_snap_reseed && reevaluated {
             let mut retry_config = config.clone();
             retry_config.initial_rho = Some(incumbent.rho.clone());
             retry_config.screen_initial_rho = false;
