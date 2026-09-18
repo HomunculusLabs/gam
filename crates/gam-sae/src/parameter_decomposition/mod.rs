@@ -132,6 +132,10 @@ pub mod gauge;
 // Gauge-covariant group masks, structured parameter paths, Sum and Compose accounting.
 pub mod operators;
 
+// Cross-module adversarial and null controls against the landed modules.
+#[cfg(test)]
+mod controls_tests;
+
 // Declared-precision real codes and decode-then-evaluate distortion.
 pub mod precision;
 
