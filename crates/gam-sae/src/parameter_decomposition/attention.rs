@@ -274,10 +274,27 @@ pub struct RotaryCausalAttention {
 /// The source's per-head query/key RMS norm: its declared epsilon and the
 /// `head_dim` gains of `q_norm` and `k_norm`.
 #[derive(Clone, Debug)]
-struct QueryKeyNorm {
+pub struct QueryKeyNorm {
     epsilon: f64,
     query_gain: Array1<f64>,
     key_gain: Array1<f64>,
+}
+
+impl QueryKeyNorm {
+    /// The source's declared `ε` in `(mean(h²) + ε)^{-1/2}`.
+    pub fn epsilon(&self) -> f64 {
+        self.epsilon
+    }
+
+    /// The `head_dim` gains of `q_norm`, shared by every query head.
+    pub fn query_gain(&self) -> ArrayView1<'_, f64> {
+        self.query_gain.view()
+    }
+
+    /// The `head_dim` gains of `k_norm`, shared by every key head.
+    pub fn key_gain(&self) -> ArrayView1<'_, f64> {
+        self.key_gain.view()
+    }
 }
 
 /// The source's causal self-attention block on its original tensors.
@@ -760,6 +777,12 @@ impl NativeAttention {
     /// must also commute with that norm, and a caller that projects rows itself would skip it.
     pub fn has_query_key_norm(&self) -> bool {
         self.query_key_norm.is_some()
+    }
+
+    /// The source's per-head query/key norm, if it has one
+    /// ([`NativeAttention::with_query_key_norm`]).
+    pub fn query_key_norm(&self) -> Option<&QueryKeyNorm> {
+        self.query_key_norm.as_ref()
     }
 
     /// The source's per-head query/key RMS norm between the projections and the
@@ -2024,9 +2047,10 @@ mod tests {
     }
 
     /// The read accessors return the parts the block was built from (geometry, rotary embedding,
-    /// score scale and all four projections), and `has_query_key_norm` follows
-    /// `with_query_key_norm`. Positive control: an edited query tensor compares unequal to the
-    /// accessor's.
+    /// score scale and all four projections), and `has_query_key_norm` and `query_key_norm`
+    /// follow `with_query_key_norm`, whose epsilon and gains the norm returns. Positive controls:
+    /// an edited query tensor compares unequal to the accessor's, and the fixture's query and key
+    /// gains differ.
     #[test]
     fn accessors_return_the_source_parts() {
         let fixture = Fixture::new(RotaryPairing::HalfSplit).biased();
@@ -2053,6 +2077,21 @@ mod tests {
             normalized.has_query_key_norm(),
             "with_query_key_norm must set the query/key norm"
         );
+        assert!(
+            native.query_key_norm().is_none(),
+            "a block built without q_norm/k_norm exposes no norm"
+        );
+        let (epsilon, query_gain, key_gain) = Fixture::new(RotaryPairing::HalfSplit)
+            .normalized()
+            .query_key_norm
+            .expect("the normalized fixture declares a norm");
+        assert_ne!(query_gain, key_gain, "distinct gains, so a swapped accessor fails");
+        let norm = normalized
+            .query_key_norm()
+            .expect("with_query_key_norm must expose the norm");
+        assert_eq!(norm.epsilon(), epsilon, "norm epsilon");
+        assert_eq!(norm.query_gain(), query_gain.view(), "query norm gain");
+        assert_eq!(norm.key_gain(), key_gain.view(), "key norm gain");
         let edited_query = masked_product(&fixture.query_outputs, &continuous_masks().query, &fixture.query_readins);
         assert_ne!(
             native.query().weight,
