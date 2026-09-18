@@ -1335,32 +1335,20 @@ impl<'a> RemlState<'a> {
         EstimationError,
     > {
         let t_tau = std::time::Instant::now();
-        // Guard: non-sparse tau coordinate construction requires dense design.
-        // Refuse by name when the dense work budget is exceeded (#2987): the
-        // caller's theta still carries every psi coordinate this builder serves,
-        // so silently returning an empty list would hand the outer evaluator a
-        // rho-only gradient for a [rho, psi] problem — a dimension change that
-        // surfaces only as a fatal length mismatch at seed validation, after the
-        // gradient-only search (which never enters this ValueGradientHessian
-        // builder) has already spent its budget. A per-point refusal lets the
-        // search retreat and the next seed try, and names the resource limit.
+        // The dense-work budget for this builder is decided by the CALLER
+        // (`evaluate_unified_with_psi_ext`): when n*p exceeds
+        // HYPER_MAX_DENSE_WORK on a non-sparse backend, the caller degrades to
+        // the first-order lane and never reaches this builder (#2987). No
+        // internal fallback exists here — a builder that silently dropped the
+        // psi coordinates it was asked for is the defect itself.
         let n_x = self.x().nrows();
         let p_x = self.x().ncols();
-        const HYPER_MAX_DENSE_WORK: usize = 50_000_000;
-        if n_x.saturating_mul(p_x) > HYPER_MAX_DENSE_WORK
-            && bundle.backend_kind() != GeometryBackendKind::SparseExactSpd
-        {
-            return Err(EstimationError::TrialPointRefused {
-                reason: format!(
-                    "tau hyper-coordinate construction exceeds the dense-work budget \
-                     (n={n_x}, p={p_x}, n*p={}); the [rho, psi] outer gradient cannot be \
-                     served rho-only at psi_dim={}; serve it on the SparseExactSpd backend \
-                     or raise HYPER_MAX_DENSE_WORK",
-                    n_x.saturating_mul(p_x),
-                    hyper_dirs.len(),
-                ),
-            });
-        }
+        debug_assert!(
+            n_x.saturating_mul(p_x) <= 50_000_000
+                || bundle.backend_kind() == GeometryBackendKind::SparseExactSpd,
+            "build_tau_unified_objects_from_bundle reached above the dense-work budget \
+             (n={n_x}, p={p_x}); the caller should have degraded to the first-order lane"
+        );
         let backend_label;
         let result = if bundle.backend_kind() == GeometryBackendKind::SparseExactSpd {
             backend_label = "sparse_exact";
