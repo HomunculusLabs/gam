@@ -246,6 +246,7 @@ def execute(args: argparse.Namespace) -> int:
             for name in STAGES:
                 executor["dtypes"].add(str(captured[name].dtype).removeprefix("torch."))
                 executor["devices"].add(str(captured[name].device))
+            executor["devices"].add(output.device)
             if executor["dtypes"] != {"float64"}:
                 raise SystemExit(f"setting {setting['name']!r}: the executed stages ran in {sorted(executor['dtypes'])}")
             if not torch.equal(captured["output"].reshape(rows, hidden), torch.from_numpy(output.values).reshape(rows, hidden)):
@@ -253,11 +254,23 @@ def execute(args: argparse.Namespace) -> int:
             externals = {
                 name: save(f"{setting['name']}.{name}", captured[name].reshape(rows, -1).numpy()) for name in STAGES
             }
-            ran.append({"name": setting["name"], "edits": declared_edits, "externals": externals, "substituted": substituted})
+            ran.append(
+                {
+                    "name": setting["name"],
+                    "edits": declared_edits,
+                    "externals": externals,
+                    "substituted": substituted,
+                    "tf32_matmul": output.tf32_matmul,
+                }
+            )
             print(f"[execute] {setting['name']} substituted={substituted}", flush=True)
     finally:
         for handle in handles:
             handle.remove()
+    # The runner reads the TF32 flag right before each forward; one export has one flag.
+    tf32_flags = sorted({entry["tf32_matmul"] for entry in ran})
+    if len(tf32_flags) != 1:
+        raise SystemExit(f"the settings ran under different TF32 flags: {tf32_flags}")
     manifest = {
         "stage": "execute",
         "harvest": args.harvest,
@@ -269,7 +282,7 @@ def execute(args: argparse.Namespace) -> int:
         "weights": {name: os.path.join(args.harvest, f"{name}.npy") for name in PARAMETERS},
         "external_dtype": sorted(executor["dtypes"]),
         "external_device": sorted(executor["devices"]),
-        "tf32_matmul": bool(torch.backends.cuda.matmul.allow_tf32),
+        "tf32_matmul": tf32_flags[0],
         "settings_md5": _md5(args.settings),
         "files": {array_id: {"path": path, "md5": _md5(path)} for array_id, path in files.items()},
         "settings": ran,
