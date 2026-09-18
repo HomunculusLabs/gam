@@ -641,7 +641,6 @@ fn estimation_error_to_pyerr_with_message(err: &EstimationError, message: String
         // (resume from the carried checkpoint / loosen the outer tolerance) is
         // the same across these lanes.
         EstimationError::RemlDidNotConverge { .. } => RemlConvergenceError::new_err(message),
-        EstimationError::DominatedCertifiedPlateau { .. } => RemlConvergenceError::new_err(message),
         EstimationError::BlockOrthogonalRemlDidNotConverge { .. } => {
             RemlConvergenceError::new_err(message)
         }
