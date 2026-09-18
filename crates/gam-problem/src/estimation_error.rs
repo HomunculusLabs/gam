@@ -761,6 +761,17 @@ pub enum EstimationError {
     #[error("{reason}")]
     TrialPointRefused { reason: String },
 
+    /// The #784 block-local quadrature correction refused at one of its typed stages.
+    ///
+    /// Five stages are statements about THIS trial point: the order search's verdict, the
+    /// admission rule's resolution, and the penalized Hessian's spectrum at this rho's mode.
+    /// They back the outer search off the point. The correction used to decline them with a
+    /// silent zero splice, so a rho where the correction could not be evaluated scored as though
+    /// it needed none. The sixth, a corrector that returns no gradient moments for a non-empty
+    /// block, breaks the corrector's contract at every rho and stays fatal.
+    #[error("#784 block-local quadrature correction refused: {stage}")]
+    BlockQuadratureCorrectionRefused { stage: BlockQuadratureCorrectionStage },
+
     #[error("Fatal outer-objective evaluation failure ({context}): {source}")]
     OuterObjectiveEvaluationFailed {
         context: String,
@@ -1058,6 +1069,8 @@ impl EstimationError {
             Self::CustomFamily(err) => err.is_trial_point_infeasible(),
             // The producer said so directly (#2531).
             Self::TrialPointRefused { .. } => true,
+            // The #784 correction's stage says whether it is a fact about this rho.
+            Self::BlockQuadratureCorrectionRefused { stage } => stage.is_trial_point_local(),
             // "The inner problem at THIS rho is too hard to evaluate, try a
             // different rho" — [`Self::is_inner_solve_retreat`]'s own words for
             // exactly these five, and verbatim this predicate's definition. The
@@ -1237,6 +1250,16 @@ impl EstimationError {
             Self::OuterObjectiveEvaluationFailed { source, .. } => source
                 .estimation_error()
                 .map_or(FailureCategory::Unclassified, Self::failure_category),
+            // A rho-local stage of the #784 correction is a refusal the outer search walks away
+            // from, like `TrialPointRefused`; a corrector that breaks its moment contract is an
+            // engine invariant.
+            Self::BlockQuadratureCorrectionRefused { stage } => {
+                if stage.is_trial_point_local() {
+                    FailureCategory::Convergence
+                } else {
+                    FailureCategory::Invariant
+                }
+            }
             Self::PirlsDidNotConverge { .. }
             | Self::FixedLambdaNewtonDidNotConverge { .. }
             | Self::BlockOrthogonalRemlDidNotConverge { .. }
@@ -1348,6 +1371,9 @@ impl EstimationError {
             Self::RemlOptimizationFailed(_) => "EstimationError::RemlOptimizationFailed",
             Self::StartupSeedsRefused(_) => "EstimationError::StartupSeedsRefused",
             Self::TrialPointRefused { .. } => "EstimationError::TrialPointRefused",
+            Self::BlockQuadratureCorrectionRefused { .. } => {
+                "EstimationError::BlockQuadratureCorrectionRefused"
+            }
             Self::OuterObjectiveEvaluationFailed { .. } => {
                 "EstimationError::OuterObjectiveEvaluationFailed"
             }
@@ -1831,6 +1857,67 @@ mod tests {
             EstimationError::HessianNotPositiveDefinite { .. }
         ));
     }
+
+    #[test]
+    fn block_quadrature_correction_refusals_back_off_only_at_rho_local_stages_784() {
+        use crate::laplace_sampler_contract::{BlockQuadratureOrderRefusal, BlockQuadratureRefusal};
+        // The five stages that are facts about the trial point back the outer search off it,
+        // as a convergence-class refusal (#784 ruling A).
+        let rho_local = [
+            BlockQuadratureCorrectionStage::OrderSearchRefused(BlockQuadratureOrderRefusal {
+                axis: 0,
+                axis_orders: vec![5],
+                paired_error: 1e-2,
+                resolution_target: 1e-6,
+                cause: BlockQuadratureRefusal::Integration("scripted refusal".to_string()),
+            }),
+            BlockQuadratureCorrectionStage::UnresolvedAtAdmission {
+                quadrature_error: 1e-3,
+                resolution_target: 1e-6,
+                axis_orders: vec![4, 4],
+                node_count: 16,
+            },
+            BlockQuadratureCorrectionStage::NonPositivePenalizedCurvature {
+                min_eigenvalue: -1e-3,
+            },
+            BlockQuadratureCorrectionStage::EigenpairResolutionUnavailable {
+                reason: "residual bound not finite".to_string(),
+            },
+            BlockQuadratureCorrectionStage::EigenframeNearDegeneracy {
+                block_eigenvalue: 2.0,
+                other_eigenvalue: 2.0 + 1e-12,
+                gap: 1e-12,
+                tolerance: 1e-10,
+            },
+        ];
+        for stage in rho_local {
+            let error = EstimationError::BlockQuadratureCorrectionRefused { stage };
+            assert!(
+                error.is_trial_point_infeasible() && error.is_inner_solve_retreat(),
+                "a rho-local correction stage must back the outer search off: {error}"
+            );
+            assert!(
+                matches!(error.failure_category(), FailureCategory::Convergence),
+                "a rho-local correction stage is a convergence-class refusal: {error}"
+            );
+        }
+        // A corrector that breaks its moment contract does so at every rho, so it stays fatal.
+        let contract = EstimationError::BlockQuadratureCorrectionRefused {
+            stage: BlockQuadratureCorrectionStage::CorrectorReturnedNoMoments { block_dim: 3 },
+        };
+        assert!(
+            !contract.is_trial_point_infeasible(),
+            "a corrector contract violation must stay fatal: {contract}"
+        );
+        assert!(
+            matches!(contract.failure_category(), FailureCategory::Invariant),
+            "a corrector contract violation is an invariant failure: {contract}"
+        );
+        assert_eq!(
+            contract.variant_name(),
+            "EstimationError::BlockQuadratureCorrectionRefused"
+        );
+    }
 }
 
 /// Honest failure text for [`EstimationError::HessianNotPositiveDefinite`].
@@ -1866,5 +1953,101 @@ fn unidentified_eigenvalue_motion(largest: Option<f64>, reachable: Option<f64>) 
             format!("; the largest unidentified eigenvalue {sigma:.4e} can rise to {reachable:.4e}")
         }
         _ => String::new(),
+    }
+}
+
+/// The stage at which the #784 block-local quadrature correction refused, with what that stage
+/// measured ([`EstimationError::BlockQuadratureCorrectionRefused`]).
+#[derive(Clone, Debug)]
+pub enum BlockQuadratureCorrectionStage {
+    /// The order search could not resolve every block axis at this rho.
+    OrderSearchRefused(crate::laplace_sampler_contract::BlockQuadratureOrderRefusal),
+    /// Before the admission latched, the selected rule's paired differences did not resolve
+    /// `min(|Δ_b|, 1/n_eff²)` at this rho.
+    UnresolvedAtAdmission {
+        quadrature_error: f64,
+        resolution_target: f64,
+        axis_orders: Vec<usize>,
+        node_count: usize,
+    },
+    /// The corrector returned no gradient-channel moments for a non-empty block. Its contract
+    /// reserves an absent moment set for the empty block, so this is the corrector's defect at
+    /// every rho, not a property of one.
+    CorrectorReturnedNoMoments { block_dim: usize },
+    /// The penalized Hessian at this rho's mode has a non-positive or non-finite eigenvalue, so
+    /// the implicit mode response the exact gradient channels contract against is undefined.
+    NonPositivePenalizedCurvature { min_eigenvalue: f64 },
+    /// The per-eigenpair residual bounds that decide whether an eigenvalue gap is measured could
+    /// not be computed at this rho.
+    EigenpairResolutionUnavailable { reason: String },
+    /// A block eigenvalue and another eigenvalue of the penalized Hessian lie within the sum of
+    /// their measured resolutions at this rho, where the eigenframe is not differentiable.
+    EigenframeNearDegeneracy {
+        block_eigenvalue: f64,
+        other_eigenvalue: f64,
+        gap: f64,
+        tolerance: f64,
+    },
+}
+
+impl BlockQuadratureCorrectionStage {
+    /// Whether this stage states a fact about the trial point it was evaluated at, which the
+    /// outer search can back away from. Exhaustive with no wildcard arm, for the reason
+    /// [`EstimationError::is_trial_point_infeasible`] is.
+    #[must_use]
+    pub fn is_trial_point_local(&self) -> bool {
+        match self {
+            Self::OrderSearchRefused(_)
+            | Self::UnresolvedAtAdmission { .. }
+            | Self::NonPositivePenalizedCurvature { .. }
+            | Self::EigenpairResolutionUnavailable { .. }
+            | Self::EigenframeNearDegeneracy { .. } => true,
+            Self::CorrectorReturnedNoMoments { .. } => false,
+        }
+    }
+}
+
+impl std::fmt::Display for BlockQuadratureCorrectionStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OrderSearchRefused(refusal) => {
+                write!(f, "the order search refused at this rho: {refusal}")
+            }
+            Self::UnresolvedAtAdmission {
+                quadrature_error,
+                resolution_target,
+                axis_orders,
+                node_count,
+            } => write!(
+                f,
+                "at admission the paired Gauss-Hermite error {quadrature_error:.4e} does not \
+                 resolve min(|Δ_b|, 1/n_eff²)={resolution_target:.4e} (axis orders \
+                 {axis_orders:?}, {node_count} nodes)"
+            ),
+            Self::CorrectorReturnedNoMoments { block_dim } => write!(
+                f,
+                "the corrector returned no gradient moments for a {block_dim}-direction block; \
+                 its contract reserves absent moments for the empty block"
+            ),
+            Self::NonPositivePenalizedCurvature { min_eigenvalue } => write!(
+                f,
+                "the penalized Hessian at this rho's mode has the non-positive eigenvalue \
+                 {min_eigenvalue:.4e}, so the implicit mode response is undefined"
+            ),
+            Self::EigenpairResolutionUnavailable { reason } => {
+                write!(f, "the eigenpair residual bounds are unavailable at this rho: {reason}")
+            }
+            Self::EigenframeNearDegeneracy {
+                block_eigenvalue,
+                other_eigenvalue,
+                gap,
+                tolerance,
+            } => write!(
+                f,
+                "block eigenvalue {block_eigenvalue:.6e} and eigenvalue {other_eigenvalue:.6e} \
+                 differ by {gap:.3e}, within their summed resolution {tolerance:.3e}, where the \
+                 eigenframe is not differentiable"
+            ),
+        }
     }
 }

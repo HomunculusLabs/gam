@@ -141,6 +141,7 @@ impl<'a> RemlState<'a> {
         // calls them through the neutral `gam_problem` sampler contract instead
         // of a back-edge into the inference SCC. The pure threshold math
         // (`laplace_trustworthiness_from_skewness`) moved down outright.
+        use gam_problem::estimation_error::BlockQuadratureCorrectionStage;
         use gam_problem::laplace_sampler_contract::laplace_trustworthiness_from_skewness;
 
         let n_rho = self.canonical_penalties.len();
@@ -448,13 +449,9 @@ impl<'a> RemlState<'a> {
             ) {
                 Ok(quadrature) => quadrature,
                 Err(refusal) => {
-                    log::info!(
-                        "[#784] block-local correction declined: {refusal} (m={m}, \
-                         max|γ|={:.3}, τ={:.3}, 1/n_eff={laplace_floor:.3e})",
-                        verdict.max_abs_skewness,
-                        verdict.threshold,
-                    );
-                    return Ok(zero());
+                    return Err(EstimationError::BlockQuadratureCorrectionRefused {
+                        stage: BlockQuadratureCorrectionStage::OrderSearchRefused(refusal),
+                    });
                 }
             },
         };
@@ -488,16 +485,21 @@ impl<'a> RemlState<'a> {
             .iter()
             .all(|&error| error == 0.0 || error < resolution_target);
         if !resolved {
+            if latched_block_dim.is_none() {
+                return Err(EstimationError::BlockQuadratureCorrectionRefused {
+                    stage: BlockQuadratureCorrectionStage::UnresolvedAtAdmission {
+                        quadrature_error: quadrature.quadrature_error,
+                        resolution_target,
+                        axis_orders: quadrature.axis_orders.clone(),
+                        node_count: quadrature.node_count,
+                    },
+                });
+            }
             log::info!(
-                "[#784] block-local correction {}: paired Gauss-Hermite error \
-                 {:.4e} does not resolve min(|Δ_b|, 1/n_eff²)={resolution_target:.4e} \
-                 (|Δ_b|={abs_value:.4e}, m={m}, max|γ|={:.3}, τ={:.3}, axis orders={:?}, \
-                 nodes={}, 1/n_eff={:.3e})",
-                if latched_block_dim.is_some() {
-                    "spliced UNRESOLVED (admission already latched, #2748)"
-                } else {
-                    "declined"
-                },
+                "[#784] block-local correction spliced UNRESOLVED (admission already latched, \
+                 #2748): paired Gauss-Hermite error {:.4e} does not resolve \
+                 min(|Δ_b|, 1/n_eff²)={resolution_target:.4e} (|Δ_b|={abs_value:.4e}, m={m}, \
+                 max|γ|={:.3}, τ={:.3}, axis orders={:?}, nodes={}, 1/n_eff={:.3e})",
                 quadrature.quadrature_error,
                 verdict.max_abs_skewness,
                 verdict.threshold,
@@ -505,9 +507,6 @@ impl<'a> RemlState<'a> {
                 quadrature.node_count,
                 laplace_floor,
             );
-            if latched_block_dim.is_none() {
-                return Ok(zero());
-            }
         }
 
         // Latch the admission on the first evaluation that reaches here with
@@ -576,9 +575,13 @@ impl<'a> RemlState<'a> {
         // non-differentiability points of the eigenframe; the splice is
         // declined there rather than clamped.
         let Some(moments) = quadrature.moments.as_ref() else {
-            // m > 0 is guaranteed above, so absent moments means every node
-            // carried zero weight — nothing trustworthy to splice.
-            return Ok(zero());
+            // The corrector's contract reserves absent moments for the empty block, and
+            // `block_cols` is non-empty here.
+            return Err(EstimationError::BlockQuadratureCorrectionRefused {
+                stage: BlockQuadratureCorrectionStage::CorrectorReturnedNoMoments {
+                    block_dim: m,
+                },
+            });
         };
         let x = x_dense.as_ref();
         let n_rows = x.nrows();
@@ -635,11 +638,16 @@ impl<'a> RemlState<'a> {
         // `evecs`, so `Q_b`/`Q_c` are built from the same spectrum as the
         // draws — one source of truth for "the direction λ_r".
         if evals.iter().any(|&s| !(s.is_finite() && s > 0.0)) {
-            log::info!(
-                "[#784] block-local fallback declined: H_pen has a non-positive eigenvalue; \
-                 the IFT mode response is undefined"
-            );
-            return Ok(zero());
+            // A NaN eigenvalue is reported as the minimum rather than skipped.
+            let min_eigenvalue = evals
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, |min, s| if s.is_nan() || s < min { s } else { min });
+            return Err(EstimationError::BlockQuadratureCorrectionRefused {
+                stage: BlockQuadratureCorrectionStage::NonPositivePenalizedCurvature {
+                    min_eigenvalue,
+                },
+            });
         }
         // When is `λ_r − σ_q` a MEASUREMENT rather than a rounding residue?
         //
@@ -677,8 +685,11 @@ impl<'a> RemlState<'a> {
             ) {
                 Ok(bounds) => bounds,
                 Err(reason) => {
-                    log::info!("[#784] block-local fallback declined: {reason}");
-                    return Ok(zero());
+                    return Err(EstimationError::BlockQuadratureCorrectionRefused {
+                        stage: BlockQuadratureCorrectionStage::EigenpairResolutionUnavailable {
+                            reason: reason.to_string(),
+                        },
+                    });
                 }
             };
         let r_tilde = evecs.t().dot(&r_mat); // p × m
@@ -695,18 +706,14 @@ impl<'a> RemlState<'a> {
                 // resolution, whose eigenframe derivative would divide by zero (#2469).
                 let degeneracy_tol = pair_resolution[col_r] + pair_resolution[q];
                 if gap.abs() <= degeneracy_tol {
-                    log::info!(
-                        "[#784] block-local fallback declined: eigenvalue near-degeneracy \
-                         |λ_r − σ_q| = {:.3e} <= {degeneracy_tol:.3e} (λ_r={lam_r:.6e} res_r={:.3e}, \
-                         σ_q={:.6e} res_q={:.3e}, max|H|={:.3e}) — the eigenframe is not \
-                         differentiable on this stratum",
-                        gap.abs(),
-                        pair_resolution[col_r],
-                        evals[q],
-                        pair_resolution[q],
-                        sym_h.iter().copied().map(f64::abs).fold(0.0_f64, f64::max),
-                    );
-                    return Ok(zero());
+                    return Err(EstimationError::BlockQuadratureCorrectionRefused {
+                        stage: BlockQuadratureCorrectionStage::EigenframeNearDegeneracy {
+                            block_eigenvalue: lam_r,
+                            other_eigenvalue: evals[q],
+                            gap: gap.abs(),
+                            tolerance: degeneracy_tol,
+                        },
+                    });
                 }
                 g_mat[(q, jr)] = r_tilde[(q, jr)] / gap;
             }
