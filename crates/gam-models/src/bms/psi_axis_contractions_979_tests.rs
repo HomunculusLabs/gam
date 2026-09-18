@@ -220,6 +220,7 @@ fn flex_full_row_correction_traces_match_the_per_row_route_979() {
         slope_design: DesignMatrix::Dense(DenseDesignMatrix::from(slope_x.clone())),
         score_warp: Some(score.runtime.clone()),
         link_dev: Some(link.runtime.clone()),
+        residual: None,
         policy: policy.clone(),
         cell_moment_lru: new_cell_moment_lru_cache(&policy),
         cell_moment_cache_stats: new_cell_moment_cache_stats(),
