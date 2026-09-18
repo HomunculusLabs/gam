@@ -86,7 +86,7 @@ impl SurvivalMarginalSlopeFamily {
             row,
             block_states,
             &primary,
-            super::partition::FLEX_ORDER_FOUR_MOMENT_DEGREE,
+            super::flex_jet::FLEX_ORDER_FOUR_MOMENT_DEGREE,
         )?;
         let (entry_base, entry_ext, exit_base, exit_ext) =
             super::flex_jet::with_flex_third_jet_arena(|jet_arena| -> Result<_, String> {
@@ -232,7 +232,7 @@ impl SurvivalMarginalSlopeFamily {
             row,
             block_states,
             primary,
-            super::partition::FLEX_ORDER_FOUR_MOMENT_DEGREE,
+            super::flex_jet::FLEX_ORDER_FOUR_MOMENT_DEGREE,
         )
     }
 

@@ -82,7 +82,7 @@ impl SurvivalMarginalSlopeFamily {
             b,
             beta_h,
             beta_w,
-            FLEX_ORDER_FOUR_MOMENT_DEGREE,
+            super::flex_jet::FLEX_ORDER_FOUR_MOMENT_DEGREE,
         )
     }
 
@@ -152,11 +152,3 @@ fn span_derivative_stack(span: exact_kernel::LocalSpanCubic, x: f64) -> [f64; 4]
         6.0 * span.c3,
     ]
 }
-
-/// Numeric cell-moment degree the order-four flex jets read. The flex moment closure
-/// expands `S(z)=e^{−Δq}=Σ_{k≤4}(−Δq)^k/k!`; with η cubic, `−Δq=½(η²−η₀²)` is degree-6
-/// in z, so the fourth-order `(−Δq)⁴` term reaches `M_{n+24}` (= `M_28` for the `n≤4`
-/// base moments). A moment order of 27 silently dropped `M_28`, truncating the
-/// contracted-fourth (Jet4) channel. Build to 32 so every order of the e^{−Δq} closure
-/// has its full moment dot.
-pub(crate) const FLEX_ORDER_FOUR_MOMENT_DEGREE: usize = 32;

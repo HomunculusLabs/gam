@@ -1483,6 +1483,24 @@ impl FlexJet for Jet4 {
     }
 }
 
+/// Numeric cell-moment degree an order-four timepoint jet reads: the base moments
+/// through `M_4`, shifted by the `6·ORDER` z-degree of `e^{−Δq}` (the moment-degree
+/// budget of `base_moment_jets`, whose highest index is `n + m ≤ 4 + 6·ORDER`).
+pub(crate) const FLEX_ORDER_FOUR_MOMENT_DEGREE: usize = 4 + 6 * <Jet4 as FlexJet>::ORDER;
+
+// Every algebra that reads an order-four partition indexes within its degree: the
+// value, gradient and Hessian timepoints, the directional and bidirectional
+// extensions, and the family-direction program over both of its inner algebras.
+const _: () = {
+    assert!(4 + 6 * <Jet1 as FlexJet>::ORDER <= FLEX_ORDER_FOUR_MOMENT_DEGREE);
+    assert!(4 + 6 * <Jet2 as FlexJet>::ORDER <= FLEX_ORDER_FOUR_MOMENT_DEGREE);
+    assert!(4 + 6 * <FixedJet3<8> as FlexJet>::ORDER <= FLEX_ORDER_FOUR_MOMENT_DEGREE);
+    assert!(4 + 6 * <ArenaJet3<'static> as FlexJet>::ORDER <= FLEX_ORDER_FOUR_MOMENT_DEGREE);
+    assert!(4 + 6 * <Jet4 as FlexJet>::ORDER <= FLEX_ORDER_FOUR_MOMENT_DEGREE);
+    assert!(4 + 6 * <Dual2<Jet2> as FlexJet>::ORDER <= FLEX_ORDER_FOUR_MOMENT_DEGREE);
+    assert!(4 + 6 * <Dual2<Jet3> as FlexJet>::ORDER <= FLEX_ORDER_FOUR_MOMENT_DEGREE);
+};
+
 // ── Jet5: three-seed, contracted fifth (gam#2893) ───────────────────────────
 
 /// Numeric cell-moment degree an order-five timepoint jet reads: the base moments
@@ -6017,6 +6035,94 @@ mod moment_engine_tests {
         family.score_warp = Some(flex_test_deviation_runtime());
         family.link_dev = Some(flex_test_deviation_runtime());
         family
+    }
+
+    /// A partition built through the derived `FLEX_ORDER_FOUR_MOMENT_DEGREE` and one
+    /// built through the order-five degree hold, for every cell and every moment an
+    /// order-four reader indexes, the same moments within the non-affine ladder's
+    /// certified band of both runs, `NON_AFFINE_LADDER_RTOL·max_{k≤d}|M_k|` summed over
+    /// the two. The band comes from each run's own moments. The ladder certifies a
+    /// rung against the largest slot through `d`, so the low moments are not
+    /// bit-identical across degrees, and the fixture must reach a cell where they move.
+    #[test]
+    fn order_four_partition_moments_agree_across_degrees_within_the_ladder_band_932() {
+        let family = make_ghw_flex_family(16);
+        let primary = flex_primary_slices(&family);
+        let row = 6usize;
+        let g = 0.19_f64;
+        let h_len = primary.h.as_ref().map_or(0, |range| range.len());
+        let w_len = primary.w.as_ref().map_or(0, |range| range.len());
+        let beta_h = Array1::from_iter(
+            (0..h_len).map(|i| 0.1 + 0.05 * (i as f64) - 0.02 * ((i % 2) as f64)),
+        );
+        let beta_w = Array1::from_iter(
+            (0..w_len).map(|i| -0.08 + 0.04 * (i as f64) + 0.01 * ((i % 3) as f64)),
+        );
+        let (bh, bw) = (Some(&beta_h), Some(&beta_w));
+        let q1 = family.offset_exit[row] + family.marginal_design.to_dense()[[row, 0]] * 0.15;
+        let a1 = family
+            .solve_row_survival_intercept_with_slot(
+                q1,
+                g,
+                bh,
+                bw,
+                Some((row, SurvivalInterceptSlotKind::Exit)),
+            )
+            .expect("intercept solve")
+            .0;
+        let build = |degree: usize| {
+            // The affine-tail memo serves a higher-degree state truncated to a lower
+            // degree, which would make the two builds agree by construction.
+            crate::cubic_cell_kernel::reset_tail_cell_moment_cache();
+            family
+                .build_cached_partition_with_moment_order(row, &primary, a1, g, bh, bw, degree)
+                .expect("cached partition")
+        };
+        let (CachedPartitionCells::Gaussian(derived), CachedPartitionCells::Gaussian(wider)) =
+            (build(FLEX_ORDER_FOUR_MOMENT_DEGREE), build(FLEX_ORDER_FIVE_MOMENT_DEGREE))
+        else {
+            panic!("a family without a latent law builds the Gaussian cells");
+        };
+        assert_eq!(derived.len(), wider.len(), "the partition does not depend on the degree");
+        let max_abs = |moments: &[f64]| moments.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        let mut moved = 0usize;
+        let mut worst_fraction = 0.0_f64;
+        for (index, (low, high)) in derived.iter().zip(&wider).enumerate() {
+            let (cell_low, cell_high) = (low.partition_cell.cell, high.partition_cell.cell);
+            assert!(
+                cell_low.left.to_bits() == cell_high.left.to_bits()
+                    && cell_low.right.to_bits() == cell_high.right.to_bits(),
+                "cell {index} changed its interval with the degree"
+            );
+            let band = crate::cubic_cell_kernel::NON_AFFINE_LADDER_RTOL
+                * (max_abs(&low.state.moments) + max_abs(&high.state.moments));
+            for k in 0..=FLEX_ORDER_FOUR_MOMENT_DEGREE {
+                let (at_derived, at_wider) = (low.state.moments[k], high.state.moments[k]);
+                if at_derived.to_bits() == at_wider.to_bits() {
+                    continue;
+                }
+                moved += 1;
+                let gap = (at_derived - at_wider).abs();
+                worst_fraction = worst_fraction.max(gap / band);
+                assert!(
+                    gap <= band,
+                    "cell {index} moment M_{k}: {at_derived:e} at degree \
+                     {FLEX_ORDER_FOUR_MOMENT_DEGREE} vs {at_wider:e} at degree \
+                     {FLEX_ORDER_FIVE_MOMENT_DEGREE}, gap {gap:e} above the ladder band {band:e}"
+                );
+            }
+        }
+        eprintln!(
+            "[932 moment degree] {} cells | {moved} moments moved between degree \
+             {FLEX_ORDER_FOUR_MOMENT_DEGREE} and {FLEX_ORDER_FIVE_MOMENT_DEGREE} | worst gap \
+             {worst_fraction:.3e} of the band",
+            derived.len()
+        );
+        assert!(
+            moved > 0,
+            "the fixture must reach a cell whose ladder rung moves with the degree, or the band \
+             bounds nothing"
+        );
     }
 
     fn make_complete_family_map_fixture() -> (SurvivalMarginalSlopeFamily, Vec<ParameterBlockState>)
