@@ -1,18 +1,20 @@
 #![cfg(test)]
-//! #2946 A2 and A3 pins for the retained-response operator.
+//! #2946 A2, A3 and A4 pins for the retained-response operator.
 //!
 //! The exact identities (A2 and the planted subspace) run on dyadic data: small-integer readers, frames and rotations
 //! built from `H = I − ½·11ᵀ`, whose entries are all `±½`. Every covariance `w_jᵀ P w_k` the operator forms is then
 //! computed exactly, both routes of an identity feed the kernel bit-identical arguments, and the identity holds
 //! bit for bit with no tolerance. The Monte Carlo pins run the executed block and accept within a standard-error
 //! multiple derived from a declared false-alarm rate, each with a positive control that the test shows it rejects.
-//! Every pin prints its numbers whether it passes or fails, so a green run is a receipt.
+//! The gradient pin (A4) accepts against a Richardson ladder of central differences within the ladder's own measured
+//! truncation, with the same kind of positive control. Every pin prints its numbers whether it passes or fails, so a
+//! green run is a receipt.
 
 use super::{KnownBlock, ResponseError};
 use gam_math::gaussian_activation::{
     GaussianActivation, PreactivationPair, gaussian_smoothing_derivatives, pair_kernel,
 };
-use gam_math::probability::standard_normal_quantile;
+use gam_math::probability::{normal_cdf, normal_pdf, standard_normal_quantile};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, array, s};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -614,4 +616,285 @@ fn a_signed_sum_carries_its_operand_bands_and_the_rounding_of_its_additions() {
     );
     assert_eq!(unresolved.value, 0.0);
     assert!(!unresolved.resolved_positive());
+}
+
+/// A block on [`overlapping_readers`] with dyadic biases of both signs, so every pair runs a biased kernel.
+fn biased_block(activation: GaussianActivation) -> KnownBlock {
+    KnownBlock::new(
+        overlapping_readers(),
+        array![0.5, -0.25, 1.0, -1.0],
+        writers(),
+        Array1::zeros(3),
+        metric().view(),
+        activation,
+    )
+    .expect("a finite biased block with a symmetric positive definite metric")
+}
+
+/// `Q(t) = Q + (Q y (cos t − 1) + x sin t) yᵀ`, the Grassmann geodesic from `frame` whose velocity at `t = 0` is the
+/// horizontal `x yᵀ`, for a unit `x` orthogonal to the frame and a unit `y`. It turns the retained direction `Q y`
+/// toward `x`, and `Q(t)ᵀ Q(t) = (I − y yᵀ) + y yᵀ = I`.
+fn geodesic_frame(frame: ArrayView2<'_, f64>, x: ArrayView1<'_, f64>, y: ArrayView1<'_, f64>, t: f64) -> Array2<f64> {
+    let turned = frame.dot(&y) * (t.cos() - 1.0) + &x * t.sin();
+    let mut moved = frame.to_owned();
+    for ((row, column), entry) in moved.indexed_iter_mut() {
+        *entry += turned[row] * y[column];
+    }
+    moved
+}
+
+/// `(V(Q(t)) − V(Q(−t))) / 2t` along [`geodesic_frame`].
+fn geodesic_central_difference(
+    block: &KnownBlock,
+    frame: ArrayView2<'_, f64>,
+    x: ArrayView1<'_, f64>,
+    y: ArrayView1<'_, f64>,
+    step: f64,
+) -> f64 {
+    let ahead = block
+        .explained_variance(geodesic_frame(frame, x, y, step).view())
+        .expect("a geodesic frame is orthonormal");
+    let behind = block
+        .explained_variance(geodesic_frame(frame, x, y, -step).view())
+        .expect("a geodesic frame is orthonormal");
+    (ahead - behind) / (2.0 * step)
+}
+
+/// `2 Σ_j (w_jᵀ x) B_jj (w_jᵀ Q y)`: the directional derivative `⟨2 Wᵀ B W Q, x yᵀ⟩` with every cross term `j ≠ k` of
+/// `B` dropped, the positive control the gradient pin must reject.
+fn diagonal_only_directional_derivative(
+    block: &KnownBlock,
+    frame: ArrayView2<'_, f64>,
+    x: ArrayView1<'_, f64>,
+    y: ArrayView1<'_, f64>,
+) -> f64 {
+    let readers = block.readers();
+    let coordinates = readers.dot(&frame);
+    let retained_direction = frame.dot(&y);
+    let mut total = 0.0;
+    for unit in 0..block.width() {
+        let reader = readers.row(unit);
+        // Integer readers and the dyadic frame form the variance and the covariance exactly, so the law states no
+        // rounding.
+        let variance = reader.dot(&reader);
+        let covariance = coordinates.row(unit).dot(&coordinates.row(unit));
+        let slope = pair_kernel(
+            block.activation(),
+            PreactivationPair {
+                mean_x: block.biases()[unit],
+                mean_y: block.biases()[unit],
+                variance_x: variance,
+                variance_y: variance,
+                covariance,
+                covariance_rounding: 0.0,
+            },
+        )
+        .expect("a biased pair kernel inside its Cauchy–Schwarz interval")
+        .covariance_derivative;
+        let metric_diagonal = block
+            .writers()
+            .column(unit)
+            .dot(&block.metric_writers().column(unit));
+        total += 2.0 * reader.dot(&x) * metric_diagonal * slope * reader.dot(&retained_direction);
+    }
+    total
+}
+
+#[test]
+fn the_frame_gradient_is_the_derivative_of_explained_variance_along_a_grassmann_geodesic() {
+    // A4. Along the geodesic `Q(t)` with velocity `x yᵀ`, `φ(t) = V(Q(t))` is smooth, so the central difference is
+    // `D(t) = φ'(0) + φ'''(0) t²/6 + O(t⁴)` and the Richardson value `R = (4 D(t/2) − D(t))/3 = φ'(0) + O(t⁴)`, both
+    // with roundoff `O(ε V / t)`. The ladder's step `D(t) − D(t/2) = φ'''(0) t²/8 + O(t⁴)` is the measured truncation
+    // of the coarser difference, and `R` is finer by two orders of `t`, so the gradient is accepted when
+    // `|⟨∇_Q V, x yᵀ⟩ − R| ≤ |D(t) − D(t/2)|`. Every pair is biased, so both biased kernels and their Price derivatives
+    // are exercised. The positive control is the same derivative with every cross term of `B` dropped.
+    let frame = retained_frame();
+    // `h₃` is a unit direction orthogonal to the frame, and `y` turns a mix of both retained directions toward it.
+    let x = half_reflector().column(2).to_owned();
+    let y = array![0.6, 0.8];
+    let step = 2.0_f64.powi(-7);
+    for activation in [GaussianActivation::Relu, GaussianActivation::ExactGelu] {
+        let block = biased_block(activation);
+        let gradient = block
+            .explained_variance_gradient(frame.view())
+            .expect("an orthonormal frame");
+        let analytic = x.dot(&gradient.horizontal_gradient.dot(&y));
+        let coarse = geodesic_central_difference(&block, frame.view(), x.view(), y.view(), step);
+        let fine = geodesic_central_difference(&block, frame.view(), x.view(), y.view(), step / 2.0);
+        let extrapolated = (4.0 * fine - coarse) / 3.0;
+        let truncation = (coarse - fine).abs();
+        let diagonal_only = diagonal_only_directional_derivative(&block, frame.view(), x.view(), y.view());
+        eprintln!(
+            "#2946 A4 {activation:?}: V(P) = {}; <grad V, x y^T> = {analytic}; central differences D({step}) = {coarse}, D({}) = {fine}; Richardson {extrapolated}; |analytic - Richardson| = {:e} against the ladder truncation {truncation:e}; control without cross terms {diagonal_only}, off by {:e}",
+            gradient.explained_variance,
+            step / 2.0,
+            (analytic - extrapolated).abs(),
+            (diagonal_only - extrapolated).abs(),
+        );
+        // One pass returns the value pass's V and E bit for bit.
+        assert_eq!(
+            gradient.explained_variance,
+            block
+                .explained_variance(frame.view())
+                .expect("an orthonormal frame"),
+        );
+        assert_eq!(
+            gradient.discarded_error,
+            block.total_variance() - gradient.explained_variance,
+        );
+        assert!(
+            (analytic - extrapolated).abs() <= truncation,
+            "{activation:?}: the frame gradient's directional derivative {analytic} must match the Richardson value {extrapolated} within the ladder's truncation {truncation}",
+        );
+        assert!(
+            (diagonal_only - extrapolated).abs() > truncation,
+            "{activation:?}: the derivative without cross terms {diagonal_only} must be rejected against {extrapolated} ± {truncation}",
+        );
+    }
+}
+
+/// #2946's saturation counterexample `F(z) = (GELU(10 z₁ − 10), 0.1 z₂)` as an exact-GELU block. The linear
+/// coordinate is `0.1 z₂ = 0.1 GELU(z₂) − 0.1 GELU(−z₂)`, because `GELU(t) − GELU(−t) = t (Φ(t) + Φ(−t)) = t`.
+fn saturation_block() -> KnownBlock {
+    KnownBlock::new(
+        array![[10.0, 0.0], [0.0, 1.0], [0.0, -1.0]],
+        array![-10.0, 0.0, 0.0],
+        array![[1.0, 0.0, 0.0], [0.0, 0.1, -0.1]],
+        Array1::zeros(2),
+        identity(2).view(),
+        GaussianActivation::ExactGelu,
+    )
+    .expect("the saturation block")
+}
+
+/// The executed exact GELU `t Φ(t)`.
+fn exact_gelu(t: f64) -> f64 {
+    t * normal_cdf(t)
+}
+
+/// `GELU'(t) = Φ(t) + t φ(t)`.
+fn exact_gelu_slope(t: f64) -> f64 {
+    normal_cdf(t) + t * normal_pdf(t)
+}
+
+/// The executed saturation block.
+fn execute_saturation_block(z: ArrayView1<'_, f64>) -> Array1<f64> {
+    array![
+        exact_gelu(10.0 * z[0] - 10.0),
+        0.1 * exact_gelu(z[1]) - 0.1 * exact_gelu(-z[1]),
+    ]
+}
+
+/// The active subspace `E[∇Fᵀ M ∇F] = Wᵀ B(I) W`. With `∇F(z) = U diag(σ'(b + W z)) W`, the average is
+/// `Wᵀ (D ∘ E[σ'(X_j) σ'(X_k)]) W`, and at the full covariance `w_jᵀ w_k` each `E[σ'(X_j) σ'(X_k)]` is the pair
+/// kernel's Price derivative `∂_r K_σ`. Integer readers make every law exact.
+fn active_subspace_matrix(block: &KnownBlock) -> Array2<f64> {
+    let readers = block.readers();
+    let input_dim = block.input_dim();
+    let mut average = Array2::<f64>::zeros((input_dim, input_dim));
+    for unit in 0..block.width() {
+        for other in 0..block.width() {
+            let slope_product = pair_kernel(
+                block.activation(),
+                PreactivationPair {
+                    mean_x: block.biases()[unit],
+                    mean_y: block.biases()[other],
+                    variance_x: readers.row(unit).dot(&readers.row(unit)),
+                    variance_y: readers.row(other).dot(&readers.row(other)),
+                    covariance: readers.row(unit).dot(&readers.row(other)),
+                    covariance_rounding: 0.0,
+                },
+            )
+            .expect("an exact pair law")
+            .covariance_derivative;
+            let weight = block
+                .writers()
+                .column(unit)
+                .dot(&block.metric_writers().column(other))
+                * slope_product;
+            for row in 0..input_dim {
+                for column in 0..input_dim {
+                    average[[row, column]] += readers[[unit, row]] * weight * readers[[other, column]];
+                }
+            }
+        }
+    }
+    average
+}
+
+#[test]
+fn the_saturated_coordinate_carries_the_discarded_error_and_the_averaged_gradient_ranks_it_first() {
+    // Retaining z₂ alone discards Var GELU(10 Z − 10), and retaining z₁ alone discards Var(0.1 Z₂) = 0.01. So the
+    // discarded error ranks z₁ first, although the block is nearly flat in z₁ at the baseline z = 0. Both errors are
+    // checked against the executed block through the coupling Z' = P Z + (I − P) Z̃, whose estimator
+    // ½‖F(Z) − F(Z')‖² touches no kernel code. The control is the active subspace E[∇Fᵀ M ∇F]: it ranks z₁ first too,
+    // so the ratio of discarded errors beats only a baseline-point Jacobian, which ranks z₂ first.
+    let block = saturation_block();
+    let coordinates = identity(2);
+    let discard_second = block
+        .discarded_error(coordinates.slice(s![.., ..1]))
+        .expect("retain z1");
+    let discard_first = block
+        .discarded_error(coordinates.slice(s![.., 1..]))
+        .expect("retain z2");
+    let active = active_subspace_matrix(&block);
+
+    let draws = 1 << 18;
+    let mut rng = StdRng::seed_from_u64(0x2946_5a7);
+    let mut first_discard_terms = Vec::with_capacity(draws);
+    let mut second_discard_terms = Vec::with_capacity(draws);
+    let mut active_first_terms = Vec::with_capacity(draws);
+    while first_discard_terms.len() < draws {
+        let z = standard_normal_vector(&mut rng, 2);
+        let independent = standard_normal_vector(&mut rng, 2);
+        let output = execute_saturation_block(z.view());
+        // Retaining z₂ redraws z₁, and retaining z₁ redraws z₂.
+        let without_first = execute_saturation_block(array![independent[0], z[1]].view());
+        let without_second = execute_saturation_block(array![z[0], independent[1]].view());
+        let difference_first = &output - &without_first;
+        let difference_second = &output - &without_second;
+        first_discard_terms.push(0.5 * difference_first.dot(&difference_first));
+        second_discard_terms.push(0.5 * difference_second.dot(&difference_second));
+        // The executed Jacobian's first column is (10 GELU'(10 z₁ − 10), 0), and M = I.
+        active_first_terms.push((10.0 * exact_gelu_slope(10.0 * z[0] - 10.0)).powi(2));
+    }
+    let multiple = standard_error_multiple(3);
+    let (first_estimate, first_se) = mean_and_standard_error(&first_discard_terms);
+    let (second_estimate, second_se) = mean_and_standard_error(&second_discard_terms);
+    let (active_first_estimate, active_first_se) = mean_and_standard_error(&active_first_terms);
+    // The baseline-point Jacobian at z = 0, as squared column norms.
+    let point_first = (10.0 * exact_gelu_slope(-10.0)).powi(2);
+    let point_second = (0.1 * (exact_gelu_slope(0.0) + exact_gelu_slope(0.0))).powi(2);
+    eprintln!(
+        "#2946 A3 saturation: E(retain z2) = {discard_first} executed MC {first_estimate} se {first_se}; E(retain z1) = {discard_second} executed MC {second_estimate} se {second_se}; ratio {}; active subspace diagonal ({}, {}), off-diagonal {}, executed MC of the first {active_first_estimate} se {active_first_se}; baseline-point Jacobian diagonal ({point_first:e}, {point_second}); multiple {multiple:.3} draws {draws}",
+        discard_first / discard_second,
+        active[[0, 0]],
+        active[[1, 1]],
+        active[[0, 1]],
+    );
+    let arms = [
+        ("E(retain z2)", discard_first, first_estimate, first_se),
+        ("E(retain z1)", discard_second, second_estimate, second_se),
+        ("E[grad F^T M grad F]_11", active[[0, 0]], active_first_estimate, active_first_se),
+    ];
+    for (label, analytic, estimate, standard_error) in arms {
+        assert!(
+            (analytic - estimate).abs() <= multiple * standard_error,
+            "{label}: analytic {analytic} vs executed Monte Carlo {estimate} ± {standard_error} (multiple {multiple})",
+        );
+    }
+    assert!(
+        discard_first > discard_second,
+        "the saturated coordinate must carry the discarded error: {discard_first} vs {discard_second}",
+    );
+    assert!(
+        active[[0, 0]] > active[[1, 1]],
+        "the active subspace must rank z1 first: {} vs {}",
+        active[[0, 0]],
+        active[[1, 1]],
+    );
+    assert!(
+        point_first < point_second,
+        "the baseline-point Jacobian must rank z2 first: {point_first:e} vs {point_second}",
+    );
 }
