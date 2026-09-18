@@ -2796,7 +2796,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             let warm_ref = if force_cold {
                 canonical_seed.as_ref()
             } else {
-                screened_outer_warm_start(outer.warm_cache.as_ref(), rho)
+                outer.warm_start_for(rho)
             };
             return match outerobjectivegradienthessian_labeled(
                 family,
@@ -2884,7 +2884,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         let warm_ref = if force_cold {
             canonical_seed.as_ref()
         } else {
-            screened_outer_warm_start(outer.warm_cache.as_ref(), rho)
+            outer.warm_start_for(rho)
         };
         let eval_result = match outerobjectivegradienthessian_labeled(
             family,
@@ -3030,7 +3030,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             let warm_ref = if force_cold {
                 canonical_seed.as_ref()
             } else {
-                screened_outer_warm_start(outer.warm_cache.as_ref(), rho)
+                outer.warm_start_for(rho)
             };
             match outerobjectivegradienthessian_labeled(
                 family,
@@ -3107,7 +3107,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 outer.record_refusal(failure.clone());
                 return Err(EstimationError::CustomFamily(failure));
             }
-            let warm_ref = screened_outer_warm_start(outer.warm_cache.as_ref(), rho);
+            let warm_ref = outer.warm_start_for(rho);
             match outerobjectiveefs(
                 family,
                 specs,
@@ -3143,7 +3143,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             }
         }),
         |outer: &mut CustomOuterState, rho: &Array1<f64>| {
-            let warm_ref = screened_outer_warm_start(outer.warm_cache.as_ref(), rho);
+            let warm_ref = outer.warm_start_for(rho);
             match custom_family_seed_screening_proxy_labeled(
                 family,
                 specs,

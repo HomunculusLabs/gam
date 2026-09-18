@@ -7876,6 +7876,7 @@ mod anchored_continuation_2366;
 mod joint_hessian_drift_fd_979;
 
 mod residual_summand_floor_2976;
+mod walk_endpoint_mode_2627;
 
 /// gam#2360. `audit_converged_identifiability` handed the drift audit a bare
 /// `vec![0.0; n]` as the pilot β. The pilot the PRE-FIT audit linearized at is

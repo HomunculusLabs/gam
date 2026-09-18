@@ -1253,9 +1253,33 @@ pub(crate) struct CustomOuterState {
     /// Mode of the latest converged first-order evaluation since the last
     /// accepted step, held until the optimizer reports that step accepted.
     pub(crate) pending_first_order_mode: Option<ConstrainedWarmStart>,
+    /// Certified mode of the current walk's latest accepted iterate: the walk's
+    /// starting iterate, then each iterate the optimizer accepts (#2627).
+    pub(crate) walk_iterate: Option<ConstrainedWarmStart>,
+    /// Certified modes of the walks a reset has ended, keyed by the bits of the θ
+    /// each walk last accepted (#2627).
+    ///
+    /// An evaluation at a θ a walk accepted is solved from that iterate's own
+    /// certified mode, the rule `ExactCoefficientModeBranch` applies to the
+    /// exact-joint drivers (gam#2765). The terminal certification resets before
+    /// each of its installations at the winner's θ, and a reset leaves the
+    /// caller's seed. Without this, every one of those installations re-solved
+    /// from that seed the mode the walk had already certified at θ: six identical
+    /// cold 26-cycle solves, about 61 s, on the event-history prior-centred fit
+    /// (job 1212656). Solved from the certified mode, each is a same-ρ reuse, and
+    /// finalize and certify still start from one state (#2334). A filed mode is
+    /// a start, not a value: the inner solve reuses it only when its own same-ρ
+    /// check accepts it under the evaluation's current contract, and otherwise
+    /// seeds β from it. One mode per walk, not per iterate: inside a walk the
+    /// incumbent's own θ is served by `warm_cache`.
+    pub(crate) walk_endpoints: Vec<(Vec<u64>, ConstrainedWarmStart)>,
     /// Kept rank of the criterion the most recent successful evaluation priced (#2765),
     /// published to the outer search through `OuterObjective::criterion_rank`.
     pub(crate) last_criterion_rank: Option<usize>,
+}
+
+fn theta_bits(theta: &Array1<f64>) -> Vec<u64> {
+    theta.iter().map(|value| value.to_bits()).collect()
 }
 
 impl CustomOuterState {
@@ -1278,8 +1302,23 @@ impl CustomOuterState {
             accepted_steps_adopted,
             incumbent_established: false,
             pending_first_order_mode: None,
+            walk_iterate: None,
+            walk_endpoints: Vec::new(),
             last_criterion_rank: None,
         }
+    }
+
+    /// The seed of one outer evaluation at `theta`: the certified mode a walk
+    /// accepted at `theta` when there is one, otherwise the incumbent's (#2627,
+    /// #2668).
+    pub(crate) fn warm_start_for(&self, theta: &Array1<f64>) -> Option<&ConstrainedWarmStart> {
+        let key = theta_bits(theta);
+        let endpoint = self
+            .walk_endpoints
+            .iter()
+            .find(|(bits, _)| *bits == key)
+            .map(|(_, mode)| mode);
+        screened_outer_warm_start(endpoint.or(self.warm_cache.as_ref()), theta)
     }
 
     /// Observe the shared cold-reeval pulse (consuming it) and the sticky
@@ -1295,7 +1334,8 @@ impl CustomOuterState {
     }
 
     /// Fold in every outer step the optimizer accepted since the previous
-    /// evaluation (#2668). Called at the head of each search evaluation.
+    /// evaluation (#2668). Called at the head of each search evaluation and by
+    /// [`Self::reset`].
     ///
     /// The accept observer fires once the accepted iterate's first-order
     /// evaluation has run, so the pending mode is that iterate's, and it becomes
@@ -1308,8 +1348,13 @@ impl CustomOuterState {
         }
         self.accepted_steps_adopted = reported;
         if let Some(mode) = self.pending_first_order_mode.take() {
-            self.warm_cache = Some(mode);
+            self.accept_iterate(mode);
         }
+    }
+
+    fn accept_iterate(&mut self, mode: ConstrainedWarmStart) {
+        self.walk_iterate = Some(mode.clone());
+        self.warm_cache = Some(mode);
     }
 
     /// Record the inner mode of a converged first-order evaluation (#2668).
@@ -1322,7 +1367,7 @@ impl CustomOuterState {
         if self.incumbent_established {
             self.pending_first_order_mode = Some(mode);
         } else {
-            self.warm_cache = Some(mode);
+            self.accept_iterate(mode);
             self.incumbent_established = true;
         }
     }
@@ -1357,11 +1402,27 @@ impl CustomOuterState {
             self.reset_warm_cache = self.warm_cache.clone();
             self.terminal_mode = None;
             self.last_error = None;
+            // The pilot's certified modes were solved on the sampled measure, so
+            // none of them is the exact stage's certified mode at its θ (#2627).
+            self.walk_endpoints.clear();
+            self.walk_iterate = None;
+            self.pending_first_order_mode = None;
         }
         transitioned
     }
 
     pub(crate) fn reset(&mut self) {
+        // A reset ends the walk. Its last accepted iterate is usually still
+        // pending, because the optimizer reports the final step accepted and then
+        // stops, so no evaluation folds it in (#2627). Fold it in and file the
+        // walk's certified mode under its θ before the caller's seed replaces the
+        // incumbent.
+        self.adopt_accepted_steps();
+        if let Some(mode) = self.walk_iterate.take() {
+            let key = theta_bits(&mode.rho);
+            self.walk_endpoints.retain(|(bits, _)| *bits != key);
+            self.walk_endpoints.push((key, mode));
+        }
         self.warm_cache = self.reset_warm_cache.clone();
         self.terminal_mode = None;
         // The reset seed is the caller's, not an evaluated incumbent, and steps
