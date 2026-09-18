@@ -36,3 +36,4 @@ pub mod quantile;
 // SwiGLU/SiLU gate kernels for the finite-response calculation (#2946 R9).
 pub mod gaussian_gated;
 mod double_double;
+pub mod sparse_grid;

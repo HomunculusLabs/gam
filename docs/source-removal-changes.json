@@ -232,5 +232,24 @@
     ],
     "reason": "#2946 T3 (Stage A census): renames with no value change. log_bayes_factor(a, b) returns b - a, the gap between two minimised criterion costs. It serves the raw REML/LAML score table and the conditional-AIC ranking delta, and is a Bayes factor on neither, so it becomes criterion_gap. The private formatter format_bayes_factor formats exp() of its argument and becomes format_exp_ratio.",
     "evidence": "At origin/main 96c3427cca, git grep on lane sw2c finds log_bayes_factor only in crates/gam-solve/src/evidence.rs (the definition and two callers in compare_reml_fits), crates/gam-pyffi/src/ffi/ffi_prelude.rs:97 (the import) and crates/gam-pyffi/src/model/model_ffi.rs:1418, plus two Python test docstrings. format_bayes_factor occurs only in evidence.rs (the definition, one call, one comment). Every occurrence is renamed in this commit."
+  },
+  {
+    "base": "09af7c1b1fb6e9cfea9c12528381bd1ff083613a",
+    "items": [
+      "crates/gam-models/src/multinomial_posterior.rs:fn:add",
+      "crates/gam-models/src/multinomial_posterior.rs:fn:add_moment",
+      "crates/gam-models/src/multinomial_posterior.rs:fn:add_weight",
+      "crates/gam-models/src/multinomial_posterior.rs:fn:binomial_as_f64",
+      "crates/gam-models/src/multinomial_posterior.rs:fn:finish",
+      "crates/gam-models/src/multinomial_posterior.rs:fn:new",
+      "crates/gam-models/src/multinomial_posterior.rs:fn:stream_axes",
+      "crates/gam-models/src/multinomial_posterior.rs:fn:stream_compositions",
+      "crates/gam-models/src/multinomial_posterior.rs:fn:stream_tensor",
+      "crates/gam-models/src/multinomial_posterior.rs:fn:value",
+      "crates/gam-models/src/multinomial_posterior.rs:struct:CompensatedSum",
+      "crates/gam-models/src/multinomial_posterior.rs:struct:QuadratureAccumulator"
+    ],
+    "reason": "#1082: the isotropic Smolyak combination, its streamed tensor nodes and the compensated accumulator move from multinomial_posterior.rs into gam_math::sparse_grid, one owner the #784 block marginal can reach. CompensatedSum (new, add, value), QuadratureAccumulator (new becomes from_zeroed; add_moment, add_weight, finish) and binomial_as_f64 move verbatim. QuadratureWorkspace's stream_compositions, stream_tensor and stream_axes move verbatim as visitor-driven functions, and the Smolyak coefficient loop becomes stream_isotropic_smolyak_level. multinomial_posterior keeps its integrand, certificate, accounting and messages, and calls gam-math.",
+    "evidence": "Gate dy3 smolyak784-g1 (direct-dy3-smolyak784-g1.log, base f7585a5a38): workspace check RC 0, 12/12 multinomial_posterior tests, guard 0 with this entry. Check-only Slurm job 1245802 at 63f78a364e: RC 0 with gam-pyffi. Bit identity: Slurm job 1224608. The item list is the refusal of scripts/source_removal_guard.py over the private landing commit de0b3baccc (base c72da1b750, tree 5ccabe3c = the kit's DRY tree, patch md5 6bcca6af): fn add, add_moment, add_weight, binomial_as_f64, finish, new, stream_axes, stream_compositions, stream_tensor, value, and structs CompensatedSum and QuadratureAccumulator, all private to multinomial_posterior.rs. The fn new removal is CompensatedSum::new and QuadratureAccumulator::new: at the base the file declares five fn new, and after the move three remain (ThreeClassConditionalIntegrand::new, RowIntegrand::new, QuadratureWorkspace::new)."
   }
 ]
