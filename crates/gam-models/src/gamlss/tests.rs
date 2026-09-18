@@ -2772,6 +2772,8 @@ pub(crate) fn gaussian_location_scale_terms_reject_invalidweights_early() {
         Ok(_) => panic!("term API should reject negative weights"),
         Err(err) => err,
     };
+    assert_eq!(err.category(), gam_problem::FailureCategory::Input, "{err}");
+    let err = err.to_string();
     assert!(err.contains("weights must be finite and non-negative"));
 }
 
@@ -2802,6 +2804,8 @@ pub(crate) fn binomial_location_scale_terms_reject_invalid_response_early() {
         Ok(_) => panic!("term API should reject invalid binomial responses"),
         Err(err) => err,
     };
+    assert_eq!(err.category(), gam_problem::FailureCategory::Input, "{err}");
+    let err = err.to_string();
     assert!(err.contains("binomial response must be finite in [0,1]"));
 }
 
@@ -2828,6 +2832,8 @@ pub(crate) fn binomial_location_scale_terms_reject_free_log_sigma_terms_early() 
         Ok(_) => panic!("Bernoulli free log_sigma terms must be rejected"),
         Err(err) => err,
     };
+    assert_eq!(err.category(), gam_problem::FailureCategory::Input, "{err}");
+    let err = err.to_string();
     assert!(err.contains("identify only the composite q = -threshold / sigma"));
     assert!(err.contains("log_sigma must be intercept-only/fixed"));
 }
@@ -2855,6 +2861,8 @@ pub(crate) fn binomial_location_scale_terms_reject_datarow_mismatch_early() {
         Ok(_) => panic!("term API should reject data/y row mismatches"),
         Err(err) => err,
     };
+    assert_eq!(err.category(), gam_problem::FailureCategory::Input, "{err}");
+    let err = err.to_string();
     assert!(err.contains("data row count must match response length"));
 }
 

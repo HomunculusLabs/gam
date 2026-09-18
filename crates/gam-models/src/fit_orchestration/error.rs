@@ -657,6 +657,15 @@ impl From<SurvivalMarginalSlopeError> for FitFailure {
     }
 }
 
+/// A term-design construction refusal, under the category the engine gives it
+/// as [`EstimationError::BasisError`], with the basis error's own text.
+impl From<gam_problem::BasisError> for FitFailure {
+    fn from(err: gam_problem::BasisError) -> Self {
+        let reason = err.to_string();
+        Self::raised(EstimationError::from(err).failure_category(), reason)
+    }
+}
+
 impl From<WorkflowError> for FitFailure {
     fn from(err: WorkflowError) -> Self {
         match err {

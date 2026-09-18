@@ -808,7 +808,7 @@ trait LocationScaleWorkflowAdapter {
         spec: &Self::Spec,
         options: &BlockwiseFitOptions,
         kappa_options: &SpatialLengthScaleOptimizationOptions,
-    ) -> Result<BlockwiseTermFitResult, String>;
+    ) -> Result<BlockwiseTermFitResult, FitFailure>;
 
     /// Select the link-wiggle basis from the pilot, then refit the full model
     /// with that selected wiggle block. Consumes `spec`.
@@ -819,7 +819,7 @@ trait LocationScaleWorkflowAdapter {
         wiggle_cfg: &LinkWiggleConfig,
         options: &BlockwiseFitOptions,
         kappa_options: &SpatialLengthScaleOptimizationOptions,
-    ) -> Result<BlockwiseTermWiggleFitResult, String>;
+    ) -> Result<BlockwiseTermWiggleFitResult, FitFailure>;
 
     /// Plain non-wiggle fit, used when no wiggle config is present. Consumes
     /// `spec`.
@@ -828,7 +828,7 @@ trait LocationScaleWorkflowAdapter {
         spec: Self::Spec,
         options: &BlockwiseFitOptions,
         kappa_options: &SpatialLengthScaleOptimizationOptions,
-    ) -> Result<BlockwiseTermFitResult, String>;
+    ) -> Result<BlockwiseTermFitResult, FitFailure>;
 
     /// Assemble the family result from a non-wiggle fit (knots/degree/wiggle
     /// coefficients all absent).
@@ -851,7 +851,7 @@ trait LocationScaleWorkflowAdapter {
 fn require_location_scale_covariance_or_decline(
     fit: &UnifiedFitResult,
     context: &str,
-) -> Result<(), String> {
+) -> Result<(), FitFailure> {
     if fit.beta_covariance().is_some() {
         return Ok(());
     }
@@ -862,8 +862,13 @@ fn require_location_scale_covariance_or_decline(
         );
         return Ok(());
     }
-    Err(format!(
-        "{context} reached assembly without its joint posterior covariance or a typed constrained-posterior moment decline; no model was minted"
+    // The fit was asked for its covariance, so returning neither it nor a typed
+    // decline breaks the engine's own contract (#2937).
+    Err(FitFailure::raised(
+        gam_problem::FailureCategory::Invariant,
+        format!(
+            "{context} reached assembly without its joint posterior covariance or a typed constrained-posterior moment decline; no model was minted"
+        ),
     ))
 }
 
@@ -872,7 +877,7 @@ fn require_location_scale_covariance_or_decline(
 /// their [`LocationScaleWorkflowAdapter`].
 fn fit_location_scale_with_optional_wiggle<A: LocationScaleWorkflowAdapter>(
     request: A::Request<'_>,
-) -> Result<A::Result, String> {
+) -> Result<A::Result, FitFailure> {
     let LocationScaleWorkflowParts {
         data,
         spec,
@@ -929,7 +934,8 @@ fn fit_location_scale_with_optional_wiggle<A: LocationScaleWorkflowAdapter>(
         noisespec_resolved: solved.fit.noisespec_resolved,
         mean_design: solved.fit.mean_design,
         noise_design: solved.fit.noise_design,
-    })?;
+    })
+    .map_err(crate::gamlss::assembly_failure)?;
     Ok(A::assemble_with_wiggle(
         assembled_fit,
         solved.wiggle_knots,
@@ -961,7 +967,7 @@ impl LocationScaleWorkflowAdapter for GaussianLocationScaleWorkflow {
         spec: &Self::Spec,
         options: &BlockwiseFitOptions,
         kappa_options: &SpatialLengthScaleOptimizationOptions,
-    ) -> Result<BlockwiseTermFitResult, String> {
+    ) -> Result<BlockwiseTermFitResult, FitFailure> {
         // Gaussian location-scale uses an identity mean link; the joint wiggle
         // refit is always admissible, so the pilot fits with no extra guard.
         fit_gaussian_location_scale_terms(
@@ -986,7 +992,7 @@ impl LocationScaleWorkflowAdapter for GaussianLocationScaleWorkflow {
         wiggle_cfg: &LinkWiggleConfig,
         options: &BlockwiseFitOptions,
         kappa_options: &SpatialLengthScaleOptimizationOptions,
-    ) -> Result<BlockwiseTermWiggleFitResult, String> {
+    ) -> Result<BlockwiseTermWiggleFitResult, FitFailure> {
         let selected_wiggle_basis = select_gaussian_location_scale_link_wiggle_basis_from_pilot(
             pilot,
             &WiggleBlockConfig {
@@ -1011,7 +1017,7 @@ impl LocationScaleWorkflowAdapter for GaussianLocationScaleWorkflow {
         spec: Self::Spec,
         options: &BlockwiseFitOptions,
         kappa_options: &SpatialLengthScaleOptimizationOptions,
-    ) -> Result<BlockwiseTermFitResult, String> {
+    ) -> Result<BlockwiseTermFitResult, FitFailure> {
         fit_gaussian_location_scale_terms(data, spec, options, kappa_options)
     }
 
@@ -1070,14 +1076,15 @@ impl LocationScaleWorkflowAdapter for BinomialLocationScaleWorkflow {
         spec: &Self::Spec,
         options: &BlockwiseFitOptions,
         kappa_options: &SpatialLengthScaleOptimizationOptions,
-    ) -> Result<BlockwiseTermFitResult, String> {
+    ) -> Result<BlockwiseTermFitResult, FitFailure> {
         // Binomial location-scale requires an inverse link that supports the
         // joint link-wiggle refit; gate it before any fitting work (the pilot
         // runs only on the wiggle path).
         require_inverse_link_supports_joint_wiggle(
             &spec.link_kind,
             "binomial location-scale link wiggle",
-        )?;
+        )
+        .map_err(|reason| FitFailure::raised(gam_problem::FailureCategory::Input, reason))?;
         fit_binomial_location_scale_terms(
             data,
             BinomialLocationScaleTermSpec {
@@ -1101,7 +1108,7 @@ impl LocationScaleWorkflowAdapter for BinomialLocationScaleWorkflow {
         wiggle_cfg: &LinkWiggleConfig,
         options: &BlockwiseFitOptions,
         kappa_options: &SpatialLengthScaleOptimizationOptions,
-    ) -> Result<BlockwiseTermWiggleFitResult, String> {
+    ) -> Result<BlockwiseTermWiggleFitResult, FitFailure> {
         let selected_wiggle_basis = select_binomial_location_scale_link_wiggle_basis_from_pilot(
             pilot,
             &WiggleBlockConfig {
@@ -1126,7 +1133,7 @@ impl LocationScaleWorkflowAdapter for BinomialLocationScaleWorkflow {
         spec: Self::Spec,
         options: &BlockwiseFitOptions,
         kappa_options: &SpatialLengthScaleOptimizationOptions,
-    ) -> Result<BlockwiseTermFitResult, String> {
+    ) -> Result<BlockwiseTermFitResult, FitFailure> {
         fit_binomial_location_scale_terms(data, spec, options, kappa_options)
     }
 
@@ -1513,7 +1520,10 @@ pub(crate) fn fit_gaussian_location_scale_model(
     let mut result =
         fit_location_scale_with_optional_wiggle::<GaussianLocationScaleWorkflow>(request)?;
 
-    rescale_gaussian_location_scale_to_raw(&mut result, response_scale)?;
+    // The raw-unit remap rewrites a fitted result the engine assembled, so its
+    // refusals are shape disagreements inside that result (#2937).
+    rescale_gaussian_location_scale_to_raw(&mut result, response_scale)
+        .map_err(crate::gamlss::assembly_failure)?;
     Ok(result)
 }
 
@@ -1538,7 +1548,6 @@ pub(crate) fn fit_binomial_location_scale_model(
     request: BinomialLocationScaleFitRequest<'_>,
 ) -> Result<BinomialLocationScaleFitResult, FitFailure> {
     fit_location_scale_with_optional_wiggle::<BinomialLocationScaleWorkflow>(request)
-        .map_err(FitFailure::from)
 }
 
 /// Penalized effective degrees of freedom for a survival transformation fit.
