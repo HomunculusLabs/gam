@@ -116,7 +116,7 @@ use super::state::{
     LocalQuotient, NativeMap, StateChart, StateDomain, StateError, StateRow, constant_rank_check,
     fiber_test, resolve_stacked_factor,
 };
-use super::supports::{EvidenceStatus, EvidenceStatusError, Extremum};
+use super::supports::{EvidenceStatus, EvidenceStatusError, ExactBasis, Extremum};
 
 /// One declared intervention of the family: its native response, its mass under
 /// the declared finite measure, and the factor of its output metric.
@@ -911,68 +911,18 @@ impl<'a> CategoricalFamily<'a> {
         }
         let encoder = chart.encoder();
         let decoder = chart.decoder();
-        let mut tested_states = 0_usize;
-        let mut vacuous_states = 0_usize;
-        let mut largest_upper = 0.0_f64;
-        let mut largest_roundoff = 0.0_f64;
-        // The state with the largest computed `divergence − roundoff`: if it is not
-        // certified above the fidelity, no state is.
-        let mut strongest: Option<(usize, f64, f64, f64)> = None;
+        let mut record = DivergenceRecord::new();
         for (index, state) in states.rows().into_iter().enumerate() {
             let code = encoder.evaluate(state, 0.0)?;
             let representative = decoder.evaluate(code.value.view(), 0.0)?;
             if sup_distance(state, representative.value.view()) <= representative.roundoff {
-                vacuous_states += 1;
+                record.vacuous_states += 1;
                 continue;
             }
-            tested_states += 1;
             let (divergence, roundoff) = self.weighted_divergence(state, &representative)?;
-            largest_upper = largest_upper.max(certified_sum(divergence, roundoff));
-            largest_roundoff = largest_roundoff.max(roundoff);
-            let larger = match strongest {
-                Some((_, best, best_roundoff, _)) => divergence - roundoff > best - best_roundoff,
-                None => true,
-            };
-            if larger {
-                strongest = Some((index, divergence, roundoff, code.roundoff));
-            }
+            record.observe(index, divergence, roundoff, code.roundoff)?;
         }
-        let (state, divergence, roundoff, merge_bound) = match strongest {
-            Some(strongest) => strongest,
-            None => {
-                return Err(StateError::VacuousFiberTest {
-                    states: vacuous_states,
-                }
-                .into());
-            }
-        };
-        let futures = self.members.len();
-        Ok(if excess_over(divergence, roundoff, fidelity) {
-            DivergenceVerdict::Separated {
-                state: StateRow(state),
-                divergence,
-                roundoff,
-                fidelity,
-                merge_bound,
-            }
-        } else if largest_upper <= fidelity {
-            DivergenceVerdict::WithinFidelity {
-                tested_states,
-                vacuous_states,
-                futures,
-                divergence_upper_bound: largest_upper,
-                roundoff: largest_roundoff,
-            }
-        } else {
-            DivergenceVerdict::Unresolved {
-                tested_states,
-                vacuous_states,
-                futures,
-                divergence_lower_bound: rounded_down(divergence, roundoff).max(0.0),
-                divergence_upper_bound: largest_upper,
-                witness: StateRow(state),
-            }
-        })
+        record.verdict(fidelity, self.members.len())
     }
 
     /// `Σ_α ν_α KL(softmax z_α(h) ‖ softmax z_α(r̂))` and a bound on its distance
@@ -1042,7 +992,7 @@ pub enum DivergenceVerdict {
     /// At `state` the weighted divergence from its section representative exceeds
     /// the declared fidelity by more than its roundoff: the chart is refuted at
     /// that state. The chart merges the pair within `merge_bound` in code space.
-    /// This is the state with the largest certified excess.
+    /// This is the state with the largest owned certified lower bound.
     Separated {
         state: StateRow,
         divergence: f64,
@@ -1122,6 +1072,138 @@ impl DivergenceVerdict {
     }
 }
 
+/// The tested states of a divergence check, each read through the owned evidence
+/// status of one exactly evaluated item.
+///
+/// The strongest state is the one with the largest owned certified lower bound.
+/// [`EvidenceStatus::refutes_at_most`] is monotone in that bound, so if the strongest
+/// state does not refute the declared fidelity, no state does. A state whose computed
+/// `divergence − roundoff` is larger only by an unrounded difference cannot shadow a
+/// certified one.
+struct DivergenceRecord {
+    tested_states: usize,
+    vacuous_states: usize,
+    largest_upper: f64,
+    largest_roundoff: f64,
+    strongest: Option<StrongestState>,
+}
+
+/// The state with the largest owned certified lower bound so far.
+struct StrongestState {
+    state: usize,
+    divergence: f64,
+    roundoff: f64,
+    merge_bound: f64,
+    /// `None` when the evaluation claimed no finite bound. Such a state keeps only the
+    /// lower side 0 that every divergence has.
+    item: Option<EvidenceStatus<StateRow, StateDomain>>,
+    lower: f64,
+}
+
+impl DivergenceRecord {
+    fn new() -> Self {
+        Self {
+            tested_states: 0,
+            vacuous_states: 0,
+            largest_upper: 0.0,
+            largest_roundoff: 0.0,
+            strongest: None,
+        }
+    }
+
+    /// Record one tested state's divergence and its roundoff.
+    fn observe(
+        &mut self,
+        state: usize,
+        divergence: f64,
+        roundoff: f64,
+        merge_bound: f64,
+    ) -> Result<(), ResponseMetricError> {
+        self.tested_states += 1;
+        let item = if divergence.is_finite() && roundoff.is_finite() {
+            Some(
+                EvidenceStatus::exact(
+                    divergence,
+                    roundoff,
+                    ExactBasis::Exhaustive { cardinality: 1 },
+                    Some(StateRow(state)),
+                    StateDomain::States { count: 1 },
+                )
+                .map_err(ResponseMetricError::Evidence)?,
+            )
+        } else {
+            None
+        };
+        let lower = item
+            .as_ref()
+            .and_then(EvidenceStatus::lower_bound)
+            .unwrap_or(0.0)
+            .max(0.0);
+        let upper = item
+            .as_ref()
+            .and_then(EvidenceStatus::upper_bound)
+            .unwrap_or(f64::INFINITY);
+        self.largest_upper = self.largest_upper.max(upper);
+        self.largest_roundoff = self.largest_roundoff.max(roundoff);
+        let larger = match &self.strongest {
+            Some(best) => lower > best.lower,
+            None => true,
+        };
+        if larger {
+            self.strongest = Some(StrongestState {
+                state,
+                divergence,
+                roundoff,
+                merge_bound,
+                item,
+                lower,
+            });
+        }
+        Ok(())
+    }
+
+    /// The verdict at the declared fidelity, decided through the owned predicates.
+    fn verdict(
+        &self,
+        fidelity: f64,
+        futures: usize,
+    ) -> Result<DivergenceVerdict, ResponseMetricError> {
+        let strongest = self.strongest.as_ref().ok_or(StateError::VacuousFiberTest {
+            states: self.vacuous_states,
+        })?;
+        let refuted = strongest
+            .item
+            .as_ref()
+            .is_some_and(|item| item.refutes_at_most(fidelity));
+        Ok(if refuted {
+            DivergenceVerdict::Separated {
+                state: StateRow(strongest.state),
+                divergence: strongest.divergence,
+                roundoff: strongest.roundoff,
+                fidelity,
+                merge_bound: strongest.merge_bound,
+            }
+        } else if self.largest_upper <= fidelity {
+            DivergenceVerdict::WithinFidelity {
+                tested_states: self.tested_states,
+                vacuous_states: self.vacuous_states,
+                futures,
+                divergence_upper_bound: self.largest_upper,
+                roundoff: self.largest_roundoff,
+            }
+        } else {
+            DivergenceVerdict::Unresolved {
+                tested_states: self.tested_states,
+                vacuous_states: self.vacuous_states,
+                futures,
+                divergence_lower_bound: strongest.lower,
+                divergence_upper_bound: self.largest_upper,
+                witness: StateRow(strongest.state),
+            }
+        })
+    }
+}
+
 /// Errors and refusals of the response metric.
 #[derive(Debug)]
 pub enum ResponseMetricError {
@@ -1151,6 +1233,8 @@ pub enum ResponseMetricError {
     EmptyCategories { member: usize },
     /// A divergence between logit vectors was refused.
     Categorical(CategoricalError),
+    /// An evidence-status constructor refused a value.
+    Evidence(EvidenceStatusError),
     /// A state check failed or refused.
     State(StateError),
 }
@@ -1200,6 +1284,7 @@ impl fmt::Display for ResponseMetricError {
                 "categorical family: member {member} has no categories"
             ),
             Self::Categorical(source) => write!(formatter, "{source}"),
+            Self::Evidence(source) => write!(formatter, "{source}"),
             Self::State(source) => write!(formatter, "{source}"),
         }
     }
@@ -1209,6 +1294,7 @@ impl std::error::Error for ResponseMetricError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Categorical(source) => Some(source),
+            Self::Evidence(source) => Some(source),
             Self::State(source) => Some(source),
             _ => None,
         }
@@ -1325,29 +1411,6 @@ fn sup_distance(left: ArrayView1<'_, f64>, right: ArrayView1<'_, f64>) -> f64 {
     left.iter()
         .zip(right.iter())
         .fold(0.0_f64, |largest, (a, b)| largest.max((a - b).abs()))
-}
-
-/// `value + err`, rounded up when `err` is nonzero, so it bounds the exact sum.
-fn certified_sum(value: f64, err: f64) -> f64 {
-    let sum = value + err;
-    if err == 0.0 { sum } else { sum.next_up() }
-}
-
-/// `value − err`, rounded down when `err` is nonzero, so the exact difference
-/// bounds it from above.
-fn rounded_down(value: f64, err: f64) -> f64 {
-    let difference = value - err;
-    if err == 0.0 {
-        difference
-    } else {
-        difference.next_down()
-    }
-}
-
-/// Whether `value` exceeds `threshold` by more than `err`: the predicate
-/// [`EvidenceStatus::counterexample`] reads, so a separation always converts.
-fn excess_over(value: f64, err: f64, threshold: f64) -> bool {
-    rounded_down(value, err) > threshold
 }
 
 #[cfg(test)]
@@ -2213,6 +2276,67 @@ mod tests {
                 assert_eq!((expected, found), (2, 1))
             }
             other => panic!("a chart on another state space must be refused, got {other:?}"),
+        }
+    }
+
+    /// The strongest tested state is ranked by the owned certified lower bound, not
+    /// by an unrounded `divergence − roundoff`. State 0 (1.5 ± 0.5) and state 1
+    /// (1.0 ± 0) have the same computed difference 1.0, but the owned lower bound of
+    /// state 0 is `1.0.next_down()` and that of state 1 is exactly 1.0. At the declared
+    /// fidelity `1.0.next_down()` only state 1 refutes. The unrounded ranking kept
+    /// whichever state came first, so with state 0 first it returned Unresolved. Both
+    /// orders now give Separated with witness state 1. Controls: an unclaimed bound
+    /// keeps only the trivial lower side and no upper side, and no tested state is a
+    /// vacuous check.
+    #[test]
+    fn divergence_ranking_uses_the_owned_certified_lower_bound_2951() {
+        let fidelity = 1.0_f64.next_down();
+        let (first, second) = ((0_usize, 1.5_f64, 0.5_f64), (1_usize, 1.0_f64, 0.0_f64));
+        // Control: the unrounded differences are equal, so the old ranking cannot
+        // separate the two states and keeps the first one it saw.
+        assert_eq!(first.1 - first.2, second.1 - second.2);
+        for order in [[first, second], [second, first]] {
+            let mut record = DivergenceRecord::new();
+            for (state, divergence, roundoff) in order {
+                record
+                    .observe(state, divergence, roundoff, 0.0)
+                    .expect("a finite item");
+            }
+            match record.verdict(fidelity, 1).expect("verdict") {
+                DivergenceVerdict::Separated {
+                    state,
+                    divergence,
+                    roundoff,
+                    ..
+                } => {
+                    assert_eq!(state, StateRow(1));
+                    assert_eq!((divergence, roundoff), (1.0, 0.0));
+                }
+                other => panic!("only state 1 is certified above the fidelity, got {other:?}"),
+            }
+        }
+
+        let mut unbounded = DivergenceRecord::new();
+        unbounded
+            .observe(0, 0.25, f64::INFINITY, 0.0)
+            .expect("an unclaimed item");
+        match unbounded.verdict(0.0, 1).expect("verdict") {
+            DivergenceVerdict::Unresolved {
+                divergence_lower_bound,
+                divergence_upper_bound,
+                ..
+            } => {
+                assert_eq!(divergence_lower_bound, 0.0);
+                assert_eq!(divergence_upper_bound, f64::INFINITY);
+            }
+            other => panic!("an unclaimed bound certifies nothing, got {other:?}"),
+        }
+
+        match DivergenceRecord::new().verdict(0.0, 1) {
+            Err(ResponseMetricError::State(StateError::VacuousFiberTest { states })) => {
+                assert_eq!(states, 0)
+            }
+            other => panic!("no tested state is a vacuous check, got {other:?}"),
         }
     }
 }
