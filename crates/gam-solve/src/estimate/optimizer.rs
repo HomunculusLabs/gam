@@ -3034,27 +3034,83 @@ where
     // prices a structural rank and a sparse Hessian a strict factorization, so
     // neither has a band to cross and neither publishes a band-identified
     // subspace.
+    //
+    // The rank certified is the one the criterion's builder published at ρ̂, on
+    // the eigenpairs it priced, judged at the PIRLS state it priced them at
+    // (#2959 D1). A re-rank of the shipped fit's stabilized Hessian certified a
+    // rank the criterion never used wherever the builder priced another: the root
+    // pricing a mode the assembled band masks. The step bounds are taken on the
+    // assembled matrix, so a root-priced rank they certify is certified, and one
+    // they refuse is published as not evaluated: the root can price modes below
+    // the assembled rounding band, which those bounds cannot resolve.
     let identified_subspace = match &pirls_res.stabilizedhessian_transformed {
-        gam_linalg::matrix::SymmetricMatrix::Dense(dense) if !cfg.firth_bias_reduction => {
-            let spectrum = super::identified_hessian::FittedHessianSpectrum::of(
-                dense,
-                pirls_res.reparam_result.e_transformed.nrows(),
-            )?;
+        gam_linalg::matrix::SymmetricMatrix::Dense(dense) if !cfg.firth_bias_reduction => 'subspace: {
+            let penalty_rank = pirls_res.reparam_result.e_transformed.nrows();
+            let qs = &pirls_res.reparam_result.qs;
+            let criterion = if final_rho.is_empty() {
+                None
+            } else {
+                Some(reml_state.criterion_rank_decision_at(&final_rho)?)
+            };
+            let (spectrum, priced_pirls, decision_reason, root_priced) = match criterion
+                .as_ref()
+                .and_then(|(bundle, decision)| decision.as_ref().map(|decision| (bundle, decision)))
+            {
+                Some((bundle, decision)) => {
+                    let (hessian, eigenvectors) = match decision.frame {
+                        super::reml::CriterionFrame::Transformed => (
+                            decision.hessian.as_ref().clone(),
+                            decision.operator.eigenvectors.clone(),
+                        ),
+                        super::reml::CriterionFrame::Original => (
+                            qs.t().dot(decision.hessian.as_ref()).dot(qs),
+                            qs.t().dot(&decision.operator.eigenvectors),
+                        ),
+                    };
+                    let root_priced = match decision.predicate {
+                        super::reml::CriterionRankPredicate::IdentifiedSubspace => false,
+                        super::reml::CriterionRankPredicate::RootScale => true,
+                        // Only a Firth term supplies a structural rank, and a Firth
+                        // fit publishes no band-identified subspace.
+                        super::reml::CriterionRankPredicate::StructuralRank => break 'subspace None,
+                    };
+                    (
+                        super::identified_hessian::FittedHessianSpectrum::from_eigensystem(
+                            hessian,
+                            decision.operator.raw_eigenvalues.clone(),
+                            eigenvectors,
+                            decision.penalty_rank,
+                            decision.priced_rank(),
+                        ),
+                        bundle.pirls_result.as_ref(),
+                        None,
+                        root_priced,
+                    )
+                }
+                None => (
+                    super::identified_hessian::FittedHessianSpectrum::of(dense, penalty_rank)?,
+                    &pirls_res,
+                    criterion.as_ref().map(|_| {
+                        crate::model_types::RankConstancyNotEvaluated::NoPublishedRankDecision
+                    }),
+                    false,
+                ),
+            };
             let rows = reml_state.x().nrows();
             let not_evaluated = if final_rho.is_empty() {
                 Some(crate::model_types::RankConstancyNotEvaluated::NoSmoothingParameters)
             } else if !final_link_coords.is_empty() {
                 Some(crate::model_types::RankConstancyNotEvaluated::LinkCoordinates)
-            } else if reml_state.active_constraint_free_basis(&pirls_res).is_some() {
+            } else if reml_state.active_constraint_free_basis(priced_pirls).is_some() {
                 Some(crate::model_types::RankConstancyNotEvaluated::ActiveConstraintFace)
-            } else if pirls_res.finalweights.len() != rows
-                || (pirls_res.solve_c_nontrivial
-                    && (pirls_res.derivatives_unsupported
-                        || pirls_res.solve_c_array.len() != rows))
+            } else if priced_pirls.finalweights.len() != rows
+                || (priced_pirls.solve_c_nontrivial
+                    && (priced_pirls.derivatives_unsupported
+                        || priced_pirls.solve_c_array.len() != rows))
             {
                 Some(crate::model_types::RankConstancyNotEvaluated::NoRowCurvatureDerivative)
             } else {
-                None
+                decision_reason
             };
             let rank_constancy = match (
                 not_evaluated,
@@ -3082,30 +3138,52 @@ where
                                 .collect()
                         })
                         .unwrap_or_default();
-                    let (certificate, step_radius) =
-                        super::identified_hessian::certify_fitted_identified_rank(
-                            &pirls_res,
-                            &spectrum,
-                            &lambdas,
-                            reml_state.x(),
-                            hessian_rho,
-                            gradient,
-                            &railed,
-                        )?;
-                    log::info!(
-                        "[#2901 V22] identified rank {} of {} is certified constant over the \
-                         certificate's Newton step {step_radius:.3e}: smallest identified \
-                         eigenvalue {:.3e}, rounding band {:.3e}",
-                        certificate.rank,
-                        dense.nrows(),
-                        certificate.smallest_identified,
-                        certificate.band,
-                    );
-                    crate::model_types::IdentifiedRankConstancy::Certified {
-                        step_radius,
-                        smallest_identified: certificate.smallest_identified,
-                        largest_unidentified: certificate.largest_unidentified,
-                        band: certificate.band,
+                    match super::identified_hessian::certify_fitted_identified_rank(
+                        priced_pirls,
+                        &spectrum,
+                        &lambdas,
+                        reml_state.x(),
+                        hessian_rho,
+                        gradient,
+                        &railed,
+                    ) {
+                        Ok((certificate, step_radius)) => {
+                            log::info!(
+                                "[#2901 V22] identified rank {} of {} is certified constant over \
+                                 the certificate's Newton step {step_radius:.3e}: smallest \
+                                 identified eigenvalue {:.3e}, rounding band {:.3e}",
+                                certificate.rank,
+                                dense.nrows(),
+                                certificate.smallest_identified,
+                                certificate.band,
+                            );
+                            crate::model_types::IdentifiedRankConstancy::Certified {
+                                step_radius,
+                                smallest_identified: certificate.smallest_identified,
+                                largest_unidentified: certificate.largest_unidentified,
+                                band: certificate.band,
+                            }
+                        }
+                        // The step bounds are taken on the assembled matrix, whose
+                        // eigensolve resolves eigenvalues only to its own rounding
+                        // band. A root-priced mode can sit below that band, so their
+                        // refusal of a root-priced rank is not evidence that the rank
+                        // moves; a certification by them is still a certification.
+                        Err(EstimationError::IdentifiedRankNotLocallyConstant { .. })
+                            if root_priced =>
+                        {
+                            let reason =
+                                crate::model_types::RankConstancyNotEvaluated::RootScalePricedRank;
+                            log::info!(
+                                "[#2959 D1] root-priced rank {} of {}; its constancy over the \
+                                 certificate's step was not evaluated: {}",
+                                spectrum.rank(),
+                                dense.nrows(),
+                                reason.description(),
+                            );
+                            crate::model_types::IdentifiedRankConstancy::NotEvaluated { reason }
+                        }
+                        Err(error) => return Err(error),
                     }
                 }
                 (reason, ..) => {
@@ -3123,10 +3201,7 @@ where
             };
             Some(crate::model_types::IdentifiedCoefficientSubspace {
                 rank: spectrum.rank(),
-                unidentified_basis: pirls_res
-                    .reparam_result
-                    .qs
-                    .dot(&spectrum.unidentified_basis()),
+                unidentified_basis: qs.dot(&spectrum.unidentified_basis()),
                 rank_constancy,
             })
         }

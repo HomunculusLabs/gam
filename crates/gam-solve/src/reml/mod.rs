@@ -4716,6 +4716,60 @@ pub(crate) struct FirthTauBetaPartialKernel {
     pub(super) d_beta_dot_h: Array1<f64>,
 }
 
+/// The predicate a dense criterion builder decided `½log|H|₊`'s rank with
+/// (#2959 D1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CriterionRankPredicate {
+    /// `H`'s identified subspace: the eigenvalues above `p·ε·‖H‖₂`, never fewer
+    /// than `rank(S_λ)` ([`reml_outer_engine::DenseSpectralOperator::identified_rank`]).
+    IdentifiedSubspace,
+    /// A structural rank taken from the unscaled design and penalty roots (Firth).
+    StructuralRank,
+    /// The root `B = [√W·X; √λ_k R_k]`'s singular values, every mode priced
+    /// (#2644, gam#2735).
+    RootScale,
+}
+
+/// The coefficient frame a criterion rank decision was taken in (#2959 D1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CriterionFrame {
+    /// PIRLS's transformed frame: the matrix is the bundle's `h_total`.
+    Transformed,
+    /// The original frame: the matrix is `Qs·h_total·Qsᵀ` with the transformed
+    /// barrier swapped for the original-basis one.
+    Original,
+}
+
+/// The rank decision the dense criterion priced `½log|H|₊` with at one
+/// evaluation point, published by the builder that priced it (#2959 D1).
+///
+/// The identified-rank certificate (#2901 V22) certifies this decision. It used
+/// to re-rank PIRLS's stabilized Hessian with its own call to the predicate, so
+/// wherever a builder priced a different rank (the root upgrade pricing a mode the
+/// assembled band masks) the certificate vouched for a rank the criterion never
+/// used.
+pub(crate) struct CriterionRankDecision {
+    pub(crate) predicate: CriterionRankPredicate,
+    pub(crate) frame: CriterionFrame,
+    /// `rank(S_λ)`, the floor the predicate was taken at.
+    pub(crate) penalty_rank: usize,
+    /// The matrix the decision was taken on, in `frame`.
+    pub(crate) hessian: Arc<Array2<f64>>,
+    /// The operator the criterion priced: its raw eigenpairs and active set.
+    pub(crate) operator: Arc<reml_outer_engine::DenseSpectralOperator>,
+}
+
+impl CriterionRankDecision {
+    /// The number of eigenpairs the criterion priced.
+    pub(crate) fn priced_rank(&self) -> usize {
+        self.operator
+            .active_mask
+            .iter()
+            .filter(|&&active| active)
+            .count()
+    }
+}
+
 /// Holds the state for the outer REML optimization and supplies cost and
 /// gradient evaluations to the `opt` optimizer.
 ///
@@ -4772,6 +4826,12 @@ pub(crate) struct EvalShared {
     /// once per ρ rather than once per value/gradient/Hessian call at that ρ.
     pub(crate) root_scale_hessian_operator:
         std::sync::OnceLock<Option<Arc<reml_outer_engine::DenseSpectralOperator>>>,
+    /// The rank decision the dense criterion priced at this evaluation point,
+    /// published by its builder (#2959 D1). Shared across the bundle's clones, so
+    /// the copy the cache keeps carries what the evaluation's own copy decided.
+    /// Empty until a builder prices a spectral operator here: the value-only
+    /// Cholesky and the sparse route publish none.
+    pub(crate) criterion_rank_decision: Arc<std::sync::OnceLock<Arc<CriterionRankDecision>>>,
     /// The penalty components the criterion APPLIES, `S̃_k = Π S_k Π`, in the
     /// ORIGINAL coefficient frame (#2454).
     ///
@@ -4890,6 +4950,23 @@ impl EvalShared {
             (Some(a), Some(b)) => a == b,
             _ => false,
         }
+    }
+
+    /// Publish the rank decision the builder priced at this point. The first
+    /// builder to price a spectral operator here decides; every later build at
+    /// the same point prices the same matrix with the same predicate.
+    pub(crate) fn publish_criterion_rank_decision(
+        &self,
+        decision: impl FnOnce() -> CriterionRankDecision,
+    ) {
+        self.criterion_rank_decision
+            .get_or_init(|| Arc::new(decision()));
+    }
+
+    /// The rank decision a builder published at this point, if one priced a
+    /// spectral operator here.
+    pub(crate) fn criterion_rank_decision(&self) -> Option<Arc<CriterionRankDecision>> {
+        self.criterion_rank_decision.get().map(Arc::clone)
     }
 
     /// Lazily build — once per evaluation point — the original-frame

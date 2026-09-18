@@ -1355,6 +1355,26 @@ impl<'a> RemlState<'a> {
         // c-nontrivial fits and design-moving ψ coordinates
         // (`force_spectral_logdet`, #1376) stay on the spectral path even for
         // value-only probes (#901).
+        // A spectral operator priced on the full transformed frame publishes its
+        // rank decision (#2959 D1). One priced on an active-constraint face's
+        // free basis does not: its matrix is the face's projection, whose rank
+        // the identified-rank certificate does not evaluate.
+        let publish_spectral = |operator: std::sync::Arc<DenseSpectralOperator>| {
+            if free_basis_opt.is_none() {
+                bundle.publish_criterion_rank_decision(|| super::CriterionRankDecision {
+                    predicate: if structural_rank.is_some() {
+                        super::CriterionRankPredicate::StructuralRank
+                    } else {
+                        super::CriterionRankPredicate::IdentifiedSubspace
+                    },
+                    frame: super::CriterionFrame::Transformed,
+                    penalty_rank,
+                    hessian: std::sync::Arc::clone(&bundle.h_total),
+                    operator: std::sync::Arc::clone(&operator),
+                });
+            }
+            operator
+        };
         let hessian_op: std::sync::Arc<dyn super::reml_outer_engine::HessianFactorization> = if mode
             == super::reml_outer_engine::EvalMode::ValueOnly
             && structural_rank.is_none()
@@ -1366,7 +1386,7 @@ impl<'a> RemlState<'a> {
                 h_for_operator.as_ref(),
             ) {
                 Ok(chol_op) => std::sync::Arc::new(chol_op),
-                Err(_) => std::sync::Arc::new(
+                Err(_) => publish_spectral(std::sync::Arc::new(
                     DenseSpectralOperator::from_symmetric_on_identified_subspace(
                         h_for_operator.as_ref(),
                         penalty_rank,
@@ -1376,10 +1396,10 @@ impl<'a> RemlState<'a> {
                             "DenseSpectralOperator from PIRLS Hessian: {e}"
                         ))
                     })?,
-                ),
+                )),
             }
         } else {
-            std::sync::Arc::new(
+            publish_spectral(std::sync::Arc::new(
                 if let Some(rank) = structural_rank {
                     DenseSpectralOperator::from_symmetric_with_structural_rank(
                         h_for_operator.as_ref(),
@@ -1396,7 +1416,7 @@ impl<'a> RemlState<'a> {
                         "DenseSpectralOperator from PIRLS Hessian: {e}"
                     ))
                 })?,
-            )
+            ))
         };
 
         let beta = if let Some(z) = free_basis_opt.as_ref() {
@@ -1833,7 +1853,28 @@ impl<'a> RemlState<'a> {
                     "using the canonical spectral Hessian operator for moving-design coordinates"
                 );
             }
-            build_spectral()?
+            let operator = build_spectral()?;
+            bundle.publish_criterion_rank_decision(|| {
+                let root_priced = bundle
+                    .root_scale_hessian_operator
+                    .get()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|root| std::sync::Arc::ptr_eq(root, &operator));
+                super::CriterionRankDecision {
+                    predicate: if root_priced {
+                        super::CriterionRankPredicate::RootScale
+                    } else if structural_rank.is_some() {
+                        super::CriterionRankPredicate::StructuralRank
+                    } else {
+                        super::CriterionRankPredicate::IdentifiedSubspace
+                    },
+                    frame: super::CriterionFrame::Original,
+                    penalty_rank,
+                    hessian: std::sync::Arc::new(h_total_original.clone()),
+                    operator: std::sync::Arc::clone(&operator),
+                }
+            });
+            operator
         };
 
         let nullspace_dim = beta.len().saturating_sub(penalty_rank) as f64;
@@ -1980,6 +2021,37 @@ impl<'a> RemlState<'a> {
     /// branch, where `free_basis_opt` already rotates everything into a reduced QS
     /// subspace (penalty-coord fast path uses `build_dense_assembly` there because
     /// the projected-`Z` original-basis route is unavailable in that subspace).
+    /// The evaluation bundle at `rho` and the rank decision the dense criterion
+    /// priced there (#2959 D1).
+    ///
+    /// An outer evaluation served from the outer-eval cache builds no assembly,
+    /// and a value-only probe prices a Cholesky that decides no rank, so the
+    /// decision may not be published yet. Then the criterion's own builder is run
+    /// once at a derivative order, which prices the spectral operator and
+    /// publishes the decision: the decision is always the builder's, never a
+    /// second call to its predicate. The sparse route prices a strict
+    /// factorization and publishes none.
+    pub(crate) fn criterion_rank_decision_at(
+        &self,
+        rho: &Array1<f64>,
+    ) -> Result<(EvalShared, Option<std::sync::Arc<super::CriterionRankDecision>>), EstimationError>
+    {
+        let bundle = self.obtain_eval_bundle(rho)?;
+        if bundle.criterion_rank_decision().is_none()
+            && bundle.backend_kind() != GeometryBackendKind::SparseExactSpd
+        {
+            self.build_auto_assembly(
+                rho,
+                &bundle,
+                super::reml_outer_engine::EvalMode::ValueAndGradient,
+                false,
+                false,
+            )?;
+        }
+        let decision = bundle.criterion_rank_decision();
+        Ok((bundle, decision))
+    }
+
     pub(crate) fn build_auto_assembly(
         &self,
         rho: &Array1<f64>,

@@ -2918,6 +2918,13 @@ pub enum RankConstancyNotEvaluated {
     /// The outer search tracked no Hessian over the certified coordinates, so its
     /// certificate has no Newton step.
     NoOuterHessian,
+    /// The criterion priced every mode from the Hessian's root (#2644, gam#2735,
+    /// gam#2959). The root resolves modes below the assembled Hessian's rounding
+    /// band, which step bounds taken on the assembled matrix cannot resolve.
+    RootScalePricedRank,
+    /// The criterion's builder published no rank decision at the fitted
+    /// smoothing parameters: the sparse route prices a strict factorization.
+    NoPublishedRankDecision,
 }
 
 impl RankConstancyNotEvaluated {
@@ -2940,6 +2947,15 @@ impl RankConstancyNotEvaluated {
             Self::NoOuterHessian => {
                 "the outer search tracked no Hessian over the certified coordinates, so its \
                  certificate has no Newton step"
+            }
+            Self::RootScalePricedRank => {
+                "the criterion priced every mode from the Hessian's root, which resolves modes \
+                 below the assembled Hessian's rounding band that step bounds taken on the \
+                 assembled matrix cannot"
+            }
+            Self::NoPublishedRankDecision => {
+                "the criterion's builder published no rank decision at the fitted smoothing \
+                 parameters"
             }
         }
     }
