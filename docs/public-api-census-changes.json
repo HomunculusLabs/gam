@@ -4230,5 +4230,16 @@
     },
     "reason": "#2951 P11, P18, codec step 3 of 3 (mpd-spec NOTE 12): code_saving_at_declared_fidelity decided fidelity with an unrounded predicate beside precision.rs's proven verdict. Its replacement code_saving_at_proven_fidelity landed in step 1 (91473e08eb); fit.rs migrated in d0b3432912 and this commit migrates families.rs, teacher_tests.rs and controls_tests.rs.",
     "evidence": "Replacement: code_saving_at_proven_fidelity in crates/gam-sae/src/parameter_decomposition/codec.rs (since 91473e08eb). A no-write grep at main's tip found the name only in codec.rs, families.rs, teacher_tests.rs, controls_tests.rs and the removal ledger. Before this entry, public_api_census.py on probe commits main+wave2 (ae25b88872) -> +step3 (994084a376), Slurm 1246008, refused exactly this removal."
+  },
+  {
+    "base": "f232342866e77552f9bc26f5e438cb6caacf5970",
+    "removed": {
+      "crates/gam-custom-family/src/jeffreys.rs::custom_family_jeffreys_cap": 1,
+      "crates/gam-custom-family/src/jeffreys.rs::custom_family_jeffreys_conditioning_gate_weight": 1,
+      "crates/gam-custom-family/src/jeffreys.rs::custom_family_jeffreys_floored_inverse": 1,
+      "crates/gam-custom-family/src/jeffreys.rs::custom_family_joint_jeffreys_contract_weight": 1
+    },
+    "reason": "#979 Jeffreys floor stage (a1): the crate-private custom-family twin of gam-solve's reduced-information spectrum is deleted. custom_family_joint_jeffreys_contract_weight and its helpers custom_family_jeffreys_cap, custom_family_jeffreys_floored_inverse and custom_family_jeffreys_conditioning_gate_weight re-derived the gate, floor and floored inverse that JointJeffreysPlan already owns. The completion now reads the plan's conditioning_gate_weight() and the new contracted_trace_weight() instead.",
+    "evidence": "At the base, git grep -w finds these four names only in crates/gam-custom-family/src/jeffreys.rs: their definitions and the one caller, custom_family_joint_jeffreys_second_order_completion, which this commit rewrites to read the plan. None is pub outside the crate, and gam-pyffi has 0 references. Lane job 1247303 (a1.patch md5 76b566a7 at e7955a5704): gam-custom-family lib 315 passed, 0 failed."
   }
 ]

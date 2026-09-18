@@ -407,5 +407,23 @@
     ],
     "reason": "#2951 (mpd-induction): the induction example's S1a loader read the registry export's logits through a single-purpose reader, native_logits, and printed their shape. The example is now the S1 stage receipt. It reads every executed stage, logits included, through float64_array, and decides agreement through receipts::compare_stage, so native_logits has no caller left. It was a private fn in an example binary, so no other target could call it.",
     "evidence": "source_removal_guard.py on a throwaway commit (tree e4b721d03e = f9d1b32b31 + the gated patch e1f39d0f) blocked exactly this identity: production_occurrences=10, removed_declarations=1. git grep -w -F native_logits at f9d1b32b31 gives 10 occurrences: the declaration (mpd_induction_registry.rs:141), its one call (:248, in main, rewritten by this patch), two string literals (:142, :250), and six local variables named native_logits in parameter_decomposition/block.rs:1930/1948/1954 and response_metric.rs:1005/1008/1011. None of those six are calls. Probe: the guard run on throwaway commit 8a2c3d9a83 (object only) through the sw0o lane object store with a5venv python3.12. The patch was gated as dx1 run mpd-induction-s1f-g6 at 95e51dadb2 (RC_CHECK=0, DONE_SENTINEL_0) and received as dx1 run mpd-induction-s1f-r4 (960 of 960 stage receipts agree)."
+  },
+  {
+    "base": "f232342866e77552f9bc26f5e438cb6caacf5970",
+    "items": [
+      "crates/gam-custom-family/src/jeffreys.rs:const:JEFFREYS_CONDITIONING_GATE_ABSOLUTE",
+      "crates/gam-custom-family/src/jeffreys.rs:const:JEFFREYS_CONDITIONING_GATE_ABSOLUTE_CLEAR",
+      "crates/gam-custom-family/src/jeffreys.rs:const:JEFFREYS_CONDITIONING_GATE_RELATIVE",
+      "crates/gam-custom-family/src/jeffreys.rs:const:JEFFREYS_CONDITIONING_GATE_RELATIVE_CLEAR",
+      "crates/gam-custom-family/src/jeffreys.rs:const:JEFFREYS_REDUCED_INFO_ABSOLUTE_FLOOR",
+      "crates/gam-custom-family/src/jeffreys.rs:const:JEFFREYS_REDUCED_INFO_RELATIVE_FLOOR",
+      "crates/gam-custom-family/src/jeffreys.rs:fn:custom_family_jeffreys_cap",
+      "crates/gam-custom-family/src/jeffreys.rs:fn:custom_family_jeffreys_conditioning_gate_weight",
+      "crates/gam-custom-family/src/jeffreys.rs:fn:custom_family_jeffreys_floored_inverse",
+      "crates/gam-custom-family/src/jeffreys.rs:fn:custom_family_joint_jeffreys_contract_weight",
+      "crates/gam-custom-family/src/jeffreys.rs:fn:ramp_down"
+    ],
+    "reason": "#979 Jeffreys floor stage (a1): the custom-family twin of gam-solve's reduced-information spectrum is deleted, so the completion's gate, floor and trace weight have one owner. custom_family_joint_jeffreys_contract_weight re-derived Z_J^T H Z_J, its eigendecomposition, the conditioning gate and the floored inverse through six duplicated constants (JEFFREYS_REDUCED_INFO_*, JEFFREYS_CONDITIONING_GATE_*) and three duplicated helpers (custom_family_jeffreys_cap, custom_family_jeffreys_floored_inverse, custom_family_jeffreys_conditioning_gate_weight with its nested ramp_down). custom_family_joint_jeffreys_second_order_completion now prepares gam_solve's JointJeffreysPlan once and reads the gate from conditioning_gate_weight() and the trace weight Z_J K Z_J^T from the new contracted_trace_weight(). The plan computes the same expressions in the same order: the same symmetrization, eigh, floored_inverse loop and product, and a gate that matches branch for branch.",
+    "evidence": "At the base, git grep -w finds every removed name only inside crates/gam-custom-family/src/jeffreys.rs, in the deleted block and its one caller custom_family_joint_jeffreys_second_order_completion, which this commit edits. The nested ramp_down's name also names gam-solve's own ramp_down helpers, which stay. Lane job 1247303 (a1.patch md5 76b566a7 at e7955a5704): gam-custom-family lib 315 passed, 0 failed; gam-solve lib 1874 passed, 0 failed."
   }
 ]
