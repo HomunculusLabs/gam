@@ -886,5 +886,20 @@
     ],
     "reason": "#2933 F36/F39: the fitted-response Hutchinson route reads the residual dof and tr R off one output-space probe per solve, through fitted_response_probe, for the fixed-frame cache and the frame-integrated lifted factor alike, and draws probes until the upper confidence bound of the residual dof's Monte Carlo variance is within the 2*nu sampling variance the dispersion carries. So the literal FITTED_RESPONSE_HUTCHINSON_PROBES = 64 is replaced by that derived count, hutchinson_fitted_response_residual_dof is replaced by fitted_response_probe plus hutchinson_fitted_response_frame, and apply_data_gauss_newton, whose only caller was the deleted parameter-space divergence probe, has no caller left. ShapeInformationRoute::fixed_frame_geometry returned None on the frame-marginal route; the route now carries its FrameMarginalInformation, so held_response_geometry hands the dispersion the operator on either route and replaces it.",
     "evidence": "The item list is the refusal of scripts/source_removal_guard.py in direct lane dy7 run adf39-g2 (base bdc83e85fe, exact tree bd9f9571, patch md5 4fcdd9c5), with RC_CHECK 0 and RC_PYFFI 0 in the same run. git grep -n -w at bdc83e85fe501ea97e57d1b3a897e1d600ce6324 finds FITTED_RESPONSE_HUTCHINSON_PROBES only in construction_fitted_response.rs (:170, :172) and an older ledger entry; apply_data_gauss_newton only in construction_fitted_response.rs (the call :694, the declaration :728, a comment :951); hutchinson_fitted_response_residual_dof only in construction_fitted_response.rs (calls :185, :195, the declaration :467); fixed_frame_geometry only at its declaration (construction_quasi_laplace.rs:8276) and its two callers (construction_reconstruction.rs:662, outer_objective.rs:1912). Every occurrence is removed or rewritten in this commit."
+  },
+  {
+    "items": [
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs:const:CERTIFICATE_ESCALATION_ANTI_RUNAWAY_CAP",
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs:const:CERTIFICATE_ESCALATION_PROGRESS",
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs:const:POLISH_ESCALATION_ANTI_RUNAWAY_CAP",
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs:fn:converge_inner_for_undamped_logdet",
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs:fn:converge_inner_for_undamped_logdet_gate_frozen",
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs:fn:descend_exact_a_saddle",
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs:fn:freeze_collapse_prevention_gates",
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs:fn:is_undamped_evidence_row_non_pd"
+    ],
+    "reason": "Pure move for line-count headroom (build.rs MAX_TRACKED_FILE_LINES = 10000; construction_quasi_laplace.rs was 9740 lines): main :706-2447, the inner solve behind the undamped evidence log-determinant (is_undamped_evidence_row_non_pd, freeze_collapse_prevention_gates, converge_inner_for_undamped_logdet, descend_exact_a_saddle, converge_inner_for_undamped_logdet_gate_frozen), moves verbatim into construction_undamped_inner.rs as a further impl SaeManifoldTerm block, which construction_quasi_laplace.rs include!s, so every method keeps its type, module and visibility.",
+    "evidence": "Pure move: every removed identity is declared again, with the same body, in the new sibling file of this landing (the sorted line multiset of the old file equals the two new files' lines plus only the added include and comment lines); gated in Slurm job 1270438, which re-runs this instrument with the entry and checks the workspace.",
+    "base": "38c2680c1201b0e7ba985cd85ebe51ffe273c60f"
   }
 ]

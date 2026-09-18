@@ -4365,5 +4365,14 @@
     },
     "reason": "#2933 F33/F35/F39: ShapeInformationRoute::fixed_frame_geometry returned the fixed-frame geometry the dispersion could share, or None on the frame-marginal route, which then formed its frame-integrated information twice. The route now carries that FrameMarginalInformation, and held_response_geometry returns the operator the dispersion shares on either route.",
     "evidence": "The removed map is the census's own refusal in direct lane dy7 run adf39-g2 (base bdc83e85fe, exact tree bd9f9571): 12669 to 12673 public function declarations with this one removed. git grep -n -w fixed_frame_geometry at bdc83e85fe501ea97e57d1b3a897e1d600ce6324 finds the declaration (construction_quasi_laplace.rs:8276) and its two callers (construction_reconstruction.rs:662, outer_objective.rs:1912), both rewritten in this commit."
+  },
+  {
+    "removed": {
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs::converge_inner_for_undamped_logdet": 1,
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs::is_undamped_evidence_row_non_pd": 1
+    },
+    "reason": "Pure move for line-count headroom (build.rs MAX_TRACKED_FILE_LINES = 10000; construction_quasi_laplace.rs was 9740 lines): main :706-2447, the inner solve behind the undamped evidence log-determinant (is_undamped_evidence_row_non_pd, freeze_collapse_prevention_gates, converge_inner_for_undamped_logdet, descend_exact_a_saddle, converge_inner_for_undamped_logdet_gate_frozen), moves verbatim into construction_undamped_inner.rs as a further impl SaeManifoldTerm block, which construction_quasi_laplace.rs include!s, so every method keeps its type, module and visibility.",
+    "evidence": "Pure move: every removed identity is declared again, with the same body, in the new sibling file of this landing (the sorted line multiset of the old file equals the two new files' lines plus only the added include and comment lines); gated in Slurm job 1270438, which re-runs this instrument with the entry and checks the workspace.",
+    "base": "38c2680c1201b0e7ba985cd85ebe51ffe273c60f"
   }
 ]
