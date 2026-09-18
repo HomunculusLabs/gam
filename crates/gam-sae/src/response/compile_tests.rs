@@ -12,6 +12,8 @@ use super::{
     enrichment_step, frame_parameter_count,
 };
 use crate::response::subspace::KnownBlock;
+use faer::Side;
+use gam_linalg::faer_ndarray::FaerCholesky;
 use gam_linalg::roundoff::accumulation_growth;
 use gam_linalg::utils::splitmix64;
 use gam_math::gaussian_activation::GaussianActivation;
@@ -61,8 +63,13 @@ fn metric() -> Array2<f64> {
     array![[2.0, 0.5, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 1.0]]
 }
 
-/// A zero-bias block with no output bias, the executed form [`execute_block`] runs.
-fn block_with(readers: Array2<f64>, block_writers: Array2<f64>, activation: GaussianActivation) -> KnownBlock {
+/// A zero-bias block with no output bias under `output_metric`.
+fn block_under(
+    readers: Array2<f64>,
+    block_writers: Array2<f64>,
+    output_metric: &Array2<f64>,
+    activation: GaussianActivation,
+) -> KnownBlock {
     let width = readers.nrows();
     let output_dim = block_writers.nrows();
     KnownBlock::new(
@@ -70,10 +77,15 @@ fn block_with(readers: Array2<f64>, block_writers: Array2<f64>, activation: Gaus
         Array1::zeros(width),
         block_writers,
         Array1::zeros(output_dim),
-        metric().view(),
+        output_metric.view(),
         activation,
     )
     .expect("a finite block with a symmetric positive definite metric")
+}
+
+/// A zero-bias block with no output bias under [`metric`], the executed form [`execute_block`] runs.
+fn block_with(readers: Array2<f64>, block_writers: Array2<f64>, activation: GaussianActivation) -> KnownBlock {
+    block_under(readers, block_writers, &metric(), activation)
 }
 
 fn known_block(readers: Array2<f64>, activation: GaussianActivation) -> KnownBlock {
@@ -120,7 +132,24 @@ fn mean_and_standard_error(terms: &[f64]) -> (f64, f64) {
     (mean, (variance / count).sqrt())
 }
 
-/// `‖F(z) − g(Qᵀz)‖²_M` over executed draws of the block, with its standard error.
+/// `‖F(z) − g(Qᵀz)‖²_M` at each executed draw of the block.
+fn executed_errors(
+    compiled: &CompiledResponse,
+    readers: &Array2<f64>,
+    block_writers: &Array2<f64>,
+    activation: GaussianActivation,
+    points: &Array2<f64>,
+) -> Vec<f64> {
+    let compiled_values = compiled.evaluate_input(points.view()).expect("a replayable compiled response");
+    (0..points.nrows())
+        .map(|row| {
+            let executed = execute_block(readers, block_writers, activation, points.row(row));
+            metric_norm_squared((&executed - &compiled_values.row(row)).view())
+        })
+        .collect()
+}
+
+/// The mean of [`executed_errors`] and its standard error.
 fn executed_total_error(
     compiled: &CompiledResponse,
     readers: &Array2<f64>,
@@ -128,14 +157,7 @@ fn executed_total_error(
     activation: GaussianActivation,
     points: &Array2<f64>,
 ) -> (f64, f64) {
-    let compiled_values = compiled.evaluate_input(points.view()).expect("a replayable compiled response");
-    let terms: Vec<f64> = (0..points.nrows())
-        .map(|row| {
-            let executed = execute_block(readers, block_writers, activation, points.row(row));
-            metric_norm_squared((&executed - &compiled_values.row(row)).view())
-        })
-        .collect();
-    mean_and_standard_error(&terms)
+    mean_and_standard_error(&executed_errors(compiled, readers, block_writers, activation, points))
 }
 
 #[test]
@@ -162,8 +184,9 @@ fn a_planted_smooth_function_of_a_planted_subspace_is_recovered() {
         compiled.representation()
     );
 
-    // With `E(P) = 0`, R2 says the executed error of `g` is the function error alone.
-    let multiple = standard_error_multiple(2);
+    // With `E(P) = 0`, R2 says the executed error of `g` is the function error alone. Arms: this agreement, the blind
+    // compile's agreement and the enrichment gain.
+    let multiple = standard_error_multiple(3);
     let points = executed_draws(2_946_151);
     let (executed, executed_se) = executed_total_error(&compiled, &readers, &writers(), activation, &points);
     let combined_se = executed_se.hypot(split.function_error_standard_error);
@@ -172,22 +195,89 @@ fn a_planted_smooth_function_of_a_planted_subspace_is_recovered() {
         "executed error {executed} ± {executed_se} disagrees with the function error {split:?} at multiple {multiple}"
     );
 
-    // Recovered: the compiled function leaves under one percent of the block's output variance, at the Monte Carlo
-    // upper bound. The complement frame, which sees none of the readers, must fail the same bar.
-    let recovery_bar = 1.0e-2 * total_variance;
-    assert!(
-        executed + multiple * executed_se <= recovery_bar,
-        "the compiled response leaves {executed} ± {executed_se} of variance {total_variance}"
+    // No rounding or quadrature bound constrains the function error itself: `F̄_P` is exact, so `Â` is the Duchon
+    // approximation error at the pilot resolution, and a fixed fraction of the variance would be a hand constant. What
+    // is derivable is covariance. Written in its whitened chart, writers `LᵀU` under the identity metric (`M = LLᵀ`),
+    // the same block must compile to `g·L`. Both compiles train on the same draws, so their whitened responses agree to
+    // the rounding of one whitening product and the rest is the same computation on them: the two functions agree to
+    // first order in that rounding, under the bar of an accumulation as deep as the training design.
+    let factor = metric().cholesky(Side::Lower).expect("the test metric is positive definite");
+    let lower = factor.lower_triangular();
+    let whitened_block = block_under(readers.clone(), lower.t().dot(&writers()), &Array2::eye(3), activation);
+    let whitened = compile_retained_response(&whitened_block, retained_frame().view(), design, 2_946_051)
+        .expect("the planted block compiles in its whitened chart");
+    let values = compiled.evaluate_input(points.view()).expect("a replayable compiled response");
+    let whitened_values = whitened.evaluate_input(points.view()).expect("a replayable compiled response");
+    let bar = rounding_bar(&block, &compiled);
+    let chart_gap = mean_squared_row_gap(&values.dot(&lower), &whitened_values);
+
+    // Negative control, the pre-landing defect: a writer built as `L·M⁻¹·V` instead of `L⁻ᵀV` maps `g − μ` to
+    // `(g − μ)·L M⁻¹ Lᵀ`, and the same bar must reject it.
+    let coordinates = points.dot(&retained_frame());
+    let fitted = compiled
+        .basis_rows(coordinates.view())
+        .expect("a replayable compiled response")
+        .dot(&compiled.coefficients())
+        .dot(&compiled.writer().t());
+    let defective_map = lower.dot(&factor.solve_mat(&lower.t().to_owned())) - Array2::<f64>::eye(3);
+    let defective = &values + &fitted.dot(&defective_map);
+    let defective_gap = mean_squared_row_gap(&defective.dot(&lower), &whitened_values);
+    eprintln!(
+        "planted GELU: variance {total_variance}, executed {executed} ± {executed_se}, {split:?}; chart gap {chart_gap}, \
+         pre-landing writer gap {defective_gap}, bar {bar}"
     );
+    assert!(
+        chart_gap <= bar,
+        "the compile is not covariant under the whitening chart: mean squared gap {chart_gap} against {bar}"
+    );
+    assert!(
+        defective_gap > bar,
+        "the pre-landing writer passed the covariance bar: mean squared gap {defective_gap} against {bar}"
+    );
+
+    // Recovered in the limit: the next resolution removes function error beyond its standard error. With `E(P) = 0`
+    // the executed error of each compile is its function error, and pairing the two at the same executed draws
+    // removes the draw-to-draw spread they share, which dominates the unpaired held-out estimates.
+    let step = enrichment_step(&block, &compiled, 2_946_061)
+        .expect("the planted block compiles at the enriched resolution")
+        .expect("the pilot resolution lies below the production ceiling");
+    let pilot_errors = executed_errors(&compiled, &readers, &writers(), activation, &points);
+    let enriched_errors = executed_errors(&step.enriched, &readers, &writers(), activation, &points);
+    let paired: Vec<f64> = pilot_errors.iter().zip(&enriched_errors).map(|(pilot, enriched)| pilot - enriched).collect();
+    let (paired_gain, paired_se) = mean_and_standard_error(&paired);
+    eprintln!(
+        "planted GELU enrichment: {} → {} centers, held-out gain {} ± {}, paired executed gain {paired_gain} ± \
+         {paired_se}",
+        design.centers,
+        step.enriched.design().centers,
+        step.gain,
+        step.gain_standard_error
+    );
+    assert!(
+        paired_gain > multiple * paired_se,
+        "enrichment did not reduce the planted function error: {paired_gain} ± {paired_se} paired, {split:?} then {:?}",
+        step.enriched.split()
+    );
+
+    // The complement frame sees none of the readers: its compile is the mean, and its executed error agrees with its
+    // split, all of it `E(P)`.
     let blind = compile_retained_response(&block, complement_frame().view(), design, 2_946_052)
         .expect("a frame orthogonal to every reader compiles to the mean");
     assert_eq!(blind.representation(), FunctionRepresentation::Constant, "a constant response is the mean");
     assert_eq!(blind.fitted_directions(), 0, "a constant response has no resolvable direction");
+    let blind_split = blind.split();
     let (blind_executed, blind_se) = executed_total_error(&blind, &readers, &writers(), activation, &points);
+    let blind_combined_se = blind_se.hypot(blind_split.function_error_standard_error);
     assert!(
-        blind_executed - multiple * blind_se > recovery_bar,
-        "the positive control passed the recovery bar: {blind_executed} ± {blind_se} against {recovery_bar}"
+        (blind_executed - blind_split.total()).abs() <= multiple * blind_combined_se,
+        "the blind compile's executed error {blind_executed} ± {blind_se} disagrees with its split {blind_split:?}"
     );
+}
+
+/// The mean over rows of `‖a_i − b_i‖²`.
+fn mean_squared_row_gap(left: &Array2<f64>, right: &Array2<f64>) -> f64 {
+    let gap = left - right;
+    gap.rows().into_iter().map(|row| row.dot(&row)).sum::<f64>() / gap.nrows() as f64
 }
 
 /// The rounding bar of a compile of `block`: its variance scaled by the growth factor of an accumulation as deep as the
