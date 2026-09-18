@@ -1843,96 +1843,144 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
 
     /// Pull back a symmetric primary third tensor along every coefficient axis.
     /// Higher information derivatives first contract their fixed directions
-    /// into this tensor, so all orders share the same weighted-Gram assembly.
+    /// into this tensor, so all orders share the same assembly.
     pub(super) fn all_axes_primary_tensor_pullback(
         &self,
         tensors: &[[[[f64; P]; P]; P]],
     ) -> Result<Vec<Array2<f64>>, String> {
+        use faer::Accum;
+        use faer::linalg::matmul::matmul;
+        use gam_linalg::faer_ndarray::{FaerArrayView, array2_to_matmut};
+
+        // Rows per tile: a tile's Jacobian rows and contracted weights stay
+        // cache-resident through its GEMM.
+        const ALL_AXES_PULLBACK_ROW_TILE: usize = 64;
+        // At most this many row groups, and at most this many bytes of group
+        // accumulators alive at once.
+        const ALL_AXES_PULLBACK_MAX_GROUPS: usize = 64;
+        const ALL_AXES_PULLBACK_ACCUMULATOR_BYTES: usize = 256 << 20;
+
         let p = self.n_coefficients();
         let n = gam_math::jet_tower::RowProgram::n_rows(self);
         if tensors.len() != n {
             return Err("survival all-axes primary tensor row count mismatch".into());
         }
-        // This is a genuinely batched dense consumer: materialize the complete
-        // row Jacobian J = J·I once through the kernel's structured BLAS-3
-        // projection. The former axis loop called `jacobian_action` and
-        // `add_pullback_hessian` for every (axis,row) pair, repeatedly decoding
-        // the same dense/operator/sparse design rows and allocating ndarray
-        // row-chunk views. A live #979 stack showed that representation work,
-        // rather than the four-primary tower contraction, dominating every
-        // worker. With J resident (n·4p scalars), each axis is the literal dense
-        // identity
+        // For a symmetric T_i the axis derivatives form one fully symmetric
+        // coefficient tensor
         //
-        //   Hdot[e_a] = Σ_i J_iᵀ T³_i[J_i[:,a]] J_i,
+        //   Hdot[e_a]_{jk} = D_{ajk} = Σ_i Σ_{αβγ} T_i[α][β][γ] J_i[α,a] J_i[β,j] J_i[γ,k],
         //
-        // evaluated with two small contractions and no design access. Memory is
-        // O(n·4p + p³), bounded here by the already-selected rigid dense path.
+        // so only the pairs a ≤ j of its first two indices are formed. Per row,
+        // V[β][γ][a] = Σ_α T[α][β][γ] J[α,a], then W_γ[(a,j)] = Σ_β V[β][γ][a] J[β,j],
+        // and one GEMM per row tile adds Σ_{i,γ} W_iγ[(a,j)] J_i[γ,k]: 4·n·p³ flops
+        // against 20·n·p³ for ten weighted Grams per axis. Each tile's Jacobian rows
+        // are built in place from the designs, so J is never materialized and the
+        // data a GEMM reads stays in cache; the former assembly streamed two n×p
+        // blocks from memory per Gram, 20·p times per call, which left it
+        // bandwidth-bound on a full node (gnomon#2337).
+        //
+        // Tiles fold in index order inside a group, and groups sum in group order.
+        // The group count depends only on the problem shape, never on the pool
+        // width, so the result is bit-identical at every thread count.
+        let pairs = p * (p + 1) / 2;
+        let pair_offset = |a: usize| a * (2 * p - a + 1) / 2;
+        let tile = ALL_AXES_PULLBACK_ROW_TILE;
+        let n_tiles = n.div_ceil(tile);
+        let group_bytes = (pairs * p).max(1) * std::mem::size_of::<f64>();
+        let n_groups = (ALL_AXES_PULLBACK_ACCUMULATOR_BYTES / group_bytes)
+            .clamp(1, ALL_AXES_PULLBACK_MAX_GROUPS)
+            .min(n_tiles.max(1));
         let identity = Array2::<f64>::eye(p);
-        let jacobians = self
-            .jacobian_action_matrix(identity.view())
-            .ok_or_else(|| {
-                "survival marginal-slope all-axes derivative requires a dense J·I projection"
-                    .to_string()
-            })?;
-        let expected = (n, P * p);
-        if jacobians.dim() != expected {
-            return Err(format!(
-                "survival marginal-slope all-axes J·I shape {:?}, expected {:?}",
-                jacobians.dim(),
-                expected,
-            ));
-        }
-
-        // Split the packed J into four contiguous n×p primary blocks once.
-        // For canonical coefficient axis a, symmetry of T³ gives the exact
-        // weighted-Gram decomposition
-        //
-        //   Hdot[e_a] = Σ_{α≤β} sym_{αβ}(
-        //       J_αᵀ diag(Σ_γ T³_{αβγ} J_γ[:,a]) J_β),
-        //
-        // where sym keeps a diagonal-primary Gram once and adds G+Gᵀ for an
-        // off-diagonal primary pair. Thus each axis is ten cache-friendly
-        // BLAS-3 Grams rather than n scalar p×p pullbacks. The row weights are
-        // built in index order from the same cached tower, so only the Gram's
-        // associative reduction changes (covered by the all-axes oracle).
-        let jacobian_blocks: [Array2<f64>; P] = std::array::from_fn(|primary| {
-            jacobians
-                .slice(s![.., primary * p..(primary + 1) * p])
-                .to_owned()
-        });
-        (0..p)
+        let group_totals: Vec<Result<Array2<f64>, String>> = (0..n_groups)
             .into_par_iter()
-            .map(|axis| {
-                let mut total = Array2::<f64>::zeros((p, p));
-                for primary_left in 0..P {
-                    for primary_right in primary_left..P {
-                        let weights = Array1::from_shape_fn(n, |row| {
-                            let mut weight = 0.0;
-                            for direction_primary in 0..P {
-                                weight += tensors[row][primary_left][primary_right]
-                                    [direction_primary]
-                                    * jacobian_blocks[direction_primary][[row, axis]];
+            .map(|group| {
+                let mut total = Array2::<f64>::zeros((pairs, p));
+                let mut weights = Array2::<f64>::zeros((P * tile, pairs));
+                let mut stacked = Array2::<f64>::zeros((P * tile, p));
+                let mut contracted = vec![0.0_f64; P * P * p];
+                for tile_index in group * n_tiles / n_groups..(group + 1) * n_tiles / n_groups {
+                    let start = tile_index * tile;
+                    let end = (start + tile).min(n);
+                    let jacobian = self.jacobian_action_matrix_rows(identity.view(), start, end);
+                    if jacobian.dim() != (end - start, P * p) {
+                        return Err(format!(
+                            "survival marginal-slope all-axes J·I tile shape {:?}, expected {:?}",
+                            jacobian.dim(),
+                            (end - start, P * p),
+                        ));
+                    }
+                    for local in 0..end - start {
+                        let row = jacobian.row(local);
+                        let tensor = &tensors[start + local];
+                        for beta in 0..P {
+                            for gamma in 0..P {
+                                let target = &mut contracted[(beta * P + gamma) * p..][..p];
+                                target.fill(0.0);
+                                for alpha in 0..P {
+                                    let t = tensor[alpha][beta][gamma];
+                                    let j_alpha = row.slice(s![alpha * p..(alpha + 1) * p]);
+                                    for (value, &jacobian_entry) in target.iter_mut().zip(j_alpha) {
+                                        *value += t * jacobian_entry;
+                                    }
+                                }
                             }
-                            weight
-                        });
-                        let gram = gam_linalg::faer_ndarray::fast_xt_diag_y(
-                            &jacobian_blocks[primary_left],
-                            &weights,
-                            &jacobian_blocks[primary_right],
-                        );
-                        total.scaled_add(1.0, &gram);
-                        if primary_left != primary_right {
-                            total.scaled_add(1.0, &gram.t());
+                        }
+                        for gamma in 0..P {
+                            let stacked_row = local * P + gamma;
+                            stacked
+                                .row_mut(stacked_row)
+                                .assign(&row.slice(s![gamma * p..(gamma + 1) * p]));
+                            let mut weight_row = weights.row_mut(stacked_row);
+                            for a in 0..p {
+                                let base = pair_offset(a);
+                                let mut target = weight_row.slice_mut(s![base..base + p - a]);
+                                target.fill(0.0);
+                                for beta in 0..P {
+                                    let v = contracted[(beta * P + gamma) * p + a];
+                                    let j_beta = row.slice(s![beta * p + a..(beta + 1) * p]);
+                                    target.zip_mut_with(&j_beta, |value, &jacobian_entry| {
+                                        *value += v * jacobian_entry
+                                    });
+                                }
+                            }
                         }
                     }
+                    let used = (end - start) * P;
+                    let weights_used = weights.slice(s![..used, ..]);
+                    let stacked_used = stacked.slice(s![..used, ..]);
+                    let weights_view = FaerArrayView::new(&weights_used);
+                    let stacked_view = FaerArrayView::new(&stacked_used);
+                    matmul(
+                        array2_to_matmut(&mut total),
+                        Accum::Add,
+                        weights_view.as_ref().transpose(),
+                        stacked_view.as_ref(),
+                        1.0,
+                        faer::Par::Seq,
+                    );
                 }
                 Ok(total)
             })
-            .collect()
+            .collect();
+        let mut total = Array2::<f64>::zeros((pairs, p));
+        for group_total in group_totals {
+            total += &group_total?;
+        }
+        // Every permutation of (a, j, k) reads the one representative at sorted
+        // indices, so each axis matrix is exactly symmetric.
+        Ok((0..p)
+            .map(|a| {
+                Array2::from_shape_fn((p, p), |(j, k)| {
+                    let mut index = [a, j, k];
+                    index.sort_unstable();
+                    total[[pair_offset(index[0]) + index[1] - index[0], index[2]]]
+                })
+            })
+            .collect())
     }
 
     /// Contract the fixed direction once per row, then use the shared
-    /// weighted-Gram pullback for every swept coefficient axis.
+    /// pullback for every swept coefficient axis.
     fn second_directional_derivative_all_axes_from_towers(
         &self,
         d_beta_u: &[f64],

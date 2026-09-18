@@ -6920,6 +6920,219 @@ fn rigid_survival_all_axes_build_once_equals_per_axis_sweep_979() {
     }
 }
 
+/// gnomon#2337: the tiled symmetric all-axes tensor pullback reassociates its row,
+/// primary and group sums, so it is held to accuracy rather than bits. Against a
+/// double-double reference of `D_{ajk} = Σ_i Σ_{αβγ} T_i[α][β][γ] J_i[α,a] J_i[β,j] J_i[γ,k]`,
+/// its largest error scaled by the entry's term mass `Σ_i Σ_{αβγ} |T J J J|` must not
+/// exceed that of the ten-Gram assembly it replaced, rebuilt here, and must sit inside
+/// the `γ_m` bound of its longest sum. Its fixed group order makes it independent of
+/// the pool width, pinned bitwise at 1, 4 and 12 workers. `n = 5000` rows span 79
+/// tiles, so groups fold more than one tile.
+#[test]
+fn rigid_survival_all_axes_tensor_pullback_is_accurate_and_width_invariant_2337() {
+    use crate::row_kernel::RowKernel;
+
+    let n = 5_000usize;
+    let z: Vec<f64> = (0..n).map(|r| ((r as f64) * 0.37).sin() * 1.1).collect();
+    let weights: Vec<f64> = (0..n).map(|r| 0.7 + 0.5 * ((r % 5) as f64) / 5.0).collect();
+    let event: Vec<f64> = (0..n).map(|r| ((r % 3 == 0) as u8) as f64).collect();
+    let marginal_design = Array2::from_shape_fn((n, 6), |(r, j)| {
+        0.2 + 0.05 * ((r * (j + 1)) as f64 * 0.011).cos() + 0.11 * (j as f64)
+            - 0.013 * (r as f64) / (n as f64)
+    });
+    let slope_design = Array2::from_shape_fn((n, 4), |(r, j)| {
+        0.1 + 0.07 * ((r + 3 * j) as f64 * 0.017).sin() - 0.09 * (j as f64)
+    });
+    let beta_marginal = Array1::from_shape_fn(6, |j| 0.03 * (j as f64) - 0.08);
+    let beta_slope = Array1::from_shape_fn(4, |j| 0.05 - 0.04 * (j as f64));
+    let mut family = oracle_rigid_family(n, &z, &weights, &event, None);
+    family.marginal_design = DesignMatrix::from(marginal_design.clone());
+    family
+        .slope_layout
+        .replace_coefficient_design(DesignMatrix::from(slope_design.clone()));
+    let block_states = vec![
+        ParameterBlockState {
+            beta: array![0.65],
+            eta: Array1::zeros(n),
+        },
+        ParameterBlockState {
+            beta: beta_marginal.clone(),
+            eta: marginal_design.dot(&beta_marginal),
+        },
+        ParameterBlockState {
+            beta: beta_slope.clone(),
+            eta: slope_design.dot(&beta_slope),
+        },
+    ];
+    let kernel = SurvivalMarginalSlopeRowKernel::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>::new(
+        family,
+        block_states,
+    );
+    let p = RowKernel::n_coefficients(&kernel);
+    assert_eq!(p, 11);
+    // Signed, row-varying and symmetric in (a, b, c): built from a + b + c and the
+    // elementary symmetric products.
+    let tensors: Vec<[[[f64; 4]; 4]; 4]> = (0..n)
+        .map(|row| {
+            std::array::from_fn(|a| {
+                std::array::from_fn(|b| {
+                    std::array::from_fn(|c| {
+                        let sum = (a + b + c) as f64;
+                        let products = (a * b + b * c + a * c + a * b * c) as f64;
+                        ((row as f64) * 0.013 + 0.7 * sum).sin() * (1.0 + 0.1 * products)
+                    })
+                })
+            })
+        })
+        .collect();
+
+    // jacobian[row][axis][primary]
+    let jacobian: Vec<Vec<[f64; 4]>> = (0..n)
+        .map(|row| {
+            (0..p)
+                .map(|axis| {
+                    let mut direction = vec![0.0_f64; p];
+                    direction[axis] = 1.0;
+                    kernel.jacobian_action(row, &direction)
+                })
+                .collect()
+        })
+        .collect();
+    let two_sum = |a: f64, b: f64| {
+        let sum = a + b;
+        let b_part = sum - a;
+        (sum, (a - (sum - b_part)) + (b - b_part))
+    };
+    let two_product = |a: f64, b: f64| {
+        let product = a * b;
+        (product, a.mul_add(b, -product))
+    };
+    // Double-double reference and absolute term mass at sorted indices a ≤ j ≤ k.
+    let mut reference = std::collections::HashMap::new();
+    for a in 0..p {
+        for j in a..p {
+            for k in j..p {
+                let (mut high, mut low, mut mass) = (0.0_f64, 0.0_f64, 0.0_f64);
+                for row in 0..n {
+                    let (ja, jj, jk) = (&jacobian[row][a], &jacobian[row][j], &jacobian[row][k]);
+                    for alpha in 0..4 {
+                        for beta in 0..4 {
+                            for gamma in 0..4 {
+                                let t = tensors[row][alpha][beta][gamma];
+                                let (p1, e1) = two_product(t, ja[alpha]);
+                                let (p2, e2) = two_product(p1, jj[beta]);
+                                let e2 = e2 + e1 * jj[beta];
+                                let (p3, e3) = two_product(p2, jk[gamma]);
+                                let e3 = e3 + e2 * jk[gamma];
+                                let (sum, error) = two_sum(high, p3);
+                                let (renormalized, rest) = two_sum(sum, low + error + e3);
+                                high = renormalized;
+                                low = rest;
+                                mass += (t * ja[alpha] * jj[beta] * jk[gamma]).abs();
+                            }
+                        }
+                    }
+                }
+                reference.insert((a, j, k), (high + low, mass));
+            }
+        }
+    }
+    let worst_scaled_error = |axes: &[Array2<f64>]| {
+        let mut worst = 0.0_f64;
+        for a in 0..p {
+            for j in 0..p {
+                for k in 0..p {
+                    let mut index = [a, j, k];
+                    index.sort_unstable();
+                    let (exact, mass) = reference[&(index[0], index[1], index[2])];
+                    if mass > 0.0 {
+                        worst = worst.max((axes[a][[j, k]] - exact).abs() / mass);
+                    }
+                }
+            }
+        }
+        worst
+    };
+
+    // The ten-Gram assembly this pullback replaced, per axis a:
+    // Σ_{α≤β} sym_{αβ}(J_αᵀ diag(Σ_γ T[α][β][γ] J_γ[:,a]) J_β).
+    let identity = Array2::<f64>::eye(p);
+    let packed = kernel
+        .jacobian_action_matrix(identity.view())
+        .expect("dense J·I projection");
+    let blocks: [Array2<f64>; 4] =
+        std::array::from_fn(|primary| packed.slice(s![.., primary * p..(primary + 1) * p]).to_owned());
+    let former: Vec<Array2<f64>> = (0..p)
+        .map(|axis| {
+            let mut total = Array2::<f64>::zeros((p, p));
+            for left in 0..4 {
+                for right in left..4 {
+                    let row_weights = Array1::from_shape_fn(n, |row| {
+                        (0..4)
+                            .map(|direction| tensors[row][left][right][direction] * blocks[direction][[row, axis]])
+                            .sum::<f64>()
+                    });
+                    let gram = gam_linalg::faer_ndarray::fast_xt_diag_y(
+                        &blocks[left],
+                        &row_weights,
+                        &blocks[right],
+                    );
+                    total.scaled_add(1.0, &gram);
+                    if left != right {
+                        total.scaled_add(1.0, &gram.t());
+                    }
+                }
+            }
+            total
+        })
+        .collect();
+
+    let pullback = |workers: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .expect("test worker pool")
+            .install(|| kernel.all_axes_primary_tensor_pullback(&tensors))
+            .expect("all-axes tensor pullback")
+    };
+    let one_worker = pullback(1);
+    let tiled_error = worst_scaled_error(&one_worker);
+    let former_error = worst_scaled_error(&former);
+    // Longest sum: three products, three primary sums of four and the n rows.
+    let terms = (3 + 3 * 4 + n) as f64;
+    let gamma_bound = terms * f64::EPSILON / 2.0 / (1.0 - terms * f64::EPSILON / 2.0);
+    eprintln!(
+        "[2337 pullback] worst scaled error: tiled {tiled_error:e}, former ten-Gram {former_error:e}, gamma_m bound {gamma_bound:e}"
+    );
+    assert!(
+        tiled_error <= former_error,
+        "tiled pullback worst scaled error {tiled_error:e} exceeds the former assembly's {former_error:e}"
+    );
+    assert!(
+        tiled_error <= gamma_bound,
+        "tiled pullback worst scaled error {tiled_error:e} exceeds the gamma_m bound {gamma_bound:e}"
+    );
+    for axis in &one_worker {
+        for j in 0..p {
+            for k in 0..p {
+                assert_eq!(axis[[j, k]].to_bits(), axis[[k, j]].to_bits(), "axis matrix not symmetric");
+            }
+        }
+    }
+    for workers in [4, 12] {
+        let wide = pullback(workers);
+        for (axis, (narrow, wide)) in one_worker.iter().zip(&wide).enumerate() {
+            for (index, (x, y)) in narrow.iter().zip(wide.iter()).enumerate() {
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "axis {axis} entry {index}: 1 worker {x:e} vs {workers} workers {y:e}"
+                );
+            }
+        }
+    }
+}
+
 /// #979: the batched all-axes second directional derivative builds the row
 /// towers once for a whole batch of directions. Each direction's object must be
 /// bit-identical to the single-direction build-once sweep, which rebuilds them.
