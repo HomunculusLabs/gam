@@ -63,6 +63,7 @@ use faer::Side;
 use gam_linalg::faer_ndarray::{
     FaerArrayView, FaerEigh, HouseholderQr, decomposition_parallelism, fast_ab, fast_ata,
 };
+use gam_linalg::matrix::array2_bits_fingerprint;
 use gam_linalg::roundoff::{
     UNIT_ROUNDOFF, accumulation_growth, compensated_band, factor_rank_partition,
     factor_singular_band, resolved_eigenvalue_count, symmetric_spectrum_rounding_band,
@@ -105,6 +106,13 @@ pub struct GaussianRemlMultiPenaltyProblem {
     compression_growth: f64,
     rho_lower: Array1<f64>,
     rho_upper: Array1<f64>,
+    /// Value fingerprints of the `X` and `Y` this problem was reduced from ([`array2_bits_fingerprint`]): the data
+    /// gradient is the envelope derivative at this data's converged fit and refuses any other arrays.
+    design_fingerprint: u64,
+    response_fingerprint: u64,
+    /// The smallest kept singular value of the unit-normalized stacked penalty roots, and the band the rank was judged
+    /// against ([`factor_singular_band`]).
+    structural_singular_margin: (f64, f64),
 }
 
 /// The criterion, its analytic ρ-derivatives and its parts at one `ρ`, each with its forward-error bound.
@@ -183,6 +191,29 @@ pub enum GaussianRemlMultiPenaltyDataGradientOutcome {
     Interior(GaussianRemlMultiPenaltyDataGradient),
     /// Some `ρ̂_k` is railed (or unaudited). The domain is derived from `XᵀX`, so a railed coordinate moves with `X`
     /// and the total derivative gains `(∂V/∂ρ_k)(∂ρ_bound/∂X)`, which the envelope forms do not carry.
+    RhoAtDomainBound {
+        placement: Vec<GaussianRemlMultiPenaltyRhoPlacement>,
+    },
+}
+
+/// `∂V/∂S_k` for every penalty where the envelope forms are the total derivative, or the typed reason they are not.
+#[derive(Clone, Debug)]
+pub enum GaussianRemlMultiPenaltyPenaltyGradientOutcome {
+    /// Every `ρ̂_k` is interior.
+    Interior {
+        /// `G_k = ½λ_k(B̂B̂ᵀ/σ̂² + m·K⁻¹ − m·S_λ⁺)`, symmetric, with `dV = tr(G_k·dS_k)` over symmetric `dS_k`. The
+        /// gradient over all `p²` entries is `G_k` too; an upper-triangle parameterization carries `2G_ij` off the
+        /// diagonal.
+        gradients: Vec<Array2<f64>>,
+        /// `rank(S_λ)`. The derivatives of `log|S_λ|₊` and of `ν` exist only for perturbations that preserve it.
+        rank: usize,
+        /// The smallest kept singular value of the unit-normalized stacked penalty roots.
+        smallest_resolved_singular_value: f64,
+        /// The backward-error band that rank was judged against ([`factor_singular_band`]).
+        rank_band: f64,
+    },
+    /// Some `ρ̂_k` is railed or unaudited. The domain is derived from the penalty spectrum, so its edge moves with
+    /// `S_k` and the envelope forms miss `(∂V/∂ρ_k)(∂ρ_bound/∂S)`.
     RhoAtDomainBound {
         placement: Vec<GaussianRemlMultiPenaltyRhoPlacement>,
     },
@@ -398,6 +429,20 @@ impl GaussianRemlMultiPenaltyProblem {
             compression_growth,
             rho_lower,
             rho_upper,
+            design_fingerprint: array2_bits_fingerprint(&x),
+            response_fingerprint: array2_bits_fingerprint(&y),
+            structural_singular_margin: (
+                partition
+                    .singular_values
+                    .get(partition.rank.saturating_sub(1))
+                    .copied()
+                    .unwrap_or(0.0),
+                factor_singular_band(
+                    stacked_rows,
+                    p,
+                    partition.singular_values.first().copied().unwrap_or(0.0),
+                ),
+            ),
         };
         // `∂q/∂ρ_k = λ_k tr(B̂ᵀS_kB̂) ≥ 0`, so a residual resolved at the domain's lower corner is resolved on the
         // whole domain; an interpolated response has no finite profiled dispersion and is refused.
@@ -762,6 +807,18 @@ impl GaussianRemlMultiPenaltyProblem {
                 fit.coefficients.dim()
             );
         }
+        if array2_bits_fingerprint(&x) != self.design_fingerprint {
+            crate::bail_invalid_estim!(
+                "multi-penalty Gaussian REML data gradient refuses `x`: its values differ from the design this \
+                 problem was built from, so the fit is not converged at it"
+            );
+        }
+        if array2_bits_fingerprint(&y) != self.response_fingerprint {
+            crate::bail_invalid_estim!(
+                "multi-penalty Gaussian REML data gradient refuses `y`: its values differ from the responses this \
+                 problem was built from, so the fit is not converged at them"
+            );
+        }
         let factor = self.stacked_root_factor(fit.evaluation.rho.view())?;
         let sigma2 = fit.evaluation.sigma2;
         let residual = &y - &fast_ab(&x, &fit.coefficients);
@@ -783,6 +840,68 @@ impl GaussianRemlMultiPenaltyProblem {
                 grad_y: residual.mapv(|value| value / sigma2),
             },
         ))
+    }
+
+    /// `∂V/∂S_k` at the fit's `ρ̂`.
+    ///
+    /// With `q` minimized over `B` and `σ²` profiled, `dq = λ_k tr(B̂B̂ᵀ dS_k)`, `d log|K| = λ_k tr(K⁻¹ dS_k)` and, while
+    /// `rank(S_λ)` is locally constant, `d log|S_λ|₊ = λ_k tr(S_λ⁺ dS_k)` with `ν` fixed, so
+    /// `∂V/∂S_k = ½λ_k(B̂B̂ᵀ/σ̂² + m·K⁻¹ − m·S_λ⁺)`. A perturbation that adds rank is outside this derivative's domain.
+    /// `B̂B̂ᵀ` is read off the compressed head: `CCᵀ = ZZᵀ` makes it equal the full coefficients' Gram.
+    pub fn penalty_gradient(
+        &self,
+        fit: &GaussianRemlMultiPenaltyFit,
+    ) -> Result<GaussianRemlMultiPenaltyPenaltyGradientOutcome, EstimationError> {
+        if fit
+            .rho_placement
+            .iter()
+            .any(|placement| *placement != GaussianRemlMultiPenaltyRhoPlacement::Interior)
+        {
+            return Ok(GaussianRemlMultiPenaltyPenaltyGradientOutcome::RhoAtDomainBound {
+                placement: fit.rho_placement.clone(),
+            });
+        }
+        let p = self.coefficients;
+        let m = self.responses as f64;
+        let factor = self.stacked_root_factor(fit.evaluation.rho.view())?;
+        let projection = self.project(&factor, self.compressed_head.view());
+        let fitted = Self::solve_upper(&factor, projection.head);
+        let inverse = Self::solve_upper(&factor, faer::Mat::<f64>::identity(p, p));
+        let normal_inverse = fast_ab(&inverse, &inverse.t());
+        let coefficient_gram = fast_ab(&fitted, &fitted.t());
+        let lambdas = factor.lambdas.to_vec();
+        let pseudo = PenaltyPseudologdet::from_components(&self.penalties, &lambdas, 0.0)
+            .map_err(|reason| EstimationError::TrialPointRefused { reason })?;
+        if pseudo.rank() != p - self.nullity {
+            return Err(EstimationError::TrialPointRefused {
+                reason: format!(
+                    "multi-penalty Gaussian REML penalty gradient: the pseudo-determinant priced rank {} at ρ̂, but \
+                     the structural rank is {}",
+                    pseudo.rank(),
+                    p - self.nullity
+                ),
+            });
+        }
+        let pseudo_inverse = fast_ab(&pseudo.w_factor, &pseudo.w_factor.t());
+        let sigma2 = fit.evaluation.sigma2;
+        let gradients = factor
+            .lambdas
+            .iter()
+            .map(|&lambda| {
+                Array2::from_shape_fn((p, p), |(row, col)| {
+                    0.5 * lambda
+                        * (coefficient_gram[[row, col]] / sigma2 + m * normal_inverse[[row, col]]
+                            - m * pseudo_inverse[[row, col]])
+                })
+            })
+            .collect();
+        let (smallest_resolved_singular_value, rank_band) = self.structural_singular_margin;
+        Ok(GaussianRemlMultiPenaltyPenaltyGradientOutcome::Interior {
+            gradients,
+            rank: p - self.nullity,
+            smallest_resolved_singular_value,
+            rank_band,
+        })
     }
 
     /// Minimize `V(ρ)` through the outer optimizer's analytic-Hessian route on the derived domain. Only a converged,
@@ -1417,6 +1536,11 @@ mod tests {
             let band = (at_2h - at_h).abs() / 3.0 + (4.0 * rounding_h + rounding_2h) / 3.0;
             let expected = directional(analytic, direction);
             assert!(
+                expected.abs() > band,
+                "∂V/∂{label}: the directional derivative {expected:.3e} must exceed the band {band:.3e}, or agreement \
+                 is vacuous"
+            );
+            assert!(
                 (at_h - expected).abs() <= band,
                 "∂V/∂{label}: central difference {at_h:.9e} vs analytic {expected:.9e}, band {band:.3e}"
             );
@@ -1606,6 +1730,151 @@ mod tests {
             GaussianRemlMultiPenaltyDataGradientOutcome::Interior(..) => {
                 panic!("a railed ρ̂ must not return the envelope forms as a total derivative")
             }
+        }
+    }
+
+    /// The data gradient is the envelope derivative at THIS data's converged fit, so arrays whose values differ from
+    /// the ones the problem was reduced from are refused, naming the argument. One flipped bit is enough.
+    #[test]
+    fn gaussian_reml_multi_penalty_data_gradient_refuses_arrays_it_was_not_built_from() {
+        let (n, p) = (60, 6);
+        let x = cosine_design(n, p);
+        let mut rng = StdRng::seed_from_u64(29_460_006);
+        let y = responses(n, &[0.3, 0.4, 0.6, 0.9], &mut rng);
+        let penalties = [curvature_penalty(p, 2), Array2::<f64>::eye(p)];
+        let problem = GaussianRemlMultiPenaltyProblem::new(x.view(), y.view(), &penalties, 0)
+            .expect("the fingerprint fixture");
+        let fit = problem.fit(None).expect("the fingerprint fixture converges");
+        let accepted = problem.data_gradient(x.view(), y.view(), &fit);
+        assert!(
+            matches!(accepted, Ok(GaussianRemlMultiPenaltyDataGradientOutcome::Interior(..))),
+            "the arrays the problem was built from are accepted; got {accepted:?} with placement {:?}",
+            fit.rho_placement
+        );
+        let mut flipped_x = x.clone();
+        flipped_x[[3, 2]] = f64::from_bits(flipped_x[[3, 2]].to_bits() ^ 1);
+        match problem.data_gradient(flipped_x.view(), y.view(), &fit) {
+            Err(EstimationError::InvalidInput(message)) => {
+                assert!(message.contains("`x`"), "the refusal names x: {message}");
+            }
+            other => panic!("one flipped bit in x must be refused; got {other:?}"),
+        }
+        let mut flipped_y = y.clone();
+        flipped_y[[5, 1]] = f64::from_bits(flipped_y[[5, 1]].to_bits() ^ 1);
+        match problem.data_gradient(x.view(), flipped_y.view(), &fit) {
+            Err(EstimationError::InvalidInput(message)) => {
+                assert!(message.contains("`y`"), "the refusal names y: {message}");
+            }
+            other => panic!("one flipped bit in y must be refused; got {other:?}"),
+        }
+    }
+
+    /// `∂V/∂S_k = ½λ_k(B̂B̂ᵀ/σ̂² + m·K⁻¹ − m·S_λ⁺)` against central differences at fixed ρ̂, along a symmetric perturbation
+    /// of each penalty inside its own range, which preserves `rank(S_λ)`. Both penalties annihilate the same two modes,
+    /// so `S_λ⁺` is a pseudo-inverse. Mutant: dropping the `−m·S_λ⁺` leg must fall outside the band.
+    #[test]
+    fn gaussian_reml_multi_penalty_penalty_gradient_matches_central_differences() {
+        let (n, p, columns) = (200, 7, 20);
+        let x = cosine_design(n, p);
+        let mut rng = StdRng::seed_from_u64(29_460_009);
+        let m = columns as f64;
+        let slope = Array2::from_shape_fn((p, p), |(row, col)| {
+            if row == col && row >= 2 { (row as f64).powi(2) } else { 0.0 }
+        });
+        let penalties = [curvature_penalty(p, 2), slope];
+        // Both strengths are planted material: at ρ = (−3, 0) the slope penalty dominates the low range modes and the
+        // curvature penalty the high ones, so each S_k carries a resolvable cotangent. On unplanted smooth responses the
+        // slope strength went small and ∂V/∂S_1 was −3.7e-6 against a rounding band of 3.7e-5 (sw2e 1196148, 1197522).
+        let planted_precision: Vec<f64> = (0..p)
+            .map(|j| (-3.0_f64).exp() * penalties[0][[j, j]] + penalties[1][[j, j]])
+            .collect();
+        let beta = Array2::from_shape_fn((p, columns), |index: (usize, usize)| {
+            let draw: f64 = StandardNormal.sample(&mut rng);
+            if index.0 < 2 { draw } else { draw / planted_precision[index.0].sqrt() }
+        });
+        let y = fast_ab(&x, &beta) + normal_matrix(n, columns, &mut rng);
+        let problem = GaussianRemlMultiPenaltyProblem::new(x.view(), y.view(), &penalties, 2)
+            .expect("the penalty-gradient fixture");
+        let fit = problem.fit(None).expect("the penalty-gradient fixture converges");
+        let (gradients, rank, smallest_resolved, rank_band) = match problem
+            .penalty_gradient(&fit)
+            .expect("the penalty gradient at the fit")
+        {
+            GaussianRemlMultiPenaltyPenaltyGradientOutcome::Interior {
+                gradients,
+                rank,
+                smallest_resolved_singular_value,
+                rank_band,
+            } => (gradients, rank, smallest_resolved_singular_value, rank_band),
+            refusal => panic!("an interior fit must return the penalty gradient; got {refusal:?}"),
+        };
+        assert_eq!(rank, p - 2, "rank(S_λ) is the complement of the two shared null modes");
+        assert!(
+            smallest_resolved > rank_band,
+            "the reported rank margin {smallest_resolved:.3e} clears its band {rank_band:.3e}"
+        );
+        let rho = fit.evaluation.rho.clone();
+        let lambdas = fit.evaluation.lambdas.clone();
+        let score = |perturbed: &[Array2<f64>]| -> (f64, f64) {
+            let evaluation = GaussianRemlMultiPenaltyProblem::new(x.view(), y.view(), perturbed, 2)
+                .expect("a perturbed penalty problem")
+                .evaluate(rho.view())
+                .expect("a perturbed penalty evaluation");
+            (evaluation.reml_score, evaluation.reml_score_roundoff)
+        };
+        // Both penalties are diagonal, so `S_λ` is too and its pseudo-inverse inverts the range modes: an independent
+        // construction for the mutant.
+        let pseudo_inverse = Array2::from_shape_fn((p, p), |(row, col)| {
+            if row == col && row >= 2 {
+                1.0 / (lambdas[0] * penalties[0][[row, row]] + lambdas[1] * penalties[1][[row, row]])
+            } else {
+                0.0
+            }
+        });
+        // Central differences at `h` and `2h`, with the Richardson remainder plus both differences' rounding (see the
+        // data gradient test).
+        let step = f64::EPSILON.cbrt();
+        for k in 0..penalties.len() {
+            let block = normal_matrix(p - 2, p - 2, &mut rng);
+            let direction = Array2::from_shape_fn((p, p), |(row, col)| {
+                if row >= 2 && col >= 2 {
+                    // A RELATIVE perturbation `Λ^½·D·Λ^½` on the range block: an absolute `O(1)` direction against
+                    // entries up to `6⁴` moved V by less than the difference's own rounding (sw2e 1196148: the mutant
+                    // gap 1.1e-5 sat inside the band 3.7e-5).
+                    0.5 * (block[[row - 2, col - 2]] + block[[col - 2, row - 2]])
+                        * (penalties[k][[row, row]] * penalties[k][[col, col]]).sqrt()
+                } else {
+                    0.0
+                }
+            });
+            let central = |h: f64| -> (f64, f64) {
+                let mut plus = penalties.clone();
+                plus[k] = &plus[k] + &direction.mapv(|value| h * value);
+                let mut minus = penalties.clone();
+                minus[k] = &minus[k] - &direction.mapv(|value| h * value);
+                let (above, above_roundoff) = score(&plus);
+                let (below, below_roundoff) = score(&minus);
+                ((above - below) / (2.0 * h), (above_roundoff + below_roundoff) / (2.0 * h))
+            };
+            let (at_h, rounding_h) = central(step);
+            let (at_2h, rounding_2h) = central(2.0 * step);
+            let band = (at_2h - at_h).abs() / 3.0 + (4.0 * rounding_h + rounding_2h) / 3.0;
+            let expected: f64 = gradients[k].iter().zip(direction.iter()).map(|(g, d)| g * d).sum();
+            assert!(
+                expected.abs() > band,
+                "∂V/∂S_{k}: the directional derivative {expected:.3e} must exceed the band {band:.3e}, or agreement is \
+                 vacuous"
+            );
+            assert!(
+                (at_h - expected).abs() <= band,
+                "∂V/∂S_{k}: central difference {at_h:.9e} vs analytic {expected:.9e}, band {band:.3e}"
+            );
+            let mutant = &gradients[k] + &pseudo_inverse.mapv(|value| 0.5 * lambdas[k] * m * value);
+            let wrong: f64 = mutant.iter().zip(direction.iter()).map(|(g, d)| g * d).sum();
+            assert!(
+                (at_h - wrong).abs() > band,
+                "mutant: the gradient without −m·S_λ⁺ gives {wrong:.9e}, inside the band {band:.3e} of {at_h:.9e}"
+            );
         }
     }
 }

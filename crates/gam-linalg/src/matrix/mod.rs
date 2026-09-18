@@ -3760,8 +3760,12 @@ pub use symmetric::*;
 /// with the same key (gam#2515). The pass is `O(n·p)`, negligible beside the
 /// `O(n·p²)` products such caches exist to skip, and bit-exact: `-0.0` and
 /// `+0.0` differ, every NaN payload differs, exactly as the arithmetic that
-/// consumes the matrix would see them.
-pub fn array2_bits_fingerprint(matrix: &ndarray::Array2<f64>) -> u64 {
+/// consumes the matrix would see them. Any storage hashes by its logical
+/// row-major order, so a view and an owned copy of the same values agree and a
+/// caller never copies a large matrix just to fingerprint it.
+pub fn array2_bits_fingerprint<S: ndarray::Data<Elem = f64>>(
+    matrix: &ndarray::ArrayBase<S, ndarray::Ix2>,
+) -> u64 {
     let mut hash = Fnv1a::new();
     hash.absorb(matrix.nrows() as u64);
     hash.absorb(matrix.ncols() as u64);
