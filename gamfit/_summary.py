@@ -180,7 +180,7 @@ class Summary:
 
         - the fit has **no** criterion at all (:attr:`raw_reml_score` is
           ``None`` too), which is not the same as one that was not recorded: an
-          exactly-interpolating Gaussian fit has :math:`\hat\varphi = 0`, so
+          exactly-interpolating Gaussian fit has :math:`\\hat\\varphi = 0`, so
           its restricted likelihood is unbounded and every score derived from
           it is undefined;
         - the fit has a raw criterion but no penalty null-space metadata, so
