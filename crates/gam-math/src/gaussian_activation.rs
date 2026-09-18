@@ -73,7 +73,8 @@
 //! It relies on its owners' contracts:
 //! - the cited libm 0.2.16 `exp` error analysis, through `normal_pdf_bounded`;
 //! - the measured `erfc` ulp, for `Φ` in the direct forms;
-//! - the measured `atan2` ulp, for the zero-mean kernels' orthant angle;
+//! - the derived arctangent of `bounded_arctangent2`, for the zero-mean kernels' orthant angle,
+//!   which rests on IEEE-754 semantics only;
 //! - the derived bounds of `normal_left_tail_ratios`, which rest on IEEE-754 semantics only.
 //!
 //! # Pair kernel
@@ -105,7 +106,8 @@
 //!
 //! Both zero-mean kernels take the orthant angle from the exactly carried
 //! residual `vw − r²`: `H = atan2(√(vw − r²), −r)/(2π)` for ReLU and
-//! `H = atan2(√Δ, −r)/(2π)` for the exact GELU. `arccos(−ρ)` of a rounded `ρ`
+//! `H = atan2(√Δ, −r)/(2π)` for the exact GELU, each through the derived
+//! `bounded_arctangent2` rather than the platform's `atan2`. `arccos(−ρ)` of a rounded `ρ`
 //! multiplies that rounding by `1/√(1 − ρ²)`; for anti-correlated large-norm
 //! readers the GELU kernel's two `√v`-sized terms cancel on top of it, which
 //! reached 90% relative error at `v = w = −r = 1e8` (#2946).
@@ -123,10 +125,12 @@ use crate::bivariate_normal::{
     BIVARIATE_NORMAL_CDF_ERROR_BOUND, BivariateNormalError,
     bivariate_normal_cdf_partials_with_complement, bivariate_normal_cdf_with_complement,
 };
+use crate::double_double::BoundedDoubleDouble;
 use crate::probability::{normal_cdf, normal_left_tail_ratios, normal_pdf_bounded};
-use crate::roundoff::UNIT_ROUNDOFF;
-use std::f64::consts::TAU;
+use crate::roundoff::{UNIT_ROUNDOFF, inflated};
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use std::fmt;
+use std::sync::LazyLock;
 
 /// An elementwise activation of a known MLP block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1039,19 +1043,196 @@ fn bounded_tau() -> Bounded {
     }
 }
 
-/// `atan2(y, −r)/(2π)` for `y ≥ 0`: the `atan2` ulp, the height's bound through
-/// `|∂_y atan2(y, x)| = |x|/(x² + y²)`, and the rounding of `2π` and the division. The
-/// `atan2` ulp is a MEASUREMENT, not a contract: this is the platform's `f64::atan2`, and
-/// neither the platform nor libm 0.2.16 documents an error analysis for atan2.
+/// `atan2(y, −r)/(2π)` for `y ≥ 0`: the derived bound of [`bounded_arctangent2`], the
+/// height's bound through `|∂_y atan2(y, x)| = |x|/(x² + y²)`, and the rounding of `2π` and
+/// the division.
 fn bounded_orthant(height: Bounded, covariance: f64) -> Bounded {
-    let angle = height.value.atan2(-covariance);
+    let angle = bounded_arctangent2(height.value, -covariance);
     Bounded {
-        value: angle,
-        bound: 2.0 * UNIT_ROUNDOFF * angle.abs()
+        value: angle.value,
+        bound: angle.bound
             + covariance.abs() * height.bound
                 / (covariance * covariance + height.value * height.value),
     }
     .div(bounded_tau())
+}
+
+/// Centers per unit of the arctangent's argument reduction: `atan(z)` for `z ∈ [0, 1]` is
+/// taken about the nearest `c = k/8`, so the reduced argument stays within `1/16`.
+const ARCTANGENT_CENTERS_PER_UNIT: f64 = 8.0;
+
+/// The centers `k/8`, `k = 0, …, 8`.
+const ARCTANGENT_CENTER_COUNT: usize = 9;
+
+/// Odd Taylor terms `(−1)ʲ w^{2j+1}/(2j + 1)`, `j < J`, kept for `atan(w)` at `|w| ≤ 1/16`.
+/// The Leibniz remainder `|w|^{2J+1}/(2J + 1)` is then below `10⁻²u·|w|`.
+const ARCTANGENT_SERIES_TERMS: usize = 7;
+
+/// The certified pieces of [`bounded_arctangent2`].
+struct ArctangentTable {
+    /// `atan(k/8)` rounded to `f64`.
+    centers: [f64; ARCTANGENT_CENTER_COUNT],
+    /// Bounds on their rounding.
+    center_bounds: [f64; ARCTANGENT_CENTER_COUNT],
+    /// `(−1)ʲ/(2j + 1)` rounded to `f64`.
+    series: [f64; ARCTANGENT_SERIES_TERMS],
+    /// `Σ_j β_j·ρ^{2j}` over the coefficients' rounding `β_j ≤ u/(2j + 1)`, at the reduced reach `ρ`.
+    series_budget: f64,
+    /// `ρ^{2J}/(2J + 1)`: the Leibniz remainder per unit of `|w|`.
+    series_remainder: f64,
+}
+
+static ARCTANGENT_TABLE: LazyLock<ArctangentTable> = LazyLock::new(ArctangentTable::build);
+
+impl ArctangentTable {
+    /// `atan(k/8)` from Euler's series `atan(x) = Σ_n (2²ⁿ(n!)²/(2n + 1)!)·x^{2n+1}/(1 + x²)^{n+1}`
+    /// in bounded double-double.
+    ///
+    /// Its terms are positive, and each is the last times `y·2n/(2n + 1) < y` with
+    /// `y = x²/(1 + x²) ≤ ½`. So the rest after any term is below that term times `y/(1 − y)`. At
+    /// `x = k/8`, the first term `8k/(64 + k²)` and `y = k²/(64 + k²)` are exact quotients of
+    /// integers.
+    ///
+    /// The reduced reach `ρ` is `1/16` widened by the reduced argument's rounding: its
+    /// numerator is exact, and its denominator and quotient round once each.
+    fn build() -> Self {
+        let floor = UNIT_ROUNDOFF * UNIT_ROUNDOFF;
+        let upper = |value: BoundedDoubleDouble| {
+            value.value.high.abs() + value.value.low.abs() + value.rounding
+        };
+        let mut centers = [0.0; ARCTANGENT_CENTER_COUNT];
+        let mut center_bounds = [0.0; ARCTANGENT_CENTER_COUNT];
+        for (index, (center, bound)) in centers.iter_mut().zip(center_bounds.iter_mut()).enumerate() {
+            let numerator = index as f64;
+            let denominator = 64.0 + numerator * numerator;
+            let ratio = BoundedDoubleDouble::exact(numerator * numerator).div_f64(denominator);
+            let ratio_upper = upper(ratio);
+            let mut term = BoundedDoubleDouble::exact(8.0 * numerator).div_f64(denominator);
+            let mut sum = term;
+            let mut order = 1.0;
+            loop {
+                // `m = 4`: the upper value, the product, the difference and the quotient.
+                let tail = inflated(upper(term) * ratio_upper / (1.0 - ratio_upper), 4);
+                if tail <= floor * sum.value.high {
+                    sum.rounding = inflated(sum.rounding + tail, 1);
+                    break;
+                }
+                term = term.mul(ratio).mul_f64(2.0 * order).div_f64(2.0 * order + 1.0);
+                sum = sum.add(term);
+                order += 1.0;
+            }
+            (*center, *bound) = sum.to_f64();
+        }
+        let reach = inflated(0.5 / ARCTANGENT_CENTERS_PER_UNIT, 2);
+        let square = reach * reach;
+        let mut series = [0.0; ARCTANGENT_SERIES_TERMS];
+        let mut series_budget = 0.0;
+        let mut power = 1.0;
+        for (order, coefficient) in series.iter_mut().enumerate() {
+            let odd = (2 * order + 1) as f64;
+            let sign = if order % 2 == 0 { 1.0 } else { -1.0 };
+            *coefficient = sign / odd;
+            series_budget += UNIT_ROUNDOFF / odd * power;
+            power *= square;
+        }
+        // `power` is now `ρ^{2J}`; `m = 3J + 2` for the budget and `m = 2J + 1` for the remainder.
+        Self {
+            centers,
+            center_bounds,
+            series,
+            series_budget: inflated(series_budget, 3 * ARCTANGENT_SERIES_TERMS + 2),
+            series_remainder: inflated(
+                power / (2 * ARCTANGENT_SERIES_TERMS + 1) as f64,
+                2 * ARCTANGENT_SERIES_TERMS + 1,
+            ),
+        }
+    }
+}
+
+/// `atan2(y, x)` for `y ≥ 0`, in `[0, π]`, with a bound derived from IEEE-754 basic
+/// operations only: no libm call and no measured ulp.
+/// - **Quadrant.** `y = 0` gives `0` or `π` by the sign of `x`, as `f64::atan2` does. Otherwise
+///   `θ = atan(z)` with `z = y/|x| ≤ 1`, or `π/2 − atan(z)` with `z = |x|/y < 1`, and then `π − θ`
+///   when `x < 0`. `atan(z) ≤ π/4` and `π/2 − atan(z) ≥ π/4`, so neither subtraction cancels.
+/// - **Reduction.** `atan(z) = atan(c) + atan(w)` with `c = k/8` nearest `z` and
+///   `w = (z − c)/(1 + zc)`, `|w| ≤ 1/16`. `8z` and its rounding are exact, and `z − c` is exact by
+///   Sterbenz's lemma (`c/2 ≤ z ≤ 2c` once `k ≥ 1`, and `z − c = z` at `k = 0`).
+/// - **Series.** `atan(w) = w·Σ_j (−1)ʲ s^j/(2j + 1)` with `s = w²`, by Horner's rule in plain
+///   products and sums with a running bound (Higham §5.1), since generic x86-64 builds lower
+///   `mul_add` to a library call. The terms alternate and decrease, so the
+///   remainder is at most the first omitted one.
+/// - **Rounding charged.**
+///   - `z` rounds by `u·z`, and `|∂_z atan| ≤ 1` passes it on.
+///   - `w` rounds by `3u·|w|`: the product and sum of its denominator, and its quotient.
+///   - `s` rounds by `u·s`, which moves the Horner sum by at most `u·s/3`, since its derivative
+///     in `s` is below `⅓`.
+///   - The product `w·p` and the three sums round by `u` of their results.
+///   - `π` and `π/2` enter within `|π − fl(π)| < 1.23e-16` and half of it: `BoundedDoubleDouble::PI`'s
+///     low word plus its bound.
+///   - The bound's own evaluation is absorbed by `inflated`.
+fn bounded_arctangent2(height: f64, abscissa: f64) -> Bounded {
+    let pi_rounding = BoundedDoubleDouble::PI.value.low.abs() + BoundedDoubleDouble::PI.rounding;
+    if height == 0.0 {
+        return if abscissa.is_sign_negative() {
+            Bounded { value: PI, bound: pi_rounding }
+        } else {
+            Bounded::exact(0.0)
+        };
+    }
+    let table = &*ARCTANGENT_TABLE;
+    let magnitude = abscissa.abs();
+    let reflected = height > magnitude;
+    let argument = if reflected { magnitude / height } else { height / magnitude };
+    let scaled = (argument * ARCTANGENT_CENTERS_PER_UNIT).round();
+    let index = scaled as usize;
+    let center = scaled / ARCTANGENT_CENTERS_PER_UNIT;
+    let reduced = (argument - center) / (argument * center + 1.0);
+    let square = reduced * reduced;
+    let mut coefficients = table.series.iter().rev();
+    let mut sum = coefficients.next().copied().unwrap_or(0.0);
+    let mut running = 0.0_f64;
+    for &coefficient in coefficients {
+        let product = sum * square;
+        sum = product + coefficient;
+        running = running * square + UNIT_ROUNDOFF * (product.abs() + sum.abs());
+    }
+    let series = reduced * sum;
+    let base = table.centers[index] + series;
+    // `atan(z)`'s error: the center's rounding; `|w|` times the Horner running bound, the
+    // coefficients' budget, `s`'s rounding, the remainder and `w`'s own `3u`; the product and the
+    // sum; `z`'s rounding; and `η/2` apiece where `z`, `s` or a product underflows. `m = 12` for
+    // the expression, and `3J` for the running bound's own steps and their `1/(1 − u)`.
+    let base_bound = inflated(
+        table.center_bounds[index]
+            + reduced.abs()
+                * (running
+                    + table.series_budget
+                    + UNIT_ROUNDOFF * square / 3.0
+                    + table.series_remainder
+                    + 3.0 * UNIT_ROUNDOFF)
+            + UNIT_ROUNDOFF * (series.abs() + base.abs())
+            + UNIT_ROUNDOFF * argument
+            + 2.0 * f64::from_bits(1),
+        12 + 3 * ARCTANGENT_SERIES_TERMS,
+    );
+    let (angle, angle_bound) = if reflected {
+        let angle = FRAC_PI_2 - base;
+        (angle, base_bound + 0.5 * pi_rounding + UNIT_ROUNDOFF * angle)
+    } else {
+        (base, base_bound)
+    };
+    if abscissa < 0.0 {
+        let supplement = PI - angle;
+        Bounded {
+            value: supplement,
+            bound: inflated(angle_bound + pi_rounding + UNIT_ROUNDOFF * supplement, 2),
+        }
+    } else {
+        Bounded {
+            value: angle,
+            bound: inflated(angle_bound, 2),
+        }
+    }
 }
 
 /// `K = r H + (vw + r² q)/(2π √Δ)` and `∂_r K = H + r (1/A + 1/B + 1/Δ)/(2π √Δ)`
@@ -3601,6 +3782,74 @@ mod tests {
         assert!(
             largest_discrepancy > 0.0,
             "no evaluation rounded, so the bounds were not exercised"
+        );
+    }
+
+    #[test]
+    fn derived_arctangent_encloses_the_double_double_reference_in_every_quadrant_case() {
+        // z = y/|x| (or |x|/y past the diagonal) on a grid of 1/32, which crosses every center k/8
+        // and both edges k/8 ± 1/16 of every reduction, for both signs of x. Plus a vanishing
+        // height, a vanishing abscissa of either sign, the diagonal, and ratios far from one. The
+        // reference is the test-local double-double atan2.
+        let mut cases: Vec<(f64, f64)> = vec![
+            (0.0, 1.0),
+            (0.0, -1.0),
+            (1.0, 0.0),
+            (1.0, -0.0),
+            (0.7, 0.7),
+            (3.0, -3.0),
+            (1.0e-100, 1.0e10),
+            (1.0e10, -1.0e-100),
+        ];
+        for step in 0..=32_u32 {
+            let ratio = f64::from(step) / 32.0;
+            for abscissa in [1.0_f64, -1.0, 7.5, -0.3] {
+                cases.push((ratio * abscissa.abs(), abscissa));
+                if step > 0 {
+                    cases.push((abscissa.abs() / ratio, abscissa));
+                }
+            }
+        }
+        let mut largest_discrepancy = 0.0_f64;
+        for (height, abscissa) in cases {
+            let angle = bounded_arctangent2(height, abscissa);
+            let reference = double_double_atan2(DoubleDouble::from(height), abscissa);
+            let error = double_double_discrepancy(angle.value, reference);
+            assert!(
+                error <= angle.bound,
+                "atan2({height}, {abscissa}) = {}: error {error:e} beyond its bound {:e}",
+                angle.value,
+                angle.bound
+            );
+            // The bound stays a few rounding units, so the enclosure is not won by width.
+            assert!(
+                angle.bound <= 16.0 * UNIT_ROUNDOFF * angle.value + 4.0 * f64::from_bits(1),
+                "atan2({height}, {abscissa}) = {}: bound {:e} is not within 16u",
+                angle.value,
+                angle.bound
+            );
+            largest_discrepancy = largest_discrepancy.max(error);
+        }
+        assert!(
+            largest_discrepancy > 0.0,
+            "no evaluation rounded, so the bounds were not exercised"
+        );
+        // Positive control at a reduction edge: z = 1/16 reduces about c = 1/8 to |w| ≈ 1/16. The
+        // same center with the odd series cut to three terms, 1 − s/3 + s²/5, misses the reference
+        // by about |w|⁷/7, far beyond the certified bound there.
+        let (height, abscissa) = (1.0, 16.0);
+        let angle = bounded_arctangent2(height, abscissa);
+        let reference = double_double_atan2(DoubleDouble::from(height), abscissa);
+        let table = &*ARCTANGENT_TABLE;
+        let argument = height / abscissa;
+        let center = (argument * ARCTANGENT_CENTERS_PER_UNIT).round() / ARCTANGENT_CENTERS_PER_UNIT;
+        let reduced = (argument - center) / (argument * center + 1.0);
+        let square = reduced * reduced;
+        let short = table.centers[1] + reduced * (1.0 - square / 3.0 + square * square / 5.0);
+        assert!(
+            center == 0.125 && double_double_discrepancy(short, reference) > angle.bound,
+            "the three-term series {short} at center {center} still lies within {:e} of the reference",
+            angle.bound
         );
     }
 
