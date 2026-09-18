@@ -253,16 +253,24 @@ fn anchored_joint_law_is_calibrated_where_the_pooled_closed_form_is_not_2929() {
             + s[1] * s[1] * sigma[[1, 1]])
             .sqrt()
     };
-    let pooled_error = (0..N)
-        .map(|row| {
-            let z = fixture.scores[row];
-            let eta = pooled.exit_index[row] * pooled_scale
-                + pooled.slopes[0] * z[0]
-                + pooled.slopes[1] * z[1];
-            (normal_cdf(-eta) - truth[row]).abs()
-        })
-        .sum::<f64>()
-        / N as f64;
+    // The mean absolute error over the rows and its Monte Carlo standard error.
+    let mean_and_se = |errors: Vec<f64>| -> (f64, f64) {
+        let count = errors.len() as f64;
+        let mean = errors.iter().sum::<f64>() / count;
+        let variance = errors.iter().map(|e| (e - mean).powi(2)).sum::<f64>() / (count - 1.0);
+        (mean, (variance / count).sqrt())
+    };
+    let (pooled_error, pooled_error_se) = mean_and_se(
+        (0..N)
+            .map(|row| {
+                let z = fixture.scores[row];
+                let eta = pooled.exit_index[row] * pooled_scale
+                    + pooled.slopes[0] * z[0]
+                    + pooled.slopes[1] * z[1];
+                (normal_cdf(-eta) - truth[row]).abs()
+            })
+            .collect(),
+    );
 
     let payload = fit_formula_to_payload(
         "Surv(time, event) ~ x + x2".to_string(),
@@ -271,10 +279,11 @@ fn anchored_joint_law_is_calibrated_where_the_pooled_closed_form_is_not_2929() {
     )
     .expect("fit the anchored K=2 model to a saved payload");
     let prediction = predict_at_training_rows(&FittedModel::from_payload(payload), &fixture.data);
-    let anchored_error = (0..N)
-        .map(|row| (prediction.survival[[row, 0]] - truth[row]).abs())
-        .sum::<f64>()
-        / N as f64;
+    let (anchored_error, anchored_error_se) = mean_and_se(
+        (0..N)
+            .map(|row| (prediction.survival[[row, 0]] - truth[row]).abs())
+            .collect(),
+    );
     // The planted correlation's reach: the factor the pooled lowering is off by
     // at the covariate extremes.
     let planted_factor = conditional_scale(1.0).max(conditional_scale(-1.0))
@@ -282,8 +291,8 @@ fn anchored_joint_law_is_calibrated_where_the_pooled_closed_form_is_not_2929() {
     eprintln!(
         "[2929 calibration] n={N} planted b=({:.3}, {:.3}) c(x) range factor={planted_factor:.3} | \
          slopes pooled=({:.4}, {:.4}) anchored=({:.4}, {:.4}) | mean |Ŝ(t,x,z) − S(t,x,z)|: \
-         pooled closed form={pooled_error:.4} anchored={anchored_error:.4} | log-lik pooled={:.3} \
-         anchored={:.3}",
+         pooled closed form={pooled_error:.4} (se {pooled_error_se:.5}) anchored={anchored_error:.4} \
+         (se {anchored_error_se:.5}) | log-lik pooled={:.3} anchored={:.3}",
         SLOPES[0],
         SLOPES[1],
         pooled.slopes[0],
@@ -297,10 +306,16 @@ fn anchored_joint_law_is_calibrated_where_the_pooled_closed_form_is_not_2929() {
         anchored_error < 0.02,
         "the anchored K=2 fit must be calibrated in context; mean |Ŝ − S| = {anchored_error:.4}"
     );
+    // The pooled lowering's miscalibration must be real, well clear of the Monte
+    // Carlo error of its mean over the rows, and more than twice the anchored
+    // fit's. The second half used to be an absolute floor of 0.03, calibrated
+    // while a Linear baseline was pinned to its cold-start Weibull offset
+    // (gnomon#2336): that put time-curve misfit into both arms on top of the
+    // pooled lowering's wrong scale, which is the only thing this test is about.
     assert!(
-        pooled_error > 2.0 * anchored_error && pooled_error > 0.03,
+        pooled_error > 2.0 * anchored_error && pooled_error >= 4.0 * pooled_error_se,
         "the pooled-Σ closed form must be measurably miscalibrated under a moving correlation; \
-         pooled {pooled_error:.4} vs anchored {anchored_error:.4}"
+         pooled {pooled_error:.4} (Monte Carlo se {pooled_error_se:.5}) vs anchored {anchored_error:.4}"
     );
     for k in 0..2 {
         assert!(
