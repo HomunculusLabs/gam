@@ -1878,13 +1878,16 @@ fn positivity_raise(order: usize, max_subject_nodes: usize, tolerance: f64) -> O
 /// are refined until no fitted coefficient moves by more than the
 /// certificate's tolerance. `start` warm-starts every block from a fit one
 /// rank down, with the new atom's loadings at the covariance score's
-/// proposal.
-fn fit_at_rank(
+/// proposal. An unpinned ladder starts at mesh refinement `from_refinement`:
+/// a model whose rank was decided at a mesh is never refitted on a coarser
+/// one, where the integrals the decision needed resolved are not.
+pub(crate) fn fit_at_rank(
     cohort: &EventHistoryCohort,
     spec: &EventHistorySpec,
     atoms: usize,
     start: Option<&RankStart>,
     pinned: Option<(usize, usize)>,
+    from_refinement: usize,
     reference_refinement: usize,
 ) -> Result<EventHistoryFit, EventHistoryError> {
     let marks = cohort.marks();
@@ -2075,7 +2078,7 @@ fn fit_at_rank(
     // returned runs the refinement ladder.
     let (mut order, mut refinement) = match pinned {
         Some((order, refinement)) => (order, refinement),
-        None => (spec.gauss_hermite_order.max(3), 0usize),
+        None => (spec.gauss_hermite_order.max(3), from_refinement),
     };
     let mut built = build(order, refinement)?;
     loop {
@@ -2500,6 +2503,78 @@ fn added_atom_probe(fit: &EventHistoryFit, log_rate: f64) -> Result<(EventHistor
     Ok((probe, states))
 }
 
+/// [`added_atom_probe`] on the time mesh at `refinement`: the fit's own
+/// coefficients, its frozen bases evaluated on that mesh's nodes, and the
+/// reference tables built on those nodes, so an integral the rank decision
+/// reads can be read one mesh rung up at the same coefficients.
+fn added_atom_probe_on_mesh(
+    fit: &EventHistoryFit,
+    cohort: &EventHistoryCohort,
+    spec: &EventHistorySpec,
+    refinement: usize,
+    log_rate: f64,
+    reference_refinement: usize,
+) -> Result<(EventHistoryFamily, Vec<ParameterBlockState>), EventHistoryError> {
+    let marks = fit.marks();
+    let atoms = fit.rank() + 1;
+    let nodes = Arc::new(expand_nodes(cohort, spec.quadrature_order, refinement)?);
+    let mut dense = Vec::with_capacity(marks);
+    let mut states = Vec::with_capacity(marks + 1);
+    for d in 0..marks {
+        let design = build_term_collection_design(nodes.node_data.view(), &fit.frozen_specs[d])
+            .map_err(|error| EventHistoryError::Fit {
+                reason: format!("design for mark {d} on mesh refinement {refinement}: {error}"),
+            })?;
+        let matrix = design
+            .design
+            .try_to_dense_arc("event-history mark design")
+            .map_err(|error| EventHistoryError::Fit {
+                reason: error.to_string(),
+            })?;
+        let beta = fit.fit.block_states[d].beta.clone();
+        let eta = matrix.dot(&beta) + &design.affine_offset;
+        states.push(ParameterBlockState { beta, eta });
+        dense.push(matrix);
+    }
+    let reference = match &spec.reference {
+        Some(strata) => Some(Arc::new(reference_tables(
+            cohort,
+            strata,
+            &fit.frozen_specs,
+            spec.quadrature_order,
+            reference_refinement,
+            &nodes,
+        )?)),
+        None => None,
+    };
+    let mut rates: Vec<Option<f64>> = fit.log_rates.iter().map(|r| Some(r.exp())).collect();
+    rates.push(Some(log_rate.exp()));
+    let probe = EventHistoryFamily::new(
+        Arc::clone(&nodes),
+        dense,
+        atoms,
+        fit.family.gh.order,
+        fit.time_scale,
+        rates,
+    )?
+    .with_reference(reference);
+    preflight(fit.family.gh.order, atoms, nodes.max_subject_nodes(), marks, probe.total_width())?;
+    let mut loadings = Array1::zeros(marks * atoms);
+    for d in 0..marks {
+        for k in 0..fit.rank() {
+            loadings[d * atoms + k] = fit.loadings[[d, k]];
+        }
+    }
+    states.push(ParameterBlockState {
+        beta: loadings,
+        eta: Array1::zeros(nodes.total_nodes),
+    });
+    probe
+        .validate_states(&states)
+        .map_err(|reason| EventHistoryError::InvalidInput { reason })?;
+    Ok((probe, states))
+}
+
 /// The added-factor curvature at a probe's Gauss-Hermite order and one ladder
 /// rung up.
 struct CurvaturePair {
@@ -2613,8 +2688,8 @@ enum Proposal {
     /// The atom with its direction, prior and start loading.
     Resolved(NewAtom),
     /// An integral the proposal reads is not resolved at this setting, for
-    /// the stated reason.
-    Unresolved(DecisionIntegral, String),
+    /// the stated reason; the rung is the ladder that resolves it.
+    Unresolved(DecisionIntegral, Rung, String),
 }
 
 /// The atom `best_new_atom` proposes, completed at the incumbent's setting: its
@@ -2626,9 +2701,12 @@ enum Proposal {
 /// cannot represent (`LostPositivity`).
 fn propose_atom(
     fit: &EventHistoryFit,
+    cohort: &EventHistoryCohort,
+    spec: &EventHistorySpec,
     mut atom: NewAtom,
     time_scale: f64,
     tolerance: f64,
+    reference_refinement: usize,
 ) -> Result<Proposal, EventHistoryError> {
     let marks = fit.marks();
     let rank = fit.rank();
@@ -2638,11 +2716,16 @@ fn propose_atom(
         Ok(None) => {
             return Ok(Proposal::Unresolved(
                 DecisionIntegral::AddedFactorCurvature,
+                Rung::GaussHermite,
                 format!("no Gauss-Hermite rung above order {order} checks the added-factor curvature"),
             ));
         }
         Err(EventHistoryError::LostPositivity { reason }) => {
-            return Ok(Proposal::Unresolved(DecisionIntegral::AddedFactorCurvature, reason));
+            return Ok(Proposal::Unresolved(
+                DecisionIntegral::AddedFactorCurvature,
+                Rung::GaussHermite,
+                reason,
+            ));
         }
         Err(error) => return Err(error),
     };
@@ -2693,7 +2776,11 @@ fn propose_atom(
             match direction_profile(fit, along, time_scale, *prior) {
                 Ok(profile) => directions.push(DirectionEvidence::Sampled(profile)),
                 Err(EventHistoryError::LostPositivity { reason }) => {
-                    return Ok(Proposal::Unresolved(DecisionIntegral::DirectionalProfile, reason));
+                    return Ok(Proposal::Unresolved(
+                        DecisionIntegral::DirectionalProfile,
+                        Rung::GaussHermite,
+                        reason,
+                    ));
                 }
                 Err(error) => return Err(error),
             }
@@ -2749,9 +2836,69 @@ fn propose_atom(
         if !(shift <= tolerance) {
             return Ok(Proposal::Unresolved(
                 DecisionIntegral::AddedFactorCurvature,
+                Rung::GaussHermite,
                 format!(
                     "the added-factor curvature between Gauss-Hermite orders {order} and {} moves the proposed start by {shift:.3e} posterior sd, above the tolerance {tolerance}",
                     curvature.next_order
+                ),
+            ));
+        }
+        // The node quadrature of the latent path is part of the same integral,
+        // so the curvature is also read one mesh rung up, at the same
+        // coefficients and order, and priced the same way (#2627). Where no
+        // mesh rung remains the decision cannot be checked at this setting.
+        let refinement = fit.quadrature.mesh_refinement;
+        let next_refinement = refinement + 1;
+        if next_refinement > cohort.mesh_refinement_ceiling() {
+            return Ok(Proposal::Unresolved(
+                DecisionIntegral::AddedFactorCurvature,
+                Rung::Mesh,
+                format!("no mesh rung above refinement {refinement} checks the added-factor curvature"),
+            ));
+        }
+        let (probe, states) = added_atom_probe_on_mesh(
+            fit,
+            cohort,
+            spec,
+            next_refinement,
+            atom.log_rate,
+            reference_refinement,
+        )?;
+        let mesh_curvature = match loading_curvature(&probe, &states) {
+            Ok(mesh_curvature) => mesh_curvature,
+            Err(EventHistoryError::LostPositivity { reason }) => {
+                return Ok(Proposal::Unresolved(
+                    DecisionIntegral::AddedFactorCurvature,
+                    Rung::GaussHermite,
+                    reason,
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        if mesh_curvature.iter().any(|x| !x.is_finite()) {
+            return Err(EventHistoryError::NumericalFailure {
+                reason: format!(
+                    "added-factor curvature is not finite at mesh refinement {next_refinement}"
+                ),
+            });
+        }
+        let (mesh_values, mesh_vectors) = super::covariance::eigenmodes(&mesh_curvature)?;
+        let mesh_shift = proposal_start_shift(
+            (&values, &vectors),
+            (&mesh_values, &mesh_vectors),
+            refined.mode_scale,
+            &spreads,
+        );
+        log::info!(
+            "[event-history] rank {rank} → {}: a mesh rung of curvature error (refinement {refinement} → {next_refinement}) moves the proposed start by {mesh_shift:.3e} posterior sd",
+            rank + 1
+        );
+        if !(mesh_shift <= tolerance) {
+            return Ok(Proposal::Unresolved(
+                DecisionIntegral::AddedFactorCurvature,
+                Rung::Mesh,
+                format!(
+                    "the added-factor curvature between mesh refinements {refinement} and {next_refinement} moves the proposed start by {mesh_shift:.3e} posterior sd, above the tolerance {tolerance}"
                 ),
             ));
         }
@@ -2920,7 +3067,7 @@ fn fit_event_history_on_grid(
     // remains, the path stops at the certified incumbent and records the
     // growth as unresolved (`RankStep::growth_unresolved`).
     let mut rank_spec = spec.clone();
-    let mut fit = certified_rank(cohort, &rank_spec, 0, None, reference_refinement)?;
+    let mut fit = certified_rank(cohort, &rank_spec, 0, None, 0, reference_refinement)?;
     let mut rank_path: Vec<RankStep> = Vec::new();
     let mut atom_evidence: Vec<f64> = Vec::new();
     loop {
@@ -2935,10 +3082,18 @@ fn fit_event_history_on_grid(
             break;
         };
         let proposed = proposal.clone();
-        let atom = match propose_atom(&fit, proposal, time_scale, spec.quadrature_tolerance)? {
+        let atom = match propose_atom(
+            &fit,
+            cohort,
+            spec,
+            proposal,
+            time_scale,
+            spec.quadrature_tolerance,
+            reference_refinement,
+        )? {
             Proposal::Resolved(atom) => atom,
-            Proposal::Unresolved(integral, reason) => {
-                match raise_incumbent(cohort, &mut rank_spec, &fit, &reason, reference_refinement)? {
+            Proposal::Unresolved(integral, rung, reason) => {
+                match raise_incumbent(cohort, &mut rank_spec, &fit, rung, &reason, reference_refinement)? {
                     Some(raised) => {
                         fit = raised;
                         continue;
@@ -3013,7 +3168,15 @@ fn fit_event_history_on_grid(
             rate_held: fit.rate_held.clone(),
             atom: Some(atom.clone()),
         };
-        let grown = fit_at_rank(cohort, &rank_spec, rank + 1, Some(&start), pin, reference_refinement);
+        let grown = fit_at_rank(
+            cohort,
+            &rank_spec,
+            rank + 1,
+            Some(&start),
+            pin,
+            fit.quadrature.mesh_refinement,
+            reference_refinement,
+        );
         match grown {
             Ok(candidate) => {
                 let criterion = |fit: &EventHistoryFit| -> Result<f64, EventHistoryError> {
@@ -3057,13 +3220,29 @@ fn fit_event_history_on_grid(
                     candidate.atom_log_lambdas.clone(),
                     candidate.rate_held.clone(),
                 );
-                fit = certified_rank(cohort, &rank_spec, rank + 1, Some(&start), reference_refinement)?;
+                // The accepted model is certified from the mesh its rank was
+                // decided at, never below it.
+                fit = certified_rank(
+                    cohort,
+                    &rank_spec,
+                    rank + 1,
+                    Some(&start),
+                    fit.quadrature.mesh_refinement,
+                    reference_refinement,
+                )?;
             }
             // The candidate is fitted at the incumbent's setting, so a
             // posterior that setting cannot represent is the incumbent's
             // setting failing to resolve the decision.
             Err(EventHistoryError::LostPositivity { reason }) => {
-                match raise_incumbent(cohort, &mut rank_spec, &fit, &reason, reference_refinement)? {
+                match raise_incumbent(
+                    cohort,
+                    &mut rank_spec,
+                    &fit,
+                    Rung::GaussHermite,
+                    &reason,
+                    reference_refinement,
+                )? {
                     Some(raised) => fit = raised,
                     None => {
                         step.accepted = false;
@@ -3108,16 +3287,18 @@ fn typed_failure(family: &EventHistoryFamily, reason: String) -> EventHistoryErr
 }
 
 /// The model at `atoms` from `start`, certified by [`fit_at_rank`]'s refinement
-/// ladder, with the certified setting and the ladder's wall time logged.
+/// ladder from mesh refinement `from_refinement` up, with the certified setting
+/// and the ladder's wall time logged.
 fn certified_rank(
     cohort: &EventHistoryCohort,
     spec: &EventHistorySpec,
     atoms: usize,
     start: Option<&RankStart>,
+    from_refinement: usize,
     reference_refinement: usize,
 ) -> Result<EventHistoryFit, EventHistoryError> {
     let started = std::time::Instant::now();
-    let fit = fit_at_rank(cohort, spec, atoms, start, None, reference_refinement)?;
+    let fit = fit_at_rank(cohort, spec, atoms, start, None, from_refinement, reference_refinement)?;
     log::info!(
         "[event-history] rank {atoms}: certified at Gauss-Hermite order {}, mesh refinement {} ({:.2} s)",
         fit.quadrature.gauss_hermite_order,
@@ -3127,35 +3308,67 @@ fn certified_rank(
     Ok(fit)
 }
 
-/// The incumbent refitted one Gauss-Hermite ladder rung up (`2·order − 1`),
-/// warm-started from its own converged values, because an integral the rank
-/// decision reads is unresolved at its certified setting. `None` at the
-/// ladder's top certifiable rung ([`positivity_raise`]), the one place the
-/// ladder stops: the incumbent stays the certified model and the decision is
-/// recorded as unresolved.
+/// The ladder a rank decision the incumbent's setting cannot resolve climbs.
+#[derive(Clone, Copy, Debug)]
+enum Rung {
+    /// The Gauss-Hermite order, `2·order − 1`.
+    GaussHermite,
+    /// The time mesh, one refinement.
+    Mesh,
+}
+
+/// The incumbent refitted one ladder rung up, the Gauss-Hermite order
+/// (`2·order − 1`) or the time mesh (one refinement), warm-started from its
+/// own converged values, because an integral the rank decision reads is
+/// unresolved at its certified setting. `None` at that ladder's top rung, the
+/// top certifiable order ([`positivity_raise`]) or the mesh ceiling
+/// ([`EventHistoryCohort::mesh_refinement_ceiling`]): the incumbent stays the
+/// certified model and the decision is recorded as unresolved.
 fn raise_incumbent(
     cohort: &EventHistoryCohort,
     rank_spec: &mut EventHistorySpec,
     fit: &EventHistoryFit,
+    rung: Rung,
     reason: &str,
     reference_refinement: usize,
 ) -> Result<Option<EventHistoryFit>, EventHistoryError> {
     let rank = fit.rank();
     let order = fit.quadrature.gauss_hermite_order;
-    let Some(next_order) =
-        positivity_raise(order, fit.nodes.max_subject_nodes(), rank_spec.quadrature_tolerance)
-    else {
-        log::info!(
-            "[event-history] rank {rank} → {}: the decision is unresolved at Gauss-Hermite order {order} ({reason}), the ladder's top certifiable rung: the path stops at the certified rank-{rank} model with growth unresolved",
-            rank + 1
-        );
-        return Ok(None);
+    let refinement = fit.quadrature.mesh_refinement;
+    let from_refinement = match rung {
+        Rung::GaussHermite => {
+            let Some(next_order) =
+                positivity_raise(order, fit.nodes.max_subject_nodes(), rank_spec.quadrature_tolerance)
+            else {
+                log::info!(
+                    "[event-history] rank {rank} → {}: the decision is unresolved at Gauss-Hermite order {order} ({reason}), the ladder's top certifiable rung: the path stops at the certified rank-{rank} model with growth unresolved",
+                    rank + 1
+                );
+                return Ok(None);
+            };
+            log::info!(
+                "[event-history] rank {rank} → {}: the decision is unresolved at Gauss-Hermite order {order} ({reason}); refitting the incumbent at order {next_order}",
+                rank + 1
+            );
+            rank_spec.gauss_hermite_order = next_order;
+            refinement
+        }
+        Rung::Mesh => {
+            let next = refinement + 1;
+            if next > cohort.mesh_refinement_ceiling() {
+                log::info!(
+                    "[event-history] rank {rank} → {}: the decision is unresolved at mesh refinement {refinement} ({reason}), the mesh's top rung: the path stops at the certified rank-{rank} model with growth unresolved",
+                    rank + 1
+                );
+                return Ok(None);
+            }
+            log::info!(
+                "[event-history] rank {rank} → {}: the decision is unresolved at mesh refinement {refinement} ({reason}); refitting the incumbent at refinement {next}",
+                rank + 1
+            );
+            next
+        }
     };
-    log::info!(
-        "[event-history] rank {rank} → {}: the decision is unresolved at Gauss-Hermite order {order} ({reason}); refitting the incumbent at order {next_order}",
-        rank + 1
-    );
-    rank_spec.gauss_hermite_order = next_order;
     let start = RankStart::carried(
         fit.fit.block_states[..fit.marks()]
             .iter()
@@ -3166,7 +3379,7 @@ fn raise_incumbent(
         fit.atom_log_lambdas.clone(),
         fit.rate_held.clone(),
     );
-    certified_rank(cohort, rank_spec, rank, Some(&start), reference_refinement).map(Some)
+    certified_rank(cohort, rank_spec, rank, Some(&start), from_refinement, reference_refinement).map(Some)
 }
 
 /// Fit and select structure under one reference-normalised objective, then
