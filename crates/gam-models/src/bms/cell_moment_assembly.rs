@@ -3441,11 +3441,14 @@ pub(super) struct BernoulliInterceptSolveStats {
 impl BernoulliInterceptSolveStats {
     pub(super) fn record_seed_residual(&self, residual: f64, abs_tol: f64) {
         let abs = residual.abs();
-        if abs <= 1e-12 {
+        // Work bound (#2469): these bin edges only choose which diagnostic counter
+        // to bump; the counters reach nothing but the intercept-seed log line.
+        const SEED_RESIDUAL_BIN_EDGES: [f64; 3] = [1e-12, 1e-10, 1e-8];
+        if abs <= SEED_RESIDUAL_BIN_EDGES[0] {
             self.seed_residual_le_1e12.fetch_add(1, Ordering::Relaxed);
-        } else if abs <= 1e-10 {
+        } else if abs <= SEED_RESIDUAL_BIN_EDGES[1] {
             self.seed_residual_le_1e10.fetch_add(1, Ordering::Relaxed);
-        } else if abs <= 1e-8 {
+        } else if abs <= SEED_RESIDUAL_BIN_EDGES[2] {
             self.seed_residual_le_1e8.fetch_add(1, Ordering::Relaxed);
         } else if abs <= abs_tol {
             self.seed_residual_le_abs_tol

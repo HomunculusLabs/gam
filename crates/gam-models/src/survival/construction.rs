@@ -1898,6 +1898,7 @@ pub fn build_survival_time_basis(
             // `d(log Λ)/dt = d(log Λ)/d(log t) · 1/t`. The `d/d(log t)` half is
             // the M-spline block the value basis was built with, so no second
             // opinion about the exterior can arise here.
+            // Structural (#2469): a capacity hint only; the triplets are pushed.
             let mut deriv_triplets = Vec::with_capacity(n * p_time.min(16));
             let mut found_nonfinite: Option<(usize, usize)> = None;
             for i in 0..n {

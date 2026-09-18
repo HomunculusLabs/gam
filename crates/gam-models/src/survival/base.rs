@@ -1565,6 +1565,8 @@ impl Clone for WorkingModelSurvival {
 }
 
 impl WorkingModelSurvival {
+    /// Derived (#2469): `ln(f64::MAX)`, the largest exponent `exp` returns finite
+    /// for (`f64::ln` is not a `const fn`, so the value is written out).
     const LOG_F64_MAX: f64 = 709.782712893384;
 
     #[inline]
