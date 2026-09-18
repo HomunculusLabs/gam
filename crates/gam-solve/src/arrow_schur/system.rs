@@ -146,6 +146,13 @@ pub struct ArrowSchurSystem {
     /// GPU PCG and streaming Schur paths to `O(m_i · p)` per row. Installed in
     /// lock-step with `htbeta_matvec` by [`Self::set_row_htbeta_operator`].
     pub htbeta_transpose_matvec: Option<RowHtbetaTransposeMatvec>,
+    /// The matrix-free row operator's declaration (#2627): per-row norm bounds and the
+    /// apply depth ([`RowHtbetaDeclaration`]), installed in lock-step with
+    /// [`Self::htbeta_matvec`] by [`Self::set_row_htbeta_operator`]. A dense slab
+    /// supplement is bounded separately from its entries, and
+    /// [`Self::cross_block_row_norm_bounds`] refuses an installed operator that carries
+    /// none.
+    pub htbeta_declaration: Option<RowHtbetaDeclaration>,
     /// Whether `rows[*].htbeta` contains a dense contribution that must be added
     /// on top of the matrix-free row operator.
     pub htbeta_dense_supplement: bool,
@@ -268,6 +275,7 @@ impl Clone for ArrowSchurSystem {
             hbb_matvec: self.hbb_matvec.clone(),
             htbeta_matvec: self.htbeta_matvec.clone(),
             htbeta_transpose_matvec: self.htbeta_transpose_matvec.clone(),
+            htbeta_declaration: self.htbeta_declaration.clone(),
             htbeta_dense_supplement: self.htbeta_dense_supplement,
             hbb_diag: self.hbb_diag.clone(),
             gb: self.gb.clone(),
@@ -327,6 +335,7 @@ impl ArrowSchurSystem {
             hbb_matvec: None,
             htbeta_matvec: None,
             htbeta_transpose_matvec: None,
+            htbeta_declaration: None,
             htbeta_dense_supplement: false,
             hbb_diag: None,
             gb: Array1::<f64>::zeros(k),
@@ -374,6 +383,7 @@ impl ArrowSchurSystem {
             hbb_matvec: None,
             htbeta_matvec: None,
             htbeta_transpose_matvec: None,
+            htbeta_declaration: None,
             htbeta_dense_supplement: false,
             hbb_diag: None,
             gb: Array1::<f64>::zeros(k),
@@ -455,6 +465,7 @@ impl ArrowSchurSystem {
             hbb_matvec: None,
             htbeta_matvec: None,
             htbeta_transpose_matvec: None,
+            htbeta_declaration: None,
             htbeta_dense_supplement: false,
             hbb_diag: None,
             gb,
@@ -572,13 +583,24 @@ impl ArrowSchurSystem {
     /// through the matvec instead of indexing the dense block. The transpose
     /// operator lets the reduced-Schur matvec apply `H_βt^(row)` directly
     /// (`O(m_i · p)`) instead of probing `forward` against `K` basis vectors.
-    pub fn set_row_htbeta_operator<F, T>(&mut self, forward: F, transpose: T)
-    where
+    ///
+    /// `declaration` states the operator's per-row norm bounds and apply depth, derived
+    /// from its own entries and loop structure (#2627, see [`RowHtbetaDeclaration`]). A
+    /// structural ridge termination reads it through
+    /// [`Self::cross_block_row_norm_bounds`], so it is installed with the operator and
+    /// never separately.
+    pub fn set_row_htbeta_operator<F, T>(
+        &mut self,
+        forward: F,
+        transpose: T,
+        declaration: RowHtbetaDeclaration,
+    ) where
         F: for<'a> Fn(usize, ArrayView1<'a, f64>, &mut Array1<f64>) + Send + Sync + 'static,
         T: for<'a> Fn(usize, ArrayView1<'a, f64>, &mut Array1<f64>) + Send + Sync + 'static,
     {
         self.htbeta_matvec = Some(Arc::new(forward));
         self.htbeta_transpose_matvec = Some(Arc::new(transpose));
+        self.htbeta_declaration = Some(declaration);
         self.htbeta_operator_fingerprint = None;
     }
 
@@ -596,6 +618,7 @@ impl ArrowSchurSystem {
         &mut self,
         forward: F,
         transpose: T,
+        declaration: RowHtbetaDeclaration,
         fingerprint: u64,
     ) where
         F: for<'a> Fn(usize, ArrayView1<'a, f64>, &mut Array1<f64>) + Send + Sync + 'static,
@@ -603,6 +626,7 @@ impl ArrowSchurSystem {
     {
         self.htbeta_matvec = Some(Arc::new(forward));
         self.htbeta_transpose_matvec = Some(Arc::new(transpose));
+        self.htbeta_declaration = Some(declaration);
         self.htbeta_operator_fingerprint = Some(fingerprint);
     }
 
@@ -831,6 +855,17 @@ impl ArrowSchurSystem {
             for j in 0..k {
                 diag[j] += self.hbb[[j, j]];
             }
+        }
+    }
+
+    /// `out += M·x` for the majorant `M` of the shared `H_ββ` block this system
+    /// solves with (#2627), through the same operator → dense dispatch as
+    /// [`Self::penalty_matvec_add`]. Returns the accumulation depth; see
+    /// [`BetaPenaltyOp::accumulate_abs_majorant_matvec`].
+    pub fn shared_block_abs_majorant_matvec(&self, x: &[f64], out: &mut [f64]) -> usize {
+        match self.penalty_op.as_ref() {
+            Some(op) => op.accumulate_abs_majorant_matvec(x, out),
+            None => dense_abs_majorant_matvec(&self.hbb, x, out),
         }
     }
 

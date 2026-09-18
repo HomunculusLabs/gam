@@ -4901,6 +4901,56 @@ impl SaeManifoldTerm {
                 }
             }
             (Some(base_forward), Some(base_transpose)) => {
+                // #2627 — the composed operator's declared per-row norm bounds: the
+                // majorizer's own, plus the exact-A correction placed at
+                // `classification_indices`. A border index repeated `m` times sums `m`
+                // correction columns, so that leg is at most `√m_max·‖delta_tbeta‖_F`.
+                let Some(base_declaration) = majorizer.htbeta_declaration.clone() else {
+                    return Err(
+                        "SaeManifoldTerm::exact_a_evidence_system: the majorizer installed a \
+                         matrix-free cross-block operator without its declaration, so the \
+                         composed operator has no bound to declare (#2627)"
+                            .to_string(),
+                    );
+                };
+                let widest_index_repeat = {
+                    let mut sorted: Vec<usize> = classification_indices.iter().copied().collect();
+                    sorted.sort_unstable();
+                    let mut widest = usize::from(!sorted.is_empty());
+                    let mut run = 1usize;
+                    for pair in sorted.windows(2) {
+                        run = if pair[0] == pair[1] { run + 1 } else { 1 };
+                        widest = widest.max(run);
+                    }
+                    widest
+                };
+                let composed_row_norm_bounds: std::sync::Arc<[f64]> = base_declaration
+                    .row_norm_bounds
+                    .iter()
+                    .zip(classification_rows.iter())
+                    .map(|(&base_bound, block)| {
+                        let correction = gam_solve::arrow_schur::frobenius_norm_upper_bound(
+                            block.delta_tbeta.iter().copied(),
+                        );
+                        let placed = gam_solve::arrow_schur::guaranteed_norm_upper_bound(
+                            correction * (widest_index_repeat as f64).sqrt(),
+                            2,
+                        );
+                        gam_solve::arrow_schur::guaranteed_norm_upper_bound(base_bound + placed, 1)
+                    })
+                    .collect();
+                // The composed forward adds the correction's inner product over the
+                // `classification_indices` entries into the base operator's output, and the
+                // transpose adds each correction column into its border entry once per
+                // repeat of the index: one addition past the longer of the stages.
+                let composed_declaration = gam_solve::arrow_schur::RowHtbetaDeclaration {
+                    row_norm_bounds: composed_row_norm_bounds,
+                    apply_depth: base_declaration
+                        .apply_depth
+                        .max(classification_indices.len())
+                        .max(widest_index_repeat + 1)
+                        + 1,
+                };
                 let forward_blocks = std::sync::Arc::clone(&classification_rows);
                 let forward_indices = std::sync::Arc::clone(&classification_indices);
                 let transpose_blocks = std::sync::Arc::clone(&classification_rows);
@@ -4956,6 +5006,7 @@ impl SaeManifoldTerm {
                             }
                         }
                     },
+                    composed_declaration,
                     composed_fingerprint,
                 );
             }

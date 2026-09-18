@@ -615,7 +615,6 @@ impl std::fmt::Debug for ArrowSolveOptions {
 pub struct ArrowProximalCorrectionOptions {
     pub initial_ridge: f64,
     pub ridge_growth: f64,
-    pub max_attempts: usize,
     pub armijo_c1: f64,
     pub gradient_tolerance: f64,
     /// Relative objective resolution below which the proximal correction
@@ -642,7 +641,6 @@ impl Default for ArrowProximalCorrectionOptions {
         Self {
             initial_ridge: DEFAULT_PROXIMAL_INITIAL_RIDGE,
             ridge_growth: DEFAULT_PROXIMAL_RIDGE_GROWTH,
-            max_attempts: DEFAULT_PROXIMAL_MAX_ATTEMPTS,
             armijo_c1: DEFAULT_ARMIJO_C1,
             gradient_tolerance: DEFAULT_GRADIENT_TOLERANCE,
             convergence_objective_rel_tol: DEFAULT_PROXIMAL_CONVERGENCE_REL_TOL,

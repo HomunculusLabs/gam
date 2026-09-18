@@ -3,6 +3,7 @@
 //! the Schur reduced-RHS / back-substitution kernels they drive.
 
 use super::*;
+use super::certified_shift::ArrowShiftCertificate;
 
 /// Number of Rademacher probe vectors for the SAE-evidence SLQ log-determinant.
 /// 32 probes give a sub-percent relative standard error on the well-conditioned
@@ -711,6 +712,15 @@ pub fn prepare_sae_resident_frame(
 /// it is an option-validation / line-search failure that a ridge shift cannot
 /// repair.
 ///
+/// The ladder ends structurally, not after a count (#2627). On the first
+/// recoverable refusal it reads the system's declared bounds once into an
+/// [`ArrowShiftCertificate`]. A refusal at a rung those bounds certify factorable
+/// cannot be cured by a larger shift and returns
+/// [`ArrowSchurError::RefusedAtCertifiedShift`] with the refusal as its cause. A
+/// system with no certifiable rung (a non-finite entry or bound, an undeclared
+/// matrix-free cross block, or a next rung past the float range) returns the
+/// refusal itself, since no shift cures it.
+///
 /// Returns `(Δt, Δβ, ArrowPcgDiagnostics)` from `solve_arrow_newton_step_core`,
 /// computed with the smallest escalated ridge that produced a successful factor.
 /// `ArrowPcgDiagnostics::ridge_escalations` records how many ridge bumps were needed.
@@ -722,7 +732,9 @@ pub fn solve_with_lm_escalation_inner(
 ) -> Result<(Array1<f64>, Array1<f64>, ArrowPcgDiagnostics), ArrowSchurError> {
     let mut proximal_ridge = 0.0_f64;
     let mut escalations: usize = 0;
-    let mut last_err: Option<ArrowSchurError> = None;
+    let mut certificate: Option<ArrowShiftCertificate> = None;
+    let dense_border_factor =
+        options.streaming_chunk_size.is_some() || options.mode != ArrowSolverMode::InexactPCG;
     // #1017: when the shape is device-admitted, hold the ridge-independent base
     // blocks (D, B, H_ββ, gradient) resident and re-factor per trial rather than
     // re-uploading the whole system each escalation. `None` keeps the exact
@@ -755,7 +767,7 @@ pub fn solve_with_lm_escalation_inner(
             None => std::borrow::Cow::Borrowed(options),
         }
     };
-    for attempt in 0..=DEFAULT_PROXIMAL_MAX_ATTEMPTS {
+    loop {
         let damped_ridge_t = ridge_t + proximal_ridge;
         let damped_ridge_beta = ridge_beta + proximal_ridge;
         // Route through `_core` (not `_artifacts`) so the #1017 device seam is
@@ -824,23 +836,33 @@ pub fn solve_with_lm_escalation_inner(
                         | ArrowSchurError::PcgFailed { .. }
                         | ArrowSchurError::UnboundedNegativeCurvature { .. }
                 );
-                last_err = Some(err);
                 if !recoverable {
-                    break;
+                    return Err(err);
                 }
-                if attempt == DEFAULT_PROXIMAL_MAX_ATTEMPTS {
-                    break;
+                if certificate.is_none() {
+                    match ArrowShiftCertificate::from_system(sys, ridge_t, ridge_beta) {
+                        Ok(built) => certificate = Some(built),
+                        Err(_) => return Err(err),
+                    }
                 }
-                proximal_ridge = if proximal_ridge == 0.0 {
-                    DEFAULT_PROXIMAL_INITIAL_RIDGE
-                } else {
-                    proximal_ridge * DEFAULT_PROXIMAL_RIDGE_GROWTH
-                };
+                let certified = certificate
+                    .as_ref()
+                    .is_some_and(|built| built.certifies_factorable(proximal_ridge, dense_border_factor));
+                if certified {
+                    return Err(ArrowSchurError::RefusedAtCertifiedShift {
+                        proximal_ridge,
+                        cause: Box::new(err),
+                    });
+                }
+                let next = next_proximal_ridge(proximal_ridge, DEFAULT_PROXIMAL_RIDGE_GROWTH);
+                if !next.is_finite() {
+                    return Err(err);
+                }
+                proximal_ridge = next;
                 escalations += 1;
             }
         }
     }
-    Err(last_err.expect("escalation loop set last_err on failure"))
 }
 
 /// Solve a non-convex arrow-Schur step with adaptive proximal damping.
@@ -848,7 +870,10 @@ pub fn solve_with_lm_escalation_inner(
 /// `trial_objective` receives the proposed `(delta_t, delta_beta)` and must
 /// return the true nonlinear objective after applying that step. The function
 /// increases a common proximal ridge until factorization succeeds, the
-/// direction is descent, and Armijo decrease holds.
+/// direction is descent, and Armijo decrease holds, or until the damped model
+/// promises less decrease than half the float spacing at the incumbent value,
+/// past which no rung can produce a representable one (#2627, see
+/// [`ArrowShiftCertificate::promises_unrepresentable_decrease`]).
 pub fn solve_arrow_newton_step_with_proximal_correction<F>(
     sys: &ArrowSchurSystem,
     base_ridge_t: f64,
@@ -898,6 +923,11 @@ where
         });
     }
 
+    let certificate = ArrowShiftCertificate::from_system(sys, base_ridge_t, base_ridge_beta)
+        .map_err(|reason| ArrowSchurError::AdaptiveCorrectionFailed {
+            reason: format!("no proximal shift can be certified: {reason}"),
+        })?;
+
     // Objective-scale resolution: the floating-point granularity of the
     // penalised objective at the incumbent value. Decreases smaller than this
     // are indistinguishable from rounding noise; increases smaller than this
@@ -922,7 +952,9 @@ where
     // raises the objective, but by no more than the objective resolution, the
     // incumbent is numerically stationary and we converge in place.
     let mut smallest_increase = f64::INFINITY;
-    for attempt in 0..correction.max_attempts {
+    let mut attempts = 0usize;
+    while !certificate.promises_unrepresentable_decrease(proximal_ridge, current_objective_value) {
+        attempts += 1;
         let ridge_t = base_ridge_t + proximal_ridge;
         let ridge_beta = base_ridge_beta + proximal_ridge;
         match solve_arrow_newton_step_core(sys, ridge_t, ridge_beta, options) {
@@ -944,7 +976,7 @@ where
                             objective_value: current_objective_value,
                             trial_objective_value: trial_value,
                             gradient_dot_step: g_dot_p,
-                            attempts: attempt + 1,
+                            attempts,
                         });
                     }
                     if trial_value.is_finite() {
@@ -984,7 +1016,28 @@ where
                 last_reason = err.to_string();
             }
         }
-        proximal_ridge = next_proximal_ridge(proximal_ridge, correction.ridge_growth);
+        let next = next_proximal_ridge(proximal_ridge, correction.ridge_growth);
+        if !next.is_finite() {
+            break;
+        }
+        proximal_ridge = next;
+    }
+
+    // The damped model promised less than half a float spacing already at the first
+    // rung, so no rung was tried: the incumbent is stationary at the objective's
+    // resolution and converges in place, exactly like the gradient-tolerance exit.
+    if attempts == 0 {
+        return Ok(ArrowAcceptedProximalStep {
+            delta_t: Array1::<f64>::zeros(sys.row_offsets[sys.rows.len()]),
+            delta_beta: Array1::<f64>::zeros(sys.k),
+            ridge_t: base_ridge_t,
+            ridge_beta: base_ridge_beta,
+            proximal_ridge: 0.0,
+            objective_value: current_objective_value,
+            trial_objective_value: current_objective_value,
+            gradient_dot_step: 0.0,
+            attempts: 0,
+        });
     }
 
     // ── Fallback 1: bank the best genuine (Armijo-failing) decrease ──────────
@@ -1012,7 +1065,7 @@ where
             objective_value: current_objective_value,
             trial_objective_value: final_value,
             gradient_dot_step: g_dot_p,
-            attempts: correction.max_attempts,
+            attempts,
         });
     }
 
@@ -1033,15 +1086,12 @@ where
             objective_value: current_objective_value,
             trial_objective_value: current_objective_value,
             gradient_dot_step: 0.0,
-            attempts: correction.max_attempts,
+            attempts,
         });
     }
 
     Err(ArrowSchurError::AdaptiveCorrectionFailed {
-        reason: format!(
-            "failed after {} attempts; last rejection: {last_reason}",
-            correction.max_attempts
-        ),
+        reason: format!("failed after {attempts} attempts; last rejection: {last_reason}"),
     })
 }
 

@@ -248,6 +248,10 @@ fn build_framed_sae_system(install_device_data: bool) -> ArrowSchurSystem {
     // `sys.rows[i].htbeta`; with it installed the system matches the production
     // matrix-free shape.
     let slabs = row_htbeta.clone();
+    let row_norm_bounds: std::sync::Arc<[f64]> = slabs
+        .iter()
+        .map(|slab| gam_solve::arrow_schur::frobenius_norm_upper_bound(slab.iter().copied()))
+        .collect();
     let fwd_slabs = slabs.clone();
     let bd = border_dim;
     let qd = q;
@@ -274,6 +278,12 @@ fn build_framed_sae_system(install_device_data: bool) -> ArrowSchurSystem {
                     out_s[c] += slab[base + c] * vr;
                 }
             }
+        },
+        // The forward accumulates `border_dim` terms per latent coordinate; the transpose
+        // adds `q` terms into each border entry.
+        gam_solve::arrow_schur::RowHtbetaDeclaration {
+            row_norm_bounds,
+            apply_depth: border_dim.max(q) + 1,
         },
     );
 

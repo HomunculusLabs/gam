@@ -483,6 +483,69 @@ impl SupportBetaOperator {
             }
         }
     }
+
+    /// Guaranteed upper bounds on `‖H_tβ^(r)‖₂` of [`Self::htbeta_forward`], which is
+    /// `jacobian_r · J_r` for the gather `J_r` over the row's basis blocks (#2627):
+    /// `‖jacobian_r‖_F · √(‖J_r‖_∞·‖J_r‖₁)`, with the gather factor from
+    /// [`super::kronecker::gather_norm_squared_upper_bound`].
+    fn row_norm_bounds(&self) -> Arc<[f64]> {
+        let width = self.output_dim;
+        let bounds: Vec<f64> = self
+            .rows
+            .iter()
+            .map(|row| {
+                let mut support: Vec<(usize, f64)> = row
+                    .blocks
+                    .iter()
+                    .flat_map(|block| {
+                        block
+                            .phi
+                            .iter()
+                            .enumerate()
+                            .map(move |(basis, &phi)| (block.beta_offset + basis * width, phi))
+                    })
+                    .collect();
+                let gather_squared =
+                    super::kronecker::gather_norm_squared_upper_bound(&mut support, width);
+                let mut jacobian_squares = 0.0_f64;
+                for &value in row.jacobian.iter() {
+                    jacobian_squares += value * value;
+                }
+                let depth = (row.jacobian.len() + 1) + (2 * support.len() + 2) + 1;
+                gam_solve::arrow_schur::guaranteed_norm_upper_bound(
+                    jacobian_squares.sqrt() * gather_squared.sqrt(),
+                    depth,
+                )
+            })
+            .collect();
+        Arc::from(bounds.into_boxed_slice())
+    }
+
+    /// The cross block's declaration for `set_row_htbeta_operator` (#2627):
+    /// [`Self::row_norm_bounds`] and the apply depth. [`Self::htbeta_forward`] gathers over
+    /// the row's basis blocks (`b_r` terms per channel) and applies the Jacobian
+    /// (`output_dim` terms), so its depth is `b_r + output_dim`.
+    /// [`Self::htbeta_transpose`] accumulates `jacobianᵀ v` (`d_r` terms) and scatters
+    /// `φ·output` into each β entry once per covering basis (at most `b_r` additions after
+    /// the product), so its depth is `d_r + b_r + 1`.
+    fn htbeta_declaration(&self) -> gam_solve::arrow_schur::RowHtbetaDeclaration {
+        let widest_basis = self
+            .rows
+            .iter()
+            .map(|row| row.blocks.iter().map(|block| block.phi.len()).sum::<usize>())
+            .max()
+            .unwrap_or(0);
+        let widest_latent = self
+            .rows
+            .iter()
+            .map(|row| row.jacobian.nrows())
+            .max()
+            .unwrap_or(0);
+        gam_solve::arrow_schur::RowHtbetaDeclaration {
+            row_norm_bounds: self.row_norm_bounds(),
+            apply_depth: widest_basis + self.output_dim.max(widest_latent) + 1,
+        }
+    }
 }
 
 /// #2576: the support `H_ββ` states its own blocks and diagonal. Behind the
@@ -621,6 +684,59 @@ impl gam_solve::arrow_schur::BetaPenaltyOp for SupportBetaOperator {
                 hasher.write_f64(value);
             }
         }
+    }
+
+    /// `M = Σ_r |J_r|ᵀ|J_r| + ⊕_k |λ_k|·max(|S_k|, |S_k|ᵀ) ⊗ I_P` (#2627): the data
+    /// Gram's gather and scatter read `|φ|`, and each smoothing block reads its own
+    /// majorant, so `M ≥ |P|` and `M` is symmetric.
+    fn accumulate_abs_majorant_matvec(&self, x: &[f64], out: &mut [f64]) -> usize {
+        let width = self.output_dim;
+        let mut slot = vec![0.0_f64; width];
+        let mut widest_row = 0usize;
+        let mut total_basis = 0usize;
+        for row in &self.rows {
+            slot.fill(0.0);
+            let row_basis: usize = row.blocks.iter().map(|block| block.phi.len()).sum();
+            widest_row = widest_row.max(row_basis);
+            total_basis += row_basis;
+            for block in &row.blocks {
+                for basis in 0..block.phi.len() {
+                    let weight = block.phi[basis].abs();
+                    let base = block.beta_offset + basis * width;
+                    for channel in 0..width {
+                        slot[channel] += weight * x[base + channel];
+                    }
+                }
+            }
+            for block in &row.blocks {
+                for basis in 0..block.phi.len() {
+                    let weight = block.phi[basis].abs();
+                    let base = block.beta_offset + basis * width;
+                    for channel in 0..width {
+                        out[base + channel] += weight * slot[channel];
+                    }
+                }
+            }
+        }
+        let mut widest_penalty = 0usize;
+        for atom in 0..self.penalties.len() {
+            let lambda = self.lambda_smooth[atom].abs();
+            let m = self.basis_sizes[atom];
+            widest_penalty = widest_penalty.max(m);
+            let offset = self.beta_offsets[atom];
+            let penalty = &self.penalties[atom];
+            for left in 0..m {
+                for channel in 0..width {
+                    let mut acc = 0.0_f64;
+                    for right in 0..m {
+                        acc += penalty[[left, right]].abs().max(penalty[[right, left]].abs())
+                            * x[offset + right * width + channel];
+                    }
+                    out[offset + left * width + channel] += lambda * acc;
+                }
+            }
+        }
+        widest_row + total_basis + widest_penalty + 4
     }
 }
 
@@ -3368,6 +3484,7 @@ impl SaeSupportSparseTerm {
         system.set_row_htbeta_operator(
             move |row, vector, out| forward.htbeta_forward(row, vector, out),
             move |row, vector, out| transpose.htbeta_transpose(row, vector, out),
+            operator.htbeta_declaration(),
         );
         let block_offsets: Arc<[Range<usize>]> = self
             .atoms

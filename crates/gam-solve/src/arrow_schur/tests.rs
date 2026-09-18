@@ -2,6 +2,7 @@
 #![cfg(test)]
 
 use super::*;
+use crate::arrow_schur::certified_shift::ArrowShiftCertificate;
 use approx::assert_abs_diff_eq;
 use ndarray::array;
 
@@ -559,7 +560,6 @@ pub(crate) fn proximal_correction_breaks_scalar_newton_cycle() {
     let correction = ArrowProximalCorrectionOptions {
         initial_ridge: 1e-8,
         ridge_growth: 10.0,
-        max_attempts: 16,
         armijo_c1: 1e-4,
         gradient_tolerance: 1e-12,
         convergence_objective_rel_tol: DEFAULT_PROXIMAL_CONVERGENCE_REL_TOL,
@@ -1144,6 +1144,12 @@ fn beta_coupling_graph_reads_the_routed_htbeta_not_the_dense_slab() {
             0,
         );
         assert_eq!(sys.rows[0].htbeta.dim(), (1, 0));
+        let row_norm_bounds: Arc<[f64]> = entries
+            .iter()
+            .map(|entry| frobenius_norm_upper_bound(entry.1.iter().map(|column| column.1)))
+            .collect();
+        // Each apply adds one term per column of its row into an existing entry.
+        let widest_row = entries.iter().map(|entry| entry.1.len()).max().unwrap_or(0);
         sys.set_row_htbeta_operator(
             move |row_idx, x, out| {
                 for (row, cols) in entries {
@@ -1162,6 +1168,10 @@ fn beta_coupling_graph_reads_the_routed_htbeta_not_the_dense_slab() {
                         }
                     }
                 }
+            },
+            RowHtbetaDeclaration {
+                row_norm_bounds,
+                apply_depth: widest_row + 1,
             },
         );
         sys.set_block_offsets(Arc::clone(&block_offsets));
@@ -1224,6 +1234,11 @@ fn beta_coupling_graph_reads_the_routed_htbeta_not_the_dense_slab() {
                 out[0] += v[0] - v[1];
                 out[2] += v[0] + v[1];
             },
+            // Two inputs combine, then add into `out`.
+            RowHtbetaDeclaration {
+                row_norm_bounds: Arc::from([frobenius_norm_upper_bound([1.0, 1.0, -1.0, 1.0])]),
+                apply_depth: 2,
+            },
         );
         sys.set_block_offsets(vec![0..2, 2..4].into());
         sys
@@ -1256,6 +1271,11 @@ pub(crate) fn sys_htbeta_materialize_row_sums_operator_and_dense_slab() {
             out[1] -= v[0];
             out[2] += 0.5 * v[0];
         },
+        // Three terms, then the addition into `out`.
+        RowHtbetaDeclaration {
+            row_norm_bounds: Arc::from([frobenius_norm_upper_bound([2.0, -1.0, 0.5])]),
+            apply_depth: 4,
+        },
     );
 
     let htbeta = sys_htbeta_materialize_row(&sys, 0, &sys.rows[0]).unwrap();
@@ -1282,6 +1302,11 @@ fn sparse_htbeta_transpose_never_probes_the_forward_operator() {
             out[1] -= v[0];
             out[2] += 0.5 * v[0];
         },
+        // The forward assigns three terms; the transpose adds one product into `out`.
+        RowHtbetaDeclaration {
+            row_norm_bounds: std::sync::Arc::from([frobenius_norm_upper_bound([2.0, -1.0, 0.5])]),
+            apply_depth: 3,
+        },
     );
 
     let mut direct = Array1::<f64>::zeros(3);
@@ -1306,6 +1331,20 @@ fn sparse_htbeta_transpose_never_probes_the_forward_operator() {
         "the O(K) forward-probe path must remain unreachable"
     );
     assert_eq!(transpose_calls.load(Ordering::SeqCst), 2);
+}
+
+/// The index of the first ladder rung the declared bounds certify factorable at zero
+/// base ridges: the structural reach of `solve_with_lm_escalation_inner` (#2627).
+fn first_certified_rung(sys: &ArrowSchurSystem, dense_border_factor: bool) -> usize {
+    let certificate =
+        ArrowShiftCertificate::from_system(sys, 0.0, 0.0).expect("a finite fixture certifies");
+    let mut ridge = 0.0_f64;
+    let mut rung = 0usize;
+    while !certificate.certifies_factorable(ridge, dense_border_factor) {
+        ridge = next_proximal_ridge(ridge, DEFAULT_PROXIMAL_RIDGE_GROWTH);
+        rung += 1;
+    }
+    rung
 }
 
 /// Issue #195 / gam#578 / gam#845: when the per-row block is barely-PD at
@@ -1360,9 +1399,10 @@ pub(crate) fn lm_escalation_recovers_from_ill_conditioned_row() {
     for v in delta_t.iter().chain(delta_beta.iter()) {
         assert!(v.is_finite(), "recovered step must be finite: {v}");
     }
+    let certified_rung = first_certified_rung(&sys, true);
     assert!(
-        diag.ridge_escalations <= DEFAULT_PROXIMAL_MAX_ATTEMPTS,
-        "recovery must use a bounded number of outer ridge escalations; got {}",
+        diag.ridge_escalations <= certified_rung,
+        "recovery must stop at or before the first certified rung {certified_rung}; got {}",
         diag.ridge_escalations
     );
 }
@@ -1778,9 +1818,10 @@ pub(crate) fn ill_conditioning_tolerated_returns_cache_with_exact_logdet() {
     for v in strict_dt.iter().chain(strict_db.iter()) {
         assert!(v.is_finite(), "recovered strict step must be finite: {v}");
     }
+    let certified_rung = first_certified_rung(&sys, true);
     assert!(
-        strict_diag.ridge_escalations <= DEFAULT_PROXIMAL_MAX_ATTEMPTS,
-        "recovery must use a bounded number of outer ridge escalations; got {}",
+        strict_diag.ridge_escalations <= certified_rung,
+        "recovery must stop at or before the first certified rung {certified_rung}; got {}",
         strict_diag.ridge_escalations
     );
 
@@ -2765,6 +2806,23 @@ pub(crate) fn sae_structured_system(
     let a_phi_t = a_phi.clone();
     let jac_t = local_jac.clone();
     let p_f = p;
+    // A row may repeat an atom, so its bound is taken from the summed dense entries.
+    let row_norm_bounds: Arc<[f64]> = (0..n)
+        .map(|row| {
+            let mut entries = vec![0.0_f64; q * k];
+            for c in 0..q {
+                for &(base, phi) in &a_phi[row] {
+                    for j in 0..p {
+                        entries[c * k + base + j] += local_jac[row][c * p + j] * phi;
+                    }
+                }
+            }
+            frobenius_norm_upper_bound(entries)
+        })
+        .collect();
+    // The forward gathers the row's support (`m` terms) and applies `L` (`p` terms); the
+    // transpose accumulates `Lᵀ v` (`q` terms) and scatters once per covering support entry.
+    let widest_support = a_phi.iter().map(Vec::len).max().unwrap_or(0);
     sys.set_row_htbeta_operator(
         move |row, x, out| {
             let mut u_p = vec![0.0_f64; p_f];
@@ -2798,6 +2856,10 @@ pub(crate) fn sae_structured_system(
                     out[base + j] += phi * u_p[j];
                 }
             }
+        },
+        RowHtbetaDeclaration {
+            row_norm_bounds,
+            apply_depth: widest_support + p.max(q) + 1,
         },
     );
     sys.set_device_sae_pcg_data(DeviceSaePcgData {
@@ -6535,8 +6597,10 @@ fn value_verdict_is_non_pd_schur_complement(error: &ArrowSchurError) -> bool {
 ///
 /// The list below is every variant, each with a reason chosen to be adversarial
 /// for this pairing: a per-row refusal and a PCG refusal whose own reasons name
-/// a non-PD operator (both must be `false` on both sides), and a Schur refusal
-/// whose reason does not (also `false` on both sides).
+/// a non-PD operator (both must be `false` on both sides), a Schur refusal
+/// whose reason does not (also `false` on both sides), and a refusal at a
+/// certified rung wrapping a non-PD Schur refusal (#2627), which is a defect
+/// rather than a relocatable trial point, so `false` on both sides.
 #[test]
 fn rendered_verdict_matches_the_value_verdict_for_every_variant_2598() {
     let cases = [
@@ -6567,6 +6631,13 @@ fn rendered_verdict_matches_the_value_verdict_for_every_variant_2598() {
         },
         ArrowSchurError::AdaptiveCorrectionFailed {
             reason: "no Armijo-accepted step; the operator is not positive definite".to_string(),
+        },
+        ArrowSchurError::RefusedAtCertifiedShift {
+            proximal_ridge: 1.0e3,
+            cause: Box::new(ArrowSchurError::SchurFactorFailed {
+                reason: "non-PD pivot -2.5e-09 at index 2 (matrix is not positive definite)"
+                    .to_string(),
+            }),
         },
     ];
     let mut saw_recoverable = false;

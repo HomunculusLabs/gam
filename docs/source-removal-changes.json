@@ -116,5 +116,13 @@
     ],
     "reason": "#2943 part 3(i) under the #979 arming contract. Only FitFailure::ending_the_fit, at fit_model's wrap_solver_err, mints CustomFamilyError::FitEndedWithoutCertifiedInnerMode. Every arming consumer reads errors below fit_model: fit_custom_family_arming_on_evidence*, called from bms/block_specs.rs, fit_orchestration/drivers/design_construction.rs and fit_orchestration/fit.rs, and multinomial.rs. A FitEnded may also wrap the search's whole-search inner-refusal record, which arming never reads. So the FitEnded arms that f8521b334b added to jeffreys_arming_evidence and map_descending_ray_direction were dead, and they are deleted. This test pinned exactly those arms. only_the_last_evaluation_refusal_arms_a_whole_search_refusal_2943 restates the contract: a FitEnded wrapping a descending ray yields no evidence, and a whole-search refusal arms on last_refusal only.",
     "evidence": "Direct gate i2953-g7 (dy4, main 98ec39dfa2 + patch 41a73c59, no ledger entry): source_removal_guard.py reported exactly this identity as unacknowledged: jeffreys_arming.rs:239 fn, test_scoped true, removed_declarations 1, production_occurrences 0. Direct gate i2953-g11 (dy4, main c9e5a6c8cd + patch 9190e2d5, with this entry): RC_SOURCE_REMOVAL=0 and RC_PUBLIC_API=0. i979 gave its final OK on the removal under the #979 arming contract."
+  },
+  {
+    "base": "48a6521355839377c026ef33df9047b95c0ba0e1",
+    "items": [
+      "crates/gam-solve/src/arrow_schur/prelude.rs:const:DEFAULT_PROXIMAL_MAX_ATTEMPTS"
+    ],
+    "reason": "#2627 P4 (normbound2627): the arrow-Schur ridge ladders stop structurally instead of after a count (SPEC 21). solve_with_lm_escalation_inner stops at a rung ArrowShiftCertificate certifies factorable from the system's declared bounds and returns ArrowSchurError::RefusedAtCertifiedShift. The proximal correction stops where the damped model promises less than half the float spacing at the incumbent. The 22-rung count DEFAULT_PROXIMAL_MAX_ATTEMPTS is deleted with ArrowProximalCorrectionOptions::max_attempts, which defaulted to it.",
+    "evidence": "Jobs 1189588 (base e6d32432e8) and 1198237 (base 5b2af0f350, with a no-patch control check RC=0) on the exact landing tree, lane sw0v: RC_CHECK=0 and public_api_census RC=0. source_removal_guard reported exactly this one identity (const, removed_declarations 1, production_occurrences 0) and nothing else. At the base the constant's consumers were the escalation loop in newton_step.rs, ArrowProximalCorrectionOptions::default, two arrow_schur tests, and a gpu_kernels doc comment and ladder-projection test. This commit restates each of them."
   }
 ]

@@ -97,6 +97,7 @@
 // `crate::arrow_schur::<Item>` paths used across the crate keep
 // resolving unchanged.
 
+mod certified_shift;
 mod factorization;
 mod newton_step;
 mod penalty_ops;
@@ -121,6 +122,10 @@ mod streaming_exact_a_carrier_2731_tests;
 mod tests;
 #[cfg(test)]
 mod tests_device_gauge_2660;
+#[cfg(test)]
+mod operator_norm_bound_2627_tests;
+#[cfg(test)]
+mod certified_shift_2627_tests;
 #[cfg(test)]
 mod evidence_schur_reuse_2900_tests;
 #[cfg(test)]

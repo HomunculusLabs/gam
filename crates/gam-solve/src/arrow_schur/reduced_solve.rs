@@ -7435,6 +7435,13 @@ pub enum ArrowSchurError {
     /// Adaptive proximal damping could not produce an Armijo-accepted
     /// nonlinear step.
     AdaptiveCorrectionFailed { reason: String },
+    /// The proximal ridge ladder refused at a rung the system's declared bounds
+    /// certify factorable (#2627): every factorization guard provably passes
+    /// there, so no larger shift can cure the refusal in `cause`.
+    RefusedAtCertifiedShift {
+        proximal_ridge: f64,
+        cause: Box<ArrowSchurError>,
+    },
 }
 
 impl ArrowSchurError {
@@ -7526,6 +7533,17 @@ impl std::fmt::Display for ArrowSchurError {
                     "arrow-Schur: adaptive proximal correction failed: {reason}"
                 )
             }
+            // The cause renders through `Debug`, so a refusal at a certified rung is
+            // never read as the relocatable non-PD Schur refusal it may wrap.
+            ArrowSchurError::RefusedAtCertifiedShift {
+                proximal_ridge,
+                cause,
+            } => write!(
+                f,
+                "arrow-Schur: the proximal ridge {proximal_ridge:e} is certified factorable \
+                 from the system's declared bounds and the solve still refused, so no larger \
+                 shift can cure it: {cause:?}"
+            ),
         }
     }
 }

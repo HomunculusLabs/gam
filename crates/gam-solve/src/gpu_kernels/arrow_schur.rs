@@ -1297,8 +1297,8 @@ pub fn solve_sae_matrix_free_pcg(
 
 /// #1017 device-resident SAE frame across the LM ridge ladder.
 ///
-/// A single inner Newton step drives the proximal ridge ladder (up to
-/// `crate::arrow_schur::DEFAULT_PROXIMAL_MAX_ATTEMPTS` trials) at a FIXED
+/// A single inner Newton step drives the proximal ridge ladder (until a rung is
+/// accepted or certified, #2627) at a FIXED
 /// system: only `ridge_t`/`ridge_beta` change per trial. In the per-trial
 /// [`solve_sae_matrix_free_pcg`] path, `flatten_device_sae_frame_data` re-marshals
 /// AND re-uploads every device operand each trial — yet the ONLY ridge-dependent
@@ -7399,8 +7399,10 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
 
             // Ladder projection: the per-trial flatten re-uploaded `total_bytes`
             // on every trial; the resident frame uploads it once, so a ladder of
-            // `trials` removes `(trials − 1) × total_bytes`.
-            let trials = crate::arrow_schur::DEFAULT_PROXIMAL_MAX_ATTEMPTS + 1;
+            // `trials` removes `(trials − 1) × total_bytes`. The ladder's length is
+            // structural (#2627), so this projects the shortest ladder a refusal
+            // produces: one refused rung, then one accepted rung.
+            let trials = 2usize;
             let saved = report.total_bytes * (trials - 1);
             assert!(saved > 0);
             eprintln!(
@@ -7761,6 +7763,17 @@ mod tests {
         // backend has a well-defined operator to apply (and exercises exactly
         // the sparse gather/scatter the SAE Kronecker path drives).
         let slabs: Vec<Array2<f64>> = sys.rows.iter().map(|row| row.htbeta.clone()).collect();
+        let row_norm_bounds: std::sync::Arc<[f64]> = slabs
+            .iter()
+            .map(|slab| crate::arrow_schur::frobenius_norm_upper_bound(slab.iter().copied()))
+            .collect();
+        // The forward accumulates one term per column; the transpose adds one per latent
+        // coordinate into each border entry.
+        let apply_depth = slabs
+            .iter()
+            .map(|slab| slab.ncols().max(slab.nrows()) + 1)
+            .max()
+            .unwrap_or(0);
         let forward_slabs = slabs.clone();
         let transpose_slabs = slabs;
         sys.set_row_htbeta_operator(
@@ -7781,6 +7794,10 @@ mod tests {
                         out[c] += h[[r, c]] * v[r];
                     }
                 }
+            },
+            crate::arrow_schur::RowHtbetaDeclaration {
+                row_norm_bounds,
+                apply_depth,
             },
         );
 
