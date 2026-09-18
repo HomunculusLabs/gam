@@ -349,6 +349,10 @@ pub struct CompiledResponse {
     basis: DuchonBasisSpec,
     /// `p × r`, one column per fitted output direction.
     coefficients: Array2<f64>,
+    /// The fit-time active Duchon penalties, `p × p` each, in the basis builder's order.
+    penalties: Vec<Array2<f64>>,
+    /// `p × M_p`, the declared joint null space `∩_k ker S_k`.
+    null_space: Array2<f64>,
     /// `L⁻ᵀ V_r`, `m × r`: the fitted output directions in the original output coordinates.
     writer: Array2<f64>,
     /// The training mean of `F̄_P`, length `m`.
@@ -384,6 +388,18 @@ impl CompiledResponse {
     /// The Duchon coefficients, `p × r`, one column per fitted output direction in the whitened principal frame.
     pub fn coefficients(&self) -> ArrayView2<'_, f64> {
         self.coefficients.view()
+    }
+
+    /// The fit-time active Duchon penalties on the coefficients of [`Self::basis_rows`], `p × p` each, in the basis
+    /// builder's order (curvature, null-space trend ridge, mass, tension), each with its own REML strength.
+    pub fn penalties(&self) -> &[Array2<f64>] {
+        &self.penalties
+    }
+
+    /// `p × M_p`, an orthonormal basis of the joint null space `∩_k ker S_k` the fit declared to the REML owner: the
+    /// unpenalized intercept.
+    pub fn null_space(&self) -> ArrayView2<'_, f64> {
+        self.null_space.view()
     }
 
     /// `L⁻ᵀ V_r`, `m × r`, which maps the fitted directions back to the original output coordinates.
@@ -536,15 +552,16 @@ pub fn compile_retained_response(
             ),
         });
     }
+    let penalties: Vec<Array2<f64>> = built.active_penalties.iter().map(|penalty| penalty.matrix.clone()).collect();
+    let null_space = declared_joint_null_space(&built)?;
     let (coefficients, representation) = if fitted_directions == 0 {
         (Array2::<f64>::zeros((width, 0)), FunctionRepresentation::Constant)
     } else {
-        let penalties: Vec<Array2<f64>> = built.active_penalties.iter().map(|penalty| penalty.matrix.clone()).collect();
         let problem = GaussianRemlMultiPenaltyProblem::new(
             training_design.view(),
             components.view(),
             &penalties,
-            declared_joint_nullity(&built)?,
+            null_space.ncols(),
         )
         .map_err(CompileError::Fit)?;
         let fit = problem.fit(None).map_err(CompileError::Fit)?;
@@ -569,6 +586,8 @@ pub fn compile_retained_response(
         frame: frame.to_owned(),
         basis,
         coefficients,
+        penalties,
+        null_space,
         writer,
         output_mean,
         design,
@@ -692,41 +711,52 @@ fn rotation_invariant(basis: &DuchonBasisSpec) -> bool {
     basis.aniso_log_scales.is_none() && basis.periodic.is_none()
 }
 
-/// `dim ∩_k ker S_k` of the realized penalty set, declared from the penalties' own structure. The curvature Gram's null
-/// space is the structural frame it declares, the polynomial block (#2445), not its numerical nullity: the builder
-/// conditions the frame's slopes with a `√ε`-relative ridge inside the curvature matrix, and whether a rank test counts
-/// those slopes moves with the center set (ten centers in two dimensions leave a numerical nullity of 1 against a frame
-/// of 3). The null-space ridge acts inside the frame and penalizes its slopes, not its constant; mass `Σ(f − f̄)²` and
-/// tension `Σ‖∇f‖²` annihilate constants too. So the joint null space is the part of the frame the ridge leaves, of
-/// dimension `dim(frame) − rank(S_ridge)` (the constant), and the whole frame when no ridge is realized. The declaration
-/// assumes that mass and tension add no rank inside that space beyond what the ridge already penalizes, which holds for
-/// the affine null space every `duchon_cubic_default` order realizes. The REML owner checks the declaration against its
-/// rank predicate and refuses any disagreement, so a refusal there names a wrong declaration, not a solver defect.
-fn declared_joint_nullity(built: &BasisBuildResult) -> Result<usize, CompileError> {
+/// `∩_k ker S_k` of the realized penalty set as an orthonormal coefficient-space basis, declared from the penalties' own
+/// structure. The curvature Gram's null space is the structural frame `Z` it declares, the polynomial block (#2445), not
+/// its numerical nullity: the builder conditions the frame's slopes with a `√ε`-relative ridge inside the curvature
+/// matrix, and whether a rank test counts those slopes moves with the center set (ten centers in two dimensions leave a
+/// numerical nullity of 1 against a frame of 3). The null-space ridge acts inside the frame and penalizes its slopes, not
+/// its constant; mass `Σ(f − f̄)²` and tension `Σ‖∇f‖²` annihilate constants too. So the joint null space is the part of
+/// the frame the ridge leaves, of dimension `dim(Z) − rank(S_ridge)` (the constant): `Z` times the eigenvectors of
+/// `ZᵀS_ridge Z` outside its `rank(S_ridge)` largest eigenvalues, so the count comes from the ridge's own rank and no
+/// threshold is read here. With no realized ridge it is the whole frame. The compile builds without an identifiability
+/// transform, so `Z` is the polynomial block's coordinate columns and the basis is orthonormal. The declaration assumes
+/// that mass and tension add no rank inside that space beyond what the ridge already penalizes, which holds for the affine
+/// null space every `duchon_cubic_default` order realizes. The REML owner checks the declared dimension against its rank
+/// predicate and refuses any disagreement, so a refusal there names a wrong declaration, not a solver defect.
+fn declared_joint_null_space(built: &BasisBuildResult) -> Result<Array2<f64>, CompileError> {
     let penalty_of = |source: PenaltySource| built.active_penalties.iter().find(|penalty| penalty.info.source == source);
     let curvature = penalty_of(PenaltySource::Primary).ok_or(CompileError::Basis {
         context: "Duchon penalty set",
         message: "the basis realized no curvature penalty".to_string(),
     })?;
-    let frame_dim = curvature
-        .info
-        .structural_null_frame
-        .as_ref()
-        .map(|frame| frame.ncols())
-        .ok_or(CompileError::Basis {
-            context: "Duchon penalty set",
-            message: "the curvature penalty declares no structural null frame".to_string(),
-        })?;
-    match penalty_of(PenaltySource::DoublePenaltyNullspace) {
-        None => Ok(frame_dim),
-        Some(ridge) => frame_dim.checked_sub(ridge.info.effective_rank).ok_or(CompileError::Basis {
-            context: "Duchon penalty set",
-            message: format!(
-                "the null-space ridge has rank {} but the curvature penalty's structural null frame has dimension {}",
-                ridge.info.effective_rank, frame_dim
-            ),
-        }),
+    let frame = curvature.info.structural_null_frame.as_ref().ok_or(CompileError::Basis {
+        context: "Duchon penalty set",
+        message: "the curvature penalty declares no structural null frame".to_string(),
+    })?;
+    let Some(ridge) = penalty_of(PenaltySource::DoublePenaltyNullspace) else {
+        return Ok(frame.clone());
+    };
+    let frame_dim = frame.ncols();
+    let nullity = frame_dim.checked_sub(ridge.info.effective_rank).ok_or(CompileError::Basis {
+        context: "Duchon penalty set",
+        message: format!(
+            "the null-space ridge has rank {} but the curvature penalty's structural null frame has dimension {}",
+            ridge.info.effective_rank, frame_dim
+        ),
+    })?;
+    let restricted = fast_atb(frame, &fast_ab(&ridge.matrix, frame));
+    let (eigenvalues, eigenvectors) = restricted.eigh(Side::Lower).map_err(|error| CompileError::Basis {
+        context: "null-space ridge inside the curvature penalty's structural null frame",
+        message: error.to_string(),
+    })?;
+    let mut order: Vec<usize> = (0..frame_dim).collect();
+    order.sort_by(|&left, &right| eigenvalues[left].total_cmp(&eigenvalues[right]));
+    let mut kept = Array2::<f64>::zeros((frame_dim, nullity));
+    for (column, &index) in order.iter().take(nullity).enumerate() {
+        kept.column_mut(column).assign(&eigenvectors.column(index));
     }
+    Ok(fast_ab(frame, &kept))
 }
 
 /// The rounding band of a Gram `AᵀA` formed from `a` (`n × c`), in eigenvalue units: the backward error of its symmetric

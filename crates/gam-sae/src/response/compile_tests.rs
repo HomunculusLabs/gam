@@ -496,6 +496,72 @@ fn the_price_reports_gauge_correct_frames_the_function_and_the_whole_block_for_a
 }
 
 #[test]
+fn the_declared_null_space_is_the_intercept_every_penalty_annihilates() {
+    // The joint null space the compile declares to the REML owner, and publishes for evidence comparisons, is the
+    // unpenalized intercept: one unit direction that every penalty annihilates to the rounding of its own entries, and
+    // whose design column is constant over any rows. The bars are the growth factor of the `p × p` products the
+    // penalties and the frame's eigenvectors are formed from. The first fitted coefficient column is the control: a
+    // generic function is neither annihilated nor constant.
+    let readers = array![
+        [2.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0, 1.0],
+        [2.0, 0.0, 1.0, 1.0],
+        [1.0, 1.0, 1.0, -1.0],
+    ];
+    let block = known_block(readers, GaussianActivation::Relu);
+    let design = CompileDesign::pilot(TRAINING_DRAWS, HOLDOUT_DRAWS, 2);
+    let compiled =
+        compile_retained_response(&block, retained_frame().view(), design, 2_946_062).expect("the block compiles");
+    let width = compiled.coefficients().nrows();
+    let null_space = compiled.null_space();
+    assert_eq!(null_space.dim(), (width, 1), "the joint null space is the intercept alone");
+    let direction = null_space.column(0).to_owned();
+    let growth = accumulation_growth(width * width);
+    let unit_gap = (direction.dot(&direction) - 1.0).abs();
+    assert!(unit_gap <= growth, "the declared null direction has squared norm off one by {unit_gap}");
+
+    let control = compiled.coefficients().column(0).to_owned();
+    let control = &control / control.dot(&control).sqrt();
+    let mut control_annihilated = true;
+    for (index, penalty) in compiled.penalties().iter().enumerate() {
+        let scale = penalty.iter().map(|value| value * value).sum::<f64>().sqrt();
+        let image = penalty.dot(&direction);
+        let image_norm = image.dot(&image).sqrt();
+        assert!(
+            image_norm <= growth * scale,
+            "penalty {index} moves the declared null direction by {image_norm} against {} of its scale {scale}",
+            growth * scale
+        );
+        let control_image = penalty.dot(&control);
+        control_annihilated &= control_image.dot(&control_image).sqrt() <= growth * scale;
+    }
+    assert!(!control_annihilated, "every penalty annihilated a fitted coefficient vector");
+
+    let points = executed_draws(2_946_162);
+    let coordinates = points.slice(s![..TRAINING_DRAWS, ..]).dot(&retained_frame());
+    let rows = compiled.basis_rows(coordinates.view()).expect("a replayable compiled response");
+    let row_scale = rows.rows().into_iter().fold(0.0_f64, |acc, row| acc.max(row.iter().map(|value| value.abs()).sum::<f64>()));
+    let spread = |column: &Array1<f64>| {
+        let (low, high) = column.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &value| {
+            (low.min(value), high.max(value))
+        });
+        high - low
+    };
+    let constancy_bar = 2.0 * accumulation_growth(width * width + width) * row_scale;
+    let null_column = rows.dot(&direction);
+    let null_spread = spread(&null_column);
+    let control_spread = spread(&rows.dot(&control));
+    assert!(
+        null_spread <= constancy_bar,
+        "the declared null direction's design column spreads by {null_spread} against {constancy_bar}"
+    );
+    assert!(
+        control_spread > constancy_bar,
+        "the control's design column is constant too: {control_spread} against {constancy_bar}"
+    );
+}
+
+#[test]
 fn the_frozen_basis_replays_the_fit_time_design_at_the_training_draws() {
     // Every held-out and executed evaluation of `g` goes through the replay spec, so it must rebuild the fit-time design
     // at the fit's own rows, whatever other rows it is handed with them: the replay runs on the training rows stacked

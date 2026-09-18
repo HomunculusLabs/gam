@@ -658,5 +658,13 @@
     ],
     "reason": "#2953 (b): replaced by the_penalty_topology_does_not_depend_on_the_metric_2953 in the same test module. The removed test pinned the isotropic-only admission of the Matérn third-order operator: it asserted that an anisotropic ν ≥ 5/2 term carries no OperatorThirdOrder block. This commit admits the operator under the anisotropic metric, since a constant linear change of variables only rescales it (T = √(w_a w_b w_c)·T^iso(A h)), so that assertion is now false by design. The replacement keeps the test's other assertions (ν = 3/2 carries no third-order block; ν ≥ 5/2 ends with OperatorThirdOrder) and adds that the candidate sources are the same with and without η, and that the η-derivative builder emits four blocks.",
     "evidence": "Gate gx10 1247189 at fe8a7a4ffe, tree f16126889c: the guard reports exactly this item, test_scoped true, production_occurrences 0 (pool/ad-spec/aniso3gate.1247189.GUARD.txt). The replacement pin passes there (gam-terms 73/73, all five named pins PASS), and the mutant restoring the isotropic-only admission fails it at its topology assertion (MUTANT_CAUGHT, matern_kernel.rs:4340). Workspace check 0, pyffi 0, census 0, gam-models 45/45 in the same job."
+  },
+  {
+    "base": "309d02a7bc8cfbf712d6b65f26e372567ce61d54",
+    "items": [
+      "crates/gam-sae/src/response/compile.rs:fn:declared_joint_nullity"
+    ],
+    "reason": "#2946 Stage E: the private count declaration is replaced by declared_joint_null_space in the same file. That function returns the orthonormal p×M_p basis the count was the dimension of: the curvature penalty's structural null frame times the eigenvectors of the ridge restricted to it outside its rank. compile_retained_response now passes null_space.ncols() to the multi-penalty REML owner and publishes the basis and the penalties (CompiledResponse::null_space, ::penalties) for fr-reuse's evidence comparison, so the declared dimension and the published basis come from one declaration.",
+    "evidence": "git grep -n -w declared_joint_nullity at 309d02a7bc finds exactly the definition (crates/gam-sae/src/response/compile.rs:705) and its one call (compile.rs:547), both replaced in this commit. The same grep form finds positive_eigenvalue_threshold in gaussian_reml_multi_penalty.rs at that sha, as a positive control. Full gate gx8 job 1263681 at 8336e5f9e3 (patch md5 dfe24fd1): workspace --all-targets check RC 0, gam-pyffi check RC 0, response::compile 7/7. Pre-push check-only gx8 job 1268453 at 309d02a7bc: RC 0 / 0. The kit's source-removal guard at parent 309d02a7bc refused naming exactly this item before the entry existed."
   }
 ]
