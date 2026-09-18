@@ -702,10 +702,15 @@ pub fn inner_mode_third_derivative(
 /// returns `vᵀ D_β M[v] v` at that scale for a unit `v`. The softest eigenpair is the smallest
 /// signed eigenvalue, so a span that is not positive definite is refused by the rounding band
 /// before any derivative is priced.
+///
+/// The verdict reads `σ` against the band alone. `t₃` and its cubic share are priced only when
+/// `third_along` is given; without it a resolved curvature is admitted with no record of them. The
+/// unified evaluator passes `None`: `t₃` is one directional drift of the log-determinant operator,
+/// a full row pass on every evaluation, and no consumer of an evaluation reads it (#979).
 pub(crate) fn grade_inner_mode_fold(
     span: &InvertedSpan,
     curvature_scale: f64,
-    third_along: &dyn Fn(&Array1<f64>) -> Result<(f64, CompletionShare), String>,
+    third_along: Option<&dyn Fn(&Array1<f64>) -> Result<(f64, CompletionShare), String>>,
 ) -> Result<InnerModeFold, String> {
     let softest = span
         .eigenvalues
@@ -717,16 +722,19 @@ pub(crate) fn grade_inner_mode_fold(
     let sigma = span.eigenvalues[softest] / curvature_scale;
     let rounding_band =
         gam_linalg::roundoff::symmetric_spectrum_rounding_band(&span.eigenvalues) / curvature_scale;
-    if !(sigma > rounding_band) {
-        return Ok(InnerModeFold {
-            sigma,
-            rounding_band,
-            third_derivative: None,
-            cubic_correction: None,
-            quartic_correction: QuarticShare::NotPriced,
-            completion: None,
-        });
-    }
+    let third_along = match third_along {
+        Some(third_along) if sigma > rounding_band => third_along,
+        _ => {
+            return Ok(InnerModeFold {
+                sigma,
+                rounding_band,
+                third_derivative: None,
+                cubic_correction: None,
+                quartic_correction: QuarticShare::NotPriced,
+                completion: None,
+            });
+        }
+    };
     let (third, completion) = third_along(&span.basis.column(softest).to_owned())?;
     let third = third / curvature_scale;
     Ok(InnerModeFold {

@@ -103,7 +103,8 @@ pub struct InnerModeFold {
     /// The span spectrum's rounding band, un-scaled.
     pub rounding_band: f64,
     /// `t₃ = vᵀ D_β M[v] v` along the softest eigenvector, un-scaled; `None` when the rounding band
-    /// refused before it was priced.
+    /// refused before it was priced, or when the grading priced no record (the unified evaluator's
+    /// verdict reads `σ` alone, #979).
     pub third_derivative: Option<f64>,
     /// The cubic share `5t₃²/(24σ³)` of the Laplace series' leading correction, priced with `t₃`.
     pub cubic_correction: Option<f64>,
@@ -150,6 +151,12 @@ impl std::fmt::Display for InnerModeFold {
                  directional derivative {third:.3e} (completion {completion:?}), recording a \
                  cubic share of {correction:.3e} of the Laplace series' leading correction; the \
                  quartic share is not priced (gam#2765, gam#979)",
+                self.sigma, self.rounding_band,
+            ),
+            _ if self.is_valid() => write!(
+                f,
+                "the inner mode's softest curvature is {:.3e}, resolved above its rounding band \
+                 {:.3e}; its Laplace series' third-order share was not priced (gam#2765, gam#979)",
                 self.sigma, self.rounding_band,
             ),
             _ => write!(

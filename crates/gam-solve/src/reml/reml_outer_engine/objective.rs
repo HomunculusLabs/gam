@@ -410,16 +410,17 @@ pub(crate) fn reml_laml_evaluate(
     // mode, so a mode whose softest direction leaves the Laplace series without a leading term is
     // at a fold, however well it is solved. One verdict at one point refuses the value and every
     // derivative alike, through the error channel, before anything is built on the mode.
+    //
+    // The verdict reads the softest curvature against its rounding band alone, so an evaluation
+    // prices no `t₃`: that is one directional drift of the log-determinant operator, a full row
+    // pass, for a record no consumer of the evaluation reads (#979: +20.5 s on the n=2000 BMS flex
+    // smoke fit, job 1267301).
     if let Some(span) = mode_kernel.inverted_span() {
-        let fold = grade_inner_mode_fold(&span, solution.rho_curvature_scale, &|direction| {
-            inner_mode_third_derivative(solution.deriv_provider.as_ref(), direction)
-        })
-        .map_err(|reason| RemlError::ContractViolation {
-            reason: format!(
-                "inner-mode fold verdict (gam#2765): the third directional derivative along the \
-                 softest direction failed: {reason}"
-            ),
-        })?;
+        let fold = grade_inner_mode_fold(&span, solution.rho_curvature_scale, None).map_err(
+            |reason| RemlError::ContractViolation {
+                reason: format!("inner-mode fold verdict (gam#2765): {reason}"),
+            },
+        )?;
         log::info!("[inner-mode fold] {fold}");
         if !fold.is_valid() {
             log::warn!("[inner-mode fold] refusing this trial point: {fold}");

@@ -8641,7 +8641,7 @@ pub(crate) fn a_fold_record_refuses_only_an_unresolved_curvature_2765() {
             eigenvalues: vec![0.0, 5.0],
         },
         1.0,
-        &|_| panic!("an unresolved curvature is refused before t3 is priced"),
+        Some(&|_| panic!("an unresolved curvature is refused before t3 is priced")),
     )
     .expect("the rounding band grades without pricing");
     assert!(!unresolved.is_valid(), "{unresolved}");
@@ -8657,7 +8657,7 @@ pub(crate) fn a_fold_record_refuses_only_an_unresolved_curvature_2765() {
             eigenvalues: vec![1.0e-7, 5.0],
         },
         1.0,
-        &|direction| Ok((direction[0].powi(3), CompletionShare::Priced)),
+        Some(&|direction| Ok((direction[0].powi(3), CompletionShare::Priced))),
     )
     .expect("a resolved curvature is graded");
     assert!(soft.is_valid(), "a large cubic share is recorded, not refused: {soft}");
