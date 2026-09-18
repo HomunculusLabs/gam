@@ -1234,6 +1234,25 @@ impl<'a> RemlState<'a> {
     ) -> Result<(f64, Array1<f64>, gam_problem::HessianValue), EstimationError> {
         let t_outer_start = std::time::Instant::now();
         let rho = theta.slice(s![..rho_dim]).to_owned();
+        // The rho-only fallback below is legal ONLY for a theta that carries no
+        // ψ tail: an empty direction list against a [rho, psi] theta would hand
+        // the caller a rho-only gradient whose length silently disagrees with
+        // the declared layout (#2987 — the dense-work guards used to
+        // manufacture exactly that condition). Make the contract unrepresentable
+        // to violate instead of trusting every caller to uphold it.
+        let psi_dim = theta.len().checked_sub(rho_dim).ok_or_else(|| {
+            EstimationError::InvalidInput(format!(
+                "rho_dim {rho_dim} exceeds theta dimension {}",
+                theta.len()
+            ))
+        })?;
+        if hyper_dirs.len() != psi_dim {
+            return Err(EstimationError::InvalidInput(format!(
+                "joint hyper evaluation direction mismatch: psi_dim={psi_dim}, \
+                 hyper_dirs={}; the [rho, psi] gradient cannot be served rho-only",
+                hyper_dirs.len()
+            )));
+        }
 
         if !hyper_dirs.is_empty() {
             let requested_hessian = matches!(
