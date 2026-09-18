@@ -241,8 +241,11 @@ pub(crate) fn weighted_cross_dense(
 
 /// Compute `xᵀ diag(diag) x`. For small products this reuses `weighted` as an
 /// n×p row-scaled scratch and dispatches to faer GEMM. For large products it
-/// streams rows into rayon-local p×p buffers and mirrors the accumulated upper
-/// triangle, avoiding weighted design materialization.
+/// streams rows into rayon-local p×p buffers, avoiding weighted design
+/// materialization. Both paths publish their upper triangle mirrored, so the
+/// Gram is exactly symmetric at every thread count: a GEMM of `xᵀ·(diag·x)`
+/// rounds `[a, b]` and `[b, a]` along different accumulation orders, so its
+/// own output is symmetric only in exact arithmetic.
 pub(crate) fn xt_diag_x_dense_into(
     x: &Array2<f64>,
     diag: &Array1<f64>,
@@ -255,27 +258,27 @@ pub(crate) fn xt_diag_x_dense_into(
     }
 
     let work = n.saturating_mul(p).saturating_mul(p);
-    if rayon::current_num_threads() <= 1 || work < DENSE_WEIGHTED_PRODUCT_PAR_FLOPS {
+    let mut out = if rayon::current_num_threads() <= 1 || work < DENSE_WEIGHTED_PRODUCT_PAR_FLOPS {
         row_scale_dense_into(x, diag, weighted);
-        return gam_linalg::faer_ndarray::fast_atb(x, weighted);
-    }
-
-    // Deterministic parallel row reduction (length-only pairwise tree; see
-    // `weighted_cross_dense` above for why a rayon fold/reduce is not usable
-    // here).
-    let mut out = gam_linalg::pairwise_reduce::par_deterministic_block_fold(
-        n,
-        |range: core::ops::Range<usize>| {
-            let mut local = Array2::<f64>::zeros((p, p));
-            accumulate_xt_diag_x_upper_rows(&mut local, x, diag, range.start, range.end);
-            local
-        },
-        |mut a, b| {
-            a += &b;
-            a
-        },
-    )
-    .unwrap_or_else(|| Array2::<f64>::zeros((p, p)));
+        gam_linalg::faer_ndarray::fast_atb(x, weighted)
+    } else {
+        // Deterministic parallel row reduction (length-only pairwise tree; see
+        // `weighted_cross_dense` above for why a rayon fold/reduce is not usable
+        // here).
+        gam_linalg::pairwise_reduce::par_deterministic_block_fold(
+            n,
+            |range: core::ops::Range<usize>| {
+                let mut local = Array2::<f64>::zeros((p, p));
+                accumulate_xt_diag_x_upper_rows(&mut local, x, diag, range.start, range.end);
+                local
+            },
+            |mut a, b| {
+                a += &b;
+                a
+            },
+        )
+        .unwrap_or_else(|| Array2::<f64>::zeros((p, p)))
+    };
     for a in 0..p {
         for b in 0..a {
             out[[a, b]] = out[[b, a]];
@@ -557,6 +560,35 @@ mod tests {
         for i in 0..got.nrows() {
             for j in 0..got.ncols() {
                 assert_relative_eq!(got[[i, j]], got[[j, i]], epsilon = 0.0);
+            }
+        }
+    }
+
+    /// Below `DENSE_WEIGHTED_PRODUCT_PAR_FLOPS` the Gram comes from the GEMM
+    /// branch at every thread count, which is where every small PIRLS Hessian
+    /// is formed. It must be exactly symmetric there too, not only on the
+    /// parallel fold the large-scale test above reaches with a Rayon pool.
+    #[test]
+    pub(crate) fn xt_diag_x_dense_into_is_exactly_symmetric_on_the_gemm_branch() {
+        let x = deterministic_matrix(768, 96, 1.1);
+        assert!(
+            x.nrows() * x.ncols() * x.ncols() < DENSE_WEIGHTED_PRODUCT_PAR_FLOPS,
+            "the fixture must sit below the parallel threshold to reach the GEMM branch"
+        );
+        let weights = deterministic_weights(x.nrows());
+        let mut scratch = Array2::<f64>::zeros((0, 0));
+        let got = xt_diag_x_dense_into(&x, &weights, &mut scratch);
+        let expected = weighted_cross_reference(&x, &x, &weights);
+        assert_matrix_close(&got, &expected, 3e-10, 5e-12);
+        for i in 0..got.nrows() {
+            for j in 0..i {
+                assert_eq!(
+                    got[[i, j]].to_bits(),
+                    got[[j, i]].to_bits(),
+                    "Gram entry [{i}, {j}] = {:e} differs from its transpose [{j}, {i}] = {:e}",
+                    got[[i, j]],
+                    got[[j, i]]
+                );
             }
         }
     }
