@@ -2756,7 +2756,8 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
     // absorber ridge and the deviation blocks included. The family reports its
     // capability on them, and the search takes its ρ domain from them by the
     // #2812 law `fit_custom_family` applies to the same blocks (#2902 item 15).
-    let initial_blocks = build_blocks(&rho_seed, &marginal_design, &slope_design)?;
+    let initial_blocks = build_blocks(&rho_seed, &marginal_design, &slope_design)
+        .map_err(|reason| FitFailure::raised(FailureCategory::Invariant, reason))?;
     let (rho_lower, rho_upper) = crate::fit_orchestration::drivers::realized_blocks_rho_domain(
         &initial_blocks,
         options,
@@ -2770,7 +2771,7 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         rho_lower,
         rho_upper,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(FitFailure::from)?;
     // A learned frailty scale owns one outer coordinate, ln σ. Its domain is the
     // one the scale derives for itself, `ln(1/√ε)` e-folds either side of the
     // seed (the gradient resolution every derived ρ edge sits at). This is the
