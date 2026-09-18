@@ -3912,13 +3912,15 @@ impl SurvivalMarginalSlopeFrozenOffsetChart {
     }
 }
 
-/// The additive time offsets of a latent-survival fit and their first partials
-/// with respect to a nonlinear baseline chart, realized at one chart point
-/// (#2714).
+/// The additive time offsets of a latent-survival fit and their first and second
+/// partials with respect to a nonlinear baseline chart, realized at one chart
+/// point (#2714, #2677).
 ///
 /// The four channels are the ones the latent row reads through additive offsets:
 /// `q_entry`, `q_exit`, `q̇_exit` and the interval upper bound `q_right`. Each
-/// `*_theta` array is `n × d`, `d = theta.len()`.
+/// `*_theta` array is `n × d` and each `*_theta_theta` array is `n × d × d`,
+/// `d = theta.len()`. A loaded/unloaded split's `ln m` axis moves no offset, so
+/// its rows and columns are zero.
 #[derive(Clone, Debug)]
 pub(crate) struct LatentSurvivalOffsetGeometry {
     pub(crate) baseline_config: SurvivalBaselineConfig,
@@ -3931,6 +3933,10 @@ pub(crate) struct LatentSurvivalOffsetGeometry {
     pub(crate) offset_exit_theta: Array2<f64>,
     pub(crate) derivative_offset_exit_theta: Array2<f64>,
     pub(crate) offset_right_theta: Array2<f64>,
+    pub(crate) offset_entry_theta_theta: ndarray::Array3<f64>,
+    pub(crate) offset_exit_theta_theta: ndarray::Array3<f64>,
+    pub(crate) derivative_offset_exit_theta_theta: ndarray::Array3<f64>,
+    pub(crate) offset_right_theta_theta: ndarray::Array3<f64>,
     /// The background components a loaded/unloaded split realizes at this chart
     /// point; `None` for a fully loaded hazard, whose chart moves only offsets.
     pub(crate) unloaded: Option<LatentSurvivalUnloadedGeometry>,
@@ -4106,15 +4112,28 @@ impl LatentSurvivalFrozenOffsetChart {
             }
             Ok((value, partials))
         };
+        type SecondChannel = Vec<Vec<(f64, f64)>>;
+        let second = |age: f64| -> Result<SecondChannel, String> {
+            let partials = log_cumulative_hazard_offset_theta_second_partials(age, &loaded_config)?;
+            if partials.len() != loaded_dim {
+                return Err(format!(
+                    "latent survival baseline chart has {} second partials for the {loaded_dim} loaded coordinates of a {dim}-coordinate theta",
+                    partials.len()
+                ));
+            }
+            Ok(partials)
+        };
+        type RowChannel = (Channel, SecondChannel);
+        let at_age = |age: f64| -> Result<RowChannel, String> { Ok((channel(age)?, second(age)?)) };
         let rows = (0..n)
             .into_par_iter()
-            .map(|row| -> Result<(Channel, Channel, Option<Channel>), String> {
-                let entry = channel(self.age_entry[row])?;
-                let exit = channel(self.age_exit[row])?;
+            .map(|row| -> Result<(RowChannel, RowChannel, Option<RowChannel>), String> {
+                let entry = at_age(self.age_entry[row])?;
+                let exit = at_age(self.age_exit[row])?;
                 let right = self
                     .age_right
                     .as_ref()
-                    .map(|ages| channel(ages[row]))
+                    .map(|ages| at_age(ages[row]))
                     .transpose()?;
                 Ok((entry, exit, right))
             })
@@ -4130,6 +4149,10 @@ impl LatentSurvivalFrozenOffsetChart {
             offset_exit_theta: Array2::zeros((n, dim)),
             derivative_offset_exit_theta: Array2::zeros((n, dim)),
             offset_right_theta: Array2::zeros((n, dim)),
+            offset_entry_theta_theta: ndarray::Array3::zeros((n, dim, dim)),
+            offset_exit_theta_theta: ndarray::Array3::zeros((n, dim, dim)),
+            derivative_offset_exit_theta_theta: ndarray::Array3::zeros((n, dim, dim)),
+            offset_right_theta_theta: ndarray::Array3::zeros((n, dim, dim)),
             unloaded: makeham.map(|makeham| LatentSurvivalUnloadedGeometry {
                 axis: loaded_dim,
                 mass_entry: self.age_entry.mapv(|age| makeham * age),
@@ -4141,7 +4164,9 @@ impl LatentSurvivalFrozenOffsetChart {
                     .map_or_else(|| Array1::zeros(n), |ages| ages.mapv(|age| makeham * age)),
             }),
         };
-        for (row, (entry, exit, right)) in rows.into_iter().enumerate() {
+        for (row, ((entry, entry_second), (exit, exit_second), right)) in
+            rows.into_iter().enumerate()
+        {
             geometry.offset_entry[row] = entry.0.0;
             geometry.offset_exit[row] = exit.0.0;
             geometry.derivative_offset_exit[row] = exit.0.1;
@@ -4149,16 +4174,73 @@ impl LatentSurvivalFrozenOffsetChart {
                 geometry.offset_entry_theta[[row, axis]] = entry.1[axis].0;
                 geometry.offset_exit_theta[[row, axis]] = exit.1[axis].0;
                 geometry.derivative_offset_exit_theta[[row, axis]] = exit.1[axis].1;
+                for other in 0..loaded_dim {
+                    geometry.offset_entry_theta_theta[[row, axis, other]] =
+                        entry_second[axis][other].0;
+                    geometry.offset_exit_theta_theta[[row, axis, other]] =
+                        exit_second[axis][other].0;
+                    geometry.derivative_offset_exit_theta_theta[[row, axis, other]] =
+                        exit_second[axis][other].1;
+                }
             }
-            if let Some(((value, _), partials)) = right {
+            if let Some((((value, _), partials), right_second)) = right {
                 geometry.offset_right[row] = value;
                 for axis in 0..loaded_dim {
                     geometry.offset_right_theta[[row, axis]] = partials[axis].0;
+                    for other in 0..loaded_dim {
+                        geometry.offset_right_theta_theta[[row, axis, other]] =
+                            right_second[axis][other].0;
+                    }
                 }
             }
         }
         Ok(geometry)
     }
+}
+
+/// Second partials `(∂²η/∂θ_k∂θ_l, ∂²o_D/∂θ_k∂θ_l)` of the log-cumulative-hazard
+/// offsets `η = log H(t)` and `o_D = h(t)/H(t)` at one age, in the coordinates of
+/// [`survival_baseline_theta_from_config`] (#2677). From the hazard's own first and
+/// second partials, `η = log H` and `H·o_D = h` give
+///
+/// ```text
+///   η_kl   = H_kl/H − H_k·H_l/H²,
+///   o_D,kl = (h_kl − o_D·H_kl − o_D,l·H_k − o_D,k·H_l)/H,   o_D,k = (h_k − o_D·H_k)/H.
+/// ```
+fn log_cumulative_hazard_offset_theta_second_partials(
+    age: f64,
+    cfg: &SurvivalBaselineConfig,
+) -> Result<Vec<Vec<(f64, f64)>>, String> {
+    let ((cumulative, instant), first, second) = survival_hazard_theta_first_second(age, cfg)?
+        .ok_or_else(|| {
+            "latent survival nonlinear baseline chart lost its hazard second partials".to_string()
+        })?;
+    let rate = instant / cumulative;
+    let rate_first: Vec<f64> = first
+        .iter()
+        .map(|&(cumulative_k, instant_k)| (instant_k - rate * cumulative_k) / cumulative)
+        .collect();
+    let dim = first.len();
+    Ok((0..dim)
+        .map(|k| {
+            (0..dim)
+                .map(|l| {
+                    let (cumulative_k, _) = first[k];
+                    let (cumulative_l, _) = first[l];
+                    let (cumulative_kl, instant_kl) = second[k][l];
+                    (
+                        cumulative_kl / cumulative
+                            - cumulative_k * cumulative_l / (cumulative * cumulative),
+                        (instant_kl
+                            - rate * cumulative_kl
+                            - rate_first[l] * cumulative_k
+                            - rate_first[k] * cumulative_l)
+                            / cumulative,
+                    )
+                })
+                .collect()
+        })
+        .collect())
 }
 
 pub fn location_scale_uses_probit_survival_baseline(inverse_link: Option<&InverseLink>) -> bool {

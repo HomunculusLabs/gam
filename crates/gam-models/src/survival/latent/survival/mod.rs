@@ -1069,6 +1069,15 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
         }
     };
     let outer_policy = seed_family.outer_derivative_policy(seed_blocks, options);
+    // The driver declares an analytic outer Hessian exactly when the one predicate
+    // that withholds it finds nothing, over the options every evaluation and the
+    // certified fit run with (#2677).
+    let analytic_outer_hessian_available = crate::custom_family::custom_family_outer_hessian_absence(
+        seed_family,
+        seed_blocks,
+        &crate::outer_subsample::exact_outer_options(options),
+    )
+    .is_none();
     let kappa_options = gam_terms::smooth::SpatialLengthScaleOptimizationOptions {
         enabled: false,
         ..Default::default()
@@ -1081,7 +1090,7 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
         &setup,
         crate::seeding::SeedRiskProfile::Survival,
         true,
-        false,
+        analytic_outer_hessian_available,
         true,
         None,
         outer_policy,
@@ -1117,18 +1126,11 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
             promote_pending_seed(&blocks);
             let rho = theta.slice(s![..rho_dim]).to_owned();
             let hyper_layout = family_hyper_layout(&blocks, theta)?;
-            // The criterion has no exact outer Hessian along θ: ask for the gradient.
-            let effective_mode = match eval_mode {
-                gam_problem::EvalMode::ValueGradientHessian => {
-                    gam_problem::EvalMode::ValueAndGradient
-                }
-                other => other,
-            };
             let eval_options = crate::outer_subsample::exact_outer_options(options);
             let (first_iterate, candidates) =
                 exact_mode_branch
                     .borrow_mut()
-                    .candidates(effective_mode, theta, &rho);
+                    .candidates(eval_mode, theta, &rho);
             if first_iterate {
                 log::info!(
                     "[latent] first derivative-bearing outer evaluation: its certified mode becomes the coefficient-mode anchor every later probe starts from"
@@ -1142,7 +1144,7 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
                 &rho,
                 &hyper_layout,
                 warm_start.as_ref(),
-                effective_mode,
+                eval_mode,
             )
             .map_err(|error| error.to_string())?;
             exact_mode_branch.borrow_mut().record_value(
@@ -1753,20 +1755,23 @@ const LATENT_SURVIVAL_PRIMARY_DIM: usize = 6;
 /// |f'|    = r / s
 /// |f''|   = r / s²
 /// |f'''|  = r(1 + r) / s³
-/// |f''''| = r(1 + 4r + r²) / s⁴,
+/// |f''''| = r(1 + 4r + r²) / s⁴
+/// |f⁽⁵⁾|  = r(1 + 11r + 11r² + r³) / s⁵,
 /// r = exp(x), s = 1 - r.
 /// ```
 ///
 /// This never forms `1/s^k`. If a true derivative magnitude cannot be
 /// represented by `f64`, the routine returns a typed numerical refusal instead
 /// of publishing an infinite jet. Only the derivative order consumed by the
-/// selected jet backend is certified. There is no clamp or magnitude cutoff.
-fn latent_unary_derivatives_log1mexp_negative(
+/// selected jet backend is certified, and the stack is as long as that jet's
+/// composition reads: five entries through the fourth order, six through the
+/// fifth. There is no clamp or magnitude cutoff.
+fn latent_unary_derivatives_log1mexp_negative<const N: usize>(
     x: f64,
     derivative_order: usize,
     context: &str,
-) -> Result<[f64; 5], LatentSurvivalError> {
-    assert!(derivative_order <= 4);
+) -> Result<[f64; N], LatentSurvivalError> {
+    assert!(derivative_order < N && N <= 6);
     if !(x.is_finite() && x < 0.0) {
         return Err(LatentSurvivalError::NumericalFailure {
             reason: format!("{context} requires a finite negative log-boundary gap, got {x:?}"),
@@ -1779,8 +1784,10 @@ fn latent_unary_derivatives_log1mexp_negative(
         x - 2.0 * value,
         x + exp_x.ln_1p() - 3.0 * value,
         x + (exp_x * (4.0 + exp_x)).ln_1p() - 4.0 * value,
+        x + (exp_x * (11.0 + exp_x * (11.0 + exp_x))).ln_1p() - 5.0 * value,
     ];
-    let mut derivatives = [value, 0.0, 0.0, 0.0, 0.0];
+    let mut derivatives = [0.0; N];
+    derivatives[0] = value;
     for (offset, log_magnitude) in log_derivative_magnitudes
         .into_iter()
         .take(derivative_order)
@@ -1812,8 +1819,8 @@ fn latent_unary_derivatives_log1mexp_negative(
 ///
 /// Absolute mass never leaves log space. The caller supplies a complete
 /// finiteness predicate for its concrete jet representation so an `Ok` result
-/// certifies every carried channel, including contracted third/fourth parts.
-fn latent_survival_positive_log_difference_jet<J: JetField>(
+/// certifies every carried channel, including contracted third/fourth/fifth parts.
+fn latent_survival_positive_log_difference_jet<const K: usize, J: LatentRowJet<K>>(
     log_left: &J,
     log_coefficient_left: f64,
     log_right: &J,
@@ -1822,24 +1829,23 @@ fn latent_survival_positive_log_difference_jet<J: JetField>(
     context: &str,
     all_channels_finite: impl Fn(&J) -> bool,
 ) -> Result<J, LatentSurvivalError> {
-    let weighted_left = log_left.add(&log_left.constant_like(log_coefficient_left));
-    let weighted_right = log_right.add(&log_right.constant_like(log_coefficient_right));
-    let delta = weighted_right.sub(&weighted_left);
-    let delta_value = delta.value();
+    let weighted_left = log_left.row_add(&J::row_constant(log_coefficient_left));
+    let weighted_right = log_right.row_add(&J::row_constant(log_coefficient_right));
+    let delta = weighted_right.row_sub(&weighted_left);
+    let delta_value = delta.row_value();
     if !(delta_value.is_finite() && delta_value < 0.0) {
         return Err(LatentSurvivalError::NumericalFailure {
             reason: format!(
                 "{context} must be a positive survival-mass difference: \
                  log(c_L*K0(M_L))={:?}, log(c_R*K0(M_R))={:?}; \
                  require M_L < M_R (i.e. L < R)",
-                weighted_left.value(),
-                weighted_right.value(),
+                weighted_left.row_value(),
+                weighted_right.row_value(),
             ),
         });
     }
-    let derivatives =
-        latent_unary_derivatives_log1mexp_negative(delta_value, derivative_order, context)?;
-    let out = weighted_left.add(&delta.compose_unary(derivatives));
+    let out = weighted_left
+        .row_add(&delta.row_compose_log1mexp_negative(derivative_order, context)?);
     if !all_channels_finite(&out) {
         return Err(LatentSurvivalError::NumericalFailure {
             reason: format!(
@@ -3147,14 +3153,14 @@ fn latent_signed_log_materialize(
 /// rounding produces [`LatentSurvivalError::DerivativeAccuracyUnresolved`]
 /// instead of an approximate derivative.
 ///
-/// The four-slot table covers the `(a,b,u,v)` layouts used by Order2, OneSeed,
-/// and TwoSeed.
-fn latent_certified_cumulants(
-    moments: [LatentSignedLog; 16],
+/// The table covers the four-slot `(a,b,u,v)` layouts used by Order2, OneSeed,
+/// and TwoSeed, and the five-slot `(a,b,u,v,w)` layout of the three-seed lift.
+fn latent_certified_cumulants<const M: usize>(
+    moments: [LatentSignedLog; M],
     target_mask: usize,
     context: &str,
-) -> Result<[LatentCertifiedCumulant; 16], LatentSurvivalError> {
-    assert!(target_mask > 0 && target_mask < 16);
+) -> Result<[LatentCertifiedCumulant; M], LatentSurvivalError> {
+    assert!(M.is_power_of_two() && target_mask > 0 && target_mask < M);
 
     let unresolved = |mask: usize, reason: &str| {
         LatentSurvivalError::DerivativeAccuracyUnresolved {
@@ -3163,8 +3169,8 @@ fn latent_certified_cumulants(
             ),
         }
     };
-    let mut rounded_moments = [0.0_f64; 16];
-    for mask in 0usize..16 {
+    let mut rounded_moments = [0.0_f64; M];
+    for mask in 0usize..M {
         if mask & !target_mask != 0 {
             continue;
         }
@@ -3200,7 +3206,7 @@ fn latent_certified_cumulants(
     let moment_span = || -> String {
         let mut lowest = f64::INFINITY;
         let mut highest = 0.0_f64;
-        for mask in 0usize..16 {
+        for mask in 0usize..M {
             let magnitude = rounded_moments[mask].abs();
             if magnitude > 0.0 {
                 lowest = lowest.min(magnitude);
@@ -3216,9 +3222,9 @@ fn latent_certified_cumulants(
         unresolved(mask, &format!("{reason} ({})", moment_span()))
     };
 
-    let mut exact_cumulants = [LatentExactExpansion::ZERO; 16];
-    let mut certificates = [LatentCertifiedCumulant::ZERO; 16];
-    for mask in 1usize..16 {
+    let mut exact_cumulants = [LatentExactExpansion::ZERO; M];
+    let mut certificates = [LatentCertifiedCumulant::ZERO; M];
+    for mask in 1usize..M {
         if mask & !target_mask != 0 {
             continue;
         }
@@ -3367,10 +3373,10 @@ fn latent_kernel_sum_order2_parts<const K: usize>(
     primary_directions: &[LatentKernelPrimaryDirection; K],
     suffixes: &[&[LatentKernelPrimaryDirection]],
     context: &str,
-) -> Result<[Order2<K>; 4], LatentSurvivalError> {
+) -> Result<[Order2<K>; 8], LatentSurvivalError> {
     assert!(
-        !suffixes.is_empty() && suffixes.len() <= 4,
-        "latent kernel lift supports one to four order-two parts"
+        !suffixes.is_empty() && suffixes.len() <= 8,
+        "latent kernel lift supports one to eight order-two parts"
     );
     let (bundle, base_log_sum) = latent_kernel_sum_base(
         quadctx,
@@ -3398,8 +3404,11 @@ fn latent_kernel_sum_order2_parts<const K: usize>(
             return Ok(LatentSignedLog::ZERO);
         }
         let terms = latent_kernel_term_sequence_inline(base_terms, axes, suffix);
+        // Term lists over at most four slots (the order-two, one-seed and two-seed
+        // lifts) stay inside the inline buffer. The three-seed lift's five-slot
+        // lists can outgrow it and are served from the heap (#2677).
         assert!(
-            !terms.spilled(),
+            axes.len() + suffix.len() > 4 || !terms.spilled(),
             "latent derivative support exceeded the inline allocation-free capacity: {} > {}",
             terms.len(),
             LATENT_TERM_INLINE_CAPACITY
@@ -3408,7 +3417,7 @@ fn latent_kernel_sum_order2_parts<const K: usize>(
         latent_signed_log_normalized(log_abs, sign, base_log_sum, context)
     };
 
-    let mut parts = [LatentSignedLogOrder2::<K>::zero(); 4];
+    let mut parts = [LatentSignedLogOrder2::<K>::zero(); 8];
     for (part, suffix) in suffixes.iter().enumerate() {
         let value = if part == 0 {
             // The base is the kernel divided by itself.
@@ -3442,92 +3451,69 @@ fn latent_kernel_sum_order2_parts<const K: usize>(
 /// Convert normalized signed-log kernel moments into derivatives of the log sum.
 ///
 /// `normalized_parts` is the single analytic recurrence's compact moment
-/// layout: the base carries `(1, S_a/S, S_ab/S)`, the one-seed parts carry
-/// `(S_u/S, S_au/S, S_abu/S)`, and the two-seed cross part carries `(S_uv/S,
-/// S_auv/S, S_abuv/S)`. For each requested output channel those moments become
-/// a four-slot `(a,b,u,v)` table for [`latent_certified_cumulants`]. Each
-/// derivative is published only after its exact expansion has certified the
-/// unique rounded result.
+/// layout, indexed by seed subset (`bit 0 = u`, `bit 1 = v`, `bit 2 = w`): the
+/// base carries `(1, S_a/S, S_ab/S)`, a part along seed set `P` carries
+/// `(S_P/S, S_aP/S, S_abP/S)`. For each requested output channel those moments
+/// become one table over the slots `(a, b, seeds…)` for
+/// [`latent_certified_cumulants`], with part `p`'s moments at `(p << 2) | j`.
+/// Each derivative is published only after its exact expansion has certified
+/// the unique rounded result.
 fn latent_kernel_signed_log_parts<const K: usize>(
     base_log_sum: f64,
-    normalized_parts: [LatentSignedLogOrder2<K>; 4],
+    normalized_parts: [LatentSignedLogOrder2<K>; 8],
     part_count: usize,
     context: &str,
-) -> Result<[Order2<K>; 4], LatentSurvivalError> {
-    assert!(matches!(part_count, 1 | 2 | 4));
-    let compose_log = |moments: [LatentSignedLog; 16], target_mask: usize| {
+) -> Result<[Order2<K>; 8], LatentSurvivalError> {
+    assert!(matches!(part_count, 1 | 2 | 4 | 8));
+    let compose_log = |moments: [LatentSignedLog; 32], target_mask: usize| {
         latent_certified_cumulants(moments, target_mask, context)
     };
     let moments_for = |a: usize, b: usize| {
-        let base = &normalized_parts[0];
-        let u = &normalized_parts[1];
-        let v = &normalized_parts[2];
-        let uv = &normalized_parts[3];
-        [
-            LatentSignedLog::ONE,
-            base.g[a],
-            base.g[b],
-            base.h[a][b],
-            u.v,
-            u.g[a],
-            u.g[b],
-            u.h[a][b],
-            v.v,
-            v.g[a],
-            v.g[b],
-            v.h[a][b],
-            uv.v,
-            uv.g[a],
-            uv.g[b],
-            uv.h[a][b],
-        ]
-    };
-
-    let mut out = [Order2::<K>::constant(0.0); 4];
-    out[0].0.v = base_log_sum;
-    if part_count >= 2 {
-        out[1].0.v = latent_signed_log_materialize(normalized_parts[1].v, context)?;
-    }
-    if part_count == 4 {
-        out[2].0.v = latent_signed_log_materialize(normalized_parts[2].v, context)?;
-        let composed = compose_log(moments_for(0, 0), 0b1100)?;
-        out[3].0.v = composed[0b1100].value;
-    }
-
-    let (gradient_mask, hessian_mask) = match part_count {
-        1 => (0b0001, 0b0011),
-        2 => (0b0101, 0b0111),
-        4 => (0b1101, 0b1111),
-        other => {
-            return Err(LatentSurvivalError::NumericalFailure {
-                reason: format!(
-                    "{context} composed a latent moment jet over {other} parts; \
-                     only 1, 2, or 4 are constructible"
-                ),
-            })
+        let mut moments = [LatentSignedLog::ZERO; 32];
+        for (part, tower) in normalized_parts.iter().enumerate() {
+            let offset = part << 2;
+            moments[offset] = if part == 0 {
+                LatentSignedLog::ONE
+            } else {
+                tower.v
+            };
+            moments[offset | 0b01] = tower.g[a];
+            moments[offset | 0b10] = tower.g[b];
+            moments[offset | 0b11] = tower.h[a][b];
         }
+        moments
     };
+
+    // A single-seed part's value is its normalized moment; a part along several
+    // seeds reads its cumulant off one composition over every seed slot.
+    let seed_mask = part_count - 1;
+    let mut out = [Order2::<K>::constant(0.0); 8];
+    out[0].0.v = base_log_sum;
+    for part in 1..part_count {
+        if part.is_power_of_two() {
+            out[part].0.v = latent_signed_log_materialize(normalized_parts[part].v, context)?;
+        }
+    }
+    if part_count >= 4 {
+        let composed = compose_log(moments_for(0, 0), seed_mask << 2)?;
+        for part in 1..part_count {
+            if !part.is_power_of_two() {
+                out[part].0.v = composed[part << 2].value;
+            }
+        }
+    }
+
+    let gradient_mask = (seed_mask << 2) | 0b01;
+    let hessian_mask = (seed_mask << 2) | 0b11;
     for a in 0..K {
         let composed = compose_log(moments_for(a, a), gradient_mask)?;
-        out[0].0.g[a] = composed[0b0001].value;
-        if part_count >= 2 {
-            out[1].0.g[a] = composed[0b0101].value;
-        }
-        if part_count == 4 {
-            out[2].0.g[a] = composed[0b1001].value;
-            out[3].0.g[a] = composed[0b1101].value;
+        for part in 0..part_count {
+            out[part].0.g[a] = composed[(part << 2) | 0b01].value;
         }
         for b in a..K {
             let composed = compose_log(moments_for(a, b), hessian_mask)?;
-            out[0].0.h[a][b] = composed[0b0011].value;
-            if part_count >= 2 {
-                out[1].0.h[a][b] = composed[0b0111].value;
-            }
-            if part_count == 4 {
-                out[2].0.h[a][b] = composed[0b1011].value;
-                out[3].0.h[a][b] = composed[0b1111].value;
-            }
             for part in 0..part_count {
+                out[part].0.h[a][b] = composed[(part << 2) | 0b11].value;
                 out[part].0.h[b][a] = out[part].0.h[a][b];
             }
         }
@@ -3565,11 +3551,151 @@ fn latent_order2_all_finite<const K: usize>(jet: &Order2<K>) -> bool {
             .all(|value| value.is_finite())
 }
 
+/// The jet operations the single latent row expression performs: kernel
+/// log-sums combine linearly, and the interval branch composes `log(1 − eᵟ)`
+/// over a log-boundary gap. The composition is the one place a jet's order
+/// shows, so each jet reads the certified derivative stack through its own
+/// order there.
+trait LatentRowJet<const K: usize>: Copy {
+    fn row_constant(value: f64) -> Self;
+    fn row_value(&self) -> f64;
+    fn row_add(&self, other: &Self) -> Self;
+    fn row_sub(&self, other: &Self) -> Self;
+    /// `log(1 − eᵟ)` composed over this jet at its negative value `δ`, with the
+    /// unary stack certified through `derivative_order`.
+    fn row_compose_log1mexp_negative(
+        &self,
+        derivative_order: usize,
+        context: &str,
+    ) -> Result<Self, LatentSurvivalError>;
+}
+
+/// The order-two, one-seed and two-seed jets compose through the five-entry stack
+/// their `JetScalar` composition reads.
+macro_rules! latent_row_jet_through_fourth_order {
+    ($($jet:ident),+) => {$(
+        impl<const K: usize> LatentRowJet<K> for $jet<K> {
+            fn row_constant(value: f64) -> Self {
+                <Self as JetScalar<K>>::constant(value)
+            }
+
+            fn row_value(&self) -> f64 {
+                JetField::value(self)
+            }
+
+            fn row_add(&self, other: &Self) -> Self {
+                JetField::add(self, other)
+            }
+
+            fn row_sub(&self, other: &Self) -> Self {
+                JetField::sub(self, other)
+            }
+
+            fn row_compose_log1mexp_negative(
+                &self,
+                derivative_order: usize,
+                context: &str,
+            ) -> Result<Self, LatentSurvivalError> {
+                let stack = latent_unary_derivatives_log1mexp_negative::<5>(
+                    JetField::value(self),
+                    derivative_order,
+                    context,
+                )?;
+                Ok(JetField::compose_unary(self, stack))
+            }
+        }
+    )+};
+}
+
+latent_row_jet_through_fourth_order!(Order2, OneSeed, TwoSeed);
+
+/// A row jet carrying the contracted fifth derivative (#2677): eight order-two
+/// parts indexed by seed subset (`bit 0 = u`, `bit 1 = v`, `bit 2 = w`), with
+/// `ε_u² = ε_v² = ε_w² = 0`. After a lift along `(u, v, w)`,
+/// `parts[7].h[a][b] = Σ_{cde} ℓ_{abcde} u_c v_d w_e`.
+#[derive(Clone, Copy)]
+struct LatentThreeSeedRow<const K: usize> {
+    parts: [Order2<K>; 8],
+}
+
+impl<const K: usize> LatentThreeSeedRow<K> {
+    fn all_channels_finite(&self) -> bool {
+        self.parts.iter().all(latent_order2_all_finite)
+    }
+}
+
+impl<const K: usize> LatentRowJet<K> for LatentThreeSeedRow<K> {
+    fn row_constant(value: f64) -> Self {
+        let mut parts = [Order2::<K>::constant(0.0); 8];
+        parts[0] = Order2::<K>::constant(value);
+        Self { parts }
+    }
+
+    fn row_value(&self) -> f64 {
+        self.parts[0].value()
+    }
+
+    fn row_add(&self, other: &Self) -> Self {
+        Self {
+            parts: std::array::from_fn(|part| self.parts[part].add(&other.parts[part])),
+        }
+    }
+
+    fn row_sub(&self, other: &Self) -> Self {
+        Self {
+            parts: std::array::from_fn(|part| self.parts[part].sub(&other.parts[part])),
+        }
+    }
+
+    /// Faà di Bruno over the nilpotent seeds: a part's coefficient sums, over the
+    /// set partitions of its seed subset into blocks `B_1 … B_k`,
+    /// `f⁽ᵏ⁾(x₀)·Π_j x_{B_j}`, where `f⁽ᵏ⁾(x₀)` is the order-two composition of the
+    /// base part with the stack shifted `k` entries. The triple part reaches
+    /// `f‴(x₀)` as an order-two jet, which reads the stack through `f⁽⁵⁾`.
+    fn row_compose_log1mexp_negative(
+        &self,
+        derivative_order: usize,
+        context: &str,
+    ) -> Result<Self, LatentSurvivalError> {
+        let stack = latent_unary_derivatives_log1mexp_negative::<6>(
+            self.parts[0].value(),
+            derivative_order,
+            context,
+        )?;
+        let x = &self.parts;
+        let shifted = |order: usize| {
+            x[0].compose_unary([stack[order], stack[order + 1], stack[order + 2], 0.0, 0.0])
+        };
+        let (f0, f1, f2, f3) = (shifted(0), shifted(1), shifted(2), shifted(3));
+        let (u, v, w) = (&x[1], &x[2], &x[4]);
+        let pair = |left: &Order2<K>, right: &Order2<K>, joint: &Order2<K>| {
+            f2.mul(left).mul(right).add(&f1.mul(joint))
+        };
+        let mut parts = [Order2::<K>::constant(0.0); 8];
+        parts[0] = f0;
+        parts[1] = f1.mul(u);
+        parts[2] = f1.mul(v);
+        parts[4] = f1.mul(w);
+        parts[3] = pair(u, v, &x[3]);
+        parts[5] = pair(u, w, &x[5]);
+        parts[6] = pair(v, w, &x[6]);
+        parts[7] = f3
+            .mul(u)
+            .mul(v)
+            .mul(w)
+            .add(&f2.mul(u).mul(&x[6]))
+            .add(&f2.mul(v).mul(&x[5]))
+            .add(&f2.mul(w).mul(&x[3]))
+            .add(&f1.mul(&x[7]));
+        Ok(Self { parts })
+    }
+}
+
 /// Backend seam for the single latent-survival row expression.  Only the
 /// analytic multivariate kernel primitive differs by requested channel; all
 /// numerator/denominator/event algebra below is instantiated unchanged.
 trait LatentPrimaryJetBackend<const K: usize> {
-    type Jet: JetScalar<K>;
+    type Jet: LatentRowJet<K>;
 
     fn derivative_order(&self) -> usize;
     fn all_channels_finite(&self, jet: &Self::Jet) -> bool;
@@ -3773,6 +3899,68 @@ impl<const K: usize> LatentPrimaryJetBackend<K> for LatentTwoSeedBackend<K> {
             del: parts[2],
             eps_del: parts[3],
         })
+    }
+}
+
+/// The lift of the contracted fifth derivative along `(u, v, w)` (#2677).
+#[derive(Clone, Copy)]
+struct LatentThreeSeedBackend<const K: usize> {
+    direction_u: [f64; K],
+    direction_v: [f64; K],
+    direction_w: [f64; K],
+}
+
+impl<const K: usize> LatentPrimaryJetBackend<K> for LatentThreeSeedBackend<K> {
+    type Jet = LatentThreeSeedRow<K>;
+
+    fn derivative_order(&self) -> usize {
+        5
+    }
+
+    fn all_channels_finite(&self, jet: &Self::Jet) -> bool {
+        jet.all_channels_finite()
+    }
+
+    fn kernel_sum_log(
+        &self,
+        quadctx: &QuadratureContext,
+        base_terms: &[LatentKernelPrimaryTerm],
+        state: LatentKernelPrimaryState,
+        primary_directions: &[LatentKernelPrimaryDirection; K],
+        context: &str,
+    ) -> Result<Self::Jet, LatentSurvivalError> {
+        let seed_u =
+            latent_kernel_direction_linear_combination(primary_directions, &self.direction_u);
+        let seed_v =
+            latent_kernel_direction_linear_combination(primary_directions, &self.direction_v);
+        let seed_w =
+            latent_kernel_direction_linear_combination(primary_directions, &self.direction_w);
+        let suffix_u = [seed_u];
+        let suffix_v = [seed_v];
+        let suffix_uv = [seed_u, seed_v];
+        let suffix_w = [seed_w];
+        let suffix_uw = [seed_u, seed_w];
+        let suffix_vw = [seed_v, seed_w];
+        let suffix_uvw = [seed_u, seed_v, seed_w];
+        let suffixes: [&[LatentKernelPrimaryDirection]; 8] = [
+            &[],
+            &suffix_u,
+            &suffix_v,
+            &suffix_uv,
+            &suffix_w,
+            &suffix_uw,
+            &suffix_vw,
+            &suffix_uvw,
+        ];
+        let parts = latent_kernel_sum_order2_parts(
+            quadctx,
+            base_terms,
+            state,
+            primary_directions,
+            &suffixes,
+            context,
+        )?;
+        Ok(LatentThreeSeedRow { parts })
     }
 }
 
@@ -4280,8 +4468,8 @@ fn latent_survival_row_primary_jet<const K: usize, B: LatentPrimaryJetBackend<K>
         _ => -row.mass_unloaded_exit + row.mass_unloaded_entry,
     };
     Ok(numerator
-        .sub(&denominator)
-        .add(&B::Jet::constant(unloaded_offset)))
+        .row_sub(&denominator)
+        .row_add(&B::Jet::row_constant(unloaded_offset)))
 }
 
 fn latent_survival_interval_numerator_jet<const K: usize, B: LatentPrimaryJetBackend<K>>(
@@ -4645,11 +4833,46 @@ fn latent_unary_derivatives_survival_odds(
 /// with `a = log K₀(L) − M_U(L)`, `b = log K₀(R) − M_U(R)` and
 /// `ω(u) = eᵘ/(1 − eᵘ)`. The jet's gradient and Hessian are `∂_{ln m}` of the
 /// row's.
-fn latent_survival_row_unloaded_scale_jet<const K: usize, B: LatentPrimaryJetBackend<K>>(
+fn latent_survival_row_unloaded_scale_jet<
+    const K: usize,
+    B: LatentPrimaryJetBackend<K, Jet: JetScalar<K>>,
+>(
     backend: &B,
     quadctx: &QuadratureContext,
     row: &LatentSurvivalRow,
     point: LatentSurvivalPrimaryPoint,
+) -> Result<B::Jet, LatentSurvivalError> {
+    latent_survival_row_background_scale_jet(
+        backend,
+        quadctx,
+        row,
+        point,
+        LatentBackgroundScaleOrder::First,
+    )
+}
+
+/// The background-scale derivative of order `order` of one latent survival row
+/// (#2677): `φ = ∂ℓ/∂ln m` ([`latent_survival_row_unloaded_scale_jet`]) or
+/// `∂φ/∂ln m = ∂²ℓ/∂(ln m)²`. Every background component is linear in `m`, so
+/// `∂_{ln m}` maps each component to itself:
+///
+/// ```text
+///   right-censored:  ∂φ = M_U(a_in) − M_U(a_out),
+///   exact event:     ∂φ = M_U(a_in) − M_U(a_out) + s·(1 − s),
+///   interval:        ∂φ = M_U(a_in) − M_U(L) + Δ·ω(u) − Δ²·ω′(u),
+/// ```
+///
+/// with `s` the background share, `u = b − a` and `Δ = M_U(R) − M_U(L)`, because
+/// `∂_{ln m} log s = 1 − s` and `∂_{ln m} u = −Δ`.
+fn latent_survival_row_background_scale_jet<
+    const K: usize,
+    B: LatentPrimaryJetBackend<K, Jet: JetScalar<K>>,
+>(
+    backend: &B,
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    order: LatentBackgroundScaleOrder,
 ) -> Result<B::Jet, LatentSurvivalError> {
     let LatentSurvivalPrimaryPoint {
         q_exit,
@@ -4726,7 +4949,16 @@ fn latent_survival_row_unloaded_scale_jet<const K: usize, B: LatentPrimaryJetBac
                 .sub(&numerator)
                 .add(&B::Jet::constant(row.hazard_unloaded.ln()));
             let share = log_share.value().exp();
-            log_share.compose_unary([share; 5]).add(&B::Jet::constant(
+            let background_share = match order {
+                LatentBackgroundScaleOrder::First => log_share.compose_unary([share; 5]),
+                // `∂_{ln m} s = s·(1 − s) = eˣ − e²ˣ` at `x = log s`.
+                LatentBackgroundScaleOrder::Second => {
+                    log_share.compose_unary(std::array::from_fn(|k| {
+                        share - f64::from(1u32 << k) * share * share
+                    }))
+                }
+            };
+            background_share.add(&B::Jet::constant(
                 row.mass_unloaded_entry - row.mass_unloaded_exit,
             ))
         }
@@ -4768,14 +5000,26 @@ fn latent_survival_row_unloaded_scale_jet<const K: usize, B: LatentPrimaryJetBac
             let gap = log_right
                 .add(&B::Jet::constant(-row.mass_unloaded_right))
                 .sub(&log_left.add(&B::Jet::constant(-row.mass_unloaded_left)));
-            let odds = gap.compose_unary(latent_unary_derivatives_survival_odds(
+            let odds = latent_unary_derivatives_survival_odds(
                 gap.value(),
                 "latent survival interval background share",
-            )?);
-            odds.scale(row.mass_unloaded_right - row.mass_unloaded_left)
-                .add(&B::Jet::constant(
-                    row.mass_unloaded_entry - row.mass_unloaded_left,
-                ))
+            )?;
+            let background_mass = row.mass_unloaded_right - row.mass_unloaded_left;
+            let share = match order {
+                LatentBackgroundScaleOrder::First => gap.compose_unary(odds).scale(background_mass),
+                LatentBackgroundScaleOrder::Second => {
+                    gap.compose_unary(latent_scaled_shifted_odds_stack(
+                        gap.value(),
+                        odds,
+                        background_mass,
+                        -background_mass,
+                        "latent survival interval background share",
+                    )?)
+                }
+            };
+            share.add(&B::Jet::constant(
+                row.mass_unloaded_entry - row.mass_unloaded_left,
+            ))
         }
     };
     if !backend.all_channels_finite(&out) {
@@ -4789,6 +5033,41 @@ fn latent_survival_row_unloaded_scale_jet<const K: usize, B: LatentPrimaryJetBac
     Ok(out)
 }
 
+/// Which background-scale derivative a row jet reads (#2677).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LatentBackgroundScaleOrder {
+    /// `φ = ∂ℓ/∂ln m`.
+    First,
+    /// `∂φ/∂ln m = ∂²ℓ/∂(ln m)²`.
+    Second,
+}
+
+/// `∂_{ln m}` of `scale·ω(u)` when `scale` is linear in `m` and `u` moves at
+/// `rate` along `ln m` (#2677): `scale·ω⁽ᵏ⁾(u) + scale·rate·ω⁽ᵏ⁺¹⁾(u)` for
+/// `k = 0..4`, from the stack of [`latent_unary_derivatives_survival_odds`] and
+/// `ω⁽⁵⁾ = (1 + 2ω)·ω⁗ + 8·ω′·ω‴ + 6·ω″²`.
+fn latent_scaled_shifted_odds_stack(
+    u: f64,
+    odds: [f64; 5],
+    scale: f64,
+    rate: f64,
+    context: &str,
+) -> Result<[f64; 5], LatentSurvivalError> {
+    let [omega, first, second, third, fourth] = odds;
+    let fifth = (1.0 + 2.0 * omega) * fourth + 8.0 * first * third + 6.0 * second * second;
+    let derivatives = [omega, first, second, third, fourth, fifth];
+    let stack: [f64; 5] =
+        std::array::from_fn(|k| scale * (derivatives[k] + rate * derivatives[k + 1]));
+    if !stack.iter().all(|value| value.is_finite()) {
+        return Err(LatentSurvivalError::NumericalFailure {
+            reason: format!(
+                "{context} background-scale odds derivatives are not representable at log-survival gap {u:?}: {stack:?}"
+            ),
+        });
+    }
+    Ok(stack)
+}
+
 /// `(φ, ∇φ, ∇²φ)` of [`latent_survival_row_unloaded_scale_jet`] from one order-2
 /// lift, masked to the live primaries (#2714).
 fn latent_survival_row_unloaded_scale_channels(
@@ -4797,13 +5076,50 @@ fn latent_survival_row_unloaded_scale_channels(
     point: LatentSurvivalPrimaryPoint,
     include_log_sigma: bool,
 ) -> Result<(f64, Array1<f64>, Array2<f64>), LatentSurvivalError> {
+    latent_survival_row_background_scale_channels(
+        quadctx,
+        row,
+        point,
+        include_log_sigma,
+        LatentBackgroundScaleOrder::First,
+    )
+}
+
+/// `(∂φ/∂ln m, ∇∂φ/∂ln m, ∇²∂φ/∂ln m)` of
+/// [`latent_survival_row_background_scale_jet`] from one order-2 lift, masked to
+/// the live primaries (#2677).
+fn latent_survival_row_unloaded_scale_second_channels(
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    include_log_sigma: bool,
+) -> Result<(f64, Array1<f64>, Array2<f64>), LatentSurvivalError> {
+    latent_survival_row_background_scale_channels(
+        quadctx,
+        row,
+        point,
+        include_log_sigma,
+        LatentBackgroundScaleOrder::Second,
+    )
+}
+
+/// The background-scale channels of order `order` of one latent survival row from
+/// one order-2 lift, masked to the live primaries (#2677).
+fn latent_survival_row_background_scale_channels(
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    include_log_sigma: bool,
+    order: LatentBackgroundScaleOrder,
+) -> Result<(f64, Array1<f64>, Array2<f64>), LatentSurvivalError> {
     let dim = LATENT_SURVIVAL_PRIMARY_DIM;
     if include_log_sigma {
-        let jet = latent_survival_row_unloaded_scale_jet::<LATENT_SURVIVAL_PRIMARY_DIM, _>(
+        let jet = latent_survival_row_background_scale_jet::<LATENT_SURVIVAL_PRIMARY_DIM, _>(
             &LatentOrder2Backend,
             quadctx,
             row,
             point,
+            order,
         )?;
         let gradient = jet.g();
         let hessian = jet.h();
@@ -4813,11 +5129,12 @@ fn latent_survival_row_unloaded_scale_channels(
             Array2::from_shape_fn((dim, dim), |(a, b)| hessian[a][b]),
         ))
     } else {
-        let jet = latent_survival_row_unloaded_scale_jet::<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA, _>(
+        let jet = latent_survival_row_background_scale_jet::<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA, _>(
             &LatentOrder2Backend,
             quadctx,
             row,
             point,
+            order,
         )?;
         let live = |a: usize| a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA;
         let gradient = jet.g();
@@ -4881,13 +5198,43 @@ fn latent_survival_row_unloaded_scale_third(
 /// `c = M_U(a_in) − M_U(a_out)`. A survivor's log-likelihood is `s`, so `φ = c`;
 /// an event's is `log(1 − eˢ)`, so `φ = −c·ω(s)` with `ω(s) = eˢ/(1 − eˢ)`.
 fn latent_binary_row_unloaded_scale_jet<
-    B: LatentPrimaryJetBackend<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA>,
+    B: LatentPrimaryJetBackend<
+            LATENT_SURVIVAL_PRIMARY_LOG_SIGMA,
+            Jet: JetScalar<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA>,
+        >,
 >(
     backend: &B,
     quadctx: &QuadratureContext,
     row: &LatentSurvivalRow,
     point: LatentSurvivalPrimaryPoint,
     event: u8,
+) -> Result<B::Jet, LatentSurvivalError> {
+    latent_binary_row_background_scale_jet(
+        backend,
+        quadctx,
+        row,
+        point,
+        event,
+        LatentBackgroundScaleOrder::First,
+    )
+}
+
+/// The background-scale derivative of order `order` of one latent-binary row
+/// (#2677): `φ = ∂ℓ/∂ln m` ([`latent_binary_row_unloaded_scale_jet`]) or
+/// `∂φ/∂ln m`. The shift `c` is linear in `m` and moves the log survival at rate
+/// `c`, so a survivor's `∂φ/∂ln m = c` and an event's is `−c·ω(s) − c²·ω′(s)`.
+fn latent_binary_row_background_scale_jet<
+    B: LatentPrimaryJetBackend<
+            LATENT_SURVIVAL_PRIMARY_LOG_SIGMA,
+            Jet: JetScalar<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA>,
+        >,
+>(
+    backend: &B,
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    event: u8,
+    order: LatentBackgroundScaleOrder,
 ) -> Result<B::Jet, LatentSurvivalError> {
     let shift = row.mass_unloaded_entry - row.mass_unloaded_exit;
     if event == 0 {
@@ -4896,12 +5243,22 @@ fn latent_binary_row_unloaded_scale_jet<
     let log_survival = latent_survival_row_primary_jet::<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA, _>(
         backend, quadctx, row, point,
     )?;
-    let out = log_survival
-        .compose_unary(latent_unary_derivatives_survival_odds(
-            log_survival.value(),
-            "latent binary background share",
-        )?)
-        .scale(-shift);
+    let odds = latent_unary_derivatives_survival_odds(
+        log_survival.value(),
+        "latent binary background share",
+    )?;
+    let out = match order {
+        LatentBackgroundScaleOrder::First => log_survival.compose_unary(odds).scale(-shift),
+        LatentBackgroundScaleOrder::Second => {
+            log_survival.compose_unary(latent_scaled_shifted_odds_stack(
+                log_survival.value(),
+                odds,
+                -shift,
+                shift,
+                "latent binary background share",
+            )?)
+        }
+    };
     if !backend.all_channels_finite(&out) {
         return Err(LatentSurvivalError::NumericalFailure {
             reason: "latent binary background share is not finite on an event row".to_string(),
@@ -4918,10 +5275,52 @@ fn latent_binary_row_unloaded_scale_channels(
     point: LatentSurvivalPrimaryPoint,
     event: u8,
 ) -> Result<(f64, Array1<f64>, Array2<f64>), LatentSurvivalError> {
+    latent_binary_row_background_scale_channels(
+        quadctx,
+        row,
+        point,
+        event,
+        LatentBackgroundScaleOrder::First,
+    )
+}
+
+/// `(∂φ/∂ln m, ∇∂φ/∂ln m, ∇²∂φ/∂ln m)` of
+/// [`latent_binary_row_background_scale_jet`] from one order-2 lift, masked to
+/// the live primaries (#2677).
+fn latent_binary_row_unloaded_scale_second_channels(
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    event: u8,
+) -> Result<(f64, Array1<f64>, Array2<f64>), LatentSurvivalError> {
+    latent_binary_row_background_scale_channels(
+        quadctx,
+        row,
+        point,
+        event,
+        LatentBackgroundScaleOrder::Second,
+    )
+}
+
+/// The background-scale channels of order `order` of one latent-binary row from
+/// one order-2 lift, masked to the live primaries (#2677).
+fn latent_binary_row_background_scale_channels(
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    event: u8,
+    order: LatentBackgroundScaleOrder,
+) -> Result<(f64, Array1<f64>, Array2<f64>), LatentSurvivalError> {
     let dim = LATENT_SURVIVAL_PRIMARY_DIM;
     let live = |a: usize| a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA;
-    let jet =
-        latent_binary_row_unloaded_scale_jet(&LatentOrder2Backend, quadctx, row, point, event)?;
+    let jet = latent_binary_row_background_scale_jet(
+        &LatentOrder2Backend,
+        quadctx,
+        row,
+        point,
+        event,
+        order,
+    )?;
     let gradient = jet.g();
     let hessian = jet.h();
     Ok((
@@ -5003,6 +5402,90 @@ fn latent_survival_row_primary_fourth_contracted(
             },
         ))
     }
+}
+
+/// `−∂_u ∂_v ∂_w ∇²ℓ` of one latent survival row from one three-seed lift,
+/// masked to the live primaries (#2677): the row kernel of the third information
+/// derivative `D³H[u, v, e_a]`.
+fn latent_survival_row_primary_fifth_contracted(
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    direction_u: &Array1<f64>,
+    direction_v: &Array1<f64>,
+    direction_w: &Array1<f64>,
+    include_log_sigma: bool,
+) -> Result<Array2<f64>, LatentSurvivalError> {
+    let dim = LATENT_SURVIVAL_PRIMARY_DIM;
+    if include_log_sigma {
+        let backend = LatentThreeSeedBackend::<LATENT_SURVIVAL_PRIMARY_DIM> {
+            direction_u: std::array::from_fn(|a| direction_u[a]),
+            direction_v: std::array::from_fn(|a| direction_v[a]),
+            direction_w: std::array::from_fn(|a| direction_w[a]),
+        };
+        let fifth = *latent_survival_row_primary_jet(&backend, quadctx, row, point)?.parts[7].h();
+        Ok(Array2::from_shape_fn((dim, dim), |(a, b)| -fifth[a][b]))
+    } else {
+        let backend = LatentThreeSeedBackend::<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA> {
+            direction_u: std::array::from_fn(|a| direction_u[a]),
+            direction_v: std::array::from_fn(|a| direction_v[a]),
+            direction_w: std::array::from_fn(|a| direction_w[a]),
+        };
+        let fifth = *latent_survival_row_primary_jet(&backend, quadctx, row, point)?.parts[7].h();
+        let live = |a: usize| a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA;
+        Ok(Array2::from_shape_fn((dim, dim), |(a, b)| {
+            if live(a) && live(b) {
+                -fifth[a][b]
+            } else {
+                0.0
+            }
+        }))
+    }
+}
+
+/// `−∂_u ∂_v ∂_w ∇²ℓ_bin` of a latent-binary row from one three-seed fixed-σ lift
+/// (#2677). A survivor's log-likelihood is its log survival `s`; an event's is
+/// `log(1 − eˢ)`, composed over the same lift.
+fn latent_binary_row_contracted_fifth(
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    event: u8,
+    direction_u: &Array1<f64>,
+    direction_v: &Array1<f64>,
+    direction_w: &Array1<f64>,
+) -> Result<Array2<f64>, LatentSurvivalError> {
+    let dim = LATENT_SURVIVAL_PRIMARY_DIM;
+    let backend = LatentThreeSeedBackend::<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA> {
+        direction_u: std::array::from_fn(|a| direction_u[a]),
+        direction_v: std::array::from_fn(|a| direction_v[a]),
+        direction_w: std::array::from_fn(|a| direction_w[a]),
+    };
+    let log_survival = latent_survival_row_primary_jet(&backend, quadctx, row, point)?;
+    let log_likelihood = match event {
+        0 => log_survival,
+        1 => log_survival
+            .row_compose_log1mexp_negative(backend.derivative_order(), "latent binary event")?,
+        other => {
+            return Err(LatentSurvivalError::InvalidDataset {
+                reason: format!("latent-binary requires event targets in {{0,1}}, got {other}"),
+            });
+        }
+    };
+    if !log_likelihood.all_channels_finite() {
+        return Err(LatentSurvivalError::NumericalFailure {
+            reason: format!("latent binary contracted fifth is not finite on an event={event} row"),
+        });
+    }
+    let fifth = *log_likelihood.parts[7].h();
+    let live = |a: usize| a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA;
+    Ok(Array2::from_shape_fn((dim, dim), |(a, b)| {
+        if live(a) && live(b) {
+            -fifth[a][b]
+        } else {
+            0.0
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -5161,6 +5644,15 @@ struct LatentSurvivalJointDenseAccum {
 }
 
 #[derive(Clone)]
+/// One row's lift request along a primary axis `e_γ`, for a joint-Hessian
+/// derivative whose row kernel is linear in that seed (#2714, #2677).
+struct LatentSurvivalPrimaryLift<'a> {
+    row_idx: usize,
+    row: &'a LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    primary: &'a Array1<f64>,
+}
+
 struct LatentSurvivalDenseHessianAccum {
     hessian: Array2<f64>,
 }
@@ -6017,6 +6509,73 @@ impl LatentSurvivalFamily {
         &self,
         block_states: &[ParameterBlockState],
     ) -> Result<Vec<Array2<f64>>, String> {
+        let include_log_sigma = self.joint_slices().log_sigma.is_some();
+        self.joint_hessian_axes_from_primary_lifts(block_states, "contracted third", |lift| {
+            latent_survival_row_primary_third_contracted(
+                &self.quadctx,
+                lift.row,
+                lift.point,
+                lift.primary,
+                include_log_sigma,
+            )
+            .map_err(String::from)
+        })
+    }
+
+    /// `{D³H[u, v, e_a]}` over every coefficient axis, the third information
+    /// derivative an armed Jeffreys term's exact outer Hessian reads (#2677). The
+    /// row kernel is linear in its third seed, so the axes close as the first
+    /// derivative's do, from one three-seed lift along `(X_i u, X_i v, e_γ)` per
+    /// touched primary.
+    fn exact_newton_joint_hessian_third_directional_derivative_all_axes_dense(
+        &self,
+        block_states: &[ParameterBlockState],
+        d_beta_u_flat: &Array1<f64>,
+        d_beta_v_flat: &Array1<f64>,
+    ) -> Result<Vec<Array2<f64>>, String> {
+        let slices = self.joint_slices();
+        if d_beta_u_flat.len() != slices.total || d_beta_v_flat.len() != slices.total {
+            return Err(format!(
+                "latent survival joint d3H direction length mismatch: got {} and {}, expected {}",
+                d_beta_u_flat.len(),
+                d_beta_v_flat.len(),
+                slices.total
+            ));
+        }
+        let include_log_sigma = slices.log_sigma.is_some();
+        self.joint_hessian_axes_from_primary_lifts(block_states, "contracted fifth", |lift| {
+            let direction_u =
+                self.row_primary_direction_from_flat(lift.row_idx, &slices, d_beta_u_flat);
+            let direction_v =
+                self.row_primary_direction_from_flat(lift.row_idx, &slices, d_beta_v_flat);
+            latent_survival_row_primary_fifth_contracted(
+                &self.quadctx,
+                lift.row,
+                lift.point,
+                &direction_u,
+                &direction_v,
+                lift.primary,
+                include_log_sigma,
+            )
+            .map_err(String::from)
+        })
+    }
+
+    /// Every canonical axis `e_a` of a joint-Hessian derivative whose row kernel is
+    /// linear in one primary seed, from one lift per row along every primary `e_γ`
+    /// its design touches:
+    ///
+    /// ```text
+    ///   D[e_a]_i = X_iᵀ (Σ_γ (X_i e_a)_γ F_{i,γ}) X_i
+    /// ```
+    ///
+    /// `lift` returns the row kernel `F_{i,γ}`; `channel` names it in refusals.
+    fn joint_hessian_axes_from_primary_lifts(
+        &self,
+        block_states: &[ParameterBlockState],
+        channel: &str,
+        lift: impl Fn(LatentSurvivalPrimaryLift<'_>) -> Result<Array2<f64>, String> + Sync,
+    ) -> Result<Vec<Array2<f64>>, String> {
         use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
         let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-survival")
@@ -6080,19 +6639,20 @@ impl LatentSurvivalFamily {
                         if !touched[gamma] {
                             return Ok(None);
                         }
-                        Ok(Some(latent_survival_row_primary_third_contracted(
-                            &self.quadctx,
-                            &row,
+                        lift(LatentSurvivalPrimaryLift {
+                            row_idx,
+                            row: &row,
                             point,
-                            &unit(gamma, LATENT_SURVIVAL_PRIMARY_DIM),
-                            include_log_sigma,
-                        )?))
+                            primary: &unit(gamma, LATENT_SURVIVAL_PRIMARY_DIM),
+                        })
+                        .map(Some)
                     })
                     .collect::<Result<Vec<_>, String>>()?;
                 Ok(Some(lifts))
             })
             .collect::<Result<Vec<_>, String>>()?;
 
+        let axis_quantity = format!("{channel} Hessian axis derivative");
         let mut axes = Vec::with_capacity(total);
         for axis_index in 0..total {
             let axis = unit(axis_index, total);
@@ -6106,33 +6666,33 @@ impl LatentSurvivalFamily {
                         return Ok(());
                     };
                     let direction = self.row_primary_direction_from_flat(row_idx, &slices, &axis);
-                    let mut third = Array2::<f64>::zeros((
+                    let mut combined = Array2::<f64>::zeros((
                         LATENT_SURVIVAL_PRIMARY_DIM,
                         LATENT_SURVIVAL_PRIMARY_DIM,
                     ));
-                    for (&component, lift) in direction.iter().zip(lifts.iter()) {
+                    for (&component, kernel) in direction.iter().zip(lifts.iter()) {
                         if component == 0.0 {
                             continue;
                         }
-                        let lift = lift.as_ref().ok_or_else(|| {
+                        let kernel = kernel.as_ref().ok_or_else(|| {
                             format!(
-                                "latent survival all-axes dH: row {row_idx} reads a primary \
+                                "latent survival all-axes {channel}: row {row_idx} reads a primary \
                                  whose design row was classified as untouched"
                             )
                         })?;
-                        third.scaled_add(component, lift);
+                        combined.scaled_add(component, kernel);
                     }
-                    let weighted_third = checked_weighted_row_matrix(
+                    let weighted = checked_weighted_row_matrix(
                         weights.at(row_idx),
-                        &third,
+                        &combined,
                         row_idx,
-                        "contracted third",
+                        channel,
                     )?;
                     self.add_pullback_primary_hessian(
                         &mut acc.hessian,
                         row_idx,
                         &slices,
-                        &weighted_third,
+                        &weighted,
                     )?;
                     Ok(())
                 },
@@ -6140,7 +6700,7 @@ impl LatentSurvivalFamily {
                     total_acc.hessian += &chunk_acc.hessian;
                 },
             )?;
-            require_finite_likelihood_matrix(&acc.hessian, "directional Hessian derivative")?;
+            require_finite_likelihood_matrix(&acc.hessian, &axis_quantity)?;
             axes.push(acc.hessian);
         }
         Ok(axes)
@@ -8321,6 +8881,91 @@ impl LatentBinaryFamily {
         Ok(out)
     }
 
+    /// `{D³H[u, v, e_a]}` over every coefficient axis (#2677): per row, one
+    /// three-seed fixed-σ lift along `(X_i u, X_i v, e_γ)` for each binary primary,
+    /// combined over the axes as the first derivative combines its lifts.
+    fn exact_newton_joint_hessian_third_directional_derivative_all_axes_dense(
+        &self,
+        block_states: &[ParameterBlockState],
+        d_beta_u_flat: &Array1<f64>,
+        d_beta_v_flat: &Array1<f64>,
+    ) -> Result<Vec<Array2<f64>>, String> {
+        const BINARY_PRIMARIES: [usize; 3] = [
+            LATENT_SURVIVAL_PRIMARY_Q_ENTRY,
+            LATENT_SURVIVAL_PRIMARY_Q_EXIT,
+            LATENT_SURVIVAL_PRIMARY_MU,
+        ];
+        let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-binary")
+            .map_err(String::from)?;
+        let (q_entry, q_exit, mu) = self.split_time_eta(block_states)?;
+        let slices = self.joint_slices();
+        if d_beta_u_flat.len() != slices.total || d_beta_v_flat.len() != slices.total {
+            return Err(format!(
+                "latent binary joint d3H direction length mismatch: got {} and {}, expected {}",
+                d_beta_u_flat.len(),
+                d_beta_v_flat.len(),
+                slices.total
+            ));
+        }
+        let total = slices.total;
+        let unit = |index: usize, len: usize| {
+            let mut axis = Array1::<f64>::zeros(len);
+            axis[index] = 1.0;
+            axis
+        };
+        let coefficient_axes: Vec<Array1<f64>> = (0..total).map(|a| unit(a, total)).collect();
+        let mut out = vec![Array2::<f64>::zeros((total, total)); total];
+        for row_idx in 0..self.event_target.len() {
+            let wi = weights.at(row_idx);
+            if wi == 0.0 {
+                continue;
+            }
+            let row =
+                self.build_right_censored_row_at(row_idx, q_entry[row_idx], q_exit[row_idx])?;
+            let point = LatentSurvivalPrimaryPoint {
+                q_entry: q_entry[row_idx],
+                q_exit: q_exit[row_idx],
+                qdot_exit: 1.0,
+                q_right: q_exit[row_idx],
+                mu: mu[row_idx],
+                sigma: self.latent_sd,
+            };
+            let direction_u = self.row_primary_direction_from_flat(row_idx, &slices, d_beta_u_flat);
+            let direction_v = self.row_primary_direction_from_flat(row_idx, &slices, d_beta_v_flat);
+            let primary_fifths = BINARY_PRIMARIES
+                .iter()
+                .map(|&gamma| {
+                    latent_binary_row_contracted_fifth(
+                        &self.quadctx,
+                        &row,
+                        point,
+                        self.event_target[row_idx],
+                        &direction_u,
+                        &direction_v,
+                        &unit(gamma, LATENT_SURVIVAL_PRIMARY_DIM),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for (axis, target) in coefficient_axes.iter().zip(out.iter_mut()) {
+                let direction = self.row_primary_direction_from_flat(row_idx, &slices, axis);
+                let mut fifth =
+                    Array2::<f64>::zeros((LATENT_SURVIVAL_PRIMARY_DIM, LATENT_SURVIVAL_PRIMARY_DIM));
+                for (&gamma, primary_fifth) in BINARY_PRIMARIES.iter().zip(primary_fifths.iter()) {
+                    if direction[gamma] != 0.0 {
+                        fifth.scaled_add(direction[gamma], primary_fifth);
+                    }
+                }
+                let weighted_fifth =
+                    checked_weighted_row_matrix(wi, &fifth, row_idx, "binary contracted fifth")?;
+                self.add_pullback_primary_hessian(target, row_idx, &slices, &weighted_fifth);
+            }
+        }
+        for axis in &out {
+            require_finite_likelihood_matrix(axis, "binary third directional Hessian derivative")?;
+        }
+        Ok(out)
+    }
+
     /// The latent-binary row direction of baseline-chart axis `axis`. The
     /// deployment holds `q̇_exit = 1` and reads no interval bound, so only the entry
     /// and exit offsets move (#2714).
@@ -8976,7 +9621,11 @@ type LatentBinaryHessianWorkspace = LatentHessianWorkspace<LatentBinaryFamily>;
 
 /// `CustomFamily` for both latent families. Lexically split out (#2601)
 /// when this file hit the 10,000-line ceiling; see `survival/custom_family.rs`.
+mod baseline_chart_pairs;
 mod custom_family;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_third_information_2677;
