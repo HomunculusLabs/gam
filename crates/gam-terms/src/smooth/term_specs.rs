@@ -8735,6 +8735,12 @@ pub fn build_single_local_smooth_term(
             penalty.info.structural_null_frame = None;
         }
     }
+    // The re-filter below numbers its input from zero, and its input is this
+    // build's active penalties, so it hands back their numbering (#2953).
+    let build_numbering: Vec<usize> = penalties_t
+        .iter()
+        .map(|penalty| penalty.info.original_index)
+        .collect();
     let penalty_candidates = penalties_t
         .into_iter()
         .map(|penalty| -> Result<PenaltyCandidate, BasisError> {
@@ -8799,7 +8805,8 @@ pub fn build_single_local_smooth_term(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let filtered = crate::basis::filter_penalty_candidates(penalty_candidates)?;
+    let filtered = crate::basis::filter_penalty_candidates(penalty_candidates)?
+        .with_build_numbering(&build_numbering)?;
     dropped_penalties_t.extend(filtered.dropped);
     // Joint-null absorption rotation. Fresh fit specs compute Q from the final
     // per-smooth penalty set (after all in-smooth reparameterizations have

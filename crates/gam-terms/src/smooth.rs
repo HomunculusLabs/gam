@@ -79,3 +79,9 @@ pub use design_freezing::freeze_term_collection_from_design;
 /// `data × centers` for the antipodal fold), not over `data` alone.
 #[cfg(test)]
 mod constant_curvature_kappa_box_tests;
+
+/// gam#2953: a term-local build's renormalization re-filter hands back its
+/// penalty builder's numbering, so a trial that drops a block ahead of an
+/// active one still aligns to the cached topology.
+#[cfg(test)]
+mod penalty_numbering_2953_tests;
