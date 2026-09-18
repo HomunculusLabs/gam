@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use super::apply::{ApplyError, FactorView, FactoredEdit, apply_anchored_linear, native_linear};
 use super::field::CotangentTerm;
 use super::occurrence::{OccurrenceError, ParameterEditRecord};
-use crate::inference::intervention_shard::{ExperimentUnit, InterventionChange};
+use crate::inference::intervention_shard::{ExperimentUnit, InterventionChange, ParameterEditScope};
 
 /// The stable id of one named parameter: its name in the executing framework.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -528,6 +528,7 @@ impl<'a> ResidualAnchor<'a> {
             rank,
             left,
             right,
+            scope: ParameterEditScope::Global,
         }))
     }
 
@@ -1429,10 +1430,16 @@ mod tests {
             .parameter_edit(&mask)
             .expect("a unit residual mask has a product form");
         let (parameter, rows, cols, rank, left, right) = match edit {
-            Some(InterventionChange::ParameterEdit { parameter, rows, cols, rank, left, right }) => {
-                (parameter, rows, cols, rank, left, right)
-            }
-            other => panic!("expected a parameter edit, got {other:?}"),
+            Some(InterventionChange::ParameterEdit {
+                parameter,
+                rows,
+                cols,
+                rank,
+                left,
+                right,
+                scope: ParameterEditScope::Global,
+            }) => (parameter, rows, cols, rank, left, right),
+            other => panic!("expected a global parameter edit, got {other:?}"),
         };
         assert_eq!((parameter.as_str(), rows, cols, rank), ("mlp.dense.weight", 6, 5, 3));
         let product = Array2::from_shape_vec((rows, rank), left)
