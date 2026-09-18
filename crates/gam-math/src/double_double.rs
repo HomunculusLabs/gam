@@ -19,7 +19,7 @@
 //! every operation returns its formula times `1 + γ_{m+3}`; the three extra operations cover forming that factor and
 //! the product. Each operation's comment states its `m`.
 
-use crate::roundoff::{UNIT_ROUNDOFF, inflated};
+use crate::roundoff::{UNIT_ROUNDOFF, accumulation_growth, inflated};
 
 /// The smallest positive subnormal, `η = 2⁻¹⁰⁷⁴`: the most any correctly rounded operation or fused remainder errs by
 /// beyond its relative band, twice over.
@@ -227,4 +227,86 @@ impl BoundedDoubleDouble {
             inflated(self.rounding + self.value.low.abs(), 1),
         )
     }
+}
+
+/// The unbounded double-double arithmetic of the Gauss-Legendre root refinement (`special::gauss_legendre_certified`),
+/// whose certificate reads the refined values exactly. `add` is the sloppy form: it can lose all relative accuracy under
+/// cancellation, which the refinement's certificate does not rely on.
+impl DoubleDouble {
+    /// Fast2Sum: `high + low` renormalized, for `|high| ≥ |low|`.
+    pub(crate) fn renormalized(high: f64, low: f64) -> Self {
+        let sum = high + low;
+        Self {
+            high: sum,
+            low: low - (sum - high),
+        }
+    }
+
+    pub(crate) fn add(self, other: Self) -> Self {
+        let head = Self::two_sum(self.high, other.high);
+        Self::renormalized(head.high, head.low + self.low + other.low)
+    }
+
+    pub(crate) fn negated(self) -> Self {
+        Self {
+            high: -self.high,
+            low: -self.low,
+        }
+    }
+
+    pub(crate) fn sub(self, other: Self) -> Self {
+        self.add(other.negated())
+    }
+
+    pub(crate) fn mul(self, other: Self) -> Self {
+        let product = self.high * other.high;
+        let residual = self.high.mul_add(other.high, -product);
+        Self::renormalized(product, residual + (self.high * other.low + self.low * other.high))
+    }
+
+    /// Three quotient digits, each divided off the remainder.
+    pub(crate) fn div(self, other: Self) -> Self {
+        let first = self.high / other.high;
+        let remainder = self.sub(other.mul(Self::from_f64(first)));
+        let second = remainder.high / other.high;
+        let rest = remainder.sub(other.mul(Self::from_f64(second)));
+        Self::renormalized(first, second).add(Self::from_f64(rest.high / other.high))
+    }
+}
+
+/// Appends the exact `TwoProductFMA` parts of `factor·value` for a double-double `value`: two products, four parts.
+pub(crate) fn push_product_parts(parts: &mut Vec<f64>, factor: f64, value: DoubleDouble) {
+    for component in [value.high, value.low] {
+        let product = factor * component;
+        parts.push(product);
+        parts.push(factor.mul_add(component, -product));
+    }
+}
+
+/// `Sum2` over `parts`, with an upper bound on its absolute error. `products` counts the `TwoProductFMA` calls that
+/// formed the parts, each within `5·2^−1074` under underflow.
+///
+/// Returns `(res, error_bound)` with `|res − Σ exact| ≤ error_bound`. By Proposition 4.5 the error is at most
+/// `u·|s| + γ²_{m−1}·S + 5η·products`, and `|s| ≤ |res| + error`. With `S` bounded above by
+/// `fl(Σ|p|)/(1 − γ_{m−1})`, the bound solves to `(u·|res| + γ²·S + 5η·products)/(1 − u)` (Ogita, Rump and Oishi,
+/// *Accurate sum and dot product*, SIAM J. Sci. Comput. 26(6), 2005, Algorithm 4.4).
+pub(crate) fn accurate_sum(parts: &mut [f64], products: usize) -> (f64, f64) {
+    let count = parts.len();
+    if count == 0 {
+        return (0.0, 0.0);
+    }
+    let gamma = accumulation_growth(count - 1);
+    let magnitude = parts.iter().fold(0.0, |total, part| total + part.abs());
+    let magnitude_bound = inflated(magnitude, count) / (1.0 - gamma);
+    for index in 1..count {
+        let pair = DoubleDouble::two_sum(parts[index], parts[index - 1]);
+        parts[index] = pair.high;
+        parts[index - 1] = pair.low;
+    }
+    let tail = parts[..count - 1].iter().fold(0.0, |total, part| total + part);
+    let res = tail + parts[count - 1];
+    let unit = UNIT_ROUNDOFF;
+    let error = (unit * res.abs() + gamma * gamma * magnitude_bound + 5.0 * SMALLEST_SUBNORMAL * products as f64)
+        / (1.0 - unit);
+    (res, inflated(error, 6))
 }

@@ -4,6 +4,7 @@
 //! dependencies, so they live in the lowest crate (`gam-math`) and can be
 //! consumed by any term/basis/inference code without inducing an SCC edge.
 
+use crate::double_double::{DoubleDouble, accurate_sum, push_product_parts};
 use crate::roundoff::{UNIT_ROUNDOFF, accumulation_growth, inflated};
 
 /// Numerically stable `C(n,k) = n! / (k!·(n−k)!)` as `f64`.  Uses the
@@ -592,67 +593,6 @@ pub fn gauss_legendre_certified(n: usize) -> CertifiedGaussLegendreRule {
     certify_legendre_rule(n, &roots)
 }
 
-/// A double-double number `high + low` with `|low| ≤ ulp(high)/2`: the refinement arithmetic of
-/// [`gauss_legendre_certified`]. It carries no error bound; the certificate reads its values exactly.
-#[derive(Clone, Copy, Debug)]
-struct DoubleDouble {
-    high: f64,
-    low: f64,
-}
-
-impl DoubleDouble {
-    fn from_f64(value: f64) -> Self {
-        Self { high: value, low: 0.0 }
-    }
-
-    fn two_sum(a: f64, b: f64) -> Self {
-        let sum = a + b;
-        let virtual_b = sum - a;
-        Self {
-            high: sum,
-            low: (a - (sum - virtual_b)) + (b - virtual_b),
-        }
-    }
-
-    fn renormalized(high: f64, low: f64) -> Self {
-        let sum = high + low;
-        Self {
-            high: sum,
-            low: low - (sum - high),
-        }
-    }
-
-    fn add(self, other: Self) -> Self {
-        let head = Self::two_sum(self.high, other.high);
-        Self::renormalized(head.high, head.low + self.low + other.low)
-    }
-
-    fn negated(self) -> Self {
-        Self {
-            high: -self.high,
-            low: -self.low,
-        }
-    }
-
-    fn sub(self, other: Self) -> Self {
-        self.add(other.negated())
-    }
-
-    fn mul(self, other: Self) -> Self {
-        let product = self.high * other.high;
-        let residual = self.high.mul_add(other.high, -product);
-        Self::renormalized(product, residual + (self.high * other.low + self.low * other.high))
-    }
-
-    fn div(self, other: Self) -> Self {
-        let first = self.high / other.high;
-        let remainder = self.sub(other.mul(Self::from_f64(first)));
-        let second = remainder.high / other.high;
-        let rest = remainder.sub(other.mul(Self::from_f64(second)));
-        Self::renormalized(first, second).add(Self::from_f64(rest.high / other.high))
-    }
-}
-
 /// `P_0, …, P_n` at `x` by Bonnet's recurrence `(j + 1)P_{j+1} = (2j + 1)x·P_j − j·P_{j−1}`, in double-double.
 fn legendre_values_double_double(n: usize, x: DoubleDouble) -> Vec<DoubleDouble> {
     let mut values = Vec::with_capacity(n + 1);
@@ -691,45 +631,6 @@ fn refine_legendre_root(n: usize, seed: f64) -> DoubleDouble {
         last_step = magnitude;
     }
     root
-}
-
-/// The smallest positive subnormal, `η = 2^−1074`.
-const SMALLEST_SUBNORMAL: f64 = f64::from_bits(1);
-
-/// Appends the exact `TwoProductFMA` parts of `factor·value` for a double-double `value`: two products, four parts.
-fn push_product_parts(parts: &mut Vec<f64>, factor: f64, value: DoubleDouble) {
-    for component in [value.high, value.low] {
-        let product = factor * component;
-        parts.push(product);
-        parts.push(factor.mul_add(component, -product));
-    }
-}
-
-/// `Sum2` over `parts`, with an upper bound on its absolute error. `products` counts the `TwoProductFMA` calls that
-/// formed the parts, each within `5·2^−1074` under underflow.
-///
-/// Returns `(res, error_bound)` with `|res − Σ exact| ≤ error_bound`. By Proposition 4.5 the error is at most
-/// `u·|s| + γ²_{m−1}·S + 5η·products`, and `|s| ≤ |res| + error`. With `S` bounded above by
-/// `fl(Σ|p|)/(1 − γ_{m−1})`, the bound solves to `(u·|res| + γ²·S + 5η·products)/(1 − u)`.
-fn accurate_sum(parts: &mut [f64], products: usize) -> (f64, f64) {
-    let count = parts.len();
-    if count == 0 {
-        return (0.0, 0.0);
-    }
-    let gamma = accumulation_growth(count - 1);
-    let magnitude = parts.iter().fold(0.0, |total, part| total + part.abs());
-    let magnitude_bound = inflated(magnitude, count) / (1.0 - gamma);
-    for index in 1..count {
-        let pair = DoubleDouble::two_sum(parts[index], parts[index - 1]);
-        parts[index] = pair.high;
-        parts[index - 1] = pair.low;
-    }
-    let tail = parts[..count - 1].iter().fold(0.0, |total, part| total + part);
-    let res = tail + parts[count - 1];
-    let unit = UNIT_ROUNDOFF;
-    let error = (unit * res.abs() + gamma * gamma * magnitude_bound + 5.0 * SMALLEST_SUBNORMAL * products as f64)
-        / (1.0 - unit);
-    (res, inflated(error, 6))
 }
 
 /// The residual certificate of a Gauss-Legendre rule at the double-double roots `roots` (see

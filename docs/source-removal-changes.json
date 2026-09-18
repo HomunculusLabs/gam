@@ -630,5 +630,25 @@
     ],
     "reason": "#2469: the three active-face scans admit rows through gam_linalg::gram_schmidt::ReorthogonalizedRowBasis. The scans are khatri_rao_cone_reduced_face, dense_reduced_face and rank_reduce_rows_pivoted_qr_with_dependence. RANK_ALPHA = 100 (function-local in each: independent above 100·ε·max(k, p)·max‖a‖) was never derived. PARALLEL_COS_TOL = 1 − 1e-9 (function-local in the same three) recorded rows tilted up to about 4.5e-5 rad as exact multiples. Exact parallelism is now the residual against one representative inside its band (exactly_parallel_representative). Both consts are deleted.",
     "evidence": "git grep -n -w RANK_ALPHA and PARALLEL_COS_TOL at c646e2a859 finds them only in crates/gam-solve/src/active_set.rs, as the three function-local declarations of each and their uses in the three scans. Gate job 1248645 at 98aa9d3e7d showed the source-removal guard naming exactly these two (production_occurrences 7 and 6) before an entry existed."
+  },
+  {
+    "base": "8c8dc5096a52d94d229ca6e36a28da2ba2431105",
+    "items": [
+      "crates/gam-math/src/bivariate_normal.rs:const:SMALLEST_SUBNORMAL",
+      "crates/gam-math/src/special.rs:const:SMALLEST_SUBNORMAL",
+      "crates/gam-math/src/special.rs:fn:accurate_sum",
+      "crates/gam-math/src/special.rs:fn:add",
+      "crates/gam-math/src/special.rs:fn:div",
+      "crates/gam-math/src/special.rs:fn:from_f64",
+      "crates/gam-math/src/special.rs:fn:mul",
+      "crates/gam-math/src/special.rs:fn:negated",
+      "crates/gam-math/src/special.rs:fn:push_product_parts",
+      "crates/gam-math/src/special.rs:fn:renormalized",
+      "crates/gam-math/src/special.rs:fn:sub",
+      "crates/gam-math/src/special.rs:fn:two_sum",
+      "crates/gam-math/src/special.rs:struct:DoubleDouble"
+    ],
+    "reason": "#2946 follow-up to L-A (gam-21 ruling, split with fr-kernel): crates/gam-math/src/double_double.rs is the one owner of double-double arithmetic. special.rs's private refinement arithmetic for gauss_legendre_certified moves there verbatim as pub(crate) items: the DoubleDouble struct and its from_f64, two_sum, renormalized, add, negated, sub, mul and div, plus push_product_parts, accurate_sum and SMALLEST_SUBNORMAL. from_f64, two_sum and SMALLEST_SUBNORMAL already existed in double_double.rs with identical bodies. special.rs now imports DoubleDouble, accurate_sum and push_product_parts from it. bivariate_normal.rs's private SMALLEST_SUBNORMAL (the same f64::from_bits(1)) is deleted, and it imports double_double::SMALLEST_SUBNORMAL. Every moved body is byte-identical, so the certified rule's bits are unchanged.",
+    "evidence": "Gate job 1251213 (pool-gx4) at base 62a48cacfb, patch md5 79c86f5d, tree 482bc337b3: the workspace --all-targets --locked check is RC 0, cargo check -p gam-pyffi is RC 0, and the public API census is RC 0. 144 of 144 gam-math tests matching (special|bivariate_normal|double_double|probability):: pass, including gauss_legendre_certified's. source_removal_guard.py's refusal in that job lists exactly these 13 identities (sw-status/fr-bvn-gate2.1251213.guard.txt), all non-public with removed_declarations 1. Pre-push job 1263100 (pool-gx4) at the landing parent 19143a1511 repeats the result: check RC 0, gam-pyffi RC 0, census RC 0, 146/146 tests, and the guard lists the same 13 identities."
   }
 ]

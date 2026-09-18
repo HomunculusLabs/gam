@@ -73,6 +73,7 @@
 
 mod positive_form;
 
+use crate::double_double::SMALLEST_SUBNORMAL;
 use crate::probability::{normal_cdf, normal_pdf};
 use crate::roundoff::{UNIT_ROUNDOFF, accumulation_growth};
 use crate::special::gauss_legendre;
@@ -171,10 +172,6 @@ pub struct BoundedProbability {
 
 /// The largest `|asin ρ|` the core rule evaluates: `asin ½`.
 const CORE_MAX_ANGLE: f64 = FRAC_PI_6;
-
-/// The smallest positive subnormal. It bounds any result that gradual underflow quantizes or rounds to zero, where the
-/// relative model no longer applies.
-const SMALLEST_SUBNORMAL: f64 = f64::from_bits(1);
 
 /// `sup |x| φ(x) = 1/√(2πe) = 0.241970…`, rounded up.
 const ARGUMENT_SENSITIVITY: f64 = 0.2420;
