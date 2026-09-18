@@ -630,3 +630,81 @@ to `[−40, 40]` with 80 000 panels. Pool job 603819 at `7427b7e91` (acn67, EPYC
 trend, not the recurrence's. The same job reproduced the finite-cell numbers above.
 `d95dd4df6` deleted the kernel source's `BRANCH_AFFINE` define and validator arm, which no
 host tag has emitted since `c7823aadd`.
+
+## 2026-09-18 pass (i932)
+
+Read on origin/main between `e7955a5704` and `cef0cf0c62`, and measured on MSI (EPYC 7763).
+
+### Correctness witnesses at the tip
+
+Every test named `*932*`, plus the non-932 witnesses the rows above name, in the test
+profile with no patch:
+- gam-models lib (job 1252877, `d094162c7d`): 151 passed, 0 failed;
+- gam-math 14, gam-model-kernels 4, gam-solve 2, gam-gpu 1, gam-row-macros 13 and gam-sae 5
+  (job 1255059, `d5827b0098`): 39 passed, 0 failed.
+
+The run covers the rows marked "not run in the 09-12 pass":
+- survival location-scale joint Hessian and cutover (37 `survival::location_scale` witnesses);
+- implicit roots and moving boundaries (the empirical-rigid polynomial oracle, the
+  fifth-vs-fourth tensor and `moving_edge_leibniz_tracks_boundary_flux_932`, whose
+  second-order bar is still `1e-3`);
+- the retired hand fourth-order oracle (the BMS flex V→t4 ladder and the survival flex
+  contraction witnesses);
+- SLS wiggle stages 2 and 3. `hand_sls_wiggle_row_third_matches_production_jet_932` and
+  `hand_sls_wiggle_row_fourth_matches_production_jet_932` landed "not compiled or run
+  before landing" (`e28cb2b3af`, `fc650e7fd8`) and now pass.
+
+### Stable primitive algebra
+
+The order-zero-to-four `ln Φ` table covered `x ∈ [−10, 2]` and divided each error by
+`max(|reference|, 1e-3)`, so a right-tail entry of `1e-12` or less passed at any relative
+error. `8d50993be7` holds every entry at `x = −100, −20, −8, 0, 8, 20` to the same `1e-11`
+relative bound with no floor, against mpmath at 100 digits, and the subnormal second through
+fourth derivatives at `x = 38.6` to four subnormal ulps. It was verified after landing by job
+1256017 at `aaa0ddcfac`.
+
+### Release receipts
+
+The Speed Gates workflow has been `disabled_manually` since 09-12 20:55 CDT, so no workflow
+runs the derived population, and the continuous-enforcement row cannot be met while it stays
+off. `scripts/speed_gates.py --run` on MSI ran all 35 derived gates: gam-math, gam-row-macros
+and gam-sae at `aaa0ddcfac` (job 1256028), gam-models at `cd4e4d3662` (jobs 1256607 and
+1258687). 30 pass and 5 fail:
+
+| gate | failing cells (`median_ratio`, wins) | contract |
+|---|---|---|
+| BINOMIAL-LS-HAND-932 | order2 0.663, third 0.547, fourth 0.781 (0.00) | faster |
+| SLS-WIGGLE-HAND-932 | orders 2/3/4 at width 3: 0.084/0.125/0.120; at width 12: 0.029/0.041/0.051 (0.00) | not_slower |
+| BMS-FLEX-CONTRACTED-932 | link-dev order 4 0.486 (0.00); score-warp order 4 0.998 (0.13) | faster |
+| RIGID-BERNOULLI-VGH-932 | y = 1 0.777, y = 0 0.779 (0.00) | faster |
+| BINOMIAL-Q-PRUNE-932 | 0.9917, resolution 0.0019 (0.00) | not_slower |
+
+RIGID-BMS-HAND-932 passes every channel on this host (order2 1.019 through fourth_full 1.325),
+as it did on EPYC 7763 before.
+
+Binomial location-scale mechanism. Every production caller evaluates
+`binomial_ls_row_program` at `δ = 0`. A `name: origin` primary role on `row_program!`, which
+seeds the value with zero so the IEEE `0·x` terms fold, lifts order2 only to 0.766 (third
+0.560, fourth 0.783; job 1261446). A `row_atom!` at-zero form of the same row, with the loss
+as its Taylor polynomial in `q − q0`, gives 0.749 / 0.255 / 0.494 (job 1262339). The hand
+factors sums shared by several channels (`u = m1 + q·m2` feeds both Hessian entries it
+names), and neither generator does.
+
+### Other rows, read
+
+- Constrained Firth/Jeffreys: `c29a6ca084` arms both binomial location-scale families
+  through the #979 lifecycle. `with_jeffreys_armed` keeps only `evidence.is_some()`
+  (`location_scale.rs:2049`, `wiggle_custom_family.rs:8`), and neither family overrides
+  `jeffreys_span_basis`, so an armed refit acts on the full span, which holds each family's
+  likelihood gauge. No fixture arms and converges yet.
+- GPU: the `survival_rowjet.rs` module doc says direct device tests cover ordinary and
+  probability-tail rows. `c0a21b5540` deleted them, and only the two source-export tests
+  remain. `calibration.rs:114-117` sets the row-kernel admission `row_kernel_min_n` from the
+  XᵀWX crossover rows, and `bms/gpu/flex.rs:22` and `sae_rowjet.rs:1398` read it.
+- Large-scale flex benchmark: `margslope_flex_large_scale_hv` times `cycle_capped_options(1)`,
+  that is `outer_max_iter: 1` and one inner cycle
+  (`tests/test_support/misc/margslope_flex_equivalence.rs:189-196`), not a converged fit.
+- Moment degree: `FLEX_ORDER_FOUR_MOMENT_DEGREE` is still the literal 32. i2948's derived
+  `4 + 6·Jet4::ORDER` passed its check and tests in job 1220614 and failed only the
+  source-removal guard, for the moved const. It is unlanded. ad-outer's per-slot ladder
+  certification (K) is designed, not landed.
