@@ -1221,14 +1221,8 @@ fn response_geometry_fit_curvature<'py>(
                 ));
             }
         };
-        gam::geometry::response_geometry::fit_response_curvature(
-            arr.view(),
-            dim,
-            level,
-            1.0e-12,
-            256,
-        )
-        .map_err(|error| error.to_string())
+        gam::geometry::response_geometry::fit_response_curvature(arr.view(), dim, level)
+            .map_err(|error| error.to_string())
     })?;
     let verdict = match fit.profile_ci.verdict {
         gam::geometry::CurvatureVerdict::Spherical => "spherical",

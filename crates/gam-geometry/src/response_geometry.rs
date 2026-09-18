@@ -1141,17 +1141,18 @@ pub enum ResponseGeometryError {
     CurvatureUnidentified {
         dispersion: f64,
     },
+    /// The κ̂ score solve collapsed its sign bracket to adjacent doubles without
+    /// its certificate: a score inside its own rounding band at a point of
+    /// positive curvature.
     CurvatureNonConvergence {
         iterations: usize,
-        max_iter: usize,
         bracket_lo: f64,
         bracket_hi: f64,
         kappa: f64,
         criterion: f64,
         score: f64,
         curvature: f64,
-        kkt_residual: f64,
-        tolerance: f64,
+        score_band: f64,
     },
 }
 
@@ -1165,23 +1166,20 @@ impl fmt::Display for ResponseGeometryError {
             ),
             Self::CurvatureNonConvergence {
                 iterations,
-                max_iter,
                 bracket_lo,
                 bracket_hi,
                 kappa,
                 criterion,
                 score,
                 curvature,
-                kkt_residual,
-                tolerance,
+                score_band,
             } => write!(
                 f,
-                "response curvature did not satisfy its minimizing box-KKT certificate after \
-                 {iterations}/{max_iter} iterations: bracket=[{bracket_lo:.6e}, \
-                 {bracket_hi:.6e}], kappa={kappa:.6e}, criterion={criterion:.6e}, \
-                 score={score:.6e}, normalized KKT residual={kkt_residual:.6e} \
-                 (required <= {tolerance:.6e}), curvature={curvature:.6e} \
-                 (required > 0)"
+                "response curvature did not satisfy its minimizing KKT certificate: after \
+                 {iterations} steps its score bracket [{bracket_lo:.6e}, {bracket_hi:.6e}] \
+                 holds no double strictly inside, at kappa={kappa:.6e}, \
+                 criterion={criterion:.6e}, score={score:.6e} (required |score| <= its \
+                 rounding band {score_band:.6e}), curvature={curvature:.6e} (required > 0)"
             ),
         }
     }
@@ -1391,6 +1389,9 @@ struct CurvatureCriterionJet {
     value: f64,
     score: f64,
     curvature: f64,
+    /// First-order rounding band of `score`: a score inside it is not resolved
+    /// from zero by the arithmetic that formed it.
+    score_band: f64,
     base: Array1<f64>,
 }
 
@@ -1433,6 +1434,13 @@ fn response_curvature_criterion_jet(
     let mut chart_volume = 0.0_f64;
     let mut chart_volume_d1 = 0.0_f64;
     let mut chart_volume_d2 = 0.0_f64;
+    // Absolute magnitudes of the score's terms, each scaled by how far rounding
+    // in the centred coordinate can move it (see `score_band` below).
+    let base_norm = crate::manifold::norm(base.view());
+    let mut dispersion_mass = 0.0_f64;
+    let mut dispersion_d1_mass = 0.0_f64;
+    let mut ln_jac_d1_mass = 0.0_f64;
+    let mut chart_volume_d1_mass = 0.0_f64;
 
     // #2351: the chart origin is IDENTIFIED with the flat centroid — every
     // per-row quantity evaluates on the mean-centred coordinate z_i = y_i − μ.
@@ -1450,6 +1458,18 @@ fn response_curvature_criterion_jet(
         dispersion += r * r;
         dispersion_d1 += 2.0 * r * r_d1;
         dispersion_d2 += 2.0 * (r_d1 * r_d1 + r * r_d2);
+        // The centred coordinate `z = y − μ` rounds by `γ(‖y‖ + ‖μ‖)` absolute,
+        // and each score term carries at most the fourth power of `‖z‖`
+        // (`r·∂r/∂κ ∝ ‖z‖⁴`), so it moves by at most `4(‖y‖ + ‖μ‖)/‖z‖` of itself
+        // per unit `γ` on top of its own rounding.
+        let centred_norm = crate::manifold::norm(centred.view());
+        let lift = if centred_norm > 0.0 {
+            1.0 + 4.0 * (crate::manifold::norm(row) + base_norm) / centred_norm
+        } else {
+            1.0
+        };
+        dispersion_mass += r * r * lift;
+        dispersion_d1_mass += (2.0 * r * r_d1).abs() * lift;
 
         if dim > 1 {
             // J_κ(r)=S(u)^(d−1), u=κr². Chain-rule jets of u.
@@ -1468,6 +1488,7 @@ fn response_curvature_criterion_jet(
             ln_jac += exponent * s[0].ln();
             ln_jac_d1 += exponent * log_s_d1 * u_d1;
             ln_jac_d2 += exponent * (log_s_d2 * u_d1 * u_d1 + log_s_d1 * u_d2);
+            ln_jac_d1_mass += (exponent * log_s_d1 * u_d1).abs() * lift;
         }
 
         // −d ln λ_z = d[ln(1+κ‖z‖²)−ln 2], evaluated at the CENTRED coordinate
@@ -1483,6 +1504,7 @@ fn response_curvature_criterion_jet(
         chart_volume += d * (gauge.ln() - std::f64::consts::LN_2);
         chart_volume_d1 += d * q / gauge;
         chart_volume_d2 -= d * q * q / (gauge * gauge);
+        chart_volume_d1_mass += (d * q / gauge).abs() * lift;
     }
     let nobs = (n_rows * dim) as f64;
     if !(dispersion.is_finite() && dispersion > 0.0) {
@@ -1505,13 +1527,78 @@ fn response_curvature_criterion_jet(
             "response curvature criterion jet is non-finite".into(),
         ));
     }
+    // First-order rounding band of the score, `γ_N` times the magnitudes above.
+    // The centroid is an `n`-term mean and the centred coordinate one more
+    // subtraction; the distance κ-jet takes a `dim`-term norm and at most ten
+    // more operations per term; the score sums `n` terms. So `N = 2n + dim + 12`.
+    // The quotient `D′/D` rounds by `(Σ|2rr′| + |D′|·Σr²/D)/D` relative to those.
+    let score_band = gam_linalg::roundoff::accumulation_growth(2 * n_rows + dim + 12)
+        * (0.5 * nobs * (dispersion_d1_mass + dispersion_d1.abs() * dispersion_mass / dispersion)
+            / dispersion
+            + ln_jac_d1_mass
+            + chart_volume_d1_mass);
     Ok(CurvatureCriterionJet {
         kappa,
         value,
         score,
         curvature,
+        score_band,
         base,
     })
+}
+
+/// The κ̂ score root inside the sign bracket `(lo, hi)` (score negative at `lo`,
+/// positive at `hi`), from `start` strictly inside it, by safeguarded Newton with
+/// no budget.
+///
+/// Each step first moves one bracket end onto the current κ, which lies strictly
+/// inside the bracket, so the bracket strictly shrinks; the solve ends when no
+/// double lies strictly inside it, so κ̂ is resolved to adjacent doubles.
+/// Newton's score step supplies local quadratic convergence, and an inadmissible
+/// Newton point is replaced by the midpoint, which at least halves the bracket.
+/// The certificate is a score inside its own rounding band at a point of
+/// positive curvature. A collapsed bracket around a score still resolved from
+/// zero is a sign change the score cannot resolve, and is refused typed.
+fn curvature_score_root(
+    mut jet_at: impl FnMut(f64) -> Result<CurvatureCriterionJet, ResponseGeometryError>,
+    start: CurvatureCriterionJet,
+    (lo, hi): (f64, f64),
+) -> Result<CurvatureCriterionJet, ResponseGeometryError> {
+    let mut a = lo;
+    let mut b = hi;
+    let mut iterations = 0_usize;
+    let mut current = start;
+    loop {
+        if current.score < 0.0 {
+            a = current.kappa;
+        } else {
+            b = current.kappa;
+        }
+        let newton = current.kappa - current.score / current.curvature;
+        let next = if current.curvature > 0.0 && newton.is_finite() && newton > a && newton < b {
+            newton
+        } else {
+            0.5 * (a + b)
+        };
+        if !(next > a && next < b) {
+            break;
+        }
+        current = jet_at(next)?;
+        iterations += 1;
+    }
+    if !(current.score.abs() <= current.score_band && current.curvature > 0.0) {
+        return Err(ResponseGeometryError::CurvatureNonConvergence {
+            iterations,
+            bracket_lo: a,
+            bracket_hi: b,
+            kappa: current.kappa,
+            criterion: current.value,
+            score: current.score,
+            curvature: current.curvature,
+            score_band: current.score_band,
+        });
+    }
+    Ok(current)
 }
 
 /// Fit curvature as an estimand on a constant-curvature response geometry.
@@ -1519,7 +1606,9 @@ fn response_curvature_criterion_jet(
 /// κ̂ is the minimiser of the profiled criterion [`response_curvature_criterion`]
 /// (the σ-profiled honest change-of-variables negative log-evidence of the wrapped
 /// normal w.r.t. ambient measure), found by a safeguarded root solve of its
-/// exact analytic score inside the chart-validity bracket. The base point μ is
+/// exact analytic score inside the chart-validity bracket, resolved to adjacent
+/// doubles with no tolerance or budget and certified against the score's own
+/// rounding band (`curvature_score_root`). The base point μ is
 /// the κ-independent flat centroid, so
 /// every `V_p` evaluation scores the SAME geometry without re-entangling κ with the
 /// chart scale (the #1104 fix). The exact outer
@@ -1552,8 +1641,6 @@ pub fn fit_response_curvature(
     values: ArrayView2<'_, f64>,
     dim: usize,
     level: f64,
-    tol: f64,
-    max_iter: usize,
 ) -> Result<ResponseCurvatureFit, ResponseGeometryError> {
     if dim == 0 {
         return Err(ResponseGeometryError::InvalidInput(
@@ -1571,18 +1658,12 @@ pub fn fit_response_curvature(
             "response curvature CI level must lie in (0, 1)".into(),
         ));
     }
-    if !(tol.is_finite() && tol > 0.0) {
-        return Err(ResponseGeometryError::InvalidInput(
-            "response curvature tolerance must be finite and positive".into(),
-        ));
-    }
 
     // Establish identifiability at the flat member before constructing bounds;
     // a zero-dispersion point cloud carries no curvature scale.
     let flat_jet = response_curvature_criterion_jet(values, dim, 0.0)?;
     let (kappa_min, kappa_max, rho_max) = response_kappa_bounds(values);
     let span = kappa_max - kappa_min;
-    let nobs = (n_rows * dim) as f64;
     if !(span.is_finite() && span > 0.0) {
         return Err(ResponseGeometryError::NumericalGeometry(
             "response curvature chart bracket is not finite and ordered".into(),
@@ -1597,80 +1678,30 @@ pub fn fit_response_curvature(
     };
 
     // ── κ̂: analytic score root / constrained box-KKT solve. ─────────────
-    // `(span/nobs)·|V'|` is dimensionless, response-scale invariant, and row-
-    // replication invariant. At a bound only the outward score component is a
-    // KKT violation.
-    let normalized_kkt = |kappa: f64, score: f64| {
-        let violation = if kappa == kappa_min {
-            (-score).max(0.0)
-        } else if kappa == kappa_max {
-            score.max(0.0)
-        } else {
-            score.abs()
-        };
-        span * violation / nobs
-    };
-
+    // At a bound only the outward score component is a KKT violation, so a
+    // bound whose score points outward is the constrained minimum itself.
     let lower = response_curvature_criterion_jet(values, dim, kappa_min)?;
     let upper = response_curvature_criterion_jet(values, dim, kappa_max)?;
-    let mut a = kappa_min;
-    let mut b = kappa_max;
-    let mut iterations = 0_usize;
-    let (jet, railed_at_resolution_limit, railed_at_hyperbolic_resolution_limit) =
-        if lower.score >= 0.0 {
-            // V'(κ_min) ≥ 0: the constrained minimum sits ON the hyperbolic
-            // chart-domain bound — the criterion is still improving as κ decreases
-            // past the limit where the cloud fills the hyperbolic ball of its own
-            // spread. Exactly symmetric to the spherical rail below (#2351): κ̂ is
-            // an UPPER bound on κ, not a resolved point estimate, and must be
-            // reported as railed rather than as a confident hyperbolic verdict.
-            (lower, false, true)
-        } else if upper.score <= 0.0 {
-            // V'(κ_max)≤0 means the criterion is still improving at the
-            // spherical chart-resolution limit.
-            (upper, true, false)
-        } else {
-            let mut current = flat_jet;
-            while iterations < max_iter {
-                iterations += 1;
-                if normalized_kkt(current.kappa, current.score) <= tol && current.curvature > 0.0 {
-                    break;
-                }
-                if current.score < 0.0 {
-                    a = current.kappa;
-                } else {
-                    b = current.kappa;
-                }
-
-                // Newton's score step supplies local quadratic convergence; the
-                // analytic sign bracket safeguards it globally. An inadmissible
-                // Newton point is replaced by the strictly contracting midpoint.
-                let newton = current.kappa - current.score / current.curvature;
-                let next =
-                    if current.curvature > 0.0 && newton.is_finite() && newton > a && newton < b {
-                        newton
-                    } else {
-                        0.5 * (a + b)
-                    };
-                current = response_curvature_criterion_jet(values, dim, next)?;
-            }
-            let residual = normalized_kkt(current.kappa, current.score);
-            if residual > tol || current.curvature <= 0.0 {
-                return Err(ResponseGeometryError::CurvatureNonConvergence {
-                    iterations,
-                    max_iter,
-                    bracket_lo: a,
-                    bracket_hi: b,
-                    kappa: current.kappa,
-                    criterion: current.value,
-                    score: current.score,
-                    curvature: current.curvature,
-                    kkt_residual: residual,
-                    tolerance: tol,
-                });
-            }
-            (current, false, false)
-        };
+    let (jet, railed_at_resolution_limit, railed_at_hyperbolic_bound) = if lower.score >= 0.0 {
+        // V'(κ_min) ≥ 0: the constrained minimum sits ON the hyperbolic
+        // chart-domain bound — the criterion is still improving as κ decreases
+        // past the limit where the cloud fills the hyperbolic ball of its own
+        // spread. Exactly symmetric to the spherical rail below (#2351): κ̂ is
+        // an UPPER bound on κ, not a resolved point estimate, and must be
+        // reported as railed rather than as a confident hyperbolic verdict.
+        (lower, false, true)
+    } else if upper.score <= 0.0 {
+        // V'(κ_max)≤0 means the criterion is still improving at the
+        // spherical chart-resolution limit.
+        (upper, true, false)
+    } else {
+        let root = curvature_score_root(
+            |kappa| response_curvature_criterion_jet(values, dim, kappa),
+            flat_jet,
+            (kappa_min, kappa_max),
+        )?;
+        (root, false, false)
+    };
     let kappa_hat = jet.kappa;
     // #2351: the hyperbolic rail flag must also fire on the BOUNDARY-LAYER
     // interior optimum. Near the chart-domain edge the conformal restoring
@@ -1681,7 +1712,7 @@ pub fn fit_response_curvature(
     // ball of its own spread — the estimate is chart-limited, not resolved,
     // regardless of whether the KKT condition binds exactly AT the bound.
     let railed_at_hyperbolic_resolution_limit =
-        railed_at_hyperbolic_resolution_limit || kappa_hat <= 0.99 * kappa_min;
+        railed_at_hyperbolic_bound || kappa_hat <= 0.99 * kappa_min;
     let v_p_hat = jet.value;
     let base = jet.base.clone();
 
@@ -1694,12 +1725,6 @@ pub fn fit_response_curvature(
     // honest "how curved relative to its spread" number alongside the dimensional κ̂.
     let kappa_r2 = kappa_hat * rho_max * rho_max;
 
-    let kappa_tol = tol * span;
-    if !(kappa_tol.is_finite() && kappa_tol > 0.0) {
-        return Err(ResponseGeometryError::InvalidInput(
-            "response curvature tolerance underflows in the chart scale".into(),
-        ));
-    }
     let profile_ci = crate::curvature_estimand::profile_ci_walk(
         &mut v_p,
         kappa_hat,
@@ -1707,7 +1732,6 @@ pub fn fit_response_curvature(
         kappa_min,
         kappa_max,
         level,
-        kappa_tol,
     )
     .map_err(ResponseGeometryError::NumericalGeometry)?;
     let flatness = crate::curvature_estimand::flatness_lr_test(&mut v_p, kappa_hat)
@@ -2543,25 +2567,52 @@ mod tests {
         }
     }
 
+    /// The κ̂ score solve's refusal, forced. The same cloud and bracket are
+    /// solved twice: with each score's derived band the root certifies, and with
+    /// the band set to zero, below the score's own rounding floor, the bracket
+    /// collapses to adjacent doubles and the solve must refuse, typed, rather
+    /// than loop or certify.
     #[test]
-    fn response_curvature_budget_exhaustion_is_typed_non_convergence() {
+    fn curvature_score_root_below_its_rounding_floor_refuses_by_bracket_collapse() {
         let values = synth_cloud(3, 0.8, 80, 0.15, 0xC0A7_2247);
-        match fit_response_curvature(values.view(), 3, 0.95, 1.0e-14, 0) {
+        let (kappa_min, kappa_max, _) = response_kappa_bounds(values.view());
+        let start = response_curvature_criterion_jet(values.view(), 3, 0.0).expect("flat jet");
+        let root = curvature_score_root(
+            |kappa| response_curvature_criterion_jet(values.view(), 3, kappa),
+            start.clone(),
+            (kappa_min, kappa_max),
+        )
+        .expect("the derived band certifies this cloud's κ̂");
+        assert!(root.score.abs() <= root.score_band && root.curvature > 0.0);
+
+        let zero_band = |kappa: f64| {
+            response_curvature_criterion_jet(values.view(), 3, kappa).map(|jet| {
+                CurvatureCriterionJet {
+                    score_band: 0.0,
+                    ..jet
+                }
+            })
+        };
+        let start = CurvatureCriterionJet {
+            score_band: 0.0,
+            ..start
+        };
+        match curvature_score_root(zero_band, start, (kappa_min, kappa_max)) {
             Err(ResponseGeometryError::CurvatureNonConvergence {
-                iterations,
-                max_iter,
-                kkt_residual,
-                tolerance,
+                bracket_lo,
+                bracket_hi,
                 score,
-                curvature,
+                score_band,
                 ..
             }) => {
-                assert_eq!(iterations, 0);
-                assert_eq!(max_iter, 0);
-                assert!(kkt_residual.is_finite() && kkt_residual > tolerance);
-                assert!(score.is_finite() && curvature.is_finite());
+                assert_eq!(score_band, 0.0);
+                assert!(score.is_finite() && score != 0.0);
+                // The bracket has no double strictly inside it.
+                let midpoint = 0.5 * (bracket_lo + bracket_hi);
+                assert!(midpoint == bracket_lo || midpoint == bracket_hi);
             }
-            other => panic!("expected typed curvature exhaustion, got {other:?}"),
+            Ok(jet) => panic!("the zero-band solve certified κ = {}", jet.kappa),
+            Err(other) => panic!("expected the zero-band solve to refuse, got {other:?}"),
         }
     }
 
@@ -2584,7 +2635,7 @@ mod tests {
         for (idx, &k_star) in k_stars.iter().enumerate() {
             let values = synth_cloud(dim, k_star, n, sigma, 0xC0FFEE ^ (idx as u64 + 1));
             let (kmin, kmax, _rho) = response_kappa_bounds(values.view());
-            let fit = fit_response_curvature(values.view(), dim, 0.95, 1e-12, 256)
+            let fit = fit_response_curvature(values.view(), dim, 0.95)
                 .expect("response curvature fit");
             k_hats.push(fit.kappa_hat);
 
@@ -2634,7 +2685,7 @@ mod tests {
             // identical points so the only change is the global scale.
             let alpha = 1.5_f64;
             let scaled = values.mapv(|v| alpha * v);
-            let fit_scaled = fit_response_curvature(scaled.view(), dim, 0.95, 1e-12, 256)
+            let fit_scaled = fit_response_curvature(scaled.view(), dim, 0.95)
                 .expect("scaled response curvature fit");
             let expected = fit.kappa_hat / (alpha * alpha);
             // Tolerance scales with magnitude; the transform is exact in the
@@ -2660,10 +2711,10 @@ mod tests {
         // ambient-origin κ_min/conformal-term bug.
         let values = synth_cloud(dim, 0.6, n, sigma, 0xC0FFEE ^ 4);
         let fit =
-            fit_response_curvature(values.view(), dim, 0.95, 1e-12, 256).expect("untranslated fit");
+            fit_response_curvature(values.view(), dim, 0.95).expect("untranslated fit");
         let shifted = &values + 10.0;
         let fit_shifted =
-            fit_response_curvature(shifted.view(), dim, 0.95, 1e-12, 256).expect("translated fit");
+            fit_response_curvature(shifted.view(), dim, 0.95).expect("translated fit");
         assert!(
             (fit.kappa_hat - fit_shifted.kappa_hat).abs() <= 1.0e-9 * (1.0 + fit.kappa_hat.abs()),
             "κ̂ moved under pure translation: {} vs {}",
@@ -2695,7 +2746,7 @@ mod tests {
         for &k_star in &[-1.0_f64, 0.0, 0.8] {
             let values = synth_cloud(1, k_star, n, sigma, 0xD1 ^ (k_star.to_bits()));
             let (kmin, kmax, _rho) = response_kappa_bounds(values.view());
-            let fit = fit_response_curvature(values.view(), 1, 0.95, 1e-12, 256)
+            let fit = fit_response_curvature(values.view(), 1, 0.95)
                 .expect("d=1 curvature fit");
             let span = kmax - kmin;
             assert!(
