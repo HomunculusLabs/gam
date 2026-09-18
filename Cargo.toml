@@ -145,6 +145,7 @@ ad_trait = "0.3.0"
 criterion = "0.8"
 tempfile = "3.27.0"
 approx = "0.5.1"
+opt.workspace = true
 
 [[bench]]
 name = "sparse_dict_router_topk"
@@ -219,6 +220,11 @@ harness = false
 [[bench]]
 name = "sae_decoder_refresh_scaling"
 path = "bench/cargo_benches/sae_decoder_refresh_scaling.rs"
+harness = false
+
+[[bench]]
+name = "joint_absolute_risk"
+path = "bench/cargo_benches/joint_absolute_risk.rs"
 harness = false
 
 [[example]]
