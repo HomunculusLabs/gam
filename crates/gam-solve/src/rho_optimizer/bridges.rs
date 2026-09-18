@@ -1889,14 +1889,40 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
             x.len(),
             self.first_order_evals
         );
-        let eval = self
+        let evaluated = self
             .obj
             .eval_with_order(x, OuterEvalOrder::ValueAndGradient)
-            .map_err(|err| into_objective_error("outer eval failed", err))?;
-        let eval = finite_outer_first_order_eval_or_error("outer eval failed", self.layout, eval)?;
-        if let Some(refusal) = self.refuse_off_stratum_trial(x, eval.cost) {
-            return Err(into_objective_error("outer eval failed", refusal));
-        }
+            .map_err(|err| into_objective_error("outer eval failed", err))
+            .and_then(|eval| {
+                finite_outer_first_order_eval_or_error("outer eval failed", self.layout, eval)
+            })
+            .and_then(|eval| match self.refuse_off_stratum_trial(x, eval.cost) {
+                Some(refusal) => Err(into_objective_error("outer eval failed", refusal)),
+                None => Ok(eval),
+            });
+        // gam#2982: `opt`'s line searches evaluate the gradient at every trial
+        // that clears Armijo and answer a recoverable failure by halving the
+        // step, keeping only a `nonfinite_seen` flag. The reason survives only
+        // if it is written here, as `eval_cost` writes it for a value probe.
+        let eval = match evaluated {
+            Ok(eval) => eval,
+            Err(err) => {
+                log::info!(
+                    "[STAGE] outer eval end order=ValueAndGradient elapsed={:.3}s outcome={} trial_rho_distance={:.3e} (first-order bridge, eval={}) theta={} reason={}",
+                    stage_start.elapsed().as_secs_f64(),
+                    if err.is_recoverable() {
+                        "recoverable"
+                    } else {
+                        "fatal"
+                    },
+                    trial_rho_distance(self.last_value_grad_rho.as_ref(), x),
+                    self.first_order_evals,
+                    format_outer_theta(x),
+                    err,
+                );
+                return Err(err);
+            }
+        };
         let g_norm = eval.gradient.iter().map(|v| v * v).sum::<f64>().sqrt();
         let gradient = eval.gradient;
         if self.g_norm_initial.is_none() && g_norm.is_finite() && g_norm > 0.0 {
@@ -2377,6 +2403,10 @@ pub(crate) fn first_order_inner_cap_schedule(
 #[cfg(test)]
 #[path = "inner_cap_schedule_tests.rs"]
 mod inner_cap_schedule_tests;
+
+#[cfg(test)]
+#[path = "value_gradient_refusal_2982_tests.rs"]
+mod value_gradient_refusal_2982_tests;
 
 
 /// Apply the accepted-iter inner-PIRLS cap schedule shared by the two ARC
