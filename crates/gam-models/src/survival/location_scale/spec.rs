@@ -348,6 +348,10 @@ pub struct SurvivalLocationScaleFitResultParts {
     /// concatenated block lambdas. Carried through from the inner blockwise fit
     /// (basis-invariant, so valid on the lifted raw fit) for `edf_by_block`.
     pub edf_by_block: Vec<f64>,
+    /// Each penalty's rank-bound status, aligned 1:1 with `penalty_block_trace`
+    /// (#2901). A block's EDF is clamped to its coefficient count only when every
+    /// penalty on it is certified. Empty when the inner solver recorded none.
+    pub edf_rank_bound: Vec<gam_solve::estimate::EdfRankBound>,
 }
 
 #[derive(Clone, Copy)]
@@ -464,6 +468,7 @@ pub fn survival_fit_from_parts(
         geometry,
         penalty_block_trace,
         edf_by_block,
+        edf_rank_bound,
     } = parts;
 
     // Validation (preserved from the old impl).
@@ -674,20 +679,32 @@ pub fn survival_fit_from_parts(
             0.0
         }
     };
-    let effective_edf = |ncoef: usize, trace_sum: f64| -> f64 {
-        (ncoef as f64 - trace_sum).clamp(0.0, ncoef as f64)
+    // #2901: `|coeff| − Σ tr_kk` is clamped to `[0, |coeff|]` only when every penalty on
+    // the block certifies `tr_kk ≤ rank_kk`. This likelihood's observed information need
+    // not dominate its penalties, and a penalty that is not certified publishes its trace
+    // unclamped, so the block figure built from it is not clamped either.
+    let block_certified = |offset: usize, count: usize| -> bool {
+        !traces_available
+            || count == 0
+            || (edf_rank_bound.len() == total_penalties
+                && edf_rank_bound[offset..offset + count]
+                    .iter()
+                    .all(gam_solve::estimate::EdfRankBound::is_certified))
     };
-    let edf_time = effective_edf(beta_time.len(), block_trace_sum(0, n_time));
-    let edf_threshold = effective_edf(beta_threshold.len(), block_trace_sum(n_time, n_threshold));
-    let edf_log_sigma = effective_edf(
-        beta_log_sigma.len(),
-        block_trace_sum(n_time + n_threshold, n_log_sigma),
-    );
+    let effective_edf = |ncoef: usize, offset: usize, count: usize| -> f64 {
+        let raw = ncoef as f64 - block_trace_sum(offset, count);
+        if block_certified(offset, count) {
+            raw.clamp(0.0, ncoef as f64)
+        } else {
+            raw
+        }
+    };
+    let edf_time = effective_edf(beta_time.len(), 0, n_time);
+    let edf_threshold = effective_edf(beta_threshold.len(), n_time, n_threshold);
+    let edf_log_sigma = effective_edf(beta_log_sigma.len(), n_time + n_threshold, n_log_sigma);
     let wiggle_len = beta_link_wiggle.as_ref().map_or(0, |beta| beta.len());
-    let edf_link_wiggle = effective_edf(
-        wiggle_len,
-        block_trace_sum(n_time + n_threshold + n_log_sigma, n_wiggle),
-    );
+    let edf_link_wiggle =
+        effective_edf(wiggle_len, n_time + n_threshold + n_log_sigma, n_wiggle);
     let edf_total = edf_time + edf_threshold + edf_log_sigma + edf_link_wiggle;
 
     use crate::model_types::{BlockRole, FittedBlock, FittedLinkState, UnifiedFitResultParts};
@@ -742,6 +759,11 @@ pub fn survival_fit_from_parts(
     };
     let inference_edf_by_block = if edf_by_block.len() == all_lambdas.len() {
         edf_by_block.clone()
+    } else {
+        Vec::new()
+    };
+    let inference_edf_rank_bound = if edf_rank_bound.len() == all_lambdas.len() {
+        edf_rank_bound.clone()
     } else {
         Vec::new()
     };
@@ -803,6 +825,7 @@ pub fn survival_fit_from_parts(
         .map(|geom| gam_solve::estimate::FitInference {
             edf_by_block: inference_edf_by_block.clone(),
             penalty_block_trace: inference_penalty_block_trace.clone(),
+            edf_rank_bound: inference_edf_rank_bound.clone(),
             edf_total,
             // This lane's correction is only ever the first-order IFT term
             // (the custom-family fit never runs a cubature upgrade), so the

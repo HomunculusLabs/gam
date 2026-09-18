@@ -796,6 +796,7 @@ fn deterministic_gaussian_standard_fit(
         edf_total,
         edf_by_block,
         penalty_block_trace,
+        edf_rank_bound,
         coefficient_influence,
     ) = {
         use gam_linalg::faer_ndarray::FaerCholesky;
@@ -856,6 +857,7 @@ fn deterministic_gaussian_standard_fit(
 
         {
             let mut raw_traces = vec![0.0_f64; n_penalties];
+            let mut trace_bands = vec![0.0_f64; n_penalties];
             let mut block_ranks = vec![0_usize; n_penalties];
             let mut scaled_range = u.clone();
             for (column, &eigenvalue) in range_eigenvalues.iter().enumerate() {
@@ -864,6 +866,19 @@ fn deterministic_gaussian_standard_fit(
                     .mapv_inplace(|value| value / eigenvalue);
             }
             let joint_penalty_pseudoinverse = scaled_range.dot(&u.t());
+            let apply_pseudoinverse = |values: &mut [f64]| -> Result<(), WorkflowError> {
+                let applied =
+                    joint_penalty_pseudoinverse.dot(&ndarray::ArrayView1::from(&*values));
+                for (slot, value) in values.iter_mut().zip(applied.iter()) {
+                    *slot = *value;
+                }
+                Ok(())
+            };
+            let inverse_one_norm = gam_linalg::condition::estimate_inverse_one_norm(
+                p,
+                apply_pseudoinverse,
+                apply_pseudoinverse,
+            )?;
             for (kk, block) in design.penalties.iter().enumerate() {
                 let r = block.col_range.clone();
                 // The per-block ceiling is `rank(S_k)`, NOT the block's column
@@ -872,78 +887,108 @@ fn deterministic_gaussian_standard_fit(
                 // what the REML criterion already prices as `rank(S_k)·ρ_k`
                 // (#2470). This path previously measured against `block_cols`
                 // and so reported each block with its penalty nullity added.
-                block_ranks[kk] = penalty_matrix_root(&block.local)
+                let root = penalty_matrix_root(&block.local).map_err(|reason| {
+                    raised_fit_failure(
+                        FailureCategory::Numerical,
+                        format!(
+                            "deterministic Gaussian shortcut penalty {kk} rank factorization \
+                             failed: {reason}"
+                        ),
+                    )
+                })?;
+                block_ranks[kk] = root.nrows();
+                if penalty_faces[kk] == DeterministicPenaltyFace::Infinite {
+                    // tr(S_∞⁺S_k) = Σ_c r_cᵀ S_∞⁺ r_c over the root's modes. The
+                    // pseudoinverse reproduces the root's projection onto the
+                    // joint range, so that projection is the right-hand side its
+                    // residual is priced against.
+                    let mut root_columns = Array2::<f64>::zeros((p, root.nrows()));
+                    root_columns
+                        .slice_mut(ndarray::s![r, ..])
+                        .assign(&root.t());
+                    let projected = u.dot(&u.t().dot(&root_columns));
+                    let solution = joint_penalty_pseudoinverse.dot(&root_columns);
+                    let (trace, band) = gam_linalg::roundoff::solved_penalty_trace(
+                        1.0,
+                        projected.view(),
+                        solution.view(),
+                        infinite_face_penalty.view(),
+                        inverse_one_norm,
+                    )
                     .map_err(|reason| {
                         raised_fit_failure(
                             FailureCategory::Numerical,
                             format!(
-                                "deterministic Gaussian shortcut penalty {kk} rank factorization \
-                                 failed: {reason}"
+                                "deterministic Gaussian shortcut penalty {kk} trace band failed: \
+                                 {reason}"
                             ),
                         )
-                    })?
-                    .nrows();
-                if penalty_faces[kk] == DeterministicPenaltyFace::Infinite {
-                    let pinv_block = joint_penalty_pseudoinverse.slice(ndarray::s![r.clone(), r]);
-                    let mut trace = gam_linalg::utils::KahanSum::default();
-                    for row in 0..block.local.nrows() {
-                        for column in 0..block.local.ncols() {
-                            trace.add(pinv_block[[row, column]] * block.local[[column, row]]);
-                        }
-                    }
-                    raw_traces[kk] = trace.sum();
+                    })?;
+                    raw_traces[kk] = trace;
+                    trace_bands[kk] = band;
                 }
             }
             // At the mixed boundary, only infinite-face penalties constrain a
             // coefficient direction. Zero-face blocks contribute no limiting
             // rank, even though their finite representation is the smallest
-            // positive strength admitted by the solver's log domain.
+            // positive strength admitted by the solver's log domain, and they
+            // publish a zero trace.
+            //
+            // The infinite-face traces add to the joint boundary rank exactly,
+            // `Σ_k tr(S_∞⁺S_k) = tr(S_∞⁺S_∞) = rank(S_∞)`. A computed sum away from
+            // that rank by more than the traces' bands means the pseudoinverse and
+            // the penalties are not one operator. Normalizing the shares to the
+            // rank used to hide that, so it refuses instead (#2901).
             let joint_penalty_rank = u.ncols();
-            // Pseudoinverse traces add to the rank of the joint PSD sum in exact
-            // arithmetic. Normalize their computed shares to that same spectral
-            // rank so eigensolver round-off cannot make the three EDF fields
-            // disagree. Zero-face penalties contribute no limiting trace.
             let mut measured_infinite_trace = gam_linalg::utils::KahanSum::default();
-            for (&trace, face) in raw_traces.iter().zip(penalty_faces.iter()) {
+            let mut infinite_trace_band = gam_linalg::utils::KahanSum::default();
+            for ((&trace, &band), face) in raw_traces
+                .iter()
+                .zip(trace_bands.iter())
+                .zip(penalty_faces.iter())
+            {
                 if *face == DeterministicPenaltyFace::Infinite {
                     measured_infinite_trace.add(trace);
+                    infinite_trace_band.add(band);
                 }
             }
             let measured_infinite_trace = measured_infinite_trace.sum();
-            if joint_penalty_rank > 0
-                && !(measured_infinite_trace.is_finite() && measured_infinite_trace > 0.0)
+            let infinite_trace_band = infinite_trace_band.sum();
+            if !((measured_infinite_trace - joint_penalty_rank as f64).abs() <= infinite_trace_band)
             {
                 return Err(raised_fit_failure(
                     FailureCategory::Numerical,
                     format!(
-                        "deterministic Gaussian shortcut could not allocate joint boundary rank \
-                         {joint_penalty_rank} across trace {measured_infinite_trace:?}"
+                        "deterministic Gaussian shortcut: the infinite-face traces sum to \
+                         {measured_infinite_trace:.6e}, away from the joint boundary rank \
+                         {joint_penalty_rank} by more than their band {infinite_trace_band:.4e}"
                     ),
                 ));
             }
-            let trace_scale = if joint_penalty_rank > 0 {
-                joint_penalty_rank as f64 / measured_infinite_trace
-            } else {
-                0.0
-            };
-            for (trace, face) in raw_traces.iter_mut().zip(penalty_faces.iter()) {
-                *trace = match face {
-                    DeterministicPenaltyFace::Infinite => *trace * trace_scale,
-                    DeterministicPenaltyFace::Zero => 0.0,
-                };
-            }
-            let bundle = gam_solve::estimate::penalized_edf_bundle(
+            // #2901: `tr(S_∞⁺S_k) ≤ rank_k` holds because `S_k ⪯ S_∞`, whatever the
+            // data, so every block is certified structurally.
+            let rank_bounds = vec![
+                gam_solve::estimate::EdfRankBound::Certified(
+                    gam_solve::estimate::EdfRankCertificate::Structural
+                );
+                n_penalties
+            ];
+            let bundle = gam_solve::estimate::penalized_edf_bundle_within_bands(
                 &raw_traces,
+                &trace_bands,
+                &rank_bounds,
                 &block_ranks,
                 p,
                 free_dim as f64,
-            );
+            )
+            .map_err(|error| WorkflowError::Fit(FitFailure::from(error)))?;
             (
                 free_information,
                 boundary_gauge,
                 bundle.edf_total,
                 bundle.edf_by_block,
                 bundle.penalty_block_trace,
+                bundle.rank_bound,
                 Some(influence),
             )
         }
@@ -956,6 +1001,7 @@ fn deterministic_gaussian_standard_fit(
     let inference = gam_solve::estimate::FitInference {
         edf_by_block,
         penalty_block_trace,
+        edf_rank_bound,
         edf_total,
         smoothing_correction: None,
         smoothing_correction_method: None,

@@ -6918,8 +6918,16 @@ pub(crate) fn per_penalty_edf_uses_realized_penalty_rank_2288() {
     let h = Array2::from_diag(&array![4.0, 5.0, 10.0, 8.0, 10.0, 20.0]);
     let lambdas = array![1.0, 0.5, 0.25, 2.0];
 
-    let (edf_total, edf_by_penalty, block_edf, penalty_trace) =
+    let (edf_total, edf_by_penalty, block_edf, penalty_trace, rank_bound) =
         custom_family_blockwise_edf(&h, &specs, &lambdas.view()).expect("exact composed EDF");
+    // #2901: every `H − λ_k S_k` is diagonal and nonnegative here, so each penalty
+    // is certified and the oracle below reads clamped, in-range traces.
+    assert!(
+        rank_bound
+            .iter()
+            .all(gam_solve::estimate::EdfRankBound::is_certified),
+        "{rank_bound:?}"
+    );
 
     // Independent diagonal oracle:
     //   λ tr(H⁻¹S) = [1/4, (1/2)(2/5+3/10), (1/4)(4/8), 2(1/10+2/20)].

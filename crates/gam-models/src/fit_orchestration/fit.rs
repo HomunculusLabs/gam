@@ -1569,11 +1569,14 @@ pub(crate) fn fit_binomial_location_scale_model(
 fn survival_transformation_edf(
     state: &gam_solve::pirls::WorkingState,
     penalty_blocks: &[PenaltyBlock],
-) -> Result<(f64, Vec<f64>, Vec<f64>, Array2<f64>), String> {
+) -> Result<
+    (f64, Vec<f64>, Vec<f64>, Vec<gam_solve::estimate::EdfRankBound>, Array2<f64>),
+    String,
+> {
     let h_dense = state.hessian.to_dense();
-    let (edf_total, edf_by_block, penalty_block_trace) =
+    let (edf_total, edf_by_block, penalty_block_trace, rank_bound) =
         survival_edf_from_dense_hessian(&h_dense, penalty_blocks)?;
-    Ok((edf_total, edf_by_block, penalty_block_trace, h_dense))
+    Ok((edf_total, edf_by_block, penalty_block_trace, rank_bound, h_dense))
 }
 
 /// Trace-form penalized EDF from a converged dense penalized Hessian.
@@ -1584,7 +1587,7 @@ fn survival_transformation_edf(
 fn survival_edf_from_dense_hessian(
     h_dense: &Array2<f64>,
     penalty_blocks: &[PenaltyBlock],
-) -> Result<(f64, Vec<f64>, Vec<f64>), String> {
+) -> Result<(f64, Vec<f64>, Vec<f64>, Vec<gam_solve::estimate::EdfRankBound>), String> {
     let p = h_dense.nrows();
     let h_sym = gam_linalg::matrix::SymmetricMatrix::Dense(h_dense.clone());
     // EDF is an exact trace of the fitted (unperturbed) penalized Hessian.
@@ -1598,14 +1601,25 @@ fn survival_edf_from_dense_hessian(
     let factor = h_sym.factorize().map_err(|error| {
         format!("survival edf: exact penalized-Hessian factorization failed: {error}")
     })?;
-    // Raw per-block penalty traces and their ranks, handed to the shared
-    // accounting (#2470). The rank comes from the realized penalty root, NOT
-    // from the declared `block.nullspace_dim`: a declared nullity is a
-    // pre-transform statement that canonical pullback intentionally clears, so
-    // consulting it here can price a block against a rank the fitted penalty no
-    // longer has. `penalty_matrix_root` is the same oracle the REML criterion
-    // uses when it charges `rank(S_k)·rho_k`.
+    let solve = |values: &mut [f64]| -> Result<(), String> {
+        let solved = factor.solve(&ndarray::Array1::from(values.to_vec()))?;
+        for (slot, value) in values.iter_mut().zip(solved.iter()) {
+            *slot = *value;
+        }
+        Ok(())
+    };
+    let inverse_one_norm = gam_linalg::condition::estimate_inverse_one_norm(p, solve, solve)
+        .map_err(|error| format!("survival edf: inverse-norm estimate failed: {error}"))?;
+    // Per-block penalty traces, the rounding band of the solve behind each, and
+    // their ranks, handed to the shared accounting (#2470, #2901). The rank comes
+    // from the realized penalty root, NOT from the declared `block.nullspace_dim`:
+    // a declared nullity is a pre-transform statement that canonical pullback
+    // intentionally clears, so consulting it here can price a block against a
+    // rank the fitted penalty no longer has. `penalty_matrix_root` is the same
+    // oracle the REML criterion uses when it charges `rank(S_k)·rho_k`.
     let mut raw_traces = vec![0.0_f64; penalty_blocks.len()];
+    let mut trace_bands = vec![0.0_f64; penalty_blocks.len()];
+    let mut rank_bounds = Vec::with_capacity(penalty_blocks.len());
     let mut block_ranks = vec![0_usize; penalty_blocks.len()];
     // `Σ_k S_k` in the joint layout. Summed UNSCALED on purpose: the penalty
     // null space is a structural property of the penalty geometry, so the floor
@@ -1613,35 +1627,48 @@ fn survival_edf_from_dense_hessian(
     let mut joint_penalty = Array2::<f64>::zeros((p, p));
     for (kk, block) in penalty_blocks.iter().enumerate() {
         let block_cols = block.range.end - block.range.start;
-        let penalty_rank = if block_cols == 0 {
-            0
+        let root = if block_cols == 0 {
+            Array2::<f64>::zeros((0, 0))
         } else {
-            penalty_matrix_root(&block.matrix)
-                .map_err(|error| {
-                    format!("survival edf: penalty {kk} rank factorization failed: {error}")
-                })?
-                .nrows()
+            penalty_matrix_root(&block.matrix).map_err(|error| {
+                format!("survival edf: penalty {kk} rank factorization failed: {error}")
+            })?
         };
+        let penalty_rank = root.nrows();
         block_ranks[kk] = penalty_rank;
         if block_cols > 0 {
             let r = block.range.start..block.range.end;
             let mut target = joint_penalty.slice_mut(ndarray::s![r.clone(), r]);
             target += &block.matrix;
         }
+        // #2901: the survival Hessian is observed information, so `H ⪰ λ_k S_k` is
+        // certified per block from the inertia of `H − λ_k S_k` shifted by its rounding
+        // band.
+        let scaled_penalty_block = if block_cols > 0 && block.lambda > 0.0 {
+            &block.matrix * block.lambda
+        } else {
+            Array2::<f64>::zeros((0, 0))
+        };
+        rank_bounds.push(
+            gam_solve::estimate::numerical_rank_bound(
+                h_dense.view(),
+                scaled_penalty_block.view(),
+                block.range.start,
+                gam_runtime::resource::MemoryGovernor::global(),
+            )
+            .map_err(|error| {
+                format!("survival edf: penalty block {kk} rank certificate failed: {error}")
+            })?,
+        );
         if block.lambda <= 0.0 || block_cols == 0 {
             raw_traces[kk] = 0.0;
             continue;
         }
-        // RHS = S_k embedded into the full p×block_cols layout: column j holds
-        // column j of S_k placed in the block rows. Solving H Z = RHS gives the
-        // block columns of H⁻¹ S_full, whose block-diagonal entries sum to
-        // tr(H⁻¹ S_k).
-        let mut rhs = Array2::<f64>::zeros((p, block_cols));
-        for c in 0..block_cols {
-            for r in 0..block_cols {
-                rhs[[block.range.start + r, c]] = block.matrix[[r, c]];
-            }
-        }
+        // RHS = the root's modes (`S_k = RᵀR`) placed in the block rows of the
+        // p×rank layout, so λ_k tr(H⁻¹S_k) = λ_k Σ_c r_cᵀ H⁻¹ r_c.
+        let mut rhs = Array2::<f64>::zeros((p, penalty_rank));
+        rhs.slice_mut(ndarray::s![block.range.clone(), ..])
+            .assign(&root.t());
         let sol = factor.solvemulti(&rhs).map_err(|e| {
             // A converged fit whose penalized Hessian cannot support a finite
             // trace solve is an identifiability failure; name the flat direction
@@ -1676,24 +1703,29 @@ fn survival_edf_from_dense_hessian(
                 block.lambda
             )
         })?;
-        let mut trace = 0.0_f64;
-        for j in 0..block_cols {
-            trace += sol[[block.range.start + j, j]];
-        }
-        // Raw product; the `[0, rank]` admission (which is what keeps a
-        // ceiling-`λ` redundant block's `+∞` from poisoning the stored trace,
-        // gam#1379) is applied by the shared accounting below.
-        raw_traces[kk] = block.lambda * trace;
+        let (trace, band) = gam_linalg::roundoff::solved_penalty_trace(
+            block.lambda,
+            rhs.view(),
+            sol.view(),
+            h_dense.view(),
+            inverse_one_norm,
+        )
+        .map_err(|error| format!("survival edf: penalty block {kk} trace band failed: {error}"))?;
+        raw_traces[kk] = trace;
+        trace_bands[kk] = band;
     }
     let joint_penalty_rank = penalty_matrix_root(&joint_penalty)
         .map_err(|error| format!("survival edf: joint penalty rank failed: {error}"))?
         .nrows();
-    let bundle = gam_solve::estimate::penalized_edf_bundle(
+    let bundle = gam_solve::estimate::penalized_edf_bundle_within_bands(
         &raw_traces,
+        &trace_bands,
+        &rank_bounds,
         &block_ranks,
         p,
         (p - joint_penalty_rank.min(p)) as f64,
-    );
+    )
+    .map_err(|error| format!("survival edf: {error}"))?;
     let edf_by_block = bundle.edf_by_block;
     let penalty_block_trace = bundle.penalty_block_trace;
     let edf_total = bundle.edf_total;
@@ -1703,7 +1735,7 @@ fn survival_edf_from_dense_hessian(
     {
         return Err("survival edf: non-finite effective degrees of freedom".to_string());
     }
-    Ok((edf_total, edf_by_block, penalty_block_trace))
+    Ok((edf_total, edf_by_block, penalty_block_trace, bundle.rank_bound))
 }
 
 /// REML/LAML smoothing-parameter selection for the single-cause transformation
@@ -2310,7 +2342,7 @@ fn survival_unified_fit_result(
     // Hessian and penalty roots (issue #565). `lambdas` is built one entry per
     // penalty block, so `edf_by_block` aligns 1:1 with `lambdas` as the
     // `try_from_parts` invariant requires.
-    let (edf_total, edf_by_block, penalty_block_trace, penalized_hessian) =
+    let (edf_total, edf_by_block, penalty_block_trace, edf_rank_bound, penalized_hessian) =
         survival_transformation_edf(state, penalty_blocks)?;
     assert_eq!(edf_by_block.len(), lambdas.len());
     assert_eq!(penalty_block_trace.len(), lambdas.len());
@@ -2460,6 +2492,7 @@ fn survival_unified_fit_result(
     let inference = gam_solve::estimate::FitInference {
         edf_by_block: edf_by_block.clone(),
         penalty_block_trace,
+        edf_rank_bound,
         edf_total,
         // This lane computes only the first-order correction, so its retained
         // first-order pair is its primary pair, as on the custom-family lane.
@@ -3861,8 +3894,19 @@ mod survival_edf_tests {
         let h = array![[4.0, 1.0, 0.0], [1.0, 3.0, 0.0], [0.0, 0.0, 2.0]];
         let blocks = vec![penalty_block(array![[1.0, 0.0], [0.0, 1.0]], 1.0, 0)];
 
-        let (edf_total, edf_by_block, penalty_block_trace) =
+        let (edf_total, edf_by_block, penalty_block_trace, rank_bound) =
             survival_edf_from_dense_hessian(&h, &blocks).expect("PD Hessian must compute EDF");
+        // #2901: `H − S` is `[[3, 1], [1, 2]] ⊕ [2]`, positive definite, so the block
+        // is certified numerically.
+        assert!(
+            matches!(
+                rank_bound[0],
+                gam_solve::estimate::EdfRankBound::Certified(
+                    gam_solve::estimate::EdfRankCertificate::Numerical { .. }
+                )
+            ),
+            "{rank_bound:?}"
+        );
 
         // Leading 2×2 block [[4,1],[1,3]] has det 11 and inverse (1/11)[[3,-1],[-1,4]];
         // tr(H⁻¹ S) over that block = (3 + 4)/11 = 7/11. p = 3, so
@@ -3883,6 +3927,53 @@ mod survival_edf_tests {
             "total EDF {:.9} != 26/11",
             edf_total
         );
+    }
+
+    /// #2901: `H ⪰ λS` is what bounds a block's trace by its rank. `H = I` against
+    /// `λS = 4I` on a rank-2 block has no certified rank bound, and its raw trace 8 publishes
+    /// with `edf_by_block = 2 − 8` unclamped, where the old clamp published the rank.
+    #[test]
+    fn survival_edf_publishes_an_uncertified_trace_unclamped_2901() {
+        let h = array![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let blocks = vec![penalty_block(array![[4.0, 0.0], [0.0, 4.0]], 1.0, 0)];
+        let (edf_total, edf_by_block, penalty_block_trace, rank_bound) =
+            survival_edf_from_dense_hessian(&h, &blocks)
+                .expect("an indefinite data curvature publishes its raw trace");
+        assert!(
+            matches!(
+                rank_bound[0],
+                gam_solve::estimate::EdfRankBound::Uncertified { smallest_pivot, band }
+                    if smallest_pivot < -band
+            ),
+            "{rank_bound:?}"
+        );
+        assert!((penalty_block_trace[0] - 8.0).abs() < 1e-12, "{penalty_block_trace:?}");
+        assert!((edf_by_block[0] - (2.0 - 8.0)).abs() < 1e-12, "{edf_by_block:?}");
+        assert!((edf_total - (3.0 - 8.0)).abs() < 1e-12, "{edf_total}");
+    }
+
+    /// #2901: `H ≻ 0` is certified only with the block's rank bound, and the
+    /// transformation baseline's box-constrained mode need not have it. `H = −I`
+    /// against `λS = 4I` is not certified, so its trace −8 below its band publishes raw
+    /// with `edf_by_block = 2 + 8` and `edf_total = 3 + 8` unclamped.
+    #[test]
+    fn survival_edf_publishes_an_uncertified_negative_trace_2901() {
+        let h = array![[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]];
+        let blocks = vec![penalty_block(array![[4.0, 0.0], [0.0, 4.0]], 1.0, 0)];
+        let (edf_total, edf_by_block, penalty_block_trace, rank_bound) =
+            survival_edf_from_dense_hessian(&h, &blocks)
+                .expect("an uncertified negative trace publishes raw");
+        assert!(
+            matches!(
+                rank_bound[0],
+                gam_solve::estimate::EdfRankBound::Uncertified { smallest_pivot, band }
+                    if smallest_pivot < -band
+            ),
+            "{rank_bound:?}"
+        );
+        assert!((penalty_block_trace[0] + 8.0).abs() < 1e-12, "{penalty_block_trace:?}");
+        assert!((edf_by_block[0] - (2.0 + 8.0)).abs() < 1e-12, "{edf_by_block:?}");
+        assert!((edf_total - (3.0 + 8.0)).abs() < 1e-12, "{edf_total}");
     }
 }
 

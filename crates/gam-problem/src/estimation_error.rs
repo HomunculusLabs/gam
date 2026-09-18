@@ -736,14 +736,17 @@ pub enum EstimationError {
     },
 
     /// A penalty block's trace `λ_k·tr(H⁻¹S_k)` came out of `[0, rank_k]` by more
-    /// than the rounding band of the solve that produced it (#2901).
+    /// than the rounding band of the solve that produced it, on a block whose
+    /// `EdfRankBound` makes both ends theorems, or came out non-finite (#2901).
     ///
-    /// With a positive-semidefinite data curvature, `H ⪰ λ_k S_k` bounds that
-    /// trace by `rank_k`, so a larger value means the Hessian and the penalty it
-    /// was contracted against are not one operator. Clamping such a trace to its
-    /// rank published a plausible effective dimension from an inconsistent
-    /// operator: on `y ~ s(x) + s(x, g, bs='fs')` a raw trace of 6.09e4 against a
-    /// rank of 22 became `edf = 7.322` where the operator's own value is 9.309.
+    /// A certified `H ⪰ λ_k S_k` with `H` nonsingular gives `H ≻ 0`, so its trace lies
+    /// in `[0, rank_k]`, and one outside by more than its band means the Hessian and
+    /// the penalty it was contracted against are not one operator. Clamping such a
+    /// trace to its rank published a plausible effective dimension from an
+    /// inconsistent operator: on `y ~ s(x) + s(x, g, bs='fs')` a raw trace of 6.09e4
+    /// against a rank of 22 became `edf = 7.322` where the operator's own value is
+    /// 9.309. A non-finite trace carries no value on any block. A block that is not
+    /// certified publishes its finite raw trace instead of refusing, below zero too.
     #[error(
         "penalty block {block}'s trace {trace:.6e} lies outside [0, {rank}] by more than the \
          rounding band {band:.4e} of the solve that produced it: the Hessian and this penalty \

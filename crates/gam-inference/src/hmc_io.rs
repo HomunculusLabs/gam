@@ -1242,6 +1242,7 @@ mod tests {
             Some(FitInference {
                 edf_by_block: vec![],
                 penalty_block_trace: vec![],
+                edf_rank_bound: Vec::new(),
                 edf_total: 2.0,
                 smoothing_correction: None,
                 smoothing_correction_method: None,

@@ -617,6 +617,20 @@ impl FaerLdlt {
     }
 }
 
+/// The inertia of a symmetric matrix read off its Bunch–Kaufman factor (#2901).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SymmetricInertia {
+    pub negative: usize,
+    pub zero: usize,
+    pub positive: usize,
+    /// The smallest eigenvalue of the factor's 1×1 and 2×2 pivot blocks: NaN when any
+    /// pivot is not finite, `+∞` for an empty matrix.
+    pub smallest_pivot: f64,
+    /// `‖L̂‖_F²·‖B̂‖_∞`, a bound on `‖ |L̂||B̂||L̂ᵀ| ‖₂`, the factors' term in the
+    /// factorization's backward error.
+    pub factor_magnitude: f64,
+}
+
 /// `P A Pᵀ = L B Lᵀ` (Bunch-Kaufman) of a symmetric matrix at
 /// [`decomposition_parallelism`].
 #[derive(Clone)]
@@ -663,6 +677,69 @@ impl FaerLblt {
             b_subdiag,
             perm,
         }
+    }
+
+    /// The inertia of the factored matrix, read off `B` (#2901).
+    ///
+    /// `P A Pᵀ = L B Lᵀ` with `L` unit lower triangular is a congruence, so by
+    /// Sylvester's law of inertia `A` has as many negative, zero and positive
+    /// eigenvalues as `B`. `B` is block diagonal: a nonzero subdiagonal entry at `k`
+    /// opens a 2×2 block on `k, k + 1`, and every other index is a 1×1 block. The
+    /// eigenvalues of `B` are those of its blocks.
+    pub fn inertia(&self) -> SymmetricInertia {
+        let n = self.l.nrows();
+        let b_diag = self.b_diag.as_ref();
+        let b_subdiag = self.b_subdiag.as_ref();
+        let mut inertia = SymmetricInertia {
+            negative: 0,
+            zero: 0,
+            positive: 0,
+            smallest_pivot: f64::INFINITY,
+            factor_magnitude: 0.0,
+        };
+        let mut finite = true;
+        let mut block_norm = 0.0_f64;
+        let mut count = |value: f64, inertia: &mut SymmetricInertia| {
+            if !value.is_finite() {
+                finite = false;
+            } else if value < 0.0 {
+                inertia.negative += 1;
+            } else if value > 0.0 {
+                inertia.positive += 1;
+            } else {
+                inertia.zero += 1;
+            }
+            inertia.smallest_pivot = inertia.smallest_pivot.min(value);
+        };
+        let mut k = 0;
+        while k < n {
+            let a = b_diag[k];
+            if k + 1 < n && b_subdiag[k] != 0.0 {
+                let c = b_subdiag[k];
+                let d = b_diag[k + 1];
+                let mean = 0.5 * (a + d);
+                let radius = (0.5 * (a - d)).hypot(c);
+                count(mean - radius, &mut inertia);
+                count(mean + radius, &mut inertia);
+                block_norm = block_norm.max((a.abs() + c.abs()).max(c.abs() + d.abs()));
+                k += 2;
+            } else {
+                count(a, &mut inertia);
+                block_norm = block_norm.max(a.abs());
+                k += 1;
+            }
+        }
+        if !finite {
+            inertia.smallest_pivot = f64::NAN;
+        }
+        let mut lower_frobenius_sq = 0.0_f64;
+        for j in 0..n {
+            for i in j..n {
+                lower_frobenius_sq += self.l[(i, j)] * self.l[(i, j)];
+            }
+        }
+        inertia.factor_magnitude = lower_frobenius_sq * block_norm;
+        inertia
     }
 
     /// The dimension of the factored matrix.
@@ -5764,5 +5841,27 @@ mod general_eigenvalues_2627_tests {
         };
         let text = refusal.to_string();
         assert!(text.contains("sigma_min") && text.contains("slot 2"), "the refusal names its arm and slot: {text}");
+    }
+}
+
+#[cfg(test)]
+mod lblt_inertia_2901_tests {
+    use super::*;
+
+    /// #2901: the inertia counts a 2×2 pivot block by its eigenvalues. `[[0, 1], [1, 0]]`
+    /// admits no 1×1 pivot and has eigenvalues ±1, and `diag(3, −2, 0)` has one
+    /// eigenvalue of each sign.
+    #[test]
+    fn the_bunch_kaufman_inertia_counts_each_pivot_block_by_its_eigenvalues_2901() {
+        let swap = Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 0.0 } else { 1.0 });
+        let inertia = FaerLblt::new(swap.as_ref(), Side::Lower).inertia();
+        assert_eq!((inertia.negative, inertia.zero, inertia.positive), (1, 0, 1), "{inertia:?}");
+        assert!((inertia.smallest_pivot + 1.0).abs() <= 4.0 * f64::EPSILON, "{inertia:?}");
+
+        let diagonal = [3.0, -2.0, 0.0];
+        let mixed = Mat::<f64>::from_fn(3, 3, |i, j| if i == j { diagonal[i] } else { 0.0 });
+        let inertia = FaerLblt::new(mixed.as_ref(), Side::Lower).inertia();
+        assert_eq!((inertia.negative, inertia.zero, inertia.positive), (1, 1, 1), "{inertia:?}");
+        assert_eq!(inertia.smallest_pivot, -2.0, "{inertia:?}");
     }
 }

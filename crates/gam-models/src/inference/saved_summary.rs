@@ -515,6 +515,7 @@ fn scan_summary_payload(model: &FittedModel, scan: &ScanIntrospection) -> Summar
         null_dim: None,
         iterations: 0,
         edf_total: Some(scan.edf),
+        edf_rank_bound: Vec::new(),
         lambdas: vec![scan.lambda],
         coefficients: Vec::new(),
         smooth_terms,
@@ -664,6 +665,7 @@ pub fn saved_model_summary(model: &FittedModel) -> Result<SummaryPayload, String
         null_dim: fit.artifacts.null_space_dim.map(|dim| dim as f64),
         iterations: fit.outer_iterations,
         edf_total: fit.edf_total(),
+        edf_rank_bound: fit.edf_rank_bound().to_vec(),
         lambdas: fit.lambdas.to_vec(),
         coefficients,
         smooth_terms,
@@ -835,6 +837,12 @@ pub struct SummaryPayload {
     pub null_dim: Option<f64>,
     pub iterations: usize,
     pub edf_total: Option<f64>,
+    /// Each penalty block's rank-bound status beside the EDF fields (#2901). An
+    /// `Uncertified` or `NotAssessed` block's trace and EDF are published unclamped,
+    /// and so is `edf_total` when any block is not certified. Empty when the fit
+    /// recorded none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edf_rank_bound: Vec<gam_solve::estimate::EdfRankBound>,
     pub lambdas: Vec<f64>,
     pub coefficients: Vec<SummaryCoefficientRow>,
     /// Per-smooth significance table (mgcv-style). Empty when the model has no

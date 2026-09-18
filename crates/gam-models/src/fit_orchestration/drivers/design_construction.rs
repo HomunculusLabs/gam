@@ -3097,6 +3097,7 @@ fn fit_bounded_term_collection_with_design(
             let inf = FitInference {
                 edf_by_block,
                 penalty_block_trace,
+                edf_rank_bound: Vec::new(),
                 edf_total,
                 // This lane publishes only the first-order correction, so its
                 // retained first-order pair is its primary pair.

@@ -4276,5 +4276,13 @@
     },
     "reason": "#2922: the Bernoulli marginal-slope Jeffreys information becomes the expected Fisher information (bms/expected_information.rs), whose derivatives need row derivatives of order at most four. The pub(super) observed third-information producers (flex_third_information_all_axes, rigid_row_contracted_trace_hessian_coefficients, rigid_row_third_information_contraction, rigid_third_information_all_axes) and the fifth-order channels only they consumed (empirical_flex_row_fifth_axis_slabs #2898, standard_normal_flex_row_fifth_axis_slabs with standard_normal_flex_row_totals and StandardNormalFlexRowTotals::contraction #2901, and the row program's evaluate_fifth) are deleted. The source-removal entry at this base records the same change with the private items.",
     "evidence": "The removed map is scripts/public_api_census.py's own refusal in direct lane dy5 run i2922-ei-p1 (base d0b3432912, exact tree b13f2450, patch md5 3ea0a200): exactly these nine function identities."
+  },
+  {
+    "base": "90bd72343f65114991afe130b7274926d9093405",
+    "removed": {
+      "crates/gam-solve/src/estimate/edf_accounting.rs::penalized_edf_bundle": 1
+    },
+    "reason": "#2901: penalized_edf_bundle clamped a per-block trace outside [0, rank] to the interval. Every route now admits its traces through penalized_edf_bundle_within_bands against their solves' bands, so it has no caller and is deleted together with its gam_solve::estimate re-export.",
+    "evidence": "Gate 1192361 (gx6, acdf183fe6 + patch adc41e92): public_api_census.py reported exactly this identity as removed without an acknowledgement; gate 1198492 (gx6, 5b2af0f350 + patch 836cf538, with this entry) gave census 0."
   }
 ]

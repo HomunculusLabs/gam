@@ -632,6 +632,43 @@ fn anchored_continuation_mode_is_independent_of_the_seed_2366() {
     );
 }
 
+/// #2901, the ruling's pin (3): at the certified mode the double well's data
+/// curvature `12β² − 4` is negative and only the penalty makes `H = 12β² − 4 + λ`
+/// positive definite. `H ⪰ λS` fails, so the block has no certified rank bound, and the
+/// exact trace `λ/H` publishes unclamped above its rank of 1 instead of refusing the
+/// fit or being clamped to the rank.
+#[test]
+fn a_double_well_fit_publishes_its_uncertified_trace_2901() {
+    let family = TiltedDoubleWellFamily::new(TILT);
+    let result = fit_custom_family(&family, &[double_well_spec(2.0)], &double_well_options())
+        .expect("a certified double-well mode publishes EDF without refusing");
+    let bound = result.edf_rank_bound();
+    assert_eq!(bound.len(), 1, "one penalty block: {bound:?}");
+    assert!(
+        matches!(
+            bound[0],
+            gam_solve::estimate::EdfRankBound::Uncertified { smallest_pivot, band }
+                if smallest_pivot < -band
+        ),
+        "the double well's data curvature is resolved negative at its mode: {bound:?}"
+    );
+    let inference = result.inference.as_ref().expect("the fit computed inference");
+    let hessian = inference.penalized_hessian.as_array()[[0, 0]];
+    let lambda = result.lambdas[0];
+    let exact = lambda / hessian;
+    let trace = result.penalty_block_trace()[0];
+    assert!(trace > 1.0, "the trace {trace} lies above the block's rank of 1");
+    assert!(
+        (trace - exact).abs() <= 2.0 * f64::EPSILON * exact,
+        "the published trace {trace} is λ/H = {exact} to one solve and one product"
+    );
+    assert_eq!(
+        result.edf_by_block()[0],
+        1.0 - trace,
+        "an uncertified block's EDF is published unclamped"
+    );
+}
+
 /// The end-to-end property: a whole production fit is a function of the model
 /// and the data, not of the coefficients the caller happened to pass in.
 ///

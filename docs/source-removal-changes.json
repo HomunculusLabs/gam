@@ -538,5 +538,17 @@
     "reason": "#2971: the per-row survival intercept solve moves from an absolute probability residual to the log residual on the calibration's smaller tail, stopped at latent_anchor's derived ANCHOR_LOG_RESIDUAL_TOL/anchor_residual_rounding and certified within anchor_residual_resolution. The three pub(crate) constants were the old stop's absolute 1e-12, its 1e-8 relative tail tolerance and its 1e-8 tail threshold. Their consumers were the post-check in intercept.rs, which this commit removes, and the anchor pin in timepoint_exact/law_node_tests.rs, which this commit restates on the production certificate (approved by i2948).",
     "evidence": "git grep -n -w at 8002846e9f4625e8196d040ee093194b4cc30693 finds the three names only in crates/gam-models/src/survival/marginal_slope: their declarations (spec.rs:110, :112, :114), the post-check in intercept.rs (:102, :103, :113, :128) and law_node_tests.rs (:222 comment, :225, :230). All of those lines are removed in this commit. Gate dy5 i2971-c1a (base 63f78a364e, exact tree 6ad46789, patch md5 cae5ab6b) has RC_CHECK 0, RC_TEST 0 (5 of 5, including survival_intercept_root_does_not_follow_its_warm_seed_2971 and the three _2948 law-node tests), RC_PUBLIC_API 0, and a source-removal refusal naming exactly these three consts.",
     "base": "e2fb2948a647b516b375db5b0f1485217db5cac9"
+  },
+  {
+    "base": "90bd72343f65114991afe130b7274926d9093405",
+    "items": [
+      "crates/gam-models/src/response_geometry.rs:fn:bounded_roundoff_value",
+      "crates/gam-solve/src/estimate/edf_accounting.rs:fn:a_nan_or_negative_overflow_trace_is_not_admitted_as_saturation",
+      "crates/gam-solve/src/estimate/edf_accounting.rs:fn:a_positive_overflow_trace_resolves_to_the_saturated_rank",
+      "crates/gam-solve/src/estimate/edf_accounting.rs:fn:admit_trace",
+      "crates/gam-solve/src/estimate/edf_accounting.rs:fn:penalized_edf_bundle"
+    ],
+    "reason": "#2901 (ad-spec's EDF rank-bound ruling): every EDF route now admits its per-block traces through penalized_edf_bundle_within_bands, each within the rounding band of the solve that formed it and under an EdfRankBound certificate. A non-finite trace refuses on every block; a certified block refuses outside [-band, rank + band]; an Uncertified or NotAssessed block publishes its finite raw trace unclamped, below zero too. penalized_edf_bundle and its admit_trace clamp published a trace outside [0, rank] at its edge and saturated +inf at the rank. With the custom-family, survival, shared-tangent and deterministic-shortcut routes migrated, they have no caller and are deleted. bounded_roundoff_value was the shared-tangent route's sqrt(eps)*max(rank, 1) admission of the same traces, which the band admission replaces. The two clamp tests pinned the +inf saturation and the NaN propagation the admission now refuses; they are restated as a_positive_overflow_trace_is_refused_instead_of_saturated_2901 and a_nan_or_negative_overflow_trace_is_refused_2901. a_negative_trace_is_admitted_at_zero keeps its name as the within-band case.",
+    "evidence": "Gate 1192361 (gx6, acdf183fe6 + patch adc41e92) ran source_removal_guard.py, which reported these identities as removed without an acknowledgement. At that base, git grep -F 'penalized_edf_bundle(' finds it called only by the four migrated routes (warm_start.rs, entry.rs, fit.rs, response_geometry.rs) and its own tests, admit_trace only by penalized_edf_bundle, and bounded_roundoff_value only at the shared-tangent trace admission."
   }
 ]

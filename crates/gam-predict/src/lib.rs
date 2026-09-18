@@ -3387,6 +3387,7 @@ mod tests {
         fit.inference = Some(FitInference {
             edf_by_block: vec![0.0],
             penalty_block_trace: vec![0.0],
+            edf_rank_bound: Vec::new(),
             edf_total: 0.0,
             smoothing_correction: Some(smoothing_correction.clone()),
             smoothing_correction_method: Some(
@@ -4183,6 +4184,7 @@ mod tests {
             // empty to satisfy the EDF/lambdas count invariant.
             edf_by_block: vec![],
             penalty_block_trace: vec![],
+            edf_rank_bound: Vec::new(),
             edf_total: p as f64,
             smoothing_correction: None,
             smoothing_correction_method: None,

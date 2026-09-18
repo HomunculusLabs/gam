@@ -3743,6 +3743,7 @@ fn compact_fit_result_for_batch_preserves_unified_geometry_invariant() {
         inference: Some(FitInference {
             edf_by_block: vec![1.5],
             penalty_block_trace: vec![],
+            edf_rank_bound: Vec::new(),
             edf_total: 1.5,
             smoothing_correction: None,
             smoothing_correction_method: None,

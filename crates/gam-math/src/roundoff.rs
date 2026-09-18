@@ -60,3 +60,14 @@ pub const GRAM_SCHMIDT_PASSES: usize = 2;
 pub fn gram_schmidt_residual_band(passes: usize, directions: usize, dim: usize, norm: f64) -> f64 {
     passes.saturating_mul(directions) as f64 * accumulation_growth(dim.saturating_add(4)) * norm
 }
+
+/// Backward-error band on the eigenvalues of a symmetric `n × n` matrix whose inertia was read off an `LDLᵀ`
+/// factorization `P A Pᵀ = L̂ D̂ L̂ᵀ` (#2901).
+///
+/// The computed factors are the exact factorization of `A + E`, with `‖E‖₂` of order
+/// `n·ε·(‖A‖₂ + ‖ |L̂||D̂||L̂ᵀ| ‖₂)`: the growth of the factors enters beside the matrix (Higham, *Accuracy and
+/// Stability of Numerical Algorithms*, ch. 11). `matrix_norm` bounds `‖A‖₂` and `factor_magnitude` bounds the factor
+/// term. By Weyl each eigenvalue of `A` lies within this band of one of `A + E`, whose signs the factorization counts.
+pub fn symmetric_inertia_band(dim: usize, matrix_norm: f64, factor_magnitude: f64) -> f64 {
+    dim as f64 * f64::EPSILON * (matrix_norm + factor_magnitude)
+}

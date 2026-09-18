@@ -152,6 +152,7 @@ mod per_term_edf_tests {
             inference: Some(FitInference {
                 edf_by_block: vec![20.0, 20.0],
                 penalty_block_trace: Vec::new(),
+                edf_rank_bound: Vec::new(),
                 edf_total: 28.0,
                 smoothing_correction: None,
                 smoothing_correction_method: None,
@@ -262,6 +263,7 @@ mod per_term_edf_tests {
                 // tr_kk over the single penalty block = dim − edf = 10 − 7 = 3.
                 edf_by_block: vec![7.0],
                 penalty_block_trace: vec![3.0],
+                edf_rank_bound: Vec::new(),
                 edf_total,
                 smoothing_correction: None,
                 smoothing_correction_method: None,
@@ -334,6 +336,7 @@ mod per_term_edf_tests {
             inference: Some(FitInference {
                 edf_by_block: vec![edf_per_smooth; n_levels],
                 penalty_block_trace: traces,
+                edf_rank_bound: Vec::new(),
                 edf_total,
                 smoothing_correction: None,
                 smoothing_correction_method: None,
@@ -536,6 +539,7 @@ mod per_term_edf_tests {
             inference: Some(FitInference {
                 edf_by_block: vec![0.0; n_blocks],
                 penalty_block_trace: traces,
+                edf_rank_bound: Vec::new(),
                 edf_total: p as f64,
                 smoothing_correction: None,
                 smoothing_correction_method: None,
@@ -2706,6 +2710,14 @@ pub struct FitInference {
     /// do not record traces; consumers fall back to `coefficient_influence`.
     #[serde(default)]
     pub penalty_block_trace: Vec<f64>,
+    /// Why each block's trace is confined to `[0, rank_k]`, or that it is not
+    /// certified (#2901), aligned 1:1 with `penalty_block_trace`. An
+    /// `Uncertified` block publishes its raw trace and an unclamped
+    /// `edf_by_block` entry, and `edf_total` is unclamped whenever any block is not
+    /// certified. Empty for fits saved before this field existed and for paths
+    /// that record no rank bound.
+    #[serde(default)]
+    pub edf_rank_bound: Vec<crate::estimate::EdfRankBound>,
     pub edf_total: f64,
     pub smoothing_correction: Option<Array2<f64>>,
     /// Method that produced `smoothing_correction`. Required whenever a matrix
@@ -2805,6 +2817,8 @@ struct FitInferenceWire {
     edf_by_block: Vec<f64>,
     #[serde(default)]
     penalty_block_trace: Vec<f64>,
+    #[serde(default)]
+    edf_rank_bound: Vec<crate::estimate::EdfRankBound>,
     edf_total: f64,
     smoothing_correction: Option<Array2<f64>>,
     smoothing_correction_method: Option<SmoothingCorrectionMethod>,
@@ -2844,6 +2858,7 @@ impl From<FitInferenceWire> for FitInference {
         Self {
             edf_by_block: wire.edf_by_block,
             penalty_block_trace: wire.penalty_block_trace,
+            edf_rank_bound: wire.edf_rank_bound,
             edf_total: wire.edf_total,
             smoothing_correction: wire.smoothing_correction,
             smoothing_correction_method: wire.smoothing_correction_method,
@@ -3402,6 +3417,7 @@ mod assembly_inner_status_gate_tests {
             inference: Some(FitInference {
                 edf_by_block: vec![1.0],
                 penalty_block_trace: vec![0.0],
+                edf_rank_bound: Vec::new(),
                 edf_total: 1.0,
                 smoothing_correction: None,
                 smoothing_correction_method: None,
@@ -3651,6 +3667,37 @@ mod assembly_inner_status_gate_tests {
             decoded.beta_standard_errors_corrected(),
             fit.beta_standard_errors_corrected()
         );
+    }
+
+    /// #2901: each block's EDF rank-bound status survives the saved-fit wire, and a fit
+    /// written before the field existed parses back with it empty.
+    #[test]
+    fn the_edf_rank_bound_status_round_trips_and_reads_empty_when_absent_2901() {
+        let mut parts = parts_with_inner_status(PirlsStatus::Converged);
+        let bounds = vec![crate::estimate::EdfRankBound::Uncertified {
+            smallest_pivot: -3.3509,
+            band: 1.0e-15,
+        }];
+        parts
+            .inference
+            .as_mut()
+            .expect("the fixture carries inference")
+            .edf_rank_bound = bounds.clone();
+        let fit = UnifiedFitResult::try_from_parts(parts).expect("a consistent fit mints");
+        let encoded = serde_json::to_value(&fit).expect("serialize the fit");
+        let decoded: UnifiedFitResult =
+            serde_json::from_value(encoded.clone()).expect("the fit parses back");
+        assert_eq!(decoded.edf_rank_bound(), bounds.as_slice());
+
+        let mut absent = encoded;
+        absent["inference"]
+            .as_object_mut()
+            .expect("the fit serializes its inference block")
+            .remove("edf_rank_bound")
+            .expect("the status was written");
+        let decoded: UnifiedFitResult =
+            serde_json::from_value(absent).expect("a fit without the status parses");
+        assert!(decoded.edf_rank_bound().is_empty(), "{:?}", decoded.edf_rank_bound());
     }
 
     /// #2955: a covariance whose diagonal `se_from_covariance` refuses is refused
@@ -5466,6 +5513,15 @@ impl UnifiedFitResult {
         self.inference
             .as_ref()
             .map(|inf| inf.penalty_block_trace.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Per-block rank-bound status aligned 1:1 with `penalty_block_trace` (#2901).
+    /// Empty when the producing path recorded none.
+    pub fn edf_rank_bound(&self) -> &[crate::estimate::EdfRankBound] {
+        self.inference
+            .as_ref()
+            .map(|inf| inf.edf_rank_bound.as_slice())
             .unwrap_or(&[])
     }
 

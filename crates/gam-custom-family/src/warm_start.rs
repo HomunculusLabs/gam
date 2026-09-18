@@ -223,7 +223,8 @@ pub struct BlockwiseFitResultParts {
     /// Tuple layout: `(edf_total, edf_by_penalty, block_edf, penalty_trace)`,
     /// where `penalty_trace[k] = λ_k·tr(H⁻¹S_k)` feeds the per-term EDF
     /// decomposition `|coeff_range| − Σ tr_k` (issue #1219).
-    pub precomputed_edf: Option<(f64, Vec<f64>, Vec<f64>, Vec<f64>)>,
+    pub precomputed_edf:
+        Option<(f64, Vec<f64>, Vec<f64>, Vec<f64>, Vec<gam_solve::estimate::EdfRankBound>)>,
     /// Selected per-component log-smoothing parameters of the full-width JOINT
     /// penalty at ρ* (gam#1587/#561). Surfaced on `FitArtifacts.joint_log_lambdas`
     /// so a joint-penalized family (the multinomial centered metric) can recover
@@ -313,7 +314,10 @@ pub(crate) fn custom_family_blockwise_edf(
     penalized_hessian: &Array2<f64>,
     specs: &[ParameterBlockSpec],
     lambdas: &ndarray::ArrayView1<'_, f64>,
-) -> Result<(f64, Vec<f64>, Vec<f64>, Vec<f64>), CustomFamilyError> {
+) -> Result<
+    (f64, Vec<f64>, Vec<f64>, Vec<f64>, Vec<gam_solve::estimate::EdfRankBound>),
+    CustomFamilyError,
+> {
     use gam_solve::estimate::reml::reml_outer_engine::penalty_matrix_root;
 
     let p = penalized_hessian.nrows();
@@ -343,12 +347,27 @@ pub(crate) fn custom_family_blockwise_edf(
         format!("custom-family edf: exact penalized-Hessian factorization failed: {error}")
     })?;
 
-    // Raw per-penalty traces and their block ranks, handed to the shared
-    // accounting below. Admission, the non-finite resolution and the
-    // `[mp, p]` floor are stated once in `penalized_edf_bundle` (#2470);
-    // this route previously floored `edf_total` at 0, which permits an
-    // effective dimension below the joint penalty null space.
+    // Per-penalty traces, the rounding band of the solve behind each, each
+    // penalty's rank-bound certificate and their block ranks, handed to the shared
+    // accounting below (#2470, #2901). A custom family's penalized Hessian is the
+    // observed information of an arbitrary likelihood, so `H ⪰ λ_k S_k` is
+    // certified per penalty from the inertia of `H − λ_k S_k` shifted by its rounding
+    // band. The tilted double well of
+    // #2366 traces 2.945 against a rank of 1 at a certified mode and publishes that
+    // trace unclamped. This route previously floored `edf_total` at 0, which permits
+    // an effective dimension below the joint penalty null space.
+    let solve = |values: &mut [f64]| -> Result<(), String> {
+        let solved = factor.solve(&ndarray::Array1::from(values.to_vec()))?;
+        for (slot, value) in values.iter_mut().zip(solved.iter()) {
+            *slot = *value;
+        }
+        Ok(())
+    };
+    let inverse_one_norm = gam_linalg::condition::estimate_inverse_one_norm(p, solve, solve)
+        .map_err(|error| format!("custom-family edf: inverse-norm estimate failed: {error}"))?;
     let mut raw_traces = vec![0.0_f64; expected_rho];
+    let mut trace_bands = vec![0.0_f64; expected_rho];
+    let mut rank_bounds = Vec::with_capacity(expected_rho);
     let mut penalty_ranks = vec![0_usize; expected_rho];
     // `Σ_k S_k` in the joint layout, whose rank gives the null-space floor.
     // Unscaled on purpose: the floor is a structural property of the penalty
@@ -379,19 +398,21 @@ pub(crate) fn custom_family_blockwise_edf(
             // multi-penalty block; consulting `nullspace_dims` here is also
             // incorrect after canonical pullback, which intentionally clears
             // stale pre-transform nullities.
-            let penalty_rank = penalty_matrix_root(&s_local)
-                .map_err(|error| {
-                    format!(
-                        "custom-family edf: penalty {global_k} rank factorization failed: {error}"
-                    )
-                })?
-                .nrows();
+            let root = penalty_matrix_root(&s_local).map_err(|error| {
+                format!("custom-family edf: penalty {global_k} rank factorization failed: {error}")
+            })?;
+            let penalty_rank = root.nrows();
             let mut s_full = Array2::<f64>::zeros((p, p));
+            // The root's rows are its modes (`S_k = RᵀR`); they become the columns
+            // of the right-hand side in the joint layout.
+            let mut root_columns = Array2::<f64>::zeros((p, penalty_rank));
             if s_local.nrows() == p && s_local.ncols() == p {
                 s_full.assign(&s_local);
+                root_columns.assign(&root.t());
             } else if s_local.nrows() == block_cols && s_local.ncols() == block_cols {
                 let r = block_col_start..block_col_start + block_cols;
-                s_full.slice_mut(ndarray::s![r.clone(), r]).assign(&s_local);
+                s_full.slice_mut(ndarray::s![r.clone(), r.clone()]).assign(&s_local);
+                root_columns.slice_mut(ndarray::s![r, ..]).assign(&root.t());
             } else {
                 return Err(CustomFamilyError::trial_point(format!(
                     "custom-family edf: penalty {global_k} materialized to {}x{}, expected {p}x{p} or {block_cols}x{block_cols}",
@@ -399,16 +420,42 @@ pub(crate) fn custom_family_blockwise_edf(
                     s_local.ncols()
                 )));
             }
-            // tr(H⁻¹ S_k) via H Z = S_k, summing the diagonal of Z.
-            let z = factor.solvemulti(&s_full).map_err(|e| {
-                format!("custom-family edf trace solve failed for penalty {global_k}: {e}")
-            })?;
-            let mut trace = 0.0_f64;
-            for d in 0..p {
-                trace += z[[d, d]];
+            // λ_k tr(H⁻¹S_k) = λ_k Σ_c r_cᵀ H⁻¹ r_c over the root columns, priced
+            // against the Hessian the solve represents.
+            if lambda > 0.0 {
+                let solution = factor.solvemulti(&root_columns).map_err(|e| {
+                    format!("custom-family edf trace solve failed for penalty {global_k}: {e}")
+                })?;
+                let (trace, band) = gam_linalg::roundoff::solved_penalty_trace(
+                    lambda,
+                    root_columns.view(),
+                    solution.view(),
+                    penalized_hessian.view(),
+                    inverse_one_norm,
+                )
+                .map_err(|error| {
+                    format!("custom-family edf: penalty {global_k} trace band failed: {error}")
+                })?;
+                raw_traces[global_k] = trace;
+                trace_bands[global_k] = band;
             }
+            // `λ_k S_k` on the block it penalizes: a full-width penalty at the origin, a
+            // local one at this block's columns.
+            let block_start = if s_local.nrows() == p { 0 } else { block_col_start };
+            rank_bounds.push(
+                gam_solve::estimate::numerical_rank_bound(
+                    penalized_hessian.view(),
+                    (&s_local * lambda.max(0.0)).view(),
+                    block_start,
+                    gam_runtime::resource::MemoryGovernor::global(),
+                )
+                .map_err(|error| CustomFamilyError::NumericalFailure {
+                    reason: format!(
+                        "custom-family edf: penalty {global_k} rank certificate failed: {error}"
+                    ),
+                })?,
+            );
             joint_penalty += &s_full;
-            raw_traces[global_k] = if lambda > 0.0 { lambda * trace } else { 0.0 };
             penalty_ranks[global_k] = penalty_rank;
         }
         penalty_offset += spec.penalties.len();
@@ -418,23 +465,39 @@ pub(crate) fn custom_family_blockwise_edf(
     let joint_penalty_rank = penalty_matrix_root(&joint_penalty)
         .map_err(|error| CustomFamilyError::trial_point(format!("custom-family edf: joint penalty rank failed: {error}")))?
         .nrows();
-    let bundle = gam_solve::estimate::penalized_edf_bundle(
+    let bundle = gam_solve::estimate::penalized_edf_bundle_within_bands(
         &raw_traces,
+        &trace_bands,
+        &rank_bounds,
         &penalty_ranks,
         p,
         (p - joint_penalty_rank.min(p)) as f64,
-    );
+    )
+    .map_err(|error| CustomFamilyError::NumericalFailure {
+        reason: format!("custom-family edf: {error}"),
+    })?;
     let edf_by_penalty = bundle.edf_by_block;
     let penalty_trace = bundle.penalty_block_trace;
+    let rank_bound = bundle.rank_bound;
     // A block's edf is its column count minus the trace its penalties spend, so
     // multiple penalties on one block compose. It is built from the ADMITTED
     // traces above, not the raw products, so the block figure and the per-penalty
-    // figures cannot disagree about how much each penalty absorbed.
+    // figures cannot disagree about how much each penalty absorbed. It is clamped
+    // to the block's column count only when every penalty on the block is certified
+    // (#2901).
     let block_edf: Vec<f64> = block_spans
         .iter()
         .map(|&(start, count, block_cols)| {
             let spent: f64 = penalty_trace[start..start + count].iter().sum();
-            (block_cols as f64 - spent).clamp(0.0, block_cols as f64)
+            let raw = block_cols as f64 - spent;
+            if rank_bound[start..start + count]
+                .iter()
+                .all(gam_solve::estimate::EdfRankBound::is_certified)
+            {
+                raw.clamp(0.0, block_cols as f64)
+            } else {
+                raw
+            }
         })
         .collect();
     let edf_total = bundle.edf_total;
@@ -445,7 +508,7 @@ pub(crate) fn custom_family_blockwise_edf(
     {
         return Err(CustomFamilyError::trial_point("custom-family edf: non-finite effective degrees of freedom".to_string()));
     }
-    Ok((edf_total, edf_by_penalty, block_edf, penalty_trace))
+    Ok((edf_total, edf_by_penalty, block_edf, penalty_trace, rank_bound))
 }
 
 /// Compute reduced-space effective degrees of freedom for a converged fit,
@@ -463,7 +526,7 @@ pub(crate) fn reduced_blockwise_edf(
     reduced_geometry: Option<&FitGeometry>,
     canonical: &gam_identifiability::canonical::CanonicalSpecs,
     lambdas: &Array1<f64>,
-) -> Option<(f64, Vec<f64>, Vec<f64>, Vec<f64>)> {
+) -> Option<(f64, Vec<f64>, Vec<f64>, Vec<f64>, Vec<gam_solve::estimate::EdfRankBound>)> {
     let geom = reduced_geometry?;
     match custom_family_blockwise_edf(
         geom.penalized_hessian.as_array(),
@@ -898,19 +961,25 @@ pub fn blockwise_fit_from_parts(
     // (CTN transformation-normal, Dirichlet, …) reports `edf_total` /
     // per-block `edf` like the standard GAM path, instead of leaving inference
     // unpopulated. Optional row evidence is not part of this calculation.
-    let (edf_total, edf_by_penalty, block_edf, penalty_trace): (f64, Vec<f64>, Vec<f64>, Vec<f64>) =
+    let (edf_total, edf_by_penalty, block_edf, penalty_trace, rank_bound): (
+        f64,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<gam_solve::estimate::EdfRankBound>,
+    ) =
         match precomputed_edf {
             // Reduced-space edf supplied by the caller (the principled path:
             // the trace is computed where the Hessian is full rank, then
             // reported on the raw fit — exact because the trace edf is
             // reparameterization-invariant).
-            Some((edf_total, edf_by_penalty, block_edf, penalty_trace)) => {
-                (edf_total, edf_by_penalty, block_edf, penalty_trace)
+            Some((edf_total, edf_by_penalty, block_edf, penalty_trace, rank_bound)) => {
+                (edf_total, edf_by_penalty, block_edf, penalty_trace, rank_bound)
             }
             // Compute from coefficient precision when the caller did not already
             // supply the basis-invariant reduced-space traces.
             None => {
-                let (edf_total, edf_by_penalty, block_edf, penalty_trace) =
+                let (edf_total, edf_by_penalty, block_edf, penalty_trace, rank_bound) =
                     custom_family_blockwise_edf(
                         geom.penalized_hessian.as_array(),
                         specs,
@@ -922,7 +991,7 @@ pub fn blockwise_fit_from_parts(
                             "{reason}; refusing to assemble a fit without EDF/inference"
                         ),
                     })?;
-                (edf_total, edf_by_penalty, block_edf, penalty_trace)
+                (edf_total, edf_by_penalty, block_edf, penalty_trace, rank_bound)
             }
         };
 
@@ -982,6 +1051,7 @@ pub fn blockwise_fit_from_parts(
     let inference = Some(gam_solve::model_types::FitInference {
         edf_by_block: edf_by_penalty,
         penalty_block_trace: penalty_trace,
+        edf_rank_bound: rank_bound,
         edf_total,
         // This custom-family lane only ever computes the first-order IFT
         // correction (never a cubature upgrade — see `smoothing_corrected`'s
@@ -1538,5 +1608,87 @@ mod test_support {
                 Arc::new(AtomicUsize::new(0)),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod edf_trace_admission_2901_tests {
+    use super::*;
+    use gam_linalg::matrix::DesignMatrix;
+    use ndarray::array;
+
+    /// #2901: `H ⪰ λS` bounds each penalty's trace by its rank, so a Hessian that
+    /// is certified numerically on a custom family, whose Hessian is observed
+    /// information. `H = 5I` against `λS = 4I` certifies and publishes `8/5`. `H = I`
+    /// against the same penalty has no certified rank bound: its raw trace 8 publishes
+    /// unclamped, where the old clamp published the rank 2. A non-positive-definite
+    /// `H = −I` is not certified either, so its trace −8 below its band publishes raw,
+    /// as the indefinite ambient precision of a cone-constrained mode does (#2635).
+    #[test]
+    fn the_custom_family_edf_certifies_numerically_and_publishes_an_uncertified_negative_trace_2901(
+    ) {
+        let specs = vec![ParameterBlockSpec {
+            name: "rank_two_block".to_string(),
+            design: DesignMatrix::from(Array2::<f64>::zeros((2, 2))),
+            offset: Array1::zeros(2),
+            penalties: vec![PenaltyMatrix::Dense(array![[4.0, 0.0], [0.0, 4.0]])],
+            nullspace_dims: vec![],
+            initial_log_lambdas: array![0.0],
+            initial_beta: None,
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        }];
+        let lambdas = array![1.0];
+        let (edf_total, _, _, penalty_trace, rank_bound) = custom_family_blockwise_edf(
+            &Array2::from_diag(&array![5.0, 5.0]),
+            &specs,
+            &lambdas.view(),
+        )
+        .expect("a dominated trace publishes");
+        approx::assert_relative_eq!(penalty_trace[0], 1.6, epsilon = 1e-12);
+        approx::assert_relative_eq!(edf_total, 0.4, epsilon = 1e-12);
+        assert!(
+            matches!(
+                rank_bound[0],
+                gam_solve::estimate::EdfRankBound::Certified(
+                    gam_solve::estimate::EdfRankCertificate::Numerical { .. }
+                )
+            ),
+            "{rank_bound:?}"
+        );
+
+        let (unbounded_total, edf_by_penalty, block_edf, unbounded_trace, unbounded_bound) =
+            custom_family_blockwise_edf(&Array2::eye(2), &specs, &lambdas.view())
+                .expect("an indefinite data curvature publishes its raw trace");
+        assert!(
+            matches!(
+                unbounded_bound[0],
+                gam_solve::estimate::EdfRankBound::Uncertified { smallest_pivot, band }
+                    if smallest_pivot < -band
+            ),
+            "{unbounded_bound:?}"
+        );
+        approx::assert_relative_eq!(unbounded_trace[0], 8.0, epsilon = 1e-12);
+        approx::assert_relative_eq!(edf_by_penalty[0], -6.0, epsilon = 1e-12);
+        approx::assert_relative_eq!(block_edf[0], -6.0, epsilon = 1e-12);
+        approx::assert_relative_eq!(unbounded_total, -6.0, epsilon = 1e-12);
+
+        let (negative_total, negative_by_penalty, negative_block, negative_trace, negative_bound) =
+            custom_family_blockwise_edf(&(-Array2::<f64>::eye(2)), &specs, &lambdas.view())
+                .expect("an uncertified negative trace publishes raw");
+        assert!(
+            matches!(
+                negative_bound[0],
+                gam_solve::estimate::EdfRankBound::Uncertified { smallest_pivot, band }
+                    if smallest_pivot < -band
+            ),
+            "{negative_bound:?}"
+        );
+        approx::assert_relative_eq!(negative_trace[0], -8.0, epsilon = 1e-12);
+        approx::assert_relative_eq!(negative_by_penalty[0], 10.0, epsilon = 1e-12);
+        approx::assert_relative_eq!(negative_block[0], 10.0, epsilon = 1e-12);
+        approx::assert_relative_eq!(negative_total, 10.0, epsilon = 1e-12);
     }
 }

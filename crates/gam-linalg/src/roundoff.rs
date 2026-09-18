@@ -248,9 +248,78 @@ pub fn solved_penalty_trace_band(
     Ok(lambda.abs() * (solve_band + accumulation_growth(rows * columns) * absolute_sum))
 }
 
+/// The trace `t̂ = λ·Σ_c r_cᵀ x̂_c` of solved penalty-root columns, with its
+/// [`solved_penalty_trace_band`] (#2901).
+///
+/// `rhs` holds the columns `r_c` a route solved against `operator`, and `solution`
+/// the computed `x̂_c`. For a pseudoinverse solve, `rhs` is the root projected onto
+/// the operator's range, the right-hand side that solve reproduces. The true
+/// residual `operator·x̂_c − r_c` is formed here, so every route prices its trace
+/// against the operator its solve represents.
+pub fn solved_penalty_trace(
+    lambda: f64,
+    rhs: ndarray::ArrayView2<'_, f64>,
+    solution: ndarray::ArrayView2<'_, f64>,
+    operator: ndarray::ArrayView2<'_, f64>,
+    inverse_one_norm_estimate: f64,
+) -> Result<(f64, f64), String> {
+    if operator.nrows() != rhs.nrows() || operator.ncols() != solution.nrows() {
+        return Err(format!(
+            "solved_penalty_trace: a {}x{} operator against a {}x{} right-hand side and a {}x{} \
+             solution",
+            operator.nrows(),
+            operator.ncols(),
+            rhs.nrows(),
+            rhs.ncols(),
+            solution.nrows(),
+            solution.ncols()
+        ));
+    }
+    let residual = operator.dot(&solution) - &rhs;
+    let matrix_max_abs = operator
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    let band = solved_penalty_trace_band(
+        lambda,
+        rhs,
+        solution,
+        residual.view(),
+        matrix_max_abs,
+        inverse_one_norm_estimate,
+    )?;
+    let trace: f64 = rhs.iter().zip(solution.iter()).map(|(r, x)| r * x).sum();
+    Ok((lambda * trace, band))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The composed trace is `λ·Σ r·x̂`, and its band covers the error of a
+    /// displaced solution through the residual it forms against the operator.
+    #[test]
+    fn a_solved_penalty_trace_prices_its_solution_against_the_operator_2901() {
+        let operator = ndarray::array![[2.0, 0.0], [0.0, 4.0]];
+        let rhs = ndarray::array![[1.0, 0.0], [0.0, 1.0]];
+        let exact = ndarray::array![[0.5, 0.0], [0.0, 0.25]];
+        let (trace, band) =
+            solved_penalty_trace(3.0, rhs.view(), exact.view(), operator.view(), 0.5)
+                .expect("exact solve");
+        assert_eq!(trace, 2.25);
+        let displaced = ndarray::array![[0.501, 0.0], [0.0, 0.25]];
+        let (displaced_trace, displaced_band) =
+            solved_penalty_trace(3.0, rhs.view(), displaced.view(), operator.view(), 0.5)
+                .expect("displaced solve");
+        let error = (displaced_trace - trace).abs();
+        assert!(
+            error <= displaced_band,
+            "displaced trace error {error:e} escapes its band {displaced_band:e}"
+        );
+        assert!(
+            error > band,
+            "the exact solve's band {band:e} must not cover a displacement of {error:e}"
+        );
+    }
 
     /// #2901: a solve left inexact by a known perturbation moves the trace by
     /// `−λ·Σ x_cᵀρ_c`, and the band carries it. `H = diag(4, 0.5)`, `r = (1, 1)`,

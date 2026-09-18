@@ -2489,6 +2489,8 @@ where
     // Raw per-block penalty trace tr_kk = λ_kk·tr(H⁻¹S_kk), retained so per-term
     // EDF can be assembled as |coeff_range| − Σ tr_kk (issue #1219).
     let mut penalty_block_trace = vec![0.0; k];
+    // Each block's rank-bound status beside its trace (#2901).
+    let mut edf_rank_bound: Vec<crate::estimate::EdfRankBound> = Vec::new();
     let mut edf_total = 0.0;
     let mut smoothing_correction = None;
     let mut smoothing_correction_method = None;
@@ -2591,6 +2593,18 @@ where
         let mut traces = vec![0.0f64; k];
         let mut trace_bands = vec![0.0f64; k];
         let inverse_one_norm = factor.inverse_one_norm_estimate(p_dim)?;
+        // #2901: `tr_k ≤ rank_k` needs `H ⪰ λ_k S̃_k`. Nonnegative working weights and
+        // no Firth term give `XᵀWX ⪰ 0`, which certifies every block without a
+        // factorization. An observed-information weight can be negative (non-canonical
+        // links, gamma-log, NB-log) and the Firth curvature is not sign-definite, so
+        // otherwise each block is certified from the inertia of `H − λ_k S̃_k` shifted by
+        // its rounding band, factored dense or sparse as `H` is stored.
+        let structural_rank_bound = !cfg.firth_bias_reduction
+            && pirls_res
+                .finalweights
+                .iter()
+                .all(|weight| weight.is_finite() && *weight >= 0.0);
+        let mut rank_bounds: Vec<crate::estimate::EdfRankBound> = Vec::with_capacity(k);
         for (kk, cp) in applied_penalties.iter().enumerate() {
             // Build the p × rank RHS with nonzeros only in [start..end] rows.
             let r = &cp.col_range;
@@ -2609,12 +2623,11 @@ where
                     frob += sol[[r.start + row, col]] * rhs[[r.start + row, col]];
                 }
             }
-            // The per-block penalty trace `tr_kk = λ_kk·tr(H⁻¹ S_kk)` is confined
-            // to `[0, rank_kk]` when the data curvature is PSD. It is published
-            // only inside that interval within the rounding band of this solve
-            // (#2901), which the shared accounting reads. A trace outside it by
-            // more, including a `+∞` overflow of a ceiling-λ block (gam#1379), is
-            // refused by name rather than clamped to a plausible rank.
+            // The per-block penalty trace `tr_kk = λ_kk·tr(H⁻¹ S_kk)` is admitted within
+            // the rounding band of this solve (#2901). A non-finite one (a `+∞`
+            // overflow of a ceiling-λ block, gam#1379) refuses by name; outside
+            // `[−band, rank + band]` it refuses only on a block whose rank bound is
+            // certified, and an uncertified block publishes it unclamped.
             let solved_rhs = factor.solved_rhs(&rhs);
             let residual = h.dot_matrix(&sol) - &solved_rhs;
             trace_bands[kk] = gam_linalg::roundoff::solved_penalty_trace_band(
@@ -2626,6 +2639,32 @@ where
                 inverse_one_norm,
             )
             .map_err(EstimationError::InvalidInput)?;
+            rank_bounds.push(if structural_rank_bound {
+                crate::estimate::EdfRankBound::Certified(
+                    crate::estimate::EdfRankCertificate::Structural,
+                )
+            } else {
+                let scaled_penalty_block = cp.root.t().dot(&cp.root) * lambdas[kk];
+                let governor = gam_runtime::resource::MemoryGovernor::global();
+                match h {
+                    gam_linalg::matrix::SymmetricMatrix::Dense(dense) => {
+                        crate::estimate::numerical_rank_bound(
+                            dense.view(),
+                            scaled_penalty_block.view(),
+                            r.start,
+                            governor,
+                        )?
+                    }
+                    gam_linalg::matrix::SymmetricMatrix::Sparse(sparse) => {
+                        crate::estimate::sparse_numerical_rank_bound(
+                            sparse,
+                            scaled_penalty_block.view(),
+                            r.start,
+                            governor,
+                        )?
+                    }
+                }
+            });
             traces[kk] = lambdas[kk] * frob;
         }
         let block_ranks: Vec<usize> = applied_penalties.iter().map(|cp| cp.rank()).collect();
@@ -2633,6 +2672,7 @@ where
         let bundle = penalized_edf_bundle_within_bands(
             &traces,
             &trace_bands,
+            &rank_bounds,
             &block_ranks,
             edf_coefficients,
             edf_penalty_nullity,
@@ -2640,6 +2680,7 @@ where
         edf_total = bundle.edf_total;
         penalty_block_trace.clone_from(&bundle.penalty_block_trace);
         edf_by_block.clone_from(&bundle.edf_by_block);
+        edf_rank_bound.clone_from(&bundle.rank_bound);
         traces.clone_from(&bundle.penalty_block_trace);
 
         // Reconcile the EDF accounting with the influence matrix F = H⁻¹X'WX.
@@ -2750,9 +2791,12 @@ where
                         applied_penalties.iter().map(|cp| cp.rank()).collect();
                     let (edf_coefficients_f, edf_penalty_nullity_f) =
                         factor.edf_dimensions(p_orig, mp);
+                    // The rank bounds of the trace channel carry over: rotating by
+                    // `Qs` leaves the spectrum of `H − λ_k S̃_k` unchanged.
                     let bundle_f = penalized_edf_bundle_within_bands(
                         &traces_f,
                         &trace_bands_f,
+                        &rank_bounds,
                         &block_ranks_f,
                         edf_coefficients_f,
                         edf_penalty_nullity_f,
@@ -2760,6 +2804,7 @@ where
                     edf_total = bundle_f.edf_total;
                     penalty_block_trace.clone_from(&bundle_f.penalty_block_trace);
                     edf_by_block.clone_from(&bundle_f.edf_by_block);
+                    edf_rank_bound.clone_from(&bundle_f.rank_bound);
                 }
             }
         }
@@ -3934,6 +3979,7 @@ where
     let inference = opts.compute_inference.then(|| FitInference {
         edf_by_block,
         penalty_block_trace,
+        edf_rank_bound,
         edf_total,
         smoothing_correction,
         smoothing_correction_method,

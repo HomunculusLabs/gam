@@ -74,15 +74,26 @@ use std::path::Path;
 // the standard errors derive from `UnifiedFitResult::covariance_conditional` /
 // `covariance_corrected`. A v18 payload's copies were checked bit for bit against
 // those stores at save, so it still loads (`payload_version_is_readable`).
-pub const MODEL_PAYLOAD_VERSION: u32 = 19;
+// v20 publishes each penalty block's EDF rank-bound status beside its trace
+// (`FitInference::edf_rank_bound`, #2901): a trace that is not certified to lie in
+// `[0, rank]` is published unclamped, and the status says so. The field carries a
+// serde default, and a v19 or v18 payload, which predates it, loads with an empty
+// list, which reads as "none recorded".
+pub const MODEL_PAYLOAD_VERSION: u32 = 20;
 
-/// The payload version this binary reads besides its own: the schema whose only
-/// difference is the inference block's redundant covariance copies (#2955).
+/// The schema before the EDF rank-bound status (#2901), whose only difference is
+/// that field's absence.
+const EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION: u32 = 19;
+
+/// The schema whose only difference from [`EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION`]
+/// is the inference block's redundant covariance copies (#2955).
 const COVARIANCE_COPIES_PAYLOAD_VERSION: u32 = 18;
 
 /// Whether this binary reads a payload written at `version`.
 fn payload_version_is_readable(version: u32) -> bool {
-    version == MODEL_PAYLOAD_VERSION || version == COVARIANCE_COPIES_PAYLOAD_VERSION
+    version == MODEL_PAYLOAD_VERSION
+        || version == EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION
+        || version == COVARIANCE_COPIES_PAYLOAD_VERSION
 }
 
 /// Coefficient parameterization of a saved transformation-normal (CTN) fit.
@@ -7252,6 +7263,33 @@ mod tests {
         .validate_payload_version()
         .expect_err("the version before the covariance-copies schema is refused");
         assert!(err.to_string().contains("payload schema mismatch"));
+    }
+
+    /// #2901: a payload written before the EDF rank-bound status, at v19 or at the
+    /// covariance-copies v18, passes the version gate. The field it lacks,
+    /// `FitInference::edf_rank_bound`, carries `#[serde(default)]`, so it reads as empty.
+    #[test]
+    fn the_payload_before_the_edf_rank_bound_status_is_readable_2901() {
+        let blocks = || {
+            vec![FittedBlock {
+                beta: array![0.1],
+                role: BlockRole::Mean,
+                edf: 1.0,
+                lambdas: Array1::zeros(0),
+            }]
+        };
+        for version in [
+            MODEL_PAYLOAD_VERSION,
+            EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION,
+            COVARIANCE_COPIES_PAYLOAD_VERSION,
+        ] {
+            FittedModel::from_payload(marginal_slope_payload(version, saved_fit(blocks())))
+                .payload()
+                .validate_payload_version()
+                .unwrap_or_else(|error| panic!("payload version {version} is readable: {error}"));
+        }
+        assert_eq!(EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION, MODEL_PAYLOAD_VERSION - 1);
+        assert_eq!(COVARIANCE_COPIES_PAYLOAD_VERSION, EDF_RANK_BOUND_ABSENT_PAYLOAD_VERSION - 1);
     }
 
     /// #2902 row 34: at payload version 17 a binomial beta-logistic link's
