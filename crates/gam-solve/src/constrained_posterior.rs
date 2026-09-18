@@ -154,7 +154,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 mod boundary_mode;
-pub use boundary_mode::{BoundaryModeApproximation, BoundaryModeCertificate};
+pub use boundary_mode::{BoundaryModeApproximation, BoundaryModeCertificate, BoundaryModeRefusal};
 
 /// Relative accuracy demanded of the orthant-moment cubature, measured against
 /// the PRE-TRUNCATION scale `sd_i = sqrt(W_ii)` so the criterion is invariant
@@ -586,6 +586,11 @@ pub struct ConePosteriorMomentDecline {
     /// persisted before it existed.
     #[serde(default)]
     pub active_rows: Vec<usize>,
+    /// Why no boundary-mode approximation replaced this decline, with the measured
+    /// certificate (such as its overturn tail mass) when it got that far. `None` when no
+    /// approximation was attempted, and on declines persisted before it existed.
+    #[serde(default)]
+    pub boundary_approximation_refusal: Option<boundary_mode::BoundaryModeRefusal>,
 }
 
 impl ConePosteriorMomentDecline {
@@ -624,13 +629,20 @@ impl ConePosteriorMomentDecline {
             ambient_precision_failure,
             properness,
             active_rows,
+            boundary_approximation_refusal: None,
         })
     }
 
     pub fn summary(&self) -> String {
+        let refusal = self
+            .boundary_approximation_refusal
+            .as_ref()
+            .map_or_else(String::new, |refusal| {
+                format!("; no boundary-mode approximation: {refusal}")
+            });
         format!(
             "ambient covariance route declined ({}); {}; the converged mode binds constraint \
-             row(s) {:?}",
+             row(s) {:?}{refusal}",
             self.ambient_precision_failure,
             self.properness.summary(),
             self.active_rows,
@@ -659,6 +671,18 @@ fn validate_decline(
             "constrained posterior moment decline names active rows {:?} that are not \
              unique valid indices for {constraint_count} inequalities",
             decline.active_rows
+        ));
+    }
+    if let Some(certificate) = decline
+        .boundary_approximation_refusal
+        .as_ref()
+        .and_then(|refusal| refusal.certificate.as_ref())
+        && !(0.0..=1.0).contains(&certificate.overturn_tail_mass)
+    {
+        return Err(format!(
+            "constrained posterior moment decline records a boundary-mode refusal whose overturn \
+             tail mass {:e} is not a probability",
+            certificate.overturn_tail_mass
         ));
     }
     decline.properness.validate(dimension, constraint_count)

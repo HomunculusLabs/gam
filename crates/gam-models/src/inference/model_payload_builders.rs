@@ -1108,10 +1108,12 @@ pub struct SurvivalMarginalSlopeInputs<'a> {
 /// differ — `survival_distribution` and `frailty` — and then set their own
 /// family-specific fields on the returned payload.
 ///
-/// A fit whose constrained posterior declined its moments stores an optimizer
-/// mode, not the posterior mean a saved model publishes, so every survival
-/// contract refuses it here by the decline's summary, as the location-scale and
-/// transformation-normal assemblers do (#979).
+/// A fit whose constrained posterior declined its moments keeps its optimizer
+/// mode under that typed decline, which records why the moments are unavailable
+/// at the boundary and, when a boundary-mode approximation was measured, its
+/// certificate and overturn tail mass. The model is saved with the mode: plug-in
+/// predictions read it, and every consumer of posterior moments refuses by the
+/// decline's summary (#979, gnomon#2336).
 fn new_royston_parmar_survival_payload(
     formula: String,
     fit_result: UnifiedFitResult,
@@ -1120,9 +1122,13 @@ fn new_royston_parmar_survival_payload(
     survival_distribution: Option<ResidualDistribution>,
     frailty: crate::survival::lognormal_kernel::FrailtySpec,
 ) -> Result<FittedModelPayload, String> {
-    fit_result
-        .require_posterior_mean("survival saved-model assembly")
-        .map_err(|error| error.to_string())?;
+    if let Some(decline) = fit_result.posterior_moment_decline() {
+        log::warn!(
+            "[survival saved-model assembly] saving the converged constrained mode; posterior \
+             moments are unavailable at the boundary: {}",
+            decline.summary()
+        );
+    }
     let mut payload = FittedModelPayload::new(
         MODEL_PAYLOAD_VERSION,
         formula,
@@ -3402,6 +3408,7 @@ mod survival_payload_decline_tests {
                         reason: "fixture: properness was not certified".to_string(),
                     },
                     active_rows: vec![0],
+                    boundary_approximation_refusal: None,
                 },
             )),
             working: None,
@@ -3447,14 +3454,15 @@ mod survival_payload_decline_tests {
         .expect("the survival fixture fit must assemble")
     }
 
-    /// #979: a fit that keeps its optimizer mode under a moment decline has no
-    /// posterior mean, so no survival contract may save it. The refusal must name
-    /// the operation, the missing estimand and the decline's own reason. The
-    /// control is the same fit with reportable moments, which must still assemble.
+    /// #979 ruling (c), gnomon#2336: a fit that keeps its optimizer mode under a
+    /// moment decline is saved with that mode, and the saved fit keeps the typed
+    /// decline, so every consumer of posterior moments still refuses it, naming the
+    /// operation, the missing estimand and the decline's own reason. The control is
+    /// the same fit with reportable moments, which must still assemble.
     #[test]
-    fn a_declined_survival_fit_is_refused_at_saved_model_assembly_979() {
+    fn a_declined_survival_fit_is_saved_with_its_mode_and_its_decline_979() {
         let schema = DataSchema { columns: Vec::new() };
-        let refusal = new_royston_parmar_survival_payload(
+        let payload = new_royston_parmar_survival_payload(
             "Surv(time, status) ~ x".to_string(),
             survival_fit(true),
             schema.clone(),
@@ -3462,10 +3470,21 @@ mod survival_payload_decline_tests {
             None,
             FrailtySpec::None,
         )
-        .err()
-        .expect("a declined fit stores a mode, not a posterior mean, and must not be saved");
+        .expect("a declined fit saves its converged mode");
+        let saved = payload
+            .fit_result
+            .as_ref()
+            .expect("the declined payload must carry its fit");
+        assert!(
+            saved.posterior_moment_decline().is_some(),
+            "the saved fit must keep its typed moment decline"
+        );
+        let refusal = saved
+            .require_posterior_mean("saved-model covariance summary")
+            .expect_err("a saved declined fit has no posterior mean")
+            .to_string();
         for needle in [
-            "survival saved-model assembly",
+            "saved-model covariance summary",
             "posterior-mean",
             "the ambient precision is indefinite",
         ] {
