@@ -189,3 +189,65 @@ fn a_tangent_only_orbit_retains_no_direction_2234() {
     assert_eq!(solve.retained_rank, 0, "a tangent-only orbit leaves A no resolved direction");
     assert_eq!(solve.band.len(), DIM, "every direction of the zero operator is held in the band");
 }
+
+/// The collapsed-chart state of the #2263 item-4 replay: every direction in band, the orbit held out
+/// with them, and a metric whose spectrum spans many decades. The held-out band is removed through
+/// its `Φ`-orthonormal primal vectors, so the solve certifies. The control is the superseded
+/// normal-equations projection onto the same images, rebuilt here from the block's own images: it
+/// rounds at `Φ`'s conditioning and misses the √ε bar.
+#[test]
+fn an_in_band_orbit_solve_certifies_on_a_wide_metric_spectrum_2234() {
+    let scales = [1.0e-3, 1.0e-2, 1.0e-1, 1.0e1, 1.0e2, 1.0e3];
+    let base = fixture_metric();
+    let metric = Array2::from_shape_fn((DIM, DIM), |(i, j)| scales[i] * base[[i, j]] * scales[j]);
+    let tangent = fixture_tangent();
+    let operator = Array2::<f64>::zeros((DIM, DIM));
+    let rhs = Array1::<f64>::from_vec(vec![0.9, -0.4, 1.3, 0.05, -0.8, 0.6]);
+
+    let eliminated = stiffened_block(&operator, &metric, &tangent, true);
+    let solve = eliminated
+        .solve_stationarity(&border(&rhs))
+        .expect("the all-band orbit solve certifies");
+    assert_eq!(solve.retained_rank, 0, "a zero operator leaves A no resolved direction");
+    assert_eq!(solve.band.len(), DIM, "every direction, the orbit's included, is held out");
+
+    // Control: the superseded removal, (HᵀH)⁻¹Hᵀr onto H = [P_ΦᵀΦW_Z, ΦTU], of the same residual.
+    let orbit = eliminated.orbit.as_ref().expect("the block carries its eliminated orbit");
+    let band_orbit: Vec<usize> = (0..orbit.curvatures.len())
+        .filter(|&index| orbit.curvatures[index].abs() <= orbit.edges[index])
+        .collect();
+    let mut images = Array2::<f64>::zeros((DIM, eliminated.band.len() + band_orbit.len()));
+    for position in 0..eliminated.band.len() {
+        images
+            .column_mut(position)
+            .assign(&orbit.stiffening.project_dual(eliminated.band_metric_images.column(position)));
+    }
+    for (offset, &index) in band_orbit.iter().enumerate() {
+        images
+            .column_mut(eliminated.band.len() + offset)
+            .assign(&orbit.direction_metric_images.column(index));
+    }
+    let residual = rhs.mapv(|value| -value);
+    let gram = images.t().dot(&images);
+    let (gram_values, _) = gram.eigh(Side::Lower).expect("image Gram spectrum");
+    let norm = |vector: &Array1<f64>| vector.dot(vector).sqrt();
+    let bar = f64::EPSILON.sqrt() * 2.0 * norm(&rhs);
+    let superseded = match symmetric_positive_function(&gram, "control", f64::recip) {
+        Ok(inverse) => {
+            let coefficients = inverse.dot(&images.t().dot(&residual));
+            Some(norm(&(&residual - &images.dot(&coefficients))))
+        }
+        Err(_) => None,
+    };
+    eprintln!(
+        "[#2234 orbit elimination] wide metric: image Gram spectrum [{:e}, {:e}], superseded remainder {superseded:?} \
+         against bar {bar:e}",
+        gram_values[0],
+        gram_values[gram_values.len() - 1],
+    );
+    assert!(
+        superseded.is_none_or(|remainder| remainder > bar),
+        "the normal-equations removal already certifies here (remainder {superseded:?}, bar {bar}), so the pin \
+         cannot see the pairing"
+    );
+}

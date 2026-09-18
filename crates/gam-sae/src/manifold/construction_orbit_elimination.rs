@@ -59,7 +59,9 @@ pub(crate) struct OrbitElimination {
     stiffening_middle: Array2<f64>,
     /// `σ`: `s·u = σ·N·u` for the orbit Schur complement, ascending.
     curvatures: Array1<f64>,
-    /// `V·U` with `UᵀNU = I`: the response columns `A⁺` carries along each orbit direction.
+    /// `T·U` with `UᵀNU = I`: the `Φ`-orthonormal orbit directions.
+    directions: Array2<f64>,
+    /// `V·U`: the response columns `A⁺` carries along each orbit direction.
     response_directions: Array2<f64>,
     /// `ΦTU`: each orbit direction's metric image, the dual component a band removes.
     direction_metric_images: Array2<f64>,
@@ -295,6 +297,7 @@ impl OrbitStiffening {
             stiffening: self,
             stiffening_middle,
             curvatures,
+            directions,
             response_directions,
             direction_metric_images,
             edges,
@@ -475,8 +478,17 @@ impl ExactHessianSpectralBlock {
     }
 
     /// [`Self::solve_stationarity`] through the eliminated orbit: `x = A⁺·rhs` for the unstiffened
-    /// `A`, certified by the physical residual `A x − rhs` after removing its components along
-    /// the held-out band images (the complement's and the orbit's).
+    /// `A`, certified by the physical residual `A x − rhs` after removing its dual components along
+    /// the held-out band (the complement's in-band directions and the in-band orbit directions).
+    ///
+    /// The held-out primal vectors, `P_ΦW_Z` for the complement and `TU` for the orbit, belong to a
+    /// `Φ`-orthonormal basis with the retained directions. So `yᵀr` IS the dual component of `r`
+    /// along `Φy`, and the band is removed as [`Self::solve_stationarity`] removes its own, one
+    /// pairing per direction with no Gram inverted. This rounds at `γ·|Φy||y||r|` per direction. A
+    /// normal-equations projection onto the images `Φy` rounds at the square of `Φ`'s
+    /// conditioning instead: a collapsed chart's 69 held-out images in 70 dimensions left 0.46 of
+    /// the backward scale (#2263 item-4 replay), and a real Qwen3-8B chart's image Gram read
+    /// indefinite at −2.9e-7 against 3.3e9.
     fn solve_orbit_eliminated_stationarity(
         &self,
         orbit: &OrbitElimination,
@@ -503,31 +515,22 @@ impl ExactHessianSpectralBlock {
         let band_orbit: Vec<usize> = (0..orbit.curvatures.len())
             .filter(|&index| orbit.curvatures[index].abs() <= orbit.edges[index])
             .collect();
-        let mut held_out = Array2::<f64>::zeros((dim, self.band.len() + band_orbit.len()));
-        for position in 0..self.band.len() {
-            held_out
-                .column_mut(position)
-                .assign(&orbit.stiffening.project_dual(self.band_metric_images.column(position)));
+        let mut removed = Array1::<f64>::zeros(dim);
+        for (position, &index) in self.band.iter().enumerate() {
+            let primal = orbit.stiffening.project_primal(self.eigenvectors.column(index));
+            let dual = orbit.stiffening.project_dual(self.band_metric_images.column(position));
+            removed.scaled_add(primal.dot(&residual), &dual);
         }
-        for (offset, &index) in band_orbit.iter().enumerate() {
-            held_out
-                .column_mut(self.band.len() + offset)
-                .assign(&orbit.direction_metric_images.column(index));
+        for &index in &band_orbit {
+            removed.scaled_add(
+                orbit.directions.column(index).dot(&residual),
+                &orbit.direction_metric_images.column(index),
+            );
         }
-        let remainder = if held_out.ncols() == 0 {
-            residual.clone()
-        } else {
-            let gram = held_out.t().dot(&held_out);
-            let coefficients = symmetric_positive_function(
-                &gram,
-                "orbit-eliminated stationarity solve: held-out images",
-                f64::recip,
-            )?
-            .dot(&held_out.t().dot(&residual));
-            &residual - &held_out.dot(&coefficients)
-        };
+        let remainder = &residual - &removed;
         let norm = |vector: &Array1<f64>| vector.dot(vector).max(0.0).sqrt();
-        let scale = orbit.stiffening.operator_frobenius * norm(&solution) + norm(&flat_rhs);
+        // Removing the band's dual components rounds at the scale of what it removes too.
+        let scale = orbit.stiffening.operator_frobenius * norm(&solution) + norm(&flat_rhs) + norm(&removed);
         let tolerance = f64::EPSILON.sqrt();
         let remainder_norm = norm(&remainder);
         if !solution.iter().all(|value| value.is_finite())
