@@ -8587,3 +8587,108 @@ fn joint_hessian_and_jeffreys_information_exist_above_512_columns() {
         .expect("the default Jeffreys information above 512 columns");
     assert_eq!(information, hessian);
 }
+
+/// gam#2971: a survival intercept is the root of its calibration identity, not
+/// of its seed. A deep-tail exit index (`q₁ = −7.7`, the planted index at the
+/// fixture's `t = 1e-3` floor, where the marginal failure probability is about
+/// 7e-15) is solved cold, then from a warm slot seeded half a unit away. Each
+/// root is certified independently: its log-tail residual lies within the
+/// resolution the solve publishes, so each sits within that resolution over the
+/// log slope of the true root, and two such roots differ by at most twice it.
+/// The absolute probability residual this replaces met its `1e-12` at the seed
+/// and returned the seed as the root.
+#[test]
+fn survival_intercept_root_does_not_follow_its_warm_seed_2971() {
+    use super::family::{
+        SurvivalInterceptSlotKind, SurvivalInterceptWarmStartCache, hash_intercept_warm_start_key,
+        new_intercept_warm_start_cache,
+    };
+    let score_runtime = test_deviation_runtime();
+    let link_runtime = test_deviation_runtime();
+    let h_dim = score_runtime.basis_dim();
+    let w_dim = link_runtime.basis_dim();
+    let q0v = -8.5_f64;
+    let q1v = -7.7_f64;
+    let qd1v = 0.9_f64;
+    let gv = 0.4_f64;
+    let make_family = |cache: Option<Arc<SurvivalInterceptWarmStartCache>>| {
+        SurvivalMarginalSlopeFamily {
+            jeffreys_armed: true,
+            latent_law: None,
+            n: 1,
+            entry_at_origin: Arc::new(Array1::from_elem(1, false)),
+            event: Arc::new(array![1.0]),
+            weights: Arc::new(array![1.0]),
+            z: Arc::new(array![0.3].insert_axis(Axis(1))),
+            score_covariance: unit_score_covariance(),
+            gaussian_frailty_sd: None,
+            family_hyper: SurvivalMarginalSlopeFamilyHyperState::default(),
+            derivative_guard: 1e-6,
+            design_entry: DesignMatrix::from(Array2::zeros((1, 1))),
+            design_exit: DesignMatrix::from(Array2::zeros((1, 1))),
+            design_derivative_exit: DesignMatrix::from(Array2::zeros((1, 1))),
+            offset_entry: Arc::new(array![q0v]),
+            offset_exit: Arc::new(array![q1v]),
+            derivative_offset_exit: Arc::new(array![qd1v]),
+            marginal_design: DesignMatrix::from(Array2::zeros((1, 0))),
+            slope_layout: (DesignMatrix::from(Array2::zeros((1, 0)))).into(),
+            score_warp: Some(score_runtime.clone()),
+            link_dev: Some(link_runtime.clone()),
+            influence_absorber: None,
+            time_linear_constraints: None,
+            time_wiggle_knots: None,
+            time_wiggle_degree: None,
+            time_wiggle_ncols: 0,
+            intercept_warm_starts: cache,
+        }
+    };
+    let beta_h = Array1::from_iter((0..h_dim).map(|k| 0.04 * (k as f64 + 1.3).sin()));
+    let beta_w = Array1::from_iter((0..w_dim).map(|k| 0.035 * (k as f64 + 0.7).cos()));
+
+    let cold = make_family(None);
+    let (a_cold, density_cold) = cold
+        .solve_row_survival_intercept_with_slot(q1v, gv, Some(&beta_h), Some(&beta_w), None)
+        .expect("cold survival intercept solve");
+
+    let cache = new_intercept_warm_start_cache(1);
+    cache.store(
+        0,
+        SurvivalInterceptSlotKind::Exit,
+        a_cold + 0.5,
+        hash_intercept_warm_start_key(Some(&beta_h), Some(&beta_w)),
+    );
+    let warm = make_family(Some(Arc::clone(&cache)));
+    let (a_warm, density_warm) = warm
+        .solve_row_survival_intercept_with_slot(
+            q1v,
+            gv,
+            Some(&beta_h),
+            Some(&beta_w),
+            Some((0, SurvivalInterceptSlotKind::Exit)),
+        )
+        .expect("warm-seeded survival intercept solve");
+
+    // The log slope at the root is `|T′|/T`, from the returned density and the
+    // target tail `Φ(q₁)`; the resolution is the production certificate's.
+    let log_target = crate::probability::normal_logcdf(q1v);
+    let log_slope = density_cold / log_target.exp();
+    let terms = score_runtime.breakpoints().len() + link_runtime.breakpoints().len() + 1;
+    let rounding = crate::latent_anchor::anchor_residual_rounding(log_target, terms);
+    let resolution = crate::latent_anchor::anchor_residual_resolution(a_cold, log_slope, rounding);
+    let bound = 2.0 * resolution / log_slope;
+    let gap = (a_warm - a_cold).abs();
+    eprintln!(
+        "survival intercept 2971: a_cold={a_cold:.15e} a_warm={a_warm:.15e} gap={gap:.3e} \
+         bound={bound:.3e} density_cold={density_cold:.6e} density_warm={density_warm:.6e} \
+         log_slope={log_slope:.6e}"
+    );
+    assert!(
+        log_slope.is_finite() && log_slope > 0.0,
+        "the cold root must carry a finite positive log slope: {log_slope:.3e}"
+    );
+    assert!(
+        gap <= bound,
+        "a warm seed half a unit from the root moved the certified intercept: a_cold={a_cold:.15e} \
+         a_warm={a_warm:.15e} gap={gap:.3e} > bound={bound:.3e}"
+    );
+}
