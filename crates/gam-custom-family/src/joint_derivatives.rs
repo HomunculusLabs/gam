@@ -782,8 +782,21 @@ impl HessianDerivativeProvider for JeffreysHphiAwareJointDerivatives<'_> {
 /// to an `InnerSolution` before calling the unified evaluator.
 pub(crate) type CompletionPsiAction = Arc<dyn Fn(usize, &Array1<f64>) -> Result<Array1<f64>, CustomFamilyError> + Send + Sync>;
 
+/// The explicit ψ partial of the Jeffreys completion `∂C/∂ψ|_β` as a matrix, per ψ axis (gam#2930).
+pub(crate) type CompletionPsiPartial = Arc<dyn Fn(usize) -> Result<Array2<f64>, CustomFamilyError> + Send + Sync>;
+
+/// The second explicit ψ partial of the Jeffreys completion `∂²C/∂ψ_i∂ψ_j|_β`, per ψ pair (gam#2930).
+pub(crate) type CompletionPsiPair = Arc<dyn Fn(usize, usize) -> Result<Array2<f64>, CustomFamilyError> + Send + Sync>;
+
+/// The mixed drift of the Jeffreys completion `∂_ψ D_β C[v]`, per ψ axis and coefficient direction
+/// (gam#2930).
+pub(crate) type CompletionBetaPsi = Arc<dyn Fn(usize, &Array1<f64>) -> Result<Array2<f64>, CustomFamilyError> + Send + Sync>;
+
 pub(crate) struct ExtCoordBundle {
     pub(crate) completion_psi: Option<CompletionPsiAction>,
+    pub(crate) completion_psi_partial: Option<CompletionPsiPartial>,
+    pub(crate) completion_psi_pair: Option<CompletionPsiPair>,
+    pub(crate) completion_beta_psi: Option<CompletionBetaPsi>,
     pub(crate) coords: Vec<HyperCoord>,
     pub(crate) ext_ext_fn: Option<
         Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, CustomFamilyError> + Send + Sync>,
@@ -953,6 +966,20 @@ impl ExtCoordBundle {
         });
         Self {
             completion_psi: self.completion_psi.map(|callback| Arc::new(move |i, v: &Array1<f64>| callback(i, v).map(|value| value * scale)) as CompletionPsiAction),
+            completion_psi_partial: self.completion_psi_partial.map(|callback| {
+                Arc::new(move |psi: usize| callback(psi).map(|partial| partial * scale))
+                    as CompletionPsiPartial
+            }),
+            completion_psi_pair: self.completion_psi_pair.map(|callback| {
+                Arc::new(move |psi_i: usize, psi_j: usize| {
+                    callback(psi_i, psi_j).map(|pair| pair * scale)
+                }) as CompletionPsiPair
+            }),
+            completion_beta_psi: self.completion_beta_psi.map(|callback| {
+                Arc::new(move |psi: usize, direction: &Array1<f64>| {
+                    callback(psi, direction).map(|drift| drift * scale)
+                }) as CompletionBetaPsi
+            }),
             coords,
             ext_ext_fn,
             rho_ext_fn,

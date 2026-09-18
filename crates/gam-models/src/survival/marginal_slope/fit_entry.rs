@@ -1643,8 +1643,38 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // whose ψ coordinates are all design axes (gam#2893). Any other θ keeps the analytic
     // gradient without declared curvature: declaring it would refuse every trial point that
     // asks for curvature.
+    //
+    // gam#2930: an armed Jeffreys objective prices its second-order completion wherever the
+    // family serves the completion's outer derivatives, and a ψ coordinate that reshapes the
+    // Jeffreys information moves that completion. The completion's explicit ψ derivative joins
+    // the gradient everywhere. Its ψψ and ρψ curvature is served where the rigid frame contracts
+    // every ψ-moved trace Hessian in one pass, which covers baseline-chart and design axes on a
+    // time-constant slope; any other such θ declares no curvature.
+    let psi_moves_priced_completion = initial_family.joint_jeffreys_term_required()
+        && initial_family.jeffreys_completion_outer_derivatives().is_some()
+        && initial_family.joint_jeffreys_information_depends_on_psi();
+    // gam#2945: a learned log σ moves the priced completion too, and the completion's explicit σ
+    // derivative `∂C/∂σ|_β` needs the σ-mixed third information derivative, which has no closed
+    // form here. Such a θ has neither an exact outer gradient nor a curvature certificate, so the
+    // fit is refused once, by name, before the smoothing search. Without this rule every
+    // value+gradient evaluation refuses at the completion's σ column action; before the completion
+    // was priced in every eval mode, the search ran and the curvature guard refused its point as
+    // unevaluated (219 s on the #2930 minimal fixture with a learned σ).
+    if psi_moves_priced_completion && learned_sigma_initial.is_some() {
+        return Err(SurvivalMarginalSlopeError::UnsupportedConfiguration {
+            reason: "a learned Gaussian frailty σ with the armed Jeffreys completion is refused: the \
+                     completion's explicit σ derivative needs the σ-mixed third information \
+                     derivative, which is not derived, so the fit has neither an exact outer \
+                     gradient nor a curvature certificate (gam#2945)"
+                .to_string(),
+        }
+        .into());
+    }
+    let completion_psi_curvature_served = initial_family.rigid_psi_jeffreys_third_served()
+        && !initial_family.slope_is_follow_up_varying();
     let psi_curvature_exact = setup.theta0().len() == setup.rho_dim()
-        || (initial_family.psi_second_order_pairs_served(setup.log_kappa_dim())
+        || ((!psi_moves_priced_completion || completion_psi_curvature_served)
+            && initial_family.psi_second_order_pairs_served(setup.log_kappa_dim())
             && (!initial_family.joint_jeffreys_term_required()
                 || initial_family.rigid_psi_jeffreys_third_served()
                 || (setup.auxiliary_dim() == 0

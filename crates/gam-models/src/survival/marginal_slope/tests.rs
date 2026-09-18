@@ -4585,6 +4585,61 @@ fn rigid_baseline_dispatch_matches_direct_and_owned_workspace_without_fd() {
     );
 }
 
+/// gam#2930: the one-pass contraction `⟨W, ∂_θ H²[e_a, e_b]⟩` along a baseline-chart coordinate
+/// is the contraction with `W` of the workspace's column-by-column `{∂_θ H²[e_b, e_a]}`, to
+/// roundoff, on every chart axis.
+#[test]
+fn rigid_baseline_contracted_trace_hessian_psi_matches_column_contraction_2930() {
+    let (family, hyper_layout) = make_rigid_baseline_psi_test_family(12);
+    let states = block_psi_test_block_states(&family, 0.15, 0.25);
+    let specs = vec![dummy_blockspec(0), dummy_blockspec(1), dummy_blockspec(1)];
+    let workspace = family
+        .exact_newton_joint_psi_workspace_with_options(
+            &states,
+            &specs,
+            &hyper_layout,
+            &BlockwiseFitOptions::default(),
+        )
+        .expect("construct rigid baseline workspace")
+        .expect("rigid baseline workspace is available");
+    let total = 2;
+    let weight = array![[0.7, -0.2], [-0.2, 0.4]];
+    assert!(!hyper_layout.is_empty(), "the chart fixture must carry baseline coordinates");
+    for axis in 0..hyper_layout.len() {
+        assert!(
+            workspace
+                .contracted_trace_hessian_psi_axes()
+                .expect("availability query")
+                .contains(&axis),
+            "chart axis {axis} must serve the one-pass contraction"
+        );
+        let contracted = workspace
+            .contracted_trace_hessian_psi(axis, &weight)
+            .expect("one-pass contraction")
+            .expect("chart axis contraction is served");
+        let mut reference = Array2::<f64>::zeros((total, total));
+        for b in 0..total {
+            let mut unit = Array1::<f64>::zeros(total);
+            unit[b] = 1.0;
+            let columns = workspace
+                .hessian_second_directional_derivative_all_beta_axes(axis, &unit)
+                .expect("column-by-column third information derivative")
+                .expect("chart axis third information derivative is served");
+            for a in 0..total {
+                reference[[a, b]] = (&weight * &columns[a]).sum();
+            }
+        }
+        assert!(
+            reference.iter().any(|value| value.abs() > 1e-8),
+            "chart axis {axis}: the reference contraction is identically zero, so it grades nothing"
+        );
+        assert!(
+            rel_diff_array2_survival(&contracted, &reference) < 1e-12,
+            "chart axis {axis}: one-pass {contracted:?} against column contraction {reference:?}"
+        );
+    }
+}
+
 #[test]
 fn flex_timewiggle_baseline_public_workspace_owns_family_and_design_pairs_without_fd() {
     let (family, states, specs, hyper_layout) = make_flex_baseline_psi_test_fixture();

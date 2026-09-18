@@ -817,6 +817,42 @@ fn assembled_operator_fingerprint(
 /// This function encapsulates all shared logic: penalty assembly, mode inverse
 /// computation, precomputation of joint corrections + second-order traces, and
 /// routing through `unified_joint_cost_gradient`.
+/// gam#2945 positive controls, for tests only: nothing outside a test sets it. An outer
+/// finite-difference gate must show that it catches a missing second-order completion term, so a test
+/// can omit one term from every value+gradient+Hessian evaluation in this process until it clears the
+/// setting. Unset, the check is one atomic read per such evaluation and changes nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionCurvatureAblation {
+    /// Omit `∂²C/∂ψ_i∂ψ_j|_β` from each ψ pair's drift.
+    PsiPair,
+    /// Omit `∂_ψ D_β C[v]` from the fixed-drift derivative.
+    BetaPsi,
+}
+
+static COMPLETION_CURVATURE_ABLATION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+impl CompletionCurvatureAblation {
+    fn code(self) -> u8 {
+        match self {
+            Self::PsiPair => 1,
+            Self::BetaPsi => 2,
+        }
+    }
+}
+
+/// Set or clear the [`CompletionCurvatureAblation`] every later Hessian evaluation in this process reads.
+/// For tests only.
+pub fn set_completion_curvature_ablation(term: Option<CompletionCurvatureAblation>) {
+    COMPLETION_CURVATURE_ABLATION.store(
+        term.map_or(0, CompletionCurvatureAblation::code),
+        std::sync::atomic::Ordering::SeqCst,
+    );
+}
+
+fn completion_curvature_ablated(term: CompletionCurvatureAblation) -> bool {
+    COMPLETION_CURVATURE_ABLATION.load(std::sync::atomic::Ordering::SeqCst) == term.code()
+}
+
 pub(crate) fn joint_outer_evaluate(
     inner: &BlockwiseInnerResult,
     specs: &[ParameterBlockSpec],
@@ -831,6 +867,10 @@ pub(crate) fn joint_outer_evaluate(
     include_logdet_h: bool,
     include_logdet_s: bool,
     project_hessian_logdet: bool,
+    // Whether an explicit ψ coordinate of this evaluation moves the Jeffreys
+    // completion (gam#2930). A property of the family and its hyper layout, the
+    // same for every `eval_mode`: see `completion_priced` below.
+    completion_moves_with_psi: bool,
     eval_mode: EvalMode,
     options: &BlockwiseFitOptions,
     rho_prior: gam_problem::RhoPrior,
@@ -962,21 +1002,122 @@ pub(crate) fn joint_outer_evaluate(
     // it prices `½·log|Zᵀ M Z|₊` on the inner mode's active face (`Z = I` when no row is
     // active). `M` carries the complete Jeffreys curvature `H_Φ + completion` when the family
     // supplies the completion's β-drifts, so the value, its traces and the mode response all
-    // read `M_true`. An explicit ψ-motion of the completion has no trace derivative here, so a
-    // ψ coordinate that moves the completion keeps `M_DD` in the criterion, and the
-    // completion then stays in the IFT operator alone (#2612).
+    // read `M_true`.
+    //
+    // gam#2930: that holds in every eval mode, whether or not a ψ coordinate moves the
+    // completion. The rule it replaces kept `M_DD` where ψ moved the completion and read that
+    // from whether this call had built the ψ completion action, which only a Hessian request
+    // does: value screening and gradients priced `M_true`, the outer Hessian `M_DD`, and seed
+    // validation refused every covariate-bearing constant-slope survival fit. `M_DD` is also
+    // the curvature whose smallest eigenvalue crosses zero near survival optima (#2894). A
+    // gradient of the `M_true` criterion adds the completion's explicit derivative
+    // `∂C/∂ψ|_β` to each ψ coordinate's drift below. Its ψψ and ρψ curvature adds
+    // `∂²C/∂ψ∂ψ|_β` to each ψ pair's drift and `∂_ψ D_β C[v]` to the fixed-drift derivative where
+    // the workspace contracts every ψ-moved trace Hessian; elsewhere a Hessian request on such a
+    // criterion is refused, and the fit declares no outer Hessian.
     let projected_criterion = project_hessian_logdet
         && include_logdet_h
         && include_logdet_s
         && pseudo_logdet_mode == PseudoLogdetMode::Smooth;
     let completion_priced = projected_criterion
         && robust_jeffreys_completion.is_some()
-        && ext_bundle
-            .as_ref()
-            .map_or(true, |bundle| bundle.completion_psi.is_none())
         && jeffreys_hphi_drift.as_ref().is_some_and(|drift| {
             drift.completion_first.is_some() && drift.completion_second.is_some()
         });
+    let mut ext_bundle = ext_bundle;
+    let mut completion_psi_partials: Vec<Array2<f64>> = Vec::new();
+    if completion_priced && completion_moves_with_psi {
+        let curvature_served = ext_bundle.as_ref().is_some_and(|bundle| {
+            bundle.completion_psi_pair.is_some() && bundle.completion_beta_psi.is_some()
+        });
+        if eval_mode == EvalMode::ValueGradientHessian && !curvature_served {
+            return Err(CustomFamilyError::UnsupportedConfiguration {
+                reason: "the outer Hessian of a criterion that prices a psi-moving Jeffreys \
+                         completion needs the completion's second psi partial and its mixed \
+                         psi-beta drift, which this frame's workspace does not contract (gam#2930)"
+                    .to_string(),
+            });
+        }
+        if let Some(bundle) = ext_bundle.as_mut() {
+            let completion_psi_partial = bundle.completion_psi_partial.clone().ok_or_else(|| {
+                CustomFamilyError::trial_point(
+                    "a criterion that prices a psi-moving Jeffreys completion requires the \
+                     completion's explicit psi derivative (gam#2930)",
+                )
+            })?;
+            for (psi, coord) in bundle.coords.iter_mut().enumerate() {
+                let partial = completion_psi_partial(psi)?;
+                if partial.dim() != (total, total) {
+                    return Err(CustomFamilyError::trial_point(format!(
+                        "the Jeffreys completion's psi partial for axis {psi} has shape {:?}, \
+                         expected ({total}, {total}) (gam#2930)",
+                        partial.dim()
+                    )));
+                }
+                let partial = (&partial + &partial.t()).mapv(|value| 0.5 * value);
+                match coord.drift.dense.as_mut() {
+                    Some(dense) => *dense += &partial,
+                    None => coord.drift.dense = Some(partial.clone()),
+                }
+                completion_psi_partials.push(partial);
+            }
+            if eval_mode == EvalMode::ValueGradientHessian
+                && let (Some(pair), Some(beta_psi)) = (
+                    bundle.completion_psi_pair.clone(),
+                    bundle.completion_beta_psi.clone(),
+                )
+            {
+                if !completion_curvature_ablated(CompletionCurvatureAblation::PsiPair)
+                    && let Some(inner_pair) = bundle.ext_ext_fn.take()
+                {
+                    bundle.ext_ext_fn = Some(Box::new(move |psi_i: usize, psi_j: usize| {
+                        let mut pair_terms = inner_pair(psi_i, psi_j)?;
+                        let completion = pair(psi_i, psi_j)?;
+                        let completion = (&completion + &completion.t()).mapv(|value| 0.5 * value);
+                        if pair_terms.b_mat.dim() == completion.dim() {
+                            pair_terms.b_mat += &completion;
+                        } else {
+                            pair_terms.b_operator = Some(Arc::new(CompositeHyperOperator {
+                                dim_hint: completion.nrows(),
+                                dense: Some(completion),
+                                operators: pair_terms.b_operator.into_iter().collect(),
+                            }));
+                        }
+                        Ok(pair_terms)
+                    })
+                        as Box<
+                            dyn Fn(usize, usize) -> Result<HyperCoordPair, CustomFamilyError>
+                                + Send
+                                + Sync,
+                        >);
+                }
+                if !completion_curvature_ablated(CompletionCurvatureAblation::BetaPsi) {
+                    let inner_drift = bundle.drift_fn.take();
+                    bundle.drift_fn = Some(Box::new(move |psi: usize, direction: &Array1<f64>| {
+                        let completion = beta_psi(psi, direction).map_err(|error| error.to_string())?;
+                        let inner = match inner_drift.as_ref() {
+                            Some(drift) => drift(psi, direction)?,
+                            None => None,
+                        };
+                        Ok(Some(match inner {
+                            Some(DriftDerivResult::Dense(matrix)) => DriftDerivResult::Dense(matrix + completion),
+                            Some(DriftDerivResult::Operator(operator)) => {
+                                DriftDerivResult::Operator(Arc::new(CompositeHyperOperator {
+                                    dim_hint: completion.nrows(),
+                                    dense: Some(completion),
+                                    operators: vec![operator],
+                                }))
+                            }
+                            None => DriftDerivResult::Dense(completion),
+                        }))
+                    }) as FixedDriftDerivFn);
+                }
+                // The direction-contracted ψψ hook carries no completion terms, so the per-pair
+                // assembly above owns this criterion's ψψ curvature.
+                bundle.contracted_psi_fn = None;
+            }
+        }
+    }
     let scaled_criterion_jeffreys: Option<Array2<f64>> =
         match (robust_jeffreys_hphi.as_ref(), robust_jeffreys_completion.as_ref()) {
             (Some(hphi), Some(completion)) if completion_priced => {
@@ -1325,6 +1466,14 @@ pub(crate) fn joint_outer_evaluate(
     } else {
         None
     };
+    if let Some(kernel) = penalty_subspace_trace.as_ref() {
+        for (psi, partial) in completion_psi_partials.iter().enumerate() {
+            log::info!(
+                "[2930-COMPLETION-PSI] psi={psi} half_trace={:.6e}",
+                0.5 * rho_curvature_scale * kernel.trace_projected_logdet(partial)
+            );
+        }
+    }
 
     // gam#1587/#561: `unified_joint_cost_gradient` appends one coordinate per
     // full-width joint penalty (the centered `M⊗S_t` multinomial penalty) AFTER
