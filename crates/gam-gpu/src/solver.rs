@@ -999,12 +999,19 @@ pub use cuda::{
 /// budget past this point makes the mixed-precision solve slower than the fp64
 /// solve it replaces. It bounds cost only; the residual's rounding band alone
 /// decides accuracy.
+// The refinement budget/verdict helpers below are pure arithmetic with no
+// CUDA surface, but their only non-test caller is the Linux-only `cuda`
+// module. On other targets the lib builds without that caller, so the
+// dead-code lint must be allowed there rather than gating the helpers away:
+// their unit tests are platform-independent and stay runnable everywhere.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn refinement_step_budget(p: usize) -> usize {
     (p + 6) / 12
 }
 
 /// What a refinement correction's new residual says about continuing.
 #[derive(Debug, PartialEq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) enum RefinementVerdict {
     /// The residual is inside its rounding band: the solution is certified.
     Converged,
@@ -1025,6 +1032,7 @@ pub(crate) enum RefinementVerdict {
 /// `κ(A)·u_f32 ≥ 1`, and a band predicted past the budget is cheaper reached
 /// by the fp64 factorization; both refuse, so refinement never hands on a
 /// solution its own certificate has not accepted.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn refinement_verdict(
     prev_norm: f64,
     new_norm: f64,
