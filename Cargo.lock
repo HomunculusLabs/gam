@@ -3901,33 +3901,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gam-mpd"
-version = "0.3.157"
-dependencies = [
- "faer",
- "gam-gpu",
- "gam-linalg",
- "gam-math",
- "gam-problem",
- "gam-runtime",
- "gam-solve",
- "gam-workspace-hack",
- "libc",
- "log",
- "memmap2",
- "ndarray 0.17.2",
- "npyz 0.9.1",
- "num-bigint",
- "num-rational",
- "qd",
- "rand 0.10.2",
- "rayon",
- "serde",
- "serde_json",
- "statrs 0.19.0",
-]
-
-[[package]]
 name = "gam-predict"
 version = "0.3.157"
 dependencies = [

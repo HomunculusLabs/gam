@@ -30,7 +30,7 @@ pub mod driver;
 pub mod engagement;
 pub mod linalg_dispatch;
 #[cfg(target_os = "macos")]
-pub mod metal;
+pub(crate) mod metal;
 pub mod numerics_device;
 pub mod numerics_host;
 pub mod policy;
@@ -38,8 +38,6 @@ pub mod pool;
 pub mod precision_bounds;
 pub mod row_kernel_race;
 pub mod solver;
-pub mod tensor;
-pub mod trace;
 
 pub use device::GpuDeviceInfo;
 pub use linalg_dispatch::CholeskyVerdict;

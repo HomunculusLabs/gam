@@ -8,7 +8,7 @@ repository = "https://github.com/SauersML/gam"
 rust-version = "1.97"
 publish = false
 
-# Cargo resolves features per invocation: `cargo check -p gam-mpd --all-targets`
+# Cargo resolves features per invocation: `cargo check -p <one package> --all-targets`
 # activated ~46 shared dependencies (serde, bytemuck, half, matrixmultiply,
 # num-traits, rand, syn, ...) with fewer features than `cargo check --workspace
 # --all-targets`. Their hashes differ, so every hash above them differs too, and

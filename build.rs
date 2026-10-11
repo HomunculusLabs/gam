@@ -4807,8 +4807,7 @@ fn is_append_only_release_log(rel: &Path) -> bool {
 ///
 /// A binary file has no lines. Its newline bytes are pixel or payload data, and
 /// there is nothing in it to split by cohesive concern, so the line-count gate
-/// cannot apply to it: a 2.9 MB PNG figure (`experiments/issue-2951/figures/`)
-/// read as 11011 "lines" and failed every build of the workspace. Text files,
+/// cannot apply to it: a 2.9 MB PNG figure read as 11011 "lines" and failed every build of the workspace. Text files,
 /// data shards included, are still counted.
 fn is_binary_file(path: &Path) -> std::io::Result<bool> {
     use std::io::Read;
