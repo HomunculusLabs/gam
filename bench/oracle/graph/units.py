@@ -58,7 +58,7 @@ def parse(text: str) -> tuple[str, dict]:
 def render(explanation: str, circuits: dict) -> str:
     """The answer text of circuits {position: [unit, ...]} (heads of one matrix and position written together)."""
     out = [f"EXPLANATION: {explanation}".rstrip()]
-    for p in sorted(circuits, key=lambda q: -1 if q is None else q):
+    for p in circuits:  # in the order given (importance: a cut-off answer loses the least important lines)
         whole, heads = [], {}
         for u in circuits[p]:
             if len(u) == 3:
@@ -104,8 +104,9 @@ def sensitive(nat, ids: list[int], targets: list[int], k: int) -> list[int]:
 
 def score(nat, task: dict, text: str, k: int = 8) -> dict:
     """The carry test of an answer on a task: {"uncarried": the movement-weighted share left uncarried, "units", per
-    position {"position", "movement" (bits), "carried" (share), "units", "outside" (units not at the position or the
-    targets, which the test cannot place)}, "explanation"}."""
+    position {"position", "movement" (bits), "carried" (share), "units" (existing units the line names at the position
+    or the targets), "outside" (units elsewhere, which the test cannot place), "unknown" (names of units the model does
+    not have)}, "explanation"}. Size counts existing units only."""
     import torch
 
     import carry
@@ -123,10 +124,12 @@ def score(nat, task: dict, text: str, k: int = 8) -> dict:
         gran = "head" if any(len(u) == 3 for u in inside) else "matrix"
         space = carry.UnitSpace(nat, len(ids), [p, *targets], gran)
         study = (carry.HeadCarry if gran == "head" else carry.MatrixCarry)(nat, ids, targets, prompts, space)
+        on = _active(space, inside)
         with torch.no_grad():
-            empty, with_units = study.measure([_active(space, []), _active(space, inside)]).tolist()
+            empty, with_units = study.measure([_active(space, []), on]).tolist()
         carried = 0.0 if empty <= 0 else max(0.0, min(1.0, 1 - with_units / empty))
-        rows.append({"position": p, "movement": empty, "carried": carried, "units": len(inside), "outside": len(stated) - len(inside)})
+        rows.append({"position": p, "movement": empty, "carried": carried, "units": int(on.sum()), "outside": len(stated) - len(inside),
+                     "unknown": len(inside) - int(on.sum())})
         total_w += empty
         total_u += empty * (1 - carried)
         native.free(nat.dev)
@@ -211,6 +214,8 @@ def dataset(explain_jsonl: Path, out: Path, fraction: int = 90) -> int:
                 task = json.loads((native.TEXTS / "vpd4l" / f"{r['task']}.json").read_text())
                 answer = (Path(tmp) / f"{r['task']}.txt").read_text()
                 positions = [p["position"] for p in r["positions"]]
+                if not positions:  # a text whose prediction is at its first position: nothing to explain
+                    continue
                 f.write(json.dumps({"prompt": [{"role": "user", "content": question(task, positions)}],
                                     "completion": [{"role": "assistant", "content": answer}], "info": {"task": r["task"]}}) + "\n")
                 n += 1
