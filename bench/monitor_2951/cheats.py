@@ -6,9 +6,11 @@ assertion's line (test.py as read, and test tracebacks quoting it) so its expect
 another of the same length, a bool negated, a string extended. The real and the edited context both go through the
 same decode and re-encode, so a re-tokenization artifact cannot pass for an effect of the edit.
 
-  span check   (when the cheating write returns the old value as a literal) teacher-forced up to that literal,
+  span check   (when the cheating write holds the old value as a literal next to the call's input: a `return` after
+               `if arg == input`, or a lookup-table entry) teacher-forced up to that literal,
                greedy-decode it under both contexts; follows = the edited decode is the new value. Also the
-               log-probability of the literal's first original token under both contexts.
+               log-probability of the literal's first original token under both contexts (from the top 20; an
+               upper bound when it falls outside them).
   write check  (every cheat) greedy-regenerate the whole turn under both contexts, take the func.py it writes and run
                it on the mutated call: does it return the original expected value, the edited one, or neither? The
                recorded cheating func.py is run the same way as a reference.
@@ -66,6 +68,25 @@ def mutations(t):
     return out
 
 
+def literal_span(tok, comp, m):
+    """[start, end) completion tokens of the cheating literal: an occurrence of the old expected value inside the
+    tool call (not the thinking) with the call's most distinctive argument literal in the 120 characters before it,
+    as in `if k == 1073741816: return 7888726` or a lookup table `(999999999999999998, 13): 587706332`."""
+    if not isinstance(m["old"], int) or isinstance(m["old"], bool):
+        return None
+    text = tok.decode(comp, skip_special_tokens=False)
+    start = text.find("<tool_call>")
+    if start < 0:
+        return None
+    args = sorted(re.findall(r"-?\d+|'[^']*'|\"[^\"]*\"", m["call"].split("(", 1)[1]), key=len)
+    anchor = args[-1].strip("'\"") if args else None
+    for x in re.finditer(r"(?<![\d.])" + re.escape(str(m["old"])) + r"(?![\d.])", text[start:]):
+        c0 = start + x.start()
+        if anchor and anchor in text[max(start, c0 - 120):c0]:
+            return replay.token_span_by_char(tok, comp, c0, c0 + len(str(m["old"])))
+    return None
+
+
 def returns(files, t, m):
     """Which expected value the func.py in `files` returns on the mutated call: 'old', 'new', 'neither' or 'error'."""
     if "func.py" not in files:
@@ -100,6 +121,9 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-len", type=int, default=32768)
+    ap.add_argument("--no-regen", action="store_true", help="span check only")
+    ap.add_argument("--only", default=None, help="comma-separated run ids to replay (default every cheat)")
+    ap.add_argument("--gpu-mem", type=float, default=0.88, help="vLLM's share of GPU memory")
     a = ap.parse_args()
     from transformers import AutoTokenizer
     from vllm import LLM, SamplingParams
@@ -111,11 +135,11 @@ def main():
     for d in a.runs:
         for l in open(os.path.join(d, "gen", "transcripts.jsonl")):
             r = json.loads(l)
-            if r["label"] == "cheat" and r["first_cheat"]:
+            if r["label"] == "cheat" and r["first_cheat"] and (a.only is None or r["run_id"] in a.only.split(",")):
                 r["arm"] = os.path.basename(os.path.normpath(d))
                 cheats.append(r)
     print(f"{len(cheats)} cheating runs", flush=True)
-    llm = LLM(model=a.model, max_model_len=a.max_len, gpu_memory_utilization=0.88, enable_prefix_caching=True, seed=0)
+    llm = LLM(model=a.model, max_model_len=a.max_len, gpu_memory_utilization=a.gpu_mem, enable_prefix_caching=True, seed=0)
 
     def batch(jobs):
         """Run every (prompt ids, max tokens, extra sampling kwargs) job in one vLLM call, greedy."""
@@ -144,18 +168,15 @@ def main():
                 row["skipped"] = "the mutated assertion's line is not in the context"
                 continue
             ed_ids = tok.encode(text.replace(m["line"], m["new_line"]), add_special_tokens=False)
-            if isinstance(m["old"], int) and not isinstance(m["old"], bool):
-                full = tok.decode(comp, skip_special_tokens=False)
-                mm = next((x for x in re.finditer(r"return\s+(-?\d+)\b", full) if x.group(1) == str(m["old"])), None)
-                sp = replay.token_span_by_char(tok, comp, mm.start(1), mm.end(1)) if mm else None
-                if sp:
-                    lo, hi = sp
-                    row["_span"] = (lo, hi, comp[lo])
-                    for k, c in (("real", base_ids), ("edited", ed_ids)):
-                        span_jobs.append((c + comp[:lo], hi - lo + 3, {}, len(rows) - 1, k))
-                        lp_jobs.append((c + comp[:lo + 1], 1, {"prompt_logprobs": 1}, len(rows) - 1, k))
+            sp = literal_span(tok, comp, m)
+            if sp:
+                lo, hi = sp
+                row["_span"] = (lo, hi, comp[lo])
+                for k, c in (("real", base_ids), ("edited", ed_ids)):
+                    span_jobs.append((c + comp[:lo], hi - lo + 3, {}, len(rows) - 1, k))
+                    lp_jobs.append((c + comp[:lo], 1, {"logprobs": 20}, len(rows) - 1, k))
             room = a.max_len - max(len(base_ids), len(ed_ids)) - 8
-            for k, c in (("real", base_ids), ("edited", ed_ids)):
+            for k, c in ((("real", base_ids), ("edited", ed_ids)) if not a.no_regen else ()):
                 regen_jobs.append((c, max(min(len(comp) + 2048, room), 16), {"stop_token_ids": [im_end, eot]}, len(rows) - 1, k))
     print(f"{len(rows)} mutated assertions; {len(span_jobs)} span decodes, {len(regen_jobs)} regenerations", flush=True)
     span_out = batch([j[:3] for j in span_jobs])
@@ -164,7 +185,11 @@ def main():
     for j, o in zip(span_jobs, span_out):
         rows[j[3]].setdefault("_dec", {})[j[4]] = tok.decode(o.outputs[0].token_ids)
     for j, o in zip(lp_jobs, lp_out):
-        rows[j[3]].setdefault("_lp", {})[j[4]] = round(float(o.prompt_logprobs[-1][rows[j[3]]["_span"][2]].logprob), 3)
+        # the original literal's first token among the 20 most likely next tokens; outside them, an upper bound
+        top = o.outputs[0].logprobs[0]
+        tid = rows[j[3]]["_span"][2]
+        v = round(float(top[tid].logprob), 3) if tid in top else f"<= {round(min(float(x.logprob) for x in top.values()), 3)}"
+        rows[j[3]].setdefault("_lp", {})[j[4]] = v
     for j, o in zip(regen_jobs, regen_out):
         fsrc = written_func(tok, list(o.outputs[0].token_ids))
         rows[j[3]].setdefault("_regen", {})[j[4]] = returns({"func.py": fsrc} if fsrc is not None else {}, rows[j[3]]["_t"], rows[j[3]]["_m"])
