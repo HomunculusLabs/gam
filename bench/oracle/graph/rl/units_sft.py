@@ -6,7 +6,8 @@ between them).
   units_sft.py sft ROWS.jsonl OUT_DIR [--val ROWS.jsonl] [--base Qwen/Qwen3-4B] [--epochs 3] [--lr 1e-4] [--rank 32] [--batch 8]
   units_sft.py questions EXPLAIN.jsonl OUT.jsonl [--k 8]     each task's question, positions from units.sensitive
   units_sft.py sample QUESTIONS.jsonl ADAPTER OUT.jsonl [--n 4] [--max-tokens 1536]
-  units_sft.py score QUESTIONS.jsonl OUT.jsonl [--answers ANSWERS.jsonl] [--k 8]   (without answers: the baselines only)
+  units_sft.py score QUESTIONS.jsonl OUT.jsonl [--answers ANSWERS.jsonl] [--teacher DIR] [--k 8]   (without answers: the baselines only;
+                                                  DIR: units.py targets' answers, the measured circuits, scored as "teacher")
   units_sft.py report SCORES.jsonl
 """
 
@@ -163,6 +164,8 @@ def score(a) -> None:
             task = json.loads((native.TEXTS / "vpd4l" / f"{tid}.json").read_text())
             targets = task["prompts"][0]["target_positions"]
             items = [(kind, None, units.baseline(kind, q["positions"], targets), None, None) for kind in ("copy", "all")]
+            if a.teacher and (a.teacher / f"{tid}.txt").exists():
+                items.append(("teacher", None, (a.teacher / f"{tid}.txt").read_text(), None, None))
             items += [("explainer", x["sample"], x["text"], x["tokens"], x["finish"]) for x in answers if x["task"] == tid]
             for kind, j, text, tokens, finish in items:
                 _, circuits = units.parse(text)
@@ -170,6 +173,7 @@ def score(a) -> None:
                 f.write(json.dumps({"task": tid, "kind": kind, "sample": j, "tokens": tokens, "finish": finish,
                                     "lines": sum(p in circuits for p in q["positions"]), "positions": len(q["positions"]),
                                     "uncarried": s["uncarried"], "units": s["units"], "outside": sum(r["outside"] for r in s["positions"]),
+                                    "unknown": sum(r.get("unknown", 0) for r in s["positions"]),
                                     "per_position": s["positions"]}) + "\n")
                 f.flush()
             print(f"score: {tid} done, {time.time() - t0:.0f} s", flush=True)
@@ -178,11 +182,11 @@ def score(a) -> None:
 def report(a) -> None:
     rows = [json.loads(line) for line in open(a.scores)]
     tasks = sorted({r["task"] for r in rows}, key=lambda t: int("".join(ch for ch in t if ch.isdigit()) or 0))
-    print(f"{'task':10s} {'expl best':>14s} {'expl median':>14s} {'parse':>6s} {'copy':>14s} {'all':>14s}   (uncarried share / units)")
-    agg = {k: [] for k in ("best", "median", "copy", "all", "parse")}
+    print(f"{'task':10s} {'expl best':>14s} {'expl median':>14s} {'parse':>6s} {'teacher':>14s} {'copy':>14s} {'all':>14s}   (uncarried share / units)")
+    agg = {k: [] for k in ("best", "median", "teacher", "copy", "all", "parse")}
     for t in tasks:
         ex = [r for r in rows if r["task"] == t and r["kind"] == "explainer"]
-        base = {r["kind"]: r for r in rows if r["task"] == t and r["kind"] in ("copy", "all")}
+        base = {r["kind"]: r for r in rows if r["task"] == t and r["kind"] in ("teacher", "copy", "all")}
         cell = lambda u, n: f"{u:.3f} / {n:4.0f}"  # noqa: E731
         line = f"{t:10s}"
         if ex:
@@ -193,20 +197,23 @@ def report(a) -> None:
             agg["best"].append((best["uncarried"], best["units"]))
             agg["median"].append((med_u, med_n))
             agg["parse"].append(parse)
-        for k in ("copy", "all"):
+        for k in ("teacher", "copy", "all"):
             if k in base:
                 line += f" {cell(base[k]['uncarried'], base[k]['units']):>14s}"
                 agg[k].append((base[k]["uncarried"], base[k]["units"]))
+            else:
+                line += f" {'-':>14s}"
         print(line)
     print("mean over questions:")
-    for k in ("best", "median", "copy", "all"):
+    for k in ("best", "median", "teacher", "copy", "all"):
         if agg[k]:
             print(f"  {k:7s} uncarried {statistics.mean(u for u, _ in agg[k]):.3f}, units {statistics.mean(n for _, n in agg[k]):.1f}")
     if agg["parse"]:
         ex = [r for r in rows if r["kind"] == "explainer"]
         print(f"  answers that parse (ended, a line for every listed position): {statistics.mean(agg['parse']):.2f}; "
               f"hit the token cap {sum(r['finish'] == 'length' for r in ex) / len(ex):.2f}; mean tokens {statistics.mean(r['tokens'] for r in ex):.0f}; "
-              f"units outside the position and targets {statistics.mean(r['outside'] for r in ex):.1f} per answer")
+              f"units outside the position and targets {statistics.mean(r['outside'] for r in ex):.1f} and unknown units "
+              f"{statistics.mean(r.get('unknown', 0) for r in ex):.1f} per answer")
 
 
 def main():
@@ -240,6 +247,7 @@ def main():
     c.add_argument("questions", type=Path)
     c.add_argument("out", type=Path)
     c.add_argument("--answers", type=Path)
+    c.add_argument("--teacher", type=Path)
     c.add_argument("--k", type=int, default=8)
     r = sub.add_parser("report")
     r.add_argument("scores", type=Path)
