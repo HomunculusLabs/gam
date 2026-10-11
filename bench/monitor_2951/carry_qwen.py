@@ -158,12 +158,13 @@ def build(a):
 class Qwen:
     """An HF Qwen3 (dense or MoE) and a forward of a few query positions over a mixed key/value cache."""
 
-    def __init__(self, name, device="cuda"):
+    def __init__(self, name, device="cuda", dtype="bfloat16"):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
         self.torch, self.dev = torch, device
         self.tok = AutoTokenizer.from_pretrained(name)
-        self.model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16).to(device).eval()
+        self.model = AutoModelForCausalLM.from_pretrained(name, dtype=getattr(torch, dtype)).to(device).eval()
+        self.model.requires_grad_(False)  # no autograd graph: it would keep every layer's intermediates alive
         cfg = self.model.config
         self.L, self.H, self.kvH = cfg.num_hidden_layers, cfg.num_attention_heads, cfg.num_key_value_heads
         self.hd = getattr(cfg, "head_dim", None) or cfg.hidden_size // self.H
@@ -187,6 +188,10 @@ class Qwen:
         return kv, lp
 
     def patched(self, q_ids, T0, kv_orig, kv_changed, masks, head_masks=None):
+        with self.torch.inference_mode():
+            return self._patched(q_ids, T0, kv_orig, kv_changed, masks, head_masks)
+
+    def _patched(self, q_ids, T0, kv_orig, kv_changed, masks, head_masks=None):
         """Log-probs at the query positions T0.. (tokens q_ids), one row per set. masks: [B, T0] bool, True = the
         position's keys/values come from the changed run at every layer. head_masks: {layer: [B, H] bool} instead
         restricts the changed keys/values of `masks` to those (layer, query head) units."""
@@ -238,7 +243,7 @@ def kl_bits(lp, lq):
 
 def run(a):
     import torch
-    qm = Qwen(a.model, a.device)
+    qm = Qwen(a.model, a.device, a.dtype)
     out = open(a.out, "a")
     done = {json.loads(l)["case"] for l in open(a.out)} if os.path.getsize(a.out) else set()
     start = time.time()
@@ -303,8 +308,8 @@ def run(a):
         single = carried([[p] for p in cand])
         order = sorted(range(len(cand)), key=lambda j: -single[j])
         res["top_single"] = [[cand[j], single[j], qm.tok.decode([seq_o[cand[j]]])] for j in order[:20]]
-        pool, chosen, frac = [cand[j] for j in order[:64]], [], 0.0
-        while frac < 0.9 and pool and len(chosen) < 64:
+        pool, chosen, frac = [cand[j] for j in order[:a.pool]], [], 0.0
+        while frac < 0.9 and pool and len(chosen) < a.pool:
             trial = carried([chosen + [p] for p in pool])
             j = max(range(len(pool)), key=lambda i: trial[i])
             chosen.append(pool.pop(j))
@@ -320,7 +325,7 @@ def run(a):
         res["heads_read"] = "value positions" if S is vpos else "set90"
         mk1 = torch.zeros(1, T0, dtype=torch.bool, device=qm.dev)
         mk1[0, torch.tensor(S, device=qm.dev)] = True
-        units = [(i, hh) for i in range(qm.L) for hh in range(qm.H)]
+        units = [(i, hh) for i in range(qm.L) for hh in range(qm.H)][:a.max_units]
         hsingle = []
         for s in range(0, len(units), a.batch):
             chunk = units[s:s + a.batch]
@@ -331,8 +336,8 @@ def run(a):
             hsingle += (1 - kl_bits(lp, lq) / base).cpu().tolist()
         horder = sorted(range(len(units)), key=lambda j: -hsingle[j])
         res["top_heads_single"] = [[units[j][0], units[j][1], hsingle[j]] for j in horder[:20]]
-        hpool, hchosen, hfrac = [units[j] for j in horder[:48]], [], 0.0
-        while hfrac < 0.9 and hpool and len(hchosen) < 32:
+        hpool, hchosen, hfrac = [units[j] for j in horder[:a.head_pool]], [], 0.0
+        while hfrac < 0.9 and hpool and len(hchosen) < a.head_pool:
             trial = []
             for s in range(0, len(hpool), a.batch):
                 chunk = hpool[s:s + a.batch]
@@ -391,6 +396,10 @@ def main():
     r.add_argument("--min-bits", type=float, default=0.5)
     r.add_argument("--device", default="cuda")
     r.add_argument("--deadline", type=float, default=1e9, help="seconds after which no new case starts")
+    r.add_argument("--dtype", default="bfloat16")
+    r.add_argument("--pool", type=int, default=64, help="single positions the greedy position search draws from")
+    r.add_argument("--head-pool", type=int, default=48, help="single heads the greedy head search draws from")
+    r.add_argument("--max-units", type=int, default=10**9, help="screen only the first units (a quick test)")
     p = sub.add_parser("report")
     p.add_argument("path")
     p.add_argument("--min-bits", type=float, default=0.05)
