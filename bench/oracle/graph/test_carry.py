@@ -6,6 +6,7 @@ import math
 import json
 from pathlib import Path
 import sys
+import tempfile
 
 import pytest
 import torch
@@ -150,6 +151,17 @@ def test_nonzero_source_target_controls(task, source, target):
     print(task, "source/target-only prototype", expected, "carry", actual)
     assert actual == pytest.approx(expected, abs=1e-5)
     assert expected > .03
+    units = carry.UnitSpace(nat, len(ids), [source, *targets])
+    fast = carry.MatrixCarry(nat, ids, targets, prompts, units, chunk_size=3)
+    all_units = torch.ones(units.size, dtype=torch.bool, device=nat.dev)
+    alternating = all_units.clone()
+    alternating[1::2] = False
+    rows = [all_units, alternating, ~all_units]
+    slow = carry.Carry(nat, ids, targets, prompts, chunk_size=1)
+    reference = slow.measure([units.expand(a) for a in rows])
+    actual = fast.measure(rows)
+    print(task, "sparse versus full", actual.tolist(), reference.tolist())
+    torch.testing.assert_close(actual, reference, atol=2e-5, rtol=1e-5)
 
 
 def test_finite_removal_versus_local_derivative(case):
@@ -226,7 +238,242 @@ def test_oom_chunk_backoff(case, monkeypatch):
     torch.testing.assert_close(actual, expected, atol=1e-5, rtol=0)
 
 
+def test_unit_space_and_head_endpoints(case):
+    nat, ids, targets, prompts, study, _, _, _ = case
+    matrix = carry.UnitSpace(nat, len(ids), [322, *targets])
+    full = torch.ones(matrix.size, dtype=torch.bool, device=nat.dev)
+    assert matrix.size == len(nat.names) * len(set([322, *targets]))
+    expected = {(n, p, c) for n, p in matrix.units for c in range(nat.C[n])}
+    for n, mask in carry.masks(nat, len(ids), expected).items():
+        assert torch.equal(mask, matrix.expand(full)[n])
+    heads = carry.UnitSpace(nat, len(ids), [322, *targets], "head")
+    hs = carry.HeadCarry(nat, ids, targets, prompts, heads, chunk_size=2)
+    rows = [torch.tensor([((u[0], u[-1]) in chosen) for u in heads.units], device=nat.dev)
+            for chosen in (set(), set(matrix.units), {("h.0.mlp.c_fc", 322), ("h.0.mlp.down_proj", 322),
+                                                    ("h.2.attn.v_proj", 322), ("h.2.attn.o_proj", 332)})]
+    ms = [matrix.expand(torch.tensor([u in chosen for u in matrix.units], device=nat.dev))
+          for chosen in (set(), set(matrix.units), {("h.0.mlp.c_fc", 322), ("h.0.mlp.down_proj", 322),
+                                                   ("h.2.attn.v_proj", 322), ("h.2.attn.o_proj", 332)})]
+    actual, reference = hs.measure(rows), study.measure(ms)
+    print("head versus matrix endpoints/4-unit", actual.tolist(), reference.tolist())
+    torch.testing.assert_close(actual, reference, atol=2e-5, rtol=1e-5)
+    fast = carry.MatrixCarry(nat, ids, targets, prompts, matrix, chunk_size=3)
+    matrix_rows = [torch.tensor([u in chosen for u in matrix.units], device=nat.dev)
+                   for chosen in (set(), set(matrix.units), {("h.0.mlp.c_fc", 322), ("h.0.mlp.down_proj", 322),
+                                                            ("h.2.attn.v_proj", 322), ("h.2.attn.o_proj", 332)})]
+    fast_scores = fast.measure(matrix_rows)
+    print("prompt-batched matrix versus separate prompts", fast_scores.tolist(), reference.tolist())
+    torch.testing.assert_close(fast_scores, reference, atol=3e-5, rtol=1e-5)
+    sparse_grad = carry._unit_attribution(fast, matrix, matrix_rows[-1])
+    dense_grad = carry.attribution(study, matrix, matrix_rows[-1])
+    torch.testing.assert_close(sparse_grad, dense_grad, atol=3e-4, rtol=.002)
+    singles = carry.HeadCarry(nat, ids, targets, prompts, heads, chunk_size=1).measure(rows)
+    torch.testing.assert_close(actual, singles, atol=2e-5, rtol=1e-5)
+    # All published attention write/read vectors span all heads. Exact zeros,
+    # rather than an arbitrary energy threshold, define whole-head support.
+    for n in nat.names:
+        if ".attn." in n:
+            st = nat.target.site(n)
+            w = st.V.T if n.endswith("o_proj") else st.U
+            assert (w.reshape(w.shape[0], nat.target.n_head, nat.target.hd).abs().amax(-1) > 0).all()
+
+
+@pytest.mark.parametrize("head", [0, 3])
+def test_head_slice_literal_and_gradient(case, head):
+    nat, ids, targets, prompts, _, _, _, _ = case
+    space = carry.UnitSpace(nat, len(ids), [322, *targets], "head")
+    hs = carry.HeadCarry(nat, ids, targets, prompts, space)
+    active = torch.tensor([u[0] in ("h.0.mlp.c_fc", "h.0.mlp.down_proj") or
+                           (u[0] in ("h.2.attn.v_proj", "h.2.attn.o_proj") and u[1] == head)
+                           for u in space.units], device=nat.dev)
+    grad = carry._unit_attribution(hs, space, active)
+    assert torch.isfinite(grad).all()
+    j = int(grad.abs().argmax())
+    eps = .01
+    losses = []
+    with torch.no_grad():
+        for delta in (-eps, eps):
+            a = active.float()
+            a[j] += delta
+            losses.append(torch.stack([carry.kl(lp, hs.mixed(x, space.coefficients(a)))[0]
+                                       for x, lp in zip(prompts, hs.lp)]).mean())
+    torch.testing.assert_close(grad[j], (losses[1] - losses[0]) / (2 * eps), atol=3e-3, rtol=.04)
+    # Independent literal o-head calculation for one prompt using model's
+    # original attention input, plus explicitly sliced q/k/v writes.
+    class Literal(carry.TorchFunctionMode):
+        def __torch_function__(self, func, types, args=(), kwargs=None):
+            kwargs = kwargs or {}
+            if func.__name__ in ("matmul", "__matmul__"):
+                for n in nat.names:
+                    st = nat.target.site(n)
+                    if ".attn." not in n:
+                        continue
+                    if n.endswith("o_proj") and args[1] is st.V:
+                        result = torch.zeros_like(hs.rec[n]).expand(args[0].shape[0], -1, -1).clone()
+                        for h in range(nat.target.n_head):
+                            sl = slice(h * nat.target.hd, (h + 1) * nat.target.hd)
+                            live = args[0][..., sl] @ st.V[sl]
+                            base = hs.originals[n][..., h, :]
+                            use = torch.zeros(len(ids), dtype=torch.bool, device=nat.dev)
+                            for p in space.positions:
+                                use[p] = active[space.index[(n, h, p)]]
+                            result += torch.where(use[None, :, None], live, base)
+                        return result
+                    if not n.endswith("o_proj") and args[1] is st.U:
+                        live = func(*args, **kwargs)
+                        result = (hs.rec[n] @ st.U).clone()
+                        for h in range(nat.target.n_head):
+                            sl = slice(h * nat.target.hd, (h + 1) * nat.target.hd)
+                            for p in space.positions:
+                                if bool(active[space.index[(n, h, p)]]):
+                                    result[:, p, sl] = live[:, p, sl]
+                        return result
+            return func(*args, **kwargs)
+    patch = {}
+    for n in nat.names:
+        if ".mlp." in n:
+            mask = torch.ones_like(hs.rec[n], dtype=torch.bool)
+            for p in space.positions:
+                if bool(active[space.index[(n, p)]]):
+                    mask[:, p] = False
+            patch[n] = (mask, hs.rec[n])
+    with torch.no_grad(), Literal():
+        literal = nat.run(prompts[0], targets, nat._full_plan(len(ids), 1), *nat._one(), patch=patch)
+    with torch.no_grad():
+        actual = hs.mixed(prompts[0], space.coefficients(active.float()))
+    delta = actual - literal
+    weighted_squared = float((literal.exp() * delta.square()).sum())
+    print("head sparse/literal max logprob error", float(delta.abs().max()),
+          "weighted squared error", weighted_squared,
+          "carry KL discrepancy", float((carry.kl(hs.lp[0], actual) - carry.kl(hs.lp[0], literal)).abs().max()))
+    assert weighted_squared < 1e-9
+    torch.testing.assert_close(carry.kl(hs.lp[0], actual), carry.kl(hs.lp[0], literal), atol=2e-5, rtol=1e-5)
+    torch.testing.assert_close(actual, literal, atol=3e-5, rtol=0)
+
+
+def test_measured_unit_elimination(monkeypatch):
+    # Nonlinear score: the gradient ordering deliberately ranks the wrong unit.
+    # Compare EVERY committed removal to exhaustive enumeration on the host.
+    class Nat:
+        dev = "cpu"
+    class Space:
+        size = 5
+        def expand(self, a):
+            return a
+        def nodes(self, a):
+            return set(a.nonzero().flatten().tolist())
+    class Study:
+        nat = Nat()
+        def __init__(self):
+            self.calls = []
+        def measure(self, sets):
+            self.calls.append(len(sets))
+            return torch.tensor([sum((i + 1)**2 for i in range(5) if not a[i]) +
+                                 (20 if not a[0] and not a[1] else 0) for a in sets], dtype=torch.float32)
+    monkeypatch.setattr(carry, "_unit_attribution", lambda *args: torch.arange(5).flip(0))
+    study = Study()
+    curve = carry._position_circuit(study, Space())
+    assert study.calls == [1, 5, 4, 3, 2]
+    assert [n for n, _ in curve] == [5, 4, 3, 2, 1]
+    for i in range(1, len(curve)):
+        previous = curve.active[i-1]
+        trials = []
+        for j in previous.nonzero().flatten().tolist():
+            a = previous.clone()
+            a[j] = False
+            trials.append(a)
+        assert curve[i][1] == float(study.measure(trials).min())
+        assert len(curve.unit_set(i-1) - curve.unit_set(i)) == 1
+
+
+def test_threshold_nonmonotone_and_floor():
+    class Space:
+        def nodes(self, a):
+            return set(a.nonzero().flatten().tolist())
+    curve = carry.Curve(Space())
+    for count, score in [(4, .2), (3, 2.), (2, .05), (1, 3.)]:
+        curve.record(torch.arange(4) < count, score)
+    assert carry._threshold(curve, 10, .9)["size"] == 2
+    assert carry._threshold(curve, 10, .99)["size"] == 2
+    assert carry._threshold(curve, .000001, .9) is None
+    assert carry._threshold(curve, .01, .9) is None
+
+
+def test_explain_selection_excludes_targets(monkeypatch):
+    class Nat:
+        def sensitivity(self, ids, targets, generator):
+            assert generator.initial_seed() == native.task_seed(str(ids[:8]))
+            return torch.tensor([2., 8., 1., 9., 3.]), torch.empty(0)
+    def capture(nat, ids, targets, order, units, moved):
+        return order
+    monkeypatch.setattr(carry, "_explain_positions", capture)
+    assert carry.explain(Nat(), [1, 2, 3, 4, 5, 6], [2, 5], 3) == [4, 1, 3]
+    assert carry.explain(Nat(), [1], [0], 8) == []
+    with pytest.raises(ValueError):
+        carry.explain(Nat(), [1, 2], [1], 0)
+
+
+def test_alternative_tokens(case):
+    nat, ids, _, prompts, *_ = case
+    with torch.no_grad():
+        prediction = nat.reference([ids], [321])[0, 0]
+    expected = [t for t in prediction.topk(4).indices.tolist() if t != ids[322]][:3]
+    assert [x[322] for x in prompts] == expected
+    assert len(set(expected)) == 3
+    assert all(x[:322] == ids[:322] and x[323:] == ids[323:] for x in prompts)
+
+
+def test_prompt_batch_embeddings(case):
+    nat, ids, targets, prompts, *_ = case
+    space = carry.UnitSpace(nat, len(ids), [322, *targets])
+    study = carry.MatrixCarry(nat, ids, targets, prompts, space)
+    with torch.no_grad():
+        mode = carry._PromptBatch(study, 1)
+        with mode:
+            actual = nat.run(prompts[0], targets, nat._full_plan(len(ids), len(prompts)), *nat._one())
+        expected = nat.reference(prompts, targets)
+    assert mode.seen
+    error = actual - expected
+    print("batched embedding versus independent Target batch max error", float(error.abs().max()))
+    assert float((expected.exp() * error.square()).sum()) < 1e-9
+    torch.testing.assert_close(actual, expected, atol=1e-4, rtol=0)
+
+
+def test_cli_resume_without_model(monkeypatch):
+    out = Path.home() / "mpd-data/graph_oracle/carry"
+    out.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w+", suffix=".jsonl", dir=out) as f:
+        f.write(json.dumps({"task": "hard9300", "split": "hard", "k": 8, "units": "matrix"}) + "\n")
+        f.flush()
+        monkeypatch.setattr(sys, "argv", ["carry.py", "explain", "--split", "hard", "--n", "1", "--k", "8", "--out", f.name])
+        monkeypatch.setattr(native, "tasks", lambda split: [Path("hard9300.json")])
+        def forbidden_model():
+            raise AssertionError("resuming finished questions must not load the model")
+        monkeypatch.setattr(native, "Native", forbidden_model)
+        carry.main()
+        assert len(Path(f.name).read_text().splitlines()) == 1
+
+
+def test_window_rms_against_padded_reference(case):
+    nat, ids, targets, prompts, *_ = case
+    space = carry.UnitSpace(nat, len(ids), [322, *targets])
+    study = carry.MatrixCarry(nat, ids, targets, prompts, space, chunk_size=3)
+    full = torch.ones(space.size, dtype=torch.bool, device=nat.dev)
+    half = full.clone()
+    half[1::2] = False
+    sets = [full, half, ~full]
+    study.pad_norm = True
+    padded = study.measure(sets)
+    padded_gradient = carry._unit_attribution(study, space, half)
+    study.pad_norm = False
+    window = study.measure(sets)
+    window_gradient = carry._unit_attribution(study, space, half)
+    print("window versus padded RMS KL", window.tolist(), padded.tolist())
+    torch.testing.assert_close(window, padded, atol=3e-5, rtol=1e-5)
+    torch.testing.assert_close(window_gradient, padded_gradient, atol=3e-4, rtol=.002)
+
+
 if __name__ == "__main__":
     # The local memory guard recognizes script paths, but reserves only 2 GiB
     # for `python -m pytest` regardless of MPD_MEM_GIB.
-    raise SystemExit(pytest.main([__file__, "-s", "-p", "no:cacheprovider"]))
+    raise SystemExit(pytest.main([__file__, "-s", "-p", "no:cacheprovider", *sys.argv[1:]]))

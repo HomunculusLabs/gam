@@ -4,6 +4,10 @@ All omitted activations are held at their values on the original prompt. Token
 embeddings and W - V U still run; ``diagnostics`` separates these bypasses.
 KL sums target positions, averages changed prompts, and is reported in bits.
 Run: MPD_MEM_GIB=24 ~/mpd-data/venv/bin/python carry.py search --task hard9308
+     MPD_MEM_GIB=24 ~/mpd-data/venv/bin/python carry.py explain --split hard
+         --n 50 --k 8 --out /Users/user/mpd-data/graph_oracle/carry/hard50_matrix.jsonl
+Use --units head for activation-slice units; summarize reads completed JSONL
+rows and reports distributions, recurring sets, timing, and full-set failures.
 """
 from __future__ import annotations
 
@@ -127,6 +131,7 @@ class Carry:
         self.nat, self.ids, self.targets, self.prompts = nat, ids, targets, prompts
         self.T = len(ids)
         self.rec = nat._model_record(ids)[0]
+        self.states = nat._model_record(ids)[1]
         with torch.no_grad():
             self.lp = [nat.reference([x], targets) for x in prompts]
         # Bound inference working memory, chiefly activations and attention.
@@ -231,6 +236,12 @@ class Curve(list):
 
     def node_set(self, i):
         return self.space.nodes(self.active[i])
+
+    unit_set = node_set
+
+    @property
+    def unit_sets(self):
+        return [self.unit_set(i) for i in range(len(self))]
 
 
 def attribution(study, space, active):
@@ -345,6 +356,689 @@ def alternatives(nat, ids, source):
     return [ids[:source] + [z] + ids[source + 1:] for z in alts]
 
 
+class UnitSpace:
+    """Disjoint matrix-position units, or attention head-position slices.
+
+    Public units are (matrix, position) and (matrix, head, position). q/k/v
+    head h selects output dimensions [h*hd:(h+1)*hd] of a @ U, BEFORE
+    adding the live remainder. Dense U mixes heads, so no component is assigned
+    to a single head. o head h selects its input contribution att_h @ V_h to
+    a_o, BEFORE a_o @ U; V mixes heads too. MLP units keep all components.
+    Head slices sum to precisely the matrix intervention (up to float32 order).
+    """
+    def __init__(self, nat, T, positions, granularity="matrix"):
+        if granularity not in ("matrix", "head"):
+            raise ValueError("granularity must be matrix or head")
+        positions = sorted(set(positions))
+        if not positions or min(positions) < 0 or max(positions) >= T:
+            raise ValueError("positions must be inside the text")
+        self.nat, self.T, self.positions, self.granularity = nat, T, positions, granularity
+        self.units = [u for n in nat.names for p in positions
+                      for u in ([(n, h, p) for h in range(nat.target.n_head)]
+                                if granularity == "head" and ".attn." in n else [(n, p)])]
+        self.size = len(self.units)
+        self.index = {u: j for j, u in enumerate(self.units)}
+        self.by_name = {}
+        self.offsets = {}
+        for n in nat.names:
+            js = [j for j, u in enumerate(self.units) if u[0] == n]
+            self.by_name[n] = torch.tensor(js, device=nat.dev)
+            self.offsets[n] = slice(js[0], js[-1]+1)
+        self.pos = torch.tensor(positions, device=nat.dev)
+
+    def expand(self, a):
+        # Matrix masks use ordinary Carry. Head coefficients are consumed by
+        # HeadCarry, never misinterpreted as subcomponent masks.
+        if self.granularity == "head":
+            return a
+        out = {}
+        for n, js in self.by_name.items():
+            v = a[js, None].expand(-1, self.nat.C[n])
+            out[n] = torch.zeros(self.T, self.nat.C[n], device=a.device, dtype=a.dtype).index_copy(0, self.pos, v)
+        return out
+
+    def nodes(self, active):
+        return {self.units[j] for j in active.nonzero().flatten().cpu().tolist()}
+
+    def coefficients(self, a):
+        """[B,N] -> per-matrix [B,T,H or 1], including frozen positions."""
+        if a.dim() == 1:
+            a = a[None]
+        out = {}
+        for n, js in self.by_name.items():
+            H = self.nat.target.n_head if self.granularity == "head" and ".attn." in n else 1
+            v = a[:, js].reshape(a.shape[0], len(self.positions), H)
+            out[n] = a.new_zeros(a.shape[0], self.T, H).index_copy(1, self.pos, v)
+        return out
+
+    def compact(self, a):
+        if a.dim() == 1:
+            a = a[None]
+        return {n: a[:, sl].reshape(a.shape[0], len(self.positions), -1) for n, sl in self.offsets.items()}
+
+
+def _unit_chunk(nat, T, prompts=3):
+    # One layer's intermediates coexist. All prompts share a batch; allow
+    # 8 GiB of workspace within the required 24 GiB process reservation.
+    width = max(max(nat.target.site(n).V.shape[0], nat.target.site(n).U.shape[1]) for n in nat.names)
+    per = 4 * (8 * nat.target.n_head * T**2 + 16 * T * width)
+    return max(1, (8 * 1024**3) // (prompts * per))
+
+
+class _AttentionPrefix(TorchFunctionMode):
+    """Reuse causal attention rows strictly before the changed position.
+
+    Capture one original run, then shorten QK, softmax and PV to rows p:T.
+    Native still receives full-size P/attention tensors. All changed rows run
+    normally, including rows outside the selected units (live remainders).
+    """
+    def __init__(self, T, start=0, originals=None):
+        self.T, self.start = T, start
+        self.capture = originals is None
+        self.originals = [] if originals is None else originals
+        self.layer, self.value_next, self.logits = 0, False, False
+        self.pattern = None
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func.__name__ in ("matmul", "__matmul__") and args[0].dim() == 4 and args[1].dim() == 4:
+            x, w = args[:2]
+            if not self.value_next:
+                self.value_next = self.logits = True
+                return func(*args, **kwargs) if self.capture else x[..., self.start:, :] @ w
+            self.value_next = False
+            if self.capture:
+                result = func(*args, **kwargs)
+                self.originals.append((self.pattern, result.detach()))
+            else:
+                result = torch.cat([self.originals[self.layer][1][..., :self.start, :].expand(x.shape[0], -1, -1, -1),
+                                    x[..., self.start:, :] @ w], -2)
+            self.layer += 1
+            return result
+        if self.logits and func.__name__ == "masked_fill" and not self.capture:
+            return func(args[0], args[1][self.start:, :], *args[2:], **kwargs)
+        if self.logits and func.__name__ == "softmax":
+            self.logits = False
+            result = func(*args, **kwargs)
+            if self.capture:
+                self.pattern = result.detach()
+                return result
+            return torch.cat([self.originals[self.layer][0][..., :self.start, :].expand(result.shape[0], -1, -1, -1), result], -2)
+        return func(*args, **kwargs)
+
+
+def _capture_attention(study):
+    mode = _AttentionPrefix(study.T)
+    with torch.no_grad(), mode:
+        study.nat.run(study.ids, study.targets, study.nat._full_plan(study.T, 1), *study.nat._one())
+    if mode.layer != study.nat.target.n_layer:
+        raise RuntimeError("attention prefix capture incomplete")
+    return mode.originals
+
+
+class _SparseProducts(TorchFunctionMode):
+    """Skip products discarded by hard/soft patches, preserve live remainders.
+
+    Frozen a @ U rows equal original a @ U exactly. x @ V rows outside the
+    unit positions are immediately overwritten by original a. Only these two
+    VPD products are shortened; attention, norms and delta products stay live.
+    """
+    def __init__(self, study):
+        self.study = study
+        self.products = {id(getattr(study.nat.target.site(n), field)): (n, field)
+                         for n in study.nat.names for field in ("V", "U")
+                         if not (study.space.granularity == "head" and ".attn." in n and
+                                 (field == "U" or n.endswith("o_proj")))}
+        self.windows = study.windows
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func.__name__ == "__getitem__" and isinstance(args[1], tuple) and len(args[1]) == 2 and isinstance(args[1][1], list):
+            key = tuple(args[1][1])
+            if key not in self.study.indices:
+                self.study.indices[key] = torch.tensor(key, device=self.study.nat.dev, dtype=torch.long)
+            return func(args[0], (args[1][0], self.study.indices[key]), **kwargs)
+        if func.__name__ in ("matmul", "__matmul__") and id(args[1]) in self.products:
+            n, field = self.products[id(args[1])]
+            x, w = args[:2]
+            if x.dim() != 3:
+                raise RuntimeError("unexpected Native VPD product shape")
+            s = self.study.T - x.shape[1]
+            if s not in self.windows:
+                self.windows[s] = torch.tensor([p-s for p in self.study.space.positions if p >= s], device=x.device)
+            pos = self.windows[s]
+            base = self.study.rec[n] if field == "V" else self.study.writes[n]
+            selected = x.index_select(1, pos) @ w
+            return base[:, s:].expand(x.shape[0], -1, -1).index_copy(1, pos, selected)
+        return func(*args, **kwargs)
+
+
+class _PromptBatch(TorchFunctionMode):
+    """Supply prompt-major embeddings to Native's shared-id batched plan.
+
+    Native uses ids only for token embedding lookup and the reuse boundary.
+    Length, targets, prefix and changed position are shared; each batch row
+    gets its own changed-token embedding. No tokenizer/model mutation.
+    """
+    def __init__(self, study, candidates):
+        self.study, self.candidates = study, candidates
+        self.emb = self.batch = None
+        self.seen = False
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func is torch.tensor and args[0] is self.study.run_ids:
+            return self.study.input_ids[0]
+        if func.__name__ == "__getitem__" and args[0] is self.study.nat.target.wte:
+            length = len(args[1])
+            self.emb = self.study.embeddings[0, -length:]
+            self.batch = self.study.embeddings[:, None, -length:].expand(-1, self.candidates, -1, -1).reshape(-1, length, self.emb.shape[-1])
+            return self.emb
+        if func.__name__ == "__getitem__" and args[0] is self.emb and args[1] is None:
+            self.seen = True
+            return self.batch
+        return func(*args, **kwargs)
+
+
+def _prepare_unit_prompts(study):
+    with torch.no_grad():
+        study.input_ids = torch.tensor(study.prompts, device=study.nat.dev)
+        study.embeddings = study.nat.target.wte[study.input_ids]
+    study.batch_lp = torch.cat(study.lp)[:, None]
+    study.windows, study.indices = {}, {}
+    study.run_ids = min(study.prompts, key=lambda x: next((p for p, (a, b) in enumerate(zip(study.ids, x)) if a != b), study.T))
+    study.prompt_index = {tuple(x): j for j, x in enumerate(study.prompts)}
+    study.direct = True
+    study.pad_norm = False
+    study.causal = torch.ones(study.T, study.T, device=study.nat.dev, dtype=torch.bool).tril()
+    study.mask_windows = {}
+    tg = study.nat.target
+    study.rope_keys = {i: tg._rope(study.states[("kv", i)].view(1, study.T, tg.n_head, tg.hd).transpose(1, 2), study.T)
+                       for i in range(tg.n_layer)}
+    if study.space.granularity == "head":
+        with torch.no_grad():
+            study.writes = {n: ((study.originals[n].sum(-2) if n.endswith("o_proj") else study.rec[n]) @ tg.site(n).U)
+                            for n in study.nat.names}
+
+
+def _run_units(study, coefficients, embeddings, *, compact=False):
+    """Direct exact unit-intervention evaluator, with live VPD remainders.
+
+    Frozen VPD products use original writes; only selected positions compute
+    activations. Remainders and MLP nonlinearities run on every changed row.
+    Attention uses all causal keys/values, but only queries in the window.
+    Prefixes are unchanged by causality. RMS is row-local; an optional padded
+    reference preserves Native's full shape for numerical checks. No gradient
+    dependency is dropped.
+    """
+    import vpd_model
+    nat, tg, T = study.nat, study.nat.target, study.T
+    B = next(iter(coefficients.values())).shape[0]
+    s = max(0, min(study.first_change, min(study.space.positions), T - -(-64 // B), min(study.targets)))
+    if s not in study.mask_windows:
+        study.mask_windows[s] = ~study.causal[s:]
+    x = embeddings[:, s:].expand(B, -1, -1).clone()
+    L, H, hd = T-s, tg.n_head, tg.hd
+    offsets = [p-s for p in study.space.positions]
+
+    def selected_rows(t, positions):
+        return torch.stack([t[:, p] for p in positions], 1)
+
+    def norm(x, weight):
+        if s and study.pad_norm:
+            padded = torch.cat([x.new_zeros(B, s, x.shape[-1]), x], 1)
+            return vpd_model.rms(padded, weight, tg.eps)[:, s:].contiguous()
+        return vpd_model.rms(x, weight, tg.eps)
+
+    def projection(n, inp):
+        st = tg.site(n)
+        selected = selected_rows(inp, offsets)
+        a = coefficients[n] if compact else selected_rows(coefficients[n], study.space.positions)
+        if study.space.granularity == "head" and ".attn." in n:
+            if n.endswith("o_proj"):
+                parts = torch.stack([selected[..., h*hd:(h+1)*hd] @ st.V[h*hd:(h+1)*hd] for h in range(H)], -2)
+                base = selected_rows(study.originals[n], study.space.positions)
+                activation = (a[..., None] * parts + (1-a[..., None]) * base).sum(-2)
+                live_write = activation @ st.U
+            else:
+                live = (selected @ st.V) @ st.U
+                base = selected_rows(study.originals[n], study.space.positions)
+                weight = a.repeat_interleave(hd, -1)
+                live_write = weight * live + (1-weight) * base
+        else:
+            live = selected @ st.V
+            base = selected_rows(study.rec[n], study.space.positions)
+            activation = torch.where(a, live, base) if a.dtype == torch.bool else a * live + (1-a) * base
+            live_write = activation @ st.U
+        write = study.writes[n][:, s:].expand(B, -1, -1).clone()
+        for j, p in enumerate(offsets):
+            write[:, p] = live_write[:, j]
+        return write
+
+    def heads(w):
+        return w.view(B, L, H, hd).transpose(1, 2)
+
+    def rope_window(w):
+        half = hd // 2
+        rotate = torch.cat([-w[..., half:], w[..., :half]], -1)
+        return w * tg.cos[s:T] + rotate * tg.sin[s:T]
+
+    for i in range(tg.n_layer):
+        names = {kind: native.site_name(i, kind) for kind in vpd_model.KINDS}
+        z = norm(x, tg.norms[2*i])
+        qkv = [projection(names[kind], z) + z @ tg.site(names[kind]).delta_T for kind in ("q_proj", "k_proj", "v_proj")]
+        q, k, v = qkv
+        q, k = rope_window(heads(q)), rope_window(heads(k))
+        k = torch.cat([study.rope_keys[i][:, :, :s].expand(B, -1, -1, -1), k], 2) if s else k
+        prefix_v = study.states[("vs", i)][:, :s].expand(B, -1, -1)
+        v = torch.cat([prefix_v, v], 1).view(B, T, H, hd).transpose(1, 2) if s else heads(v)
+        if torch.is_grad_enabled():
+            pattern = ((q @ k.transpose(-1, -2)) / math.sqrt(hd)).masked_fill(study.mask_windows[s], float("-inf")).softmax(-1)
+            attention = pattern @ v
+        else:
+            attention = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=~study.mask_windows[s], dropout_p=0.0)
+        attention = attention.transpose(1, 2).reshape(B, L, -1)
+        no = names["o_proj"]
+        x = (x + projection(no, attention)) + attention @ tg.site(no).delta_T
+        z = norm(x, tg.norms[2*i+1])
+        nf, nd = names["c_fc"], names["down_proj"]
+        pre = projection(nf, z) + z @ tg.site(nf).delta_T
+        gelu = vpd_model.gelu_tanh(pre)
+        x = (x + projection(nd, gelu)) + gelu @ tg.site(nd).delta_T
+    final = selected_rows(x, [p-s for p in study.targets])
+    return torch.log_softmax((vpd_model.rms(final, tg.ln_f, tg.eps) @ tg.wte.T).float(), -1)
+
+
+def _mixed_units(study, x, coefficients):
+    j = study.prompt_index.get(tuple(x))
+    if j is None:
+        emb = study.nat.target.wte[torch.tensor(x, device=study.nat.dev)][None]
+    else:
+        emb = study.embeddings[j:j+1]
+    return _run_units(study, coefficients, emb)
+
+
+@torch.no_grad()
+def _measure_units(study, sets):
+    out, start = [], 0
+    while start < len(sets):
+        valid = min(study.chunk_size, len(sets) - start)
+        # MPS recompiles graphs for new batch shapes. At short windows the
+        # compilation cost dominates the extra arithmetic on duplicate rows.
+        capacity = min(study.chunk_size, study.space.size)
+        short = study.T - min(study.first_change, min(study.targets)) <= 64
+        B = max(valid, capacity) if short else valid
+        try:
+            a = torch.stack(sets[start:start+valid])
+            if B > valid:
+                a = torch.cat([a, a[-1:].expand(B-valid, -1)])
+            if study.space.granularity == "head":
+                a = a.float()
+            base_coeff = study.space.compact(a) if study.direct else study.space.coefficients(a)
+            coeff = {n: v.repeat(len(study.prompts), 1, 1) for n, v in base_coeff.items()}
+            if study.direct:
+                emb = study.embeddings[:, None].expand(-1, B, -1, -1).reshape(-1, study.T, study.embeddings.shape[-1])
+                lq = _run_units(study, coeff, emb, compact=True)
+                scores = kl(study.batch_lp, lq.reshape(len(study.prompts), B, *lq.shape[1:])).mean(0)
+                out.append(scores[:valid])
+                start += valid
+                if str(study.nat.dev).startswith("mps") and torch.mps.driver_allocated_memory() > 12 * 1024**3:
+                    native.free(study.nat.dev)
+                continue
+            mode = _PromptBatch(study, B)
+            with mode:
+                if study.space.granularity == "head":
+                    lq = study.mixed(study.run_ids, coeff, reuse=True)
+                else:
+                    patch = {n: (~v, study.rec[n]) for n, v in coeff.items()}
+                    with _AttentionPrefix(study.T, study.first_change, study.attention), _SparseProducts(study):
+                        lq = study.nat.run(study.run_ids, study.targets,
+                                          study.nat._full_plan(study.T, B * len(study.prompts)), *study.nat._one(),
+                                          patch=patch, reuse=(study.states, study.ids))
+            if not mode.seen:
+                raise RuntimeError("Native embedding batch interception failed")
+            scores = kl(study.batch_lp, lq.reshape(len(study.prompts), B, *lq.shape[1:])).mean(0)
+            out.append(scores[:valid])
+            start += valid
+        except RuntimeError as exc:
+            if "out of memory" not in str(exc).lower() or B == 1:
+                raise
+            study.chunk_size = max(1, B // 2)
+            exc.__traceback__ = None
+            a = coeff = patch = lq = mode = None
+            native.free(study.nat.dev)
+            if str(study.nat.dev).startswith("cuda"):
+                torch.cuda.empty_cache()
+    return torch.cat(out) if out else torch.empty(0, device=study.nat.dev)
+
+
+class MatrixCarry(Carry):
+    """A whole matrix needs a broadcast [B,T,1] mask, not [B,T,C]."""
+    unit_vectors = True
+
+    def __init__(self, nat, ids, targets, prompts, space, chunk_size=None):
+        super().__init__(nat, ids, targets, prompts, chunk_size)
+        if chunk_size is None:
+            self.chunk_size = _unit_chunk(nat, self.T, len(prompts))
+        self.space = space
+        with torch.no_grad():
+            self.writes = {n: self.rec[n] @ nat.target.site(n).U for n in nat.names}
+        self.attention = _capture_attention(self)
+        self.first_change = min((p for x in prompts for p, (a, b) in enumerate(zip(ids, x)) if a != b), default=self.T)
+        _prepare_unit_prompts(self)
+
+    def mixed(self, x, coefficients):
+        if self.direct:
+            return _mixed_units(self, x, coefficients)
+        with _AttentionPrefix(self.T, self.first_change, self.attention), _SparseProducts(self):
+            return super().mixed(x, coefficients)
+
+    @torch.no_grad()
+    def measure(self, sets):
+        return _measure_units(self, sets)
+
+
+class _HeadMix(TorchFunctionMode):
+    """Head-sliced VPD contributions; no global hooks or model mutations."""
+    def __init__(self, nat, coefficients=None, originals=None, patch=None, positions=None):
+        self.nat, self.coefficients = nat, coefficients
+        self.originals = {} if originals is None else originals
+        self.capture = coefficients is None
+        self.pos = positions if isinstance(positions, torch.Tensor) or positions is None else torch.tensor(positions, device=nat.dev)
+        self.windows = {}
+        self.products = {id(nat.target.site(n).V if n.endswith("o_proj") else nat.target.site(n).U): n
+                         for n in nat.names if ".attn." in n}
+        self.patches = {} if patch is None else {id(v[0]): n for n, v in patch.items()}
+        self.seen = set()
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func is torch.where and id(args[0]) in self.patches:
+            n = self.patches[id(args[0])]
+            a = self.coefficients[n]
+            return a * args[2] + (1 - a) * args[1]
+        if func.__name__ in ("matmul", "__matmul__") and id(args[1]) in self.products:
+            n = self.products[id(args[1])]
+            self.seen.add(n)
+            H, hd = self.nat.target.n_head, self.nat.target.hd
+            s = 0 if self.capture else self.originals[n].shape[1] - args[0].shape[1]
+            pos = self.pos
+            if pos is not None:
+                if s not in self.windows:
+                    self.windows[s] = self.pos - s
+                pos = self.windows[s]
+            if n.endswith("o_proj"):
+                # [B,T,H,C]: contributions, not residual output dimensions.
+                x, V = args[:2]
+                if pos is not None:
+                    x = x.index_select(1, pos)
+                parts = torch.stack([x[..., h*hd:(h+1)*hd] @ V[h*hd:(h+1)*hd] for h in range(H)], -2)
+                if self.capture:
+                    self.originals[n] = parts.detach()
+                    return func(*args, **kwargs)
+                a = self.coefficients[n][:, s:, :, None]
+                base = self.originals[n][:, s:]
+                if pos is not None:
+                    mixed = (a.index_select(1, pos) * parts +
+                             (1 - a.index_select(1, pos)) * base.index_select(1, pos)).sum(-2)
+                    return base.sum(-2).expand(parts.shape[0], -1, -1).index_copy(1, pos, mixed)
+                return (a * parts + (1 - a) * base).sum(-2)
+            live = func(*args, **kwargs) if pos is None else args[0].index_select(1, pos) @ args[1]
+            if self.capture:
+                self.originals[n] = live.detach()
+                return live
+            a = self.coefficients[n][:, s:].repeat_interleave(hd, -1)
+            base = self.originals[n][:, s:]
+            if pos is not None:
+                mixed = a.index_select(1, pos) * live + (1 - a.index_select(1, pos)) * base.index_select(1, pos)
+                return base.expand(live.shape[0], -1, -1).index_copy(1, pos, mixed)
+            return a * live + (1 - a) * self.originals[n]
+        return func(*args, **kwargs)
+
+
+class HeadCarry(Carry):
+    unit_vectors = True
+
+    def __init__(self, nat, ids, targets, prompts, space, chunk_size=None):
+        super().__init__(nat, ids, targets, prompts, chunk_size)
+        if chunk_size is None:
+            self.chunk_size = _unit_chunk(nat, self.T, len(prompts))
+        self.space = space
+        with torch.no_grad():
+            self.writes = {n: self.rec[n] @ nat.target.site(n).U for n in nat.names if ".mlp." in n}
+        capture = _HeadMix(nat)
+        with torch.no_grad(), capture:
+            nat.run(ids, targets, nat._full_plan(self.T, 1), *nat._one())
+        if capture.seen != set(capture.products.values()):
+            raise RuntimeError("head product capture incomplete")
+        self.originals = capture.originals
+        self.attention = _capture_attention(self)
+        self.first_change = min((p for x in prompts for p, (a, b) in enumerate(zip(ids, x)) if a != b), default=self.T)
+        _prepare_unit_prompts(self)
+
+    def mixed(self, x, coefficients, *, reuse=False):
+        if self.direct:
+            return _mixed_units(self, x, coefficients)
+        patch = {n: (coefficients[n] == 0 if reuse else torch.ones_like(self.rec[n], dtype=torch.bool), self.rec[n])
+                 for n in self.nat.names if ".mlp." in n}
+        mode = _HeadMix(self.nat, coefficients, self.originals, None if reuse else patch, self.space.pos)
+        mode.windows = self.windows
+        with _AttentionPrefix(self.T, self.first_change, self.attention), _SparseProducts(self), mode:
+            result = self.nat.run(x, self.targets, self.nat._full_plan(self.T, next(iter(coefficients.values())).shape[0]),
+                                  *self.nat._one(), patch=patch, reuse=(self.states, self.ids) if reuse else None)
+        if mode.seen != set(mode.products.values()):
+            raise RuntimeError("head product interception incomplete")
+        return result
+
+    @torch.no_grad()
+    def measure(self, sets):
+        return _measure_units(self, sets)
+
+
+def _unit_attribution(study, space, active):
+    if not getattr(study, "unit_vectors", False):
+        return attribution(study, space, active)
+    a = active.float().detach().requires_grad_(True)
+    grad = torch.zeros_like(a)
+    for x, lp in zip(study.prompts, study.lp):
+        loss = kl(lp, study.mixed(x, space.coefficients(a))).sum() / len(study.prompts)
+        grad += torch.autograd.grad(loss, a)[0]
+    return grad
+
+
+def _position_circuit(study, space):
+    active = torch.ones(space.size, dtype=torch.bool, device=study.nat.dev)
+    curve = Curve(space)
+    argument = (lambda a: a) if getattr(study, "unit_vectors", False) else space.expand
+    curve.record(active, study.measure([argument(active)])[0])
+    # Attribution only orders the measured candidates. Every candidate is
+    # measured at every step: no unjustified gradient-based early termination.
+    order = torch.argsort(_unit_attribution(study, space, active).abs(), stable=True).cpu().tolist()
+    kept = set(range(space.size))
+    while len(kept) > 1:
+        js = [j for j in order if j in kept]
+        trial = active[None].expand(len(js), -1).clone()
+        trial[torch.arange(len(js), device=active.device), torch.tensor(js, device=active.device)] = False
+        candidates = [argument(a) for a in trial.unbind()]
+        # One cached carry-KL evaluation, internally chunked; changed prompt
+        # references are never recomputed inside backward elimination.
+        scores = study.measure(candidates)
+        best = int(scores.argmin())
+        active[js[best]] = False
+        kept.remove(js[best])
+        curve.record(active, scores[best])
+    return curve
+
+
+def position_circuit(nat, ids, targets, p, prompts, units="matrix"):
+    """Exact measured greedy elimination to one unit; Curve.unit_set(i).
+
+    units is 'matrix', 'head', or an explicit iterable of the above unit tuples
+    (at p and targets). Gradients affect order only, never membership or scores.
+    The smallest sets reported later are smallest on this greedy path, not a
+    globally optimal subset. All candidate removals are one chunked carry call.
+    """
+    if not isinstance(units, str):
+        units = list(units)
+    space = UnitSpace(nat, len(ids), [p, *targets], units if isinstance(units, str) else
+                      ("head" if any(len(u) == 3 for u in units) else "matrix"))
+    if not isinstance(units, str):
+        allowed = set(units)
+        if allowed != set(space.units):
+            raise ValueError("explicit units must contain the full p/targets space")
+    study = (HeadCarry if space.granularity == "head" else MatrixCarry)(nat, ids, targets, prompts, space)
+    return _position_circuit(study, space)
+
+
+def _threshold(curve, empty, fraction):
+    if empty <= 1e-5:
+        return None  # float32 floor; percentages of zero have no interpretation
+    eligible = [i for i, (_, score) in enumerate(curve) if score <= (1 - fraction) * empty]
+    if not eligible:
+        return None
+    i = min(eligible, key=lambda j: curve[j][0])
+    return {"size": curve[i][0], "kl_bits": curve[i][1], "units": sorted(curve.node_set(i))}
+
+
+def _explain_positions(nat, ids, targets, order, units, moved=None):
+    result = []
+    for p in order:
+        t0 = time.perf_counter()
+        prompts = alternatives(nat, ids, p)
+        space = UnitSpace(nat, len(ids), [p, *targets], units)
+        study = (HeadCarry if units == "head" else MatrixCarry)(nat, ids, targets, prompts, space)
+        empty = float(study.measure([torch.zeros(space.size, dtype=torch.bool, device=nat.dev)])[0])
+        with torch.no_grad():
+            original = nat.reference([ids], targets)
+            movement = float(torch.stack([kl(lp, original)[0] for lp in study.lp]).mean())
+        curve = _position_circuit(study, space)
+        synchronize(nat.dev)
+        row = {"position": p, "token": ids[p], "alternatives": [x[p] for x in prompts],
+               "sensitivity_nats": float(moved[p-1]) if moved is not None else None,
+               "empty_bits": empty, "movement_bits": movement,
+               "empty_minus_movement_bits": empty - movement,
+               "threshold_90_below_tested_tolerance": .1 * empty < 3e-5,
+               "threshold_99_below_tested_tolerance": .01 * empty < 3e-5,
+               "curve": list(curve), "unit_sets": [sorted(curve.node_set(i)) for i in range(len(curve))],
+               "smallest_90": _threshold(curve, empty, .90), "smallest_99": _threshold(curve, empty, .99),
+               "full_carry_fraction": 1 - curve[0][1] / empty if empty > 1e-5 else None,
+               "outside_needed_90": curve[0][1] > .1 * empty if empty > 1e-5 else None,
+               "seconds": time.perf_counter() - t0}
+        result.append(row)
+        print(f"  p={p} empty={empty:.6g} full={curve[0][1]:.6g} n90={None if row['smallest_90'] is None else row['smallest_90']['size']} {row['seconds']:.1f}s", flush=True)
+    return result
+
+
+def explain(nat, ids, targets, K, *, units="matrix"):
+    """Top K Native.sensitivity positions; top three model alternatives each.
+
+    Sensitivity is Native's one seeded random alternative and last-target KL
+    (nats, original||changed), NOT our three-alternative carry KL (bits,
+    changed||carried), summed over targets. Position zero has no preceding
+    prediction and is not in Native.sensitivity's candidate space.
+    """
+    if K < 1:
+        raise ValueError("K must be positive")
+    if max(targets) < 1:
+        return []
+    with torch.no_grad():
+        moved, other = nat.sensitivity(ids, targets, torch.Generator(device="cpu").manual_seed(native.task_seed(str(ids[:8]))))
+    order = [p for p in (moved.argsort(descending=True, stable=True) + 1).tolist() if p not in targets][:K]
+    del other
+    return _explain_positions(nat, ids, targets, order, units, moved)
+
+
+def _unit_names(units, position, targets):
+    names = []
+    for u in units:
+        layer, kind = native._name_layer_kind(u[0])
+        role = "p" if u[-1] == position else ("t" if len(targets) == 1 else f"t{targets.index(u[-1])}")
+        short = {"q_proj": "q", "k_proj": "k", "v_proj": "v", "o_proj": "o", "c_fc": "fc", "down_proj": "down"}[kind]
+        names.append(f"L{layer}.{short}" + (f".h{u[1]}" if len(u) == 3 else "") + "@" + role)
+    return tuple(sorted(names))
+
+
+def summarize(paths):
+    """Normalize units to p/t roles; keep split denominators and failures."""
+    rows = [json.loads(line) for path in paths for line in path.read_text().splitlines() if line.strip()]
+    output = {}
+    for key in sorted({(r["split"], r["units"], r.get("selection", "sensitivity")) for r in rows}):
+        subset = [r for r in rows if (r["split"], r["units"], r.get("selection", "sensitivity")) == key]
+        positions = [(r, p) for r in subset for p in r["positions"]]
+        stats = {"questions": len(subset), "positions": len(positions),
+                 "outside_needed_90": sum(p["outside_needed_90"] is True for _, p in positions),
+                 "full_fail_but_subset_reaches_90": sum(p["outside_needed_90"] is True and p["smallest_90"] is not None for _, p in positions),
+                 "outside_criterion_note": "Full p/targets carry <90% is the requested screen, not proof every subset fails; KL is nonmonotone.",
+                 "effect_above_floor": sum(p["empty_bits"] > 1e-5 for _, p in positions),
+                 "threshold_90_below_tested_tolerance": sum(p["empty_bits"] * .1 < 3e-5 for _, p in positions),
+                 "threshold_99_below_tested_tolerance": sum(p["empty_bits"] * .01 < 3e-5 for _, p in positions),
+                 "max_empty_movement_discrepancy_bits": max((abs(p["empty_minus_movement_bits"]) for _, p in positions), default=0),
+                 "seconds_per_question": {"mean": float(np.mean([r["seconds"] for r in subset])),
+                                          "median": float(np.median([r["seconds"] for r in subset])),
+                                          "min": min(r["seconds"] for r in subset), "max": max(r["seconds"] for r in subset)}}
+        gpu = [r["gpu_utilization"] for r in subset if r.get("gpu_utilization")]
+        stats["gpu_mean_percent"] = sum(g["mean_percent"] * g["samples"] for g in gpu) / sum(g["samples"] for g in gpu) if gpu else None
+        stats["seconds_per_engine"] = {}
+        for engine in sorted({r.get("engine", "native_unit") for r in subset}):
+            seconds = [r["seconds"] for r in subset if r.get("engine", "native_unit") == engine]
+            stats["seconds_per_engine"][engine] = {"questions": len(seconds), "mean": float(np.mean(seconds)), "median": float(np.median(seconds))}
+        fours = {}
+        for r, p in positions:
+            if p["empty_bits"] <= 1e-5:
+                continue
+            for i, (size, score) in enumerate(p["curve"]):
+                if size == 4:
+                    names = _unit_names(p["unit_sets"][i], p["position"], r["targets"])
+                    fours.setdefault(names, []).append(1 - score / p["empty_bits"])
+        stats["frequent_four_unit_sets"] = [{"count": len(v), "units": s, "mean_carry_fraction": float(np.mean(v)),
+                                            "min_carry_fraction": min(v), "max_carry_fraction": max(v)}
+                                           for s, v in sorted(fours.items(), key=lambda item: (-len(item[1]), item[0]))[:15]]
+        for level in (90, 99):
+            sizes, resolvable, sets, singles = Counter(), Counter(), Counter(), Counter()
+            for r, p in positions:
+                small = p[f"smallest_{level}"]
+                label = str(small["size"]) if small else ("effect_floor" if p["empty_bits"] <= 1e-5 else "unreached")
+                sizes[label] += 1
+                if (1 - level / 100) * p["empty_bits"] >= 3e-5:
+                    resolvable[label] += 1
+                if small:
+                    names = _unit_names(small["units"], p["position"], r["targets"])
+                    sets[names] += 1
+                    singles.update(names)
+            stats[f"n{level}_distribution"] = dict(sizes)
+            stats[f"n{level}_resolvable_distribution"] = dict(resolvable)
+            stats[f"frequent_{level}_sets"] = [{"count": c, "units": s} for s, c in sets.most_common(15)]
+            stats[f"frequent_{level}_units"] = singles.most_common(20)
+        output["/".join(key)] = stats
+    return output
+
+
+def audit_matrix_results(paths):
+    """Recheck emitted curves with the original, dense, unbatched node API."""
+    nat = native.Native()
+    result = []
+    for path in paths:
+        for line in path.read_text().splitlines():
+            row = json.loads(line)
+            if row["units"] != "matrix":
+                raise ValueError("audit takes matrix results; head slices are independently tested in test_carry.py")
+            ids, targets = native.text(native.TEXTS / "vpd4l" / f"{row['task']}.json")
+            for p in row["positions"]:
+                pos = p["position"]
+                prompts = [ids[:pos] + [token] + ids[pos+1:] for token in p["alternatives"]]
+                study = Carry(nat, ids, targets, prompts, chunk_size=1)
+                nodes = [{(n, t, c) for n, t in units for c in range(nat.C[n])} for units in p["unit_sets"]]
+                actual = study.measure([set(), *nodes]).cpu().tolist()
+                errors = [abs(a-b) for a, b in zip(actual, [p["empty_bits"], *[z[1] for z in p["curve"]]])]
+                item = {"task": row["task"], "position": pos, "max_error_bits": max(errors),
+                        "empty_bits_dense": actual[0], "full_bits_dense": actual[1],
+                        "points": len(nodes), "dense_curve": [[z[0], v] for z, v in zip(p["curve"], actual[1:])]}
+                result.append(item)
+                print(row["task"], "dense audit max bits error", max(errors), flush=True)
+                native.free(nat.dev)
+    return result
+
+
 def report(curve, diag):
     baseline = diag["empty_bits"]
     cutoff = curve[0][1] + .1 * (baseline - curve[0][1])
@@ -400,11 +1094,122 @@ class _Utilization:
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("layout", help="check exact VPD head support")
+    a = sub.add_parser("summarize")
+    a.add_argument("files", type=Path, nargs="+")
+    a.add_argument("--out", type=Path)
+    a = sub.add_parser("audit")
+    a.add_argument("files", type=Path, nargs="+")
+    a.add_argument("--out", type=Path, required=True)
+    c = sub.add_parser("copies", help="source-position circuits for known copy questions")
+    c.add_argument("--n", type=int, default=6)
+    c.add_argument("--tasks", nargs="+", help="optional copy question ids")
+    c.add_argument("--units", choices=("matrix", "head"), default="head")
+    c.add_argument("--out", type=Path, required=True)
+    e = sub.add_parser("explain")
+    e.add_argument("--split", choices=("hard", "heldout", "train"), required=True)
+    e.add_argument("--n", type=int, required=True)
+    e.add_argument("--k", type=int, default=8)
+    e.add_argument("--units", choices=("matrix", "head"), default="matrix")
+    e.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("search")
     p.add_argument("--task", required=True, help="copy question id, or first6")
     p.add_argument("--positions", default="source,target", help="comma-separated source,target, integer positions, or all")
     p.add_argument("--out", type=Path, help="JSON result path (otherwise only prints)")
     args = ap.parse_args()
+    if args.cmd == "audit":
+        args.out.write_text(json.dumps(audit_matrix_results(args.files), indent=2) + "\n")
+        return
+    if args.cmd == "summarize":
+        result = json.dumps(summarize(args.files), indent=2)
+        print(result)
+        if args.out:
+            args.out.write_text(result + "\n")
+        return
+    if args.cmd == "copies":
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        done = set()
+        if args.out.exists():
+            for line in args.out.read_text().splitlines():
+                row = json.loads(line)
+                if row["units"] != args.units or row.get("selection") != "copy_source":
+                    ap.error("existing copy output has incompatible configuration")
+                done.add(row["task"])
+        rows = [json.loads(line) for line in COPYCHECK.read_text().splitlines()][:args.n]
+        if args.tasks:
+            rows = [r for r in rows if r["task"] in args.tasks]
+            if set(args.tasks) - {r["task"] for r in rows}:
+                ap.error("requested copy task not in the first n copycheck rows")
+        nat = native.Native()
+        for row in rows:
+            if row["task"] in done:
+                continue
+            ids, targets = native.text(native.TEXTS / "vpd4l" / f"{row['task']}.json")
+            print(row["task"], "copy source", row["source"], flush=True)
+            util = _Utilization(nat.dev)
+            t0 = time.perf_counter()
+            positions = _explain_positions(nat, ids, targets, [row["source"]], args.units)
+            synchronize(nat.dev)
+            result = {"task": row["task"], "split": row["split"], "units": args.units,
+                      "selection": "copy_source", "targets": targets, "positions": positions,
+                      "device": str(nat.dev), "seconds": time.perf_counter() - t0,
+                      "gpu_utilization": util.finish()}
+            with args.out.open("a") as f:
+                f.write(json.dumps(result) + "\n")
+            native.free(nat.dev)
+        return
+    if args.cmd == "explain":
+        if args.n < 1 or args.k < 1:
+            ap.error("n and k must be positive")
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        done = set()
+        if args.out.exists():
+            with args.out.open() as f:
+                for line in f:
+                    row = json.loads(line)
+                    if (row["split"], row["k"], row["units"]) != (args.split, args.k, args.units):
+                        ap.error("existing output has incompatible split, k or units")
+                    done.add(row["task"])
+        pending = [p for p in native.tasks(args.split)[:args.n] if p.stem not in done]
+        if not pending:
+            print("all requested questions already present", flush=True)
+            return
+        nat = native.Native()
+        if str(nat.dev) != "mps":
+            print(f"device={nat.dev}", flush=True)
+        for path in pending:
+            print(path.stem, flush=True)
+            ids, targets = native.text(path)
+            synchronize(nat.dev)
+            util = _Utilization(nat.dev)
+            t0 = time.perf_counter()
+            positions = explain(nat, ids, targets, args.k, units=args.units)
+            synchronize(nat.dev)
+            result = {"task": path.stem, "split": args.split, "k": args.k, "units": args.units,
+                      "targets": targets, "device": str(nat.dev), "positions": positions,
+                      "engine": "direct-unit-v4-stable-batches",
+                      "seconds": time.perf_counter() - t0, "gpu_utilization": util.finish(),
+                      "search": "exact greedy; smallest sets on measured path, not global optima",
+                      "outside_criterion": "Full p/targets carry <90%, not proof every subset fails",
+                      "head_definition": UnitSpace.__doc__ if args.units == "head" else None}
+            with args.out.open("a") as f:
+                f.write(json.dumps(result) + "\n")
+                f.flush()
+            print(f"{path.stem}: {result['seconds']:.1f}s GPU {result['gpu_utilization']}", flush=True)
+            native.free(nat.dev)
+        return
+    if args.cmd == "layout":
+        nat = native.Native()
+        print(nat.dev, nat.target.n_head, nat.target.hd, flush=True)
+        for n in nat.names:
+            if ".attn." not in n:
+                continue
+            st = nat.target.site(n)
+            w = st.V.T if n.endswith("o_proj") else st.U
+            z = w.reshape(w.shape[0], nat.target.n_head, nat.target.hd).abs().amax(-1)
+            counts = (z > 0).sum(-1)
+            print(n, "heads/component", torch.unique(counts, return_counts=True), flush=True)
+        return
     rows = [json.loads(line) for line in COPYCHECK.read_text().splitlines()]
     rows = rows[:6] if args.task == "first6" else [r for r in rows if r["task"] == args.task]
     if not rows:
