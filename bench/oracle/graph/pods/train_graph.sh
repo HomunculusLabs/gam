@@ -28,7 +28,7 @@ O=/Users/user/mpd-data/runpod/$N; W=/workspace/runs/$N
 T=/Users/user/mpd-data/graph_oracle/texts-$RUN.tar
 COPYFILE_DISABLE=1 tar -cf "$T" -C /Users/user/mpd-data/graph_oracle texts/vpd4l texts/$SEARCH texts/$HELD $( [ -d $B/$HARD ] && echo texts/$HARD ) ${VPD_LIST:+texts/vpd_ranked} ${RESPONSES:+texts/vpd_responses}
 if [ -n "$EVIDENCE" ]; then LEN="--max-tokens 4096 --max-model-len 26624"; else LEN="--max-tokens 4096 --max-model-len 14336"; fi
-SHARE=$([ -n "$EVIDENCE" ] && echo "--gpu-memory 0.35 --score-workers 3" || echo "--gpu-memory 0.5 --score-workers 4")  # with evidence vLLM stays awake (train.py): a smaller fixed share  # a revision prompt holds the first answer
+SHARE=$([ -n "$EVIDENCE" ] && echo "--gpu-memory 0.35 --score-workers 2" || echo "--gpu-memory 0.5 --score-workers 2")  # with evidence vLLM stays awake (train.py): a smaller fixed share  # a revision prompt holds the first answer
 VPD_IN=${VPD_IN-/Users/user/mpd-data/vpd/s-55ea3f9b/model_400000.pth}
 PT="~/mpd-data/graph_oracle/texts"  # the texts on the pod (unpacked from $T; a Mac path here would be uploaded file by file)
 BASIC="--base ${BASE:-Qwen/Qwen3-4B} --model vpd4l --behaviors $PT --search $PT/$SEARCH --part-tokens /root/reg.safetensors --scorer native ${EVIDENCE:+--evidence} ${VPD_LIST:+--vpd-list $VPD_LIST} ${RESPONSES:+--responses $RESPONSES} $LEN --share-gpu $SHARE --micro 1 --eval-behaviors 50 --oracle-runs $O/oracle"
@@ -39,10 +39,10 @@ RL="mkdir -p $O/rl; python rl/train.py --mode rl2 $LOOP --reader $COMMON --init 
 EVAL="mkdir -p $O/eval_rl $O/eval_hard $O/eval_swap; python rl/train.py --mode eval $COMMON ${REVISE:+--revise} --necessity --adversarial --transfer --init $O/rl/adapter --samples 4 --out $O/eval_rl --run-name graphrl > $O/eval_rl/log 2>&1; \
 python rl/train.py --mode eval $BASIC --search-heldout $PT/$HARD --eval-split hard ${REVISE:+--revise} --necessity --init $O/rl/adapter --samples 4 --out $O/eval_hard --run-name graphrl_hard > $O/eval_hard/log 2>&1"
 SWAP="python rl/train.py --mode eval $COMMON --init $O/rl/adapter --samples 4 --swap-evidence --no-baselines --out $O/eval_swap --run-name graphrl_swap > $O/eval_swap/log 2>&1"
-if [ -n "$NO_RL" ]; then  # no RL: the evaluations read the SFT adapter
+if [ -n "$NO_RL" ]; then  # no RL: the evaluations read the SFT adapter (INIT's when given, with no SFT)
   RL="true"
-  EVAL=${EVAL//$O\/rl\/adapter/$O/sft/adapter}
-  SWAP=${SWAP//$O\/rl\/adapter/$O/sft/adapter}
+  EVAL=${EVAL//$O\/rl\/adapter/${INIT:-$O/sft/adapter}}
+  SWAP=${SWAP//$O\/rl\/adapter/${INIT:-$O/sft/adapter}}
 fi
 if [ -n "$INIT" ]; then  # an SFT adapter from an earlier run (its directory): RL starts from it, no SFT
   RL=${RL/--init $O\/sft\/adapter/--init $INIT}
