@@ -17,8 +17,8 @@ MANIFEST = '/Users/user/mpd-data/compare/manifest'
 POINTS = '/Users/user/mpd-data/compare/frontier_points.json'
 ARMS = '/Users/user/mpd-data/compare/arms'
 # VPD's active bits per token under descent's rule (budget_descent.py's K_t at K = VPD's count):
-# MLP only, 129 subcomponents; whole model, 213, once descent's whole-model rule gives it.
-VPD_ACTIVE_BITS = {'mlp': 3284863.883754805, 'whole': None}
+# MLP only, 129 subcomponents; whole model, 213 (the whole-model rot runs' K).
+VPD_ACTIVE_BITS = {'mlp': 3284863.883754805, 'whole': 4221686.34073962}
 FAMILIES = ('cut', 'push', 'scale', 'swap', 'zero')
 
 
