@@ -1285,6 +1285,8 @@ def main():
     e.add_argument("--k", type=int, default=8)
     e.add_argument("--units", choices=("matrix", "head"), default="matrix")
     e.add_argument("--relays", action="store_true", help="screen and measure up to three intermediate relay positions")
+    e.add_argument("--offset", type=int, default=0, help="this process's share of the first n texts: offset, offset + stride, ...")
+    e.add_argument("--stride", type=int, default=1)
     e.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("search")
     p.add_argument("--task", required=True, help="copy question id, or first6")
@@ -1333,8 +1335,8 @@ def main():
             native.free(nat.dev)
         return
     if args.cmd == "explain":
-        if args.n < 1 or args.k < 1:
-            ap.error("n and k must be positive")
+        if args.n < 1 or args.k < 1 or args.stride < 1 or not 0 <= args.offset < args.stride:
+            ap.error("n, k and stride must be positive, offset in [0, stride)")
         args.out.parent.mkdir(parents=True, exist_ok=True)
         done = set()
         if args.out.exists():
@@ -1344,7 +1346,7 @@ def main():
                     if (row["split"], row["k"], row["units"], row.get("relays", False)) != (args.split, args.k, args.units, args.relays):
                         ap.error("existing output has incompatible split, k, units or relays")
                     done.add(row["task"])
-        pending = [p for p in native.tasks(args.split)[:args.n] if p.stem not in done]
+        pending = [p for p in native.tasks(args.split)[:args.n][args.offset::args.stride] if p.stem not in done]
         if not pending:
             print("all requested questions already present", flush=True)
             return
