@@ -10,6 +10,8 @@
 #   SEARCH, HELD, HARD: the directories under texts of the SFT answers and the held-out and hard search baselines (default search,
 #   search_heldout, search_hard); VPD_LIST=K: the question lists VPD's first K subcomponents at the target (texts/vpd_ranked, native.py ranked).
 #   VPD's checkpoint (its causal-importance network: the evaluation's VPD ranked baseline) goes up too, 2.9 GB (VPD_IN= skips it).
+#   RESPONSES=K: the question lists where the prediction responds at K positions (texts/vpd_responses); SFT_FROM=ADAPTER: SFT
+#   starts from that adapter; NO_RL=1: no RL, the evaluations run on the SFT adapter.
 # The questions, search answers and source go up as tar files (rp-run uploads a directory file by file).
 cd /Users/user/gam
 RH=${1:-1.0}
@@ -24,19 +26,24 @@ B=/Users/user/mpd-data/graph_oracle/texts
 N=oracle-graph-$RUN
 O=/Users/user/mpd-data/runpod/$N; W=/workspace/runs/$N
 T=/Users/user/mpd-data/graph_oracle/texts-$RUN.tar
-COPYFILE_DISABLE=1 tar -cf "$T" -C /Users/user/mpd-data/graph_oracle texts/vpd4l texts/$SEARCH texts/$HELD $( [ -d $B/$HARD ] && echo texts/$HARD ) ${VPD_LIST:+texts/vpd_ranked}
+COPYFILE_DISABLE=1 tar -cf "$T" -C /Users/user/mpd-data/graph_oracle texts/vpd4l texts/$SEARCH texts/$HELD $( [ -d $B/$HARD ] && echo texts/$HARD ) ${VPD_LIST:+texts/vpd_ranked} ${RESPONSES:+texts/vpd_responses}
 if [ -n "$EVIDENCE" ]; then LEN="--max-tokens 4096 --max-model-len 26624"; else LEN="--max-tokens 4096 --max-model-len 14336"; fi
 SHARE=$([ -n "$EVIDENCE" ] && echo "--gpu-memory 0.35 --score-workers 3" || echo "--gpu-memory 0.5 --score-workers 4")  # with evidence vLLM stays awake (train.py): a smaller fixed share  # a revision prompt holds the first answer
 VPD_IN=${VPD_IN-/Users/user/mpd-data/vpd/s-55ea3f9b/model_400000.pth}
 PT="~/mpd-data/graph_oracle/texts"  # the texts on the pod (unpacked from $T; a Mac path here would be uploaded file by file)
-BASIC="--base ${BASE:-Qwen/Qwen3-4B} --model vpd4l --behaviors $PT --search $PT/$SEARCH --part-tokens /root/reg.safetensors --scorer native ${EVIDENCE:+--evidence} ${VPD_LIST:+--vpd-list $VPD_LIST} $LEN --share-gpu $SHARE --micro 1 --eval-behaviors 50 --oracle-runs $O/oracle"
+BASIC="--base ${BASE:-Qwen/Qwen3-4B} --model vpd4l --behaviors $PT --search $PT/$SEARCH --part-tokens /root/reg.safetensors --scorer native ${EVIDENCE:+--evidence} ${VPD_LIST:+--vpd-list $VPD_LIST} ${RESPONSES:+--responses $RESPONSES} $LEN --share-gpu $SHARE --micro 1 --eval-behaviors 50 --oracle-runs $O/oracle"
 COMMON="$BASIC --search-heldout $PT/$HELD"
-SFT="mkdir -p $O/sft; python rl/train.py --mode sft $COMMON --samples 4 --sft-steps ${SFT_STEPS:-80} --batch 8 --out $O/sft --run-name graphsft > $O/sft/log 2>&1"
+SFT="mkdir -p $O/sft; python rl/train.py --mode sft $COMMON --samples 4 --sft-steps ${SFT_STEPS:-80} --batch 8 ${SFT_FROM:+--init $SFT_FROM} --out $O/sft --run-name graphsft > $O/sft/log 2>&1"
 if [ -n "$REVISE" ]; then LOOP="--revise"; else LOOP="--async"; fi
 RL="mkdir -p $O/rl; python rl/train.py --mode rl2 $LOOP --reader $COMMON --init $O/sft/adapter --samples ${SAMPLES:-8} --behaviors-per-step ${BPS:-4} --credit ${CREDIT:-16} --credit-answers ${CREDIT_ANSWERS:-2} --refine ${REFINE:-1} --steps 1000 --hours $RH --out $O/rl --run-name graphrl > $O/rl/log 2>&1"
 EVAL="mkdir -p $O/eval_rl $O/eval_hard $O/eval_swap; python rl/train.py --mode eval $COMMON ${REVISE:+--revise} --necessity --adversarial --transfer --init $O/rl/adapter --samples 4 --out $O/eval_rl --run-name graphrl > $O/eval_rl/log 2>&1; \
 python rl/train.py --mode eval $BASIC --search-heldout $PT/$HARD --eval-split hard ${REVISE:+--revise} --necessity --init $O/rl/adapter --samples 4 --out $O/eval_hard --run-name graphrl_hard > $O/eval_hard/log 2>&1"
 SWAP="python rl/train.py --mode eval $COMMON --init $O/rl/adapter --samples 4 --swap-evidence --no-baselines --out $O/eval_swap --run-name graphrl_swap > $O/eval_swap/log 2>&1"
+if [ -n "$NO_RL" ]; then  # no RL: the evaluations read the SFT adapter
+  RL="true"
+  EVAL=${EVAL//$O\/rl\/adapter/$O/sft/adapter}
+  SWAP=${SWAP//$O\/rl\/adapter/$O/sft/adapter}
+fi
 if [ -n "$INIT" ]; then  # an SFT adapter from an earlier run (its directory): RL starts from it, no SFT
   RL=${RL/--init $O\/sft\/adapter/--init $INIT}
   START="ls $INIT > /dev/null"
