@@ -112,7 +112,7 @@ pub struct MetalRuntime {
     pub device: MetalDeviceInfo,
     pub devices: Vec<MetalDeviceInfo>,
     #[cfg(target_os = "macos")]
-    pub(crate) context: crate::metal::MetalContext,
+    pub context: crate::metal::MetalContext,
 }
 
 /// Lossless outcome of the Metal probe.

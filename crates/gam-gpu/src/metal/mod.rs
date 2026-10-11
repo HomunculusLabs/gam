@@ -1,6 +1,8 @@
 //! Apple-GPU (Metal) backend: the device probe, the compiled kernel library,
 //! shared-memory buffers and command submission. macOS only; every item is
-//! reached through [`crate::apple_gpu`].
+//! reached through [`crate::apple_gpu`], except the context's device and queue
+//! and pipeline compilation, which are public so other crates can run their own
+//! kernels on the same device.
 //!
 //! The binding is `objc2-metal`, the maintained Metal binding (the `metal`
 //! crate is deprecated upstream in its favour and receives no new API).
@@ -38,9 +40,9 @@ type Encoder = ProtocolObject<dyn MTLComputeCommandEncoder>;
 
 /// The process-wide Metal handles of the selected device: the device, one
 /// command queue, and a compute pipeline per kernel in [`msl::KERNELS`].
-pub(crate) struct MetalContext {
-    device: Retained<Device>,
-    queue: Retained<Queue>,
+pub struct MetalContext {
+    pub device: Retained<Device>,
+    pub queue: Retained<Queue>,
     pipelines: Vec<(&'static str, Retained<Pipeline>)>,
 }
 
@@ -319,7 +321,7 @@ fn describe(ordinal: usize, device: &Device) -> MetalDeviceInfo {
 /// functions. `mathMode` exists from macOS 15; before it the same contract is
 /// `fastMathEnabled = NO`, sent by selector so the deprecated method is not
 /// named in Rust.
-fn safe_compile_options() -> Retained<MTLCompileOptions> {
+pub fn safe_compile_options() -> Retained<MTLCompileOptions> {
     let options = MTLCompileOptions::new();
     if options.respondsToSelector(sel!(setMathMode:)) {
         options.setMathMode(MTLMathMode::Safe);
@@ -337,7 +339,7 @@ fn disable_fast_math(options: &MTLCompileOptions) {
 }
 
 /// A compute pipeline for each of `kernels` in the MSL `source`, compiled with `options`.
-pub(crate) fn compile_pipelines(
+pub fn compile_pipelines(
     device: &Device,
     source: &str,
     kernels: &[&'static str],

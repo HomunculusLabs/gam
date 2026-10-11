@@ -10,7 +10,7 @@
 //! per-backend ad-hoc OnceLock, no transitional shim.
 
 #[cfg(target_os = "linux")]
-pub use linux::{KeyedPtxModuleCache, PtxModuleCache, compile_ptx_arch, checked_interval_compiler_info};
+pub use linux::{KeyedPtxModuleCache, PtxModuleCache, compile_ptx_arch, checked_interval_compiler_info, nvrtc_compile_options};
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -196,7 +196,7 @@ mod linux {
             .gpu_ctx_with(|err| format!("{}: {err}", context()))
     }
 
-    fn nvrtc_compile_options() -> Result<CompileOptions, GpuError> {
+    pub fn nvrtc_compile_options() -> Result<CompileOptions, GpuError> {
         let mut opts = CompileOptions::default();
         opts.include_paths = nvrtc_include_paths();
         // GPU↔CPU PARITY: disable FMA contraction. NVRTC's default is

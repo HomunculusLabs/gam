@@ -30,7 +30,7 @@ pub mod driver;
 pub mod engagement;
 pub mod linalg_dispatch;
 #[cfg(target_os = "macos")]
-pub(crate) mod metal;
+pub mod metal;
 pub mod numerics_device;
 pub mod numerics_host;
 pub mod policy;

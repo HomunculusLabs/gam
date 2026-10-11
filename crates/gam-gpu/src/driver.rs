@@ -162,7 +162,7 @@ pub fn preload_cuda_driver() -> Result<(), GpuError> {
 /// points needs it.
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum CudarcLibrary {
+pub enum CudarcLibrary {
     Driver,
     Runtime,
     Blas,
@@ -219,7 +219,7 @@ impl CudarcLibrary {
 /// `fallback-dynamic-loading` into `dynamic-loading`, which is also the only mode
 /// whose loader can panic.
 #[cfg(target_os = "linux")]
-pub(crate) fn require_cudarc_library(library: CudarcLibrary) -> Result<(), GpuError> {
+pub fn require_cudarc_library(library: CudarcLibrary) -> Result<(), GpuError> {
     let (names, slot) = library.cudarc_names_and_slot();
     let opened = slot.get_or_init(|| {
         let searched = match library {
