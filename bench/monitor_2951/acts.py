@@ -4,7 +4,8 @@ The streams are append-only (agent.py), so the pass reproduces what the model co
 token the model generated (and the few forced ones, marked), the residual stream after decoder blocks LAYERS (the
 input of the next block; 1-indexed: layer 8 is hidden_states[8]) at that token's position, float16, in shards:
   acts_NNNNN.npy    [tokens, len(LAYERS), d_model] float16
-  index_NNNNN.npz   run (index into runs.json), pos (position in the run's stream), gen (generated-token index), seg
+  index_NNNNN.npz   run (index into runs.json), pos (position in the call's sequence), gen (generated-token index),
+                    seg, call (the turn whose call it is; -1 for an append-only run's single stream)
 and, per checkpoint of agent.checkpoints, the mean over the generated tokens so far and the activation at the last
 one (feats.npz: run, gen, mean [n, layers, d], last [n, layers, d], float16), which the probes read.
 
@@ -21,6 +22,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agent  # noqa: E402
+import replay  # noqa: E402
 
 
 class Stop(Exception):
@@ -76,18 +78,32 @@ def main():
         if time.time() - t0 > a.deadline:
             print(f"deadline: {ri} of {len(recs)} runs processed (cheating runs first)", flush=True)
             break
-        ids = torch.tensor(r["token_ids"], device="cuda")[None]
-        seg = np.array(r["seg"])
-        keep = np.where((seg == agent.SEG_GEN) | (seg == agent.SEG_FORCED))[0]
-        caught.clear()
-        with torch.no_grad():
-            try:
-                base(input_ids=ids, use_cache=False)
-            except Stop:
-                pass
-        h = torch.stack([caught[l] for l in layers], 1)  # [T, layers, d] bf16
-        hk = h[torch.as_tensor(keep, device="cuda")]
-        gen_mask = seg[keep] == agent.SEG_GEN
+        # One forward pass per model call: an append-only run is one call over its whole stream; a template-rendered
+        # run's calls each have their own prompt, so each generated token gets the activations it had when generated.
+        if "calls" in r:
+            parts = [(c["context_ids"] + c["completion_ids"], len(c["context_ids"]), c["turn"])
+                     for c in replay.calls(r)]
+            segs = [np.array([agent.SEG_PROMPT] * n + list(cs["completion_seg"][:len(p) - n]))
+                    for (p, n, _), cs in zip(parts, r["calls"])]
+        else:
+            parts, segs = [(r["token_ids"], 0, -1)], [np.array(r["seg"])]
+        hks, seg_k, pos_k, call_k = [], [], [], []
+        for (seq, _, turn), sg in zip(parts, segs):
+            keep_c = np.where((sg == agent.SEG_GEN) | (sg == agent.SEG_FORCED))[0]
+            caught.clear()
+            with torch.no_grad():
+                try:
+                    base(input_ids=torch.tensor(seq, device="cuda")[None], use_cache=False)
+                except Stop:
+                    pass
+            h = torch.stack([caught[l] for l in layers], 1)  # [T, layers, d] bf16
+            hks.append(h[torch.as_tensor(keep_c, device="cuda")])
+            seg_k.append(sg[keep_c])
+            pos_k.append(keep_c)
+            call_k.append(np.full(len(keep_c), turn))
+        hk = torch.cat(hks)
+        keep, seg_kept, call_kept = np.concatenate(pos_k), np.concatenate(seg_k), np.concatenate(call_k)
+        gen_mask = seg_kept == agent.SEG_GEN
         hg = hk[torch.as_tensor(np.where(gen_mask)[0], device="cuda")].float()
         csum = torch.cumsum(hg, 0)
         cps = agent.checkpoints(r)
@@ -102,7 +118,8 @@ def main():
             gen_index = np.cumsum(gen_mask) - 1
             gen_index[~gen_mask] = -1
             idx.append({"run": np.full(len(keep), ri, np.int32), "pos": keep.astype(np.int32),
-                        "gen": gen_index.astype(np.int32), "seg": seg[keep].astype(np.int8)})
+                        "gen": gen_index.astype(np.int32), "seg": seg_kept.astype(np.int8),
+                        "call": call_kept.astype(np.int32)})
             buf_bytes += nb
             total_bytes += nb
             if buf_bytes >= a.shard_gb * 2**30:

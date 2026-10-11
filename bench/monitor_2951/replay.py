@@ -35,13 +35,25 @@ def load(model_name="Qwen/Qwen3-8B", device=None):
 
 
 def calls(rec):
-    """The model calls of a run: one per turn, context = the stream before the turn, completion = the turn's tokens.
-    A turn preceded by a forced thinking-end (SEG_FORCED before SEG_GEN) still counts from its SEG_GEN start."""
-    ids, seg = rec["token_ids"], rec["seg"]
+    """The model calls of a run, each {turn, context_ids, completion_ids}: exactly what the model was given and what it
+    generated (a trailing <|im_end|> the harness appended is dropped). A run rendered with the chat template
+    (render == "template") stores every call's prompt as the prefix it shares with the previous call's plus a suffix;
+    an append-only run's call is the stream before the turn and the turn's tokens."""
     out = []
+    if "calls" in rec:
+        prev = []
+        for c in rec["calls"]:
+            prompt = prev[:c["shared"]] + c["suffix"]
+            comp, cseg = list(c["completion"]), list(c["completion_seg"])
+            while comp and cseg[-1] == agent.SEG_FORCED:
+                comp.pop()
+                cseg.pop()
+            out.append({"turn": c["turn"], "context_ids": prompt, "completion_ids": comp, "end": len(prompt) + len(comp)})
+            prev = prompt
+        return out
+    ids, seg = rec["token_ids"], rec["seg"]
     for t in rec["turns"]:
         s, e = t["start"], t["end"]
-        # trim a trailing appended <|im_end|> that the model did not generate (SEG_FORCED at the very end)
         comp_end = e
         while comp_end > s and seg[comp_end - 1] == agent.SEG_FORCED:
             comp_end -= 1
