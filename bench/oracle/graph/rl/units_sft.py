@@ -6,8 +6,8 @@ between them).
   units_sft.py sft ROWS.jsonl OUT_DIR [--val ROWS.jsonl] [--base Qwen/Qwen3-4B] [--epochs 3] [--lr 1e-4] [--rank 32] [--batch 8]
   units_sft.py questions EXPLAIN.jsonl OUT.jsonl [--k 8]     each task's question, positions from units.sensitive
   units_sft.py sample QUESTIONS.jsonl ADAPTER OUT.jsonl [--n 4] [--max-tokens 1536]
-  units_sft.py score QUESTIONS.jsonl OUT.jsonl [--answers ANSWERS.jsonl] [--teacher DIR] [--k 8]   (without answers: the baselines only;
-                                                  DIR: units.py targets' answers, the measured circuits, scored as "teacher")
+  units_sft.py score QUESTIONS.jsonl OUT.jsonl [--answers ANSWERS.jsonl | [--teacher DIR]] [--k 8]   (the answers, or else the copy
+                                                  and all baselines and DIR's units.py targets answers, scored as "teacher")
   units_sft.py report SCORES.jsonl
 """
 
@@ -163,10 +163,12 @@ def score(a) -> None:
         for tid, q in qs.items():
             task = json.loads((native.TEXTS / "vpd4l" / f"{tid}.json").read_text())
             targets = task["prompts"][0]["target_positions"]
-            items = [(kind, None, units.baseline(kind, q["positions"], targets), None, None) for kind in ("copy", "all")]
-            if a.teacher and (a.teacher / f"{tid}.txt").exists():
-                items.append(("teacher", None, (a.teacher / f"{tid}.txt").read_text(), None, None))
-            items += [("explainer", x["sample"], x["text"], x["tokens"], x["finish"]) for x in answers if x["task"] == tid]
+            if answers:  # the explainer's answers; the baselines and the teacher are scored without --answers
+                items = [("explainer", x["sample"], x["text"], x["tokens"], x["finish"]) for x in answers if x["task"] == tid]
+            else:
+                items = [(kind, None, units.baseline(kind, q["positions"], targets), None, None) for kind in ("copy", "all")]
+                if a.teacher and (a.teacher / f"{tid}.txt").exists():
+                    items.append(("teacher", None, (a.teacher / f"{tid}.txt").read_text(), None, None))
             for kind, j, text, tokens, finish in items:
                 _, circuits = units.parse(text)
                 s = units.score(nat, task, text, a.k)
@@ -184,6 +186,8 @@ def report(a) -> None:
     tasks = sorted({r["task"] for r in rows}, key=lambda t: int("".join(ch for ch in t if ch.isdigit()) or 0))
     print(f"{'task':10s} {'expl best':>14s} {'expl median':>14s} {'parse':>6s} {'teacher':>14s} {'copy':>14s} {'all':>14s}   (uncarried share / units)")
     agg = {k: [] for k in ("best", "median", "teacher", "copy", "all", "parse")}
+    empty = [t for t in tasks if all(r["positions"] == 0 for r in rows if r["task"] == t)]
+    tasks = [t for t in tasks if t not in empty]  # a text whose question lists no positions has nothing to measure
     for t in tasks:
         ex = [r for r in rows if r["task"] == t and r["kind"] == "explainer"]
         base = {r["kind"]: r for r in rows if r["task"] == t and r["kind"] in ("teacher", "copy", "all")}
@@ -204,12 +208,12 @@ def report(a) -> None:
             else:
                 line += f" {'-':>14s}"
         print(line)
-    print("mean over questions:")
+    print(f"mean over the {len(tasks)} questions" + (f" (left out, no positions: {', '.join(empty)})" if empty else "") + ":")
     for k in ("best", "median", "teacher", "copy", "all"):
         if agg[k]:
             print(f"  {k:7s} uncarried {statistics.mean(u for u, _ in agg[k]):.3f}, units {statistics.mean(n for _, n in agg[k]):.1f}")
     if agg["parse"]:
-        ex = [r for r in rows if r["kind"] == "explainer"]
+        ex = [r for r in rows if r["kind"] == "explainer" and r["task"] in tasks]
         print(f"  answers that parse (ended, a line for every listed position): {statistics.mean(agg['parse']):.2f}; "
               f"hit the token cap {sum(r['finish'] == 'length' for r in ex) / len(ex):.2f}; mean tokens {statistics.mean(r['tokens'] for r in ex):.0f}; "
               f"units outside the position and targets {statistics.mean(r['outside'] for r in ex):.1f} and unknown units "
