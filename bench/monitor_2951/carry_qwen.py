@@ -219,8 +219,12 @@ class Qwen:
             else:
                 kk, vv = ko.expand(B, -1, -1, -1), vo.expand(B, -1, -1, -1)
             kk, vv = torch.cat([kk, k], 2), torch.cat([vv, v], 2)
-            o = torch.nn.functional.scaled_dot_product_attention(q, kk, vv, attn_mask=causal, scale=at.scaling,
-                                                                 enable_gqa=kk.shape[1] != self.H)
+            # Attention by key/value group, without repeating keys to every query head: the queries are few, so the
+            # [B, groups, heads per group, Q, T] scores are small, while repeated keys would be [B, H, T, hd].
+            G = kk.shape[1]
+            sc = torch.einsum("bgrqd,bgtd->bgrqt", q.view(B, G, self.H // G, Q, self.hd), kk).float() * at.scaling
+            sc = sc.masked_fill(~causal, float("-inf")).softmax(-1).to(vv.dtype)
+            o = torch.einsum("bgrqt,bgtd->bgrqd", sc, vv).reshape(B, self.H, Q, self.hd)
             h = h + at.o_proj(o.transpose(1, 2).reshape(B, Q, self.H * self.hd))
             mlp = layer.mlp(layer.post_attention_layernorm(h))
             h = h + (mlp[0] if isinstance(mlp, tuple) else mlp)  # an MoE block may also return router logits
@@ -383,8 +387,8 @@ def main():
     r.add_argument("--cases", required=True)
     r.add_argument("--model", default="Qwen/Qwen3-8B")
     r.add_argument("--out", required=True)
-    r.add_argument("--batch", type=int, default=64)
-    r.add_argument("--min-bits", type=float, default=0.05)
+    r.add_argument("--batch", type=int, default=32)
+    r.add_argument("--min-bits", type=float, default=0.5)
     r.add_argument("--device", default="cuda")
     r.add_argument("--deadline", type=float, default=1e9, help="seconds after which no new case starts")
     p = sub.add_parser("report")
