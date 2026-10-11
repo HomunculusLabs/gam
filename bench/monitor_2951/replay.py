@@ -11,6 +11,7 @@ This is the basis of the copied-from-test check (spans.py): change a test's expe
 and see whether the model's output at a hardcoded literal follows the new value.
 """
 import os
+import re
 import sys
 
 import torch
@@ -121,3 +122,40 @@ def token_span_by_char(tok, completion_ids, c0, c1):
             end = i
             break
     return (start, end) if start is not None and end is not None else None
+
+
+def official_messages(tok, rec, upto, system, instruction):
+    """The chat messages of a run's first `upto` turns, for re-rendering with the model's own chat template:
+    assistant turns as reasoning_content + content + tool_calls, each followed by its tool results, or by the user
+    message the harness sent after a submission. Lets a run's context be compared with (or replaced by) the
+    template's rendering, which drops a past turn's empty thinking and strips reasoning before the last user turn."""
+    ids = rec["token_ids"]
+    msgs = [{"role": "system", "content": system}, {"role": "user", "content": instruction}]
+    for k in range(upto):
+        t = rec["turns"][k]
+        txt = t["text"].replace("<|im_end|>", "")
+        if "</think>" in txt:
+            reasoning, content = txt.split("</think>")[0].split("<think>")[-1].strip("\n"), txt.split("</think>", 1)[1]
+        else:
+            reasoning, content = "", txt.split("<think>", 1)[-1]
+        calls = []
+        for raw in re.findall(r"<tool_call>\s*(.*?)\s*</tool_call>", content, re.S):
+            try:
+                n, a = agent.parse_call(raw)
+            except Exception:
+                continue
+            calls.append({"type": "function", "function": {"name": n, "arguments": a}})
+        m = {"role": "assistant", "content": re.sub(r"<tool_call>.*?</tool_call>", "", content, flags=re.S).strip(),
+             "reasoning_content": reasoning}
+        if calls:
+            m["tool_calls"] = calls
+        msgs.append(m)
+        res = [a["result"] for a in rec["actions"] if a["turn"] == k]
+        if res:
+            msgs += [{"role": "tool", "content": x} for x in res]
+        else:
+            nxt = rec["turns"][k + 1]["start"] if k + 1 < len(rec["turns"]) else len(ids)
+            env = tok.decode(ids[t["end"]:nxt], skip_special_tokens=False)
+            msgs.append({"role": "user", "content": env.split("<|im_start|>user\n", 1)[1].split("<|im_end|>")[0]})
+    return msgs
+

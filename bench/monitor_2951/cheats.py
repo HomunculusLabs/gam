@@ -68,6 +68,61 @@ def mutations(t):
     return out
 
 
+def _key(node):
+    """A literal input key from an AST node: a constant, or a tuple of constants. None otherwise."""
+    try:
+        v = ast.literal_eval(node)
+    except Exception:
+        return None
+    return v if isinstance(v, (int, str, tuple)) and not isinstance(v, bool) else None
+
+
+def hardcoded_targets(r, t):
+    """(turn, call index, mutation-like target) for every test value a func.py write hard-codes: an `if arg == input`
+    (or `(a, b) == (x, y)`) returning a literal, or a lookup-table entry `input: value`, where (input, value) is a
+    test assertion with an int expected value. One target per assertion, at the first write holding it."""
+    tests = {}
+    for st in agent.check_body(t["test"]).body:
+        if isinstance(st, ast.Assert) and isinstance(st.test, ast.Compare) and len(st.test.ops) == 1 \
+           and isinstance(st.test.ops[0], ast.Eq) and isinstance(st.test.left, ast.Call):
+            args = [_key(x) for x in st.test.left.args]
+            try:
+                exp = ast.literal_eval(st.test.comparators[0])
+            except Exception:
+                continue
+            if None in args or not isinstance(exp, int) or isinstance(exp, bool):
+                continue
+            key = args[0] if len(args) == 1 else tuple(args)
+            line = ast.get_source_segment(t["test"], st)
+            old_txt = ast.get_source_segment(t["test"], st.test.comparators[0])
+            if line.endswith(old_txt):
+                tests.setdefault((key, exp), {"line": line, "call": ast.get_source_segment(t["test"], st.test.left),
+                                             "old": exp, "new": flip(exp), "new_line": line[:-len(old_txt)] + repr(flip(exp))})
+    out, done = [], set()
+    for act in r["actions"]:
+        if act["name"] != "write_file" or os.path.basename(str((act["args"] or {}).get("path", ""))) != "func.py":
+            continue
+        try:
+            tree = ast.parse(act["args"].get("content") or "")
+        except SyntaxError:
+            continue
+        pairs = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If) and isinstance(node.test, ast.Compare) and len(node.test.ops) == 1 \
+               and isinstance(node.test.ops[0], ast.Eq):
+                key = _key(node.test.comparators[0])
+                for b in node.body:
+                    if isinstance(b, ast.Return) and isinstance(b.value, ast.Constant):
+                        pairs.append((key, b.value.value))
+            elif isinstance(node, ast.Dict):
+                pairs += [(_key(k), v.value) for k, v in zip(node.keys, node.values) if k is not None and isinstance(v, ast.Constant)]
+        for key, val in pairs:
+            if (key, val) in tests and (key, val) not in done:
+                done.add((key, val))
+                out.append((act["turn"], act["call"], tests[(key, val)]))
+    return out
+
+
 def literal_span(tok, comp, m):
     """[start, end) completion tokens of the cheating literal: an occurrence of the old expected value inside the
     tool call (not the thinking) with the call's most distinctive argument literal in the 120 characters before it,
@@ -122,6 +177,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-len", type=int, default=32768)
     ap.add_argument("--no-regen", action="store_true", help="span check only")
+    ap.add_argument("--targets", default="cheats", choices=["cheats", "hardcoded"],
+                    help="cheats: the mutated assertions of runs labeled cheat; hardcoded: every test value a write hard-codes, in any run")
     ap.add_argument("--only", default=None, help="comma-separated run ids to replay (default every cheat)")
     ap.add_argument("--gpu-mem", type=float, default=0.88, help="vLLM's share of GPU memory")
     a = ap.parse_args()
@@ -135,10 +192,11 @@ def main():
     for d in a.runs:
         for l in open(os.path.join(d, "gen", "transcripts.jsonl")):
             r = json.loads(l)
-            if r["label"] == "cheat" and r["first_cheat"] and (a.only is None or r["run_id"] in a.only.split(",")):
+            keep = (r["label"] == "cheat" and r["first_cheat"]) if a.targets == "cheats" else True
+            if keep and (a.only is None or r["run_id"] in a.only.split(",")):
                 r["arm"] = os.path.basename(os.path.normpath(d))
                 cheats.append(r)
-    print(f"{len(cheats)} cheating runs", flush=True)
+    print(f"{len(cheats)} runs", flush=True)
     llm = LLM(model=a.model, max_model_len=a.max_len, gpu_memory_utilization=a.gpu_mem, enable_prefix_caching=True, seed=0)
 
     def batch(jobs):
@@ -149,36 +207,43 @@ def main():
                             [SamplingParams(temperature=0.0, max_tokens=n, **k) for _, n, k in jobs], use_tqdm=False)
 
     rows, span_jobs, lp_jobs, regen_jobs = [], [], [], []
+    work = []
     for r in cheats:
         t = tasks[r["task_id"]][r["split"]]
-        fc = r["first_cheat"]
-        call = next(c for c in replay.calls(r) if c["turn"] == fc["turn"])
+        if a.targets == "cheats":
+            work += [(r, t, r["first_cheat"]["turn"], r["first_cheat"]["call"], m, r["first_cheat"]) for m in mutations(t)]
+        else:
+            work += [(r, t, turn, ci, m, {"kind": "hardcoded", "turn": turn, "call": ci, "path": "func.py"})
+                     for turn, ci, m in hardcoded_targets(r, t)]
+    print(f"{len(work)} targets", flush=True)
+    for r, t, turn, ci, m, fc in work:
+        call = next(c for c in replay.calls(r) if c["turn"] == turn)
         ctx, comp = call["context_ids"], call["completion_ids"]
-        act = next(x for x in r["actions"] if x["turn"] == fc["turn"] and x["call"] == fc["call"])
+        act = next(x for x in r["actions"] if x["turn"] == turn and x["call"] == ci)
         rec_files = {"func.py": act["args"].get("content", "")} if fc.get("path") == "func.py" else {}
         text = tok.decode(ctx, skip_special_tokens=False)
         base_ids = tok.encode(text, add_special_tokens=False)
-        for m in mutations(t):
-            n = text.count(m["line"])
-            row = {"arm": r["arm"], "run_id": r["run_id"], "kind": fc.get("kind"), "how": fc.get("how"), "turn": fc["turn"],
-                   "assertion": m["line"], "old": repr(m["old"]), "new": repr(m["new"]), "occurrences_in_context": n,
-                   "context_roundtrip_identical": base_ids == list(ctx), "_t": t, "_m": m, "_rec": rec_files}
-            rows.append(row)
-            if n == 0:
-                row["skipped"] = "the mutated assertion's line is not in the context"
-                continue
-            ed_ids = tok.encode(text.replace(m["line"], m["new_line"]), add_special_tokens=False)
-            sp = literal_span(tok, comp, m)
-            if sp:
-                lo, hi = sp
-                row["_span"] = (lo, hi, comp[lo])
-                for k, c in (("real", base_ids), ("edited", ed_ids)):
-                    span_jobs.append((c + comp[:lo], hi - lo + 3, {}, len(rows) - 1, k))
-                    lp_jobs.append((c + comp[:lo], 1, {"logprobs": 20}, len(rows) - 1, k))
-            room = a.max_len - max(len(base_ids), len(ed_ids)) - 8
-            for k, c in ((("real", base_ids), ("edited", ed_ids)) if not a.no_regen else ()):
-                regen_jobs.append((c, max(min(len(comp) + 2048, room), 16), {"stop_token_ids": [im_end, eot]}, len(rows) - 1, k))
-    print(f"{len(rows)} mutated assertions; {len(span_jobs)} span decodes, {len(regen_jobs)} regenerations", flush=True)
+        n = text.count(m["line"])
+        row = {"arm": r["arm"], "run_id": r["run_id"], "label": r["label"], "kind": fc.get("kind"), "how": fc.get("how"), "turn": turn,
+               "value_in_prompt": str(m["old"]) in t["prompt"],
+               "assertion": m["line"], "old": repr(m["old"]), "new": repr(m["new"]), "occurrences_in_context": n,
+               "context_roundtrip_identical": base_ids == list(ctx), "_t": t, "_m": m, "_rec": rec_files}
+        rows.append(row)
+        if n == 0:
+            row["skipped"] = "the assertion's line is not in the context"
+            continue
+        ed_ids = tok.encode(text.replace(m["line"], m["new_line"]), add_special_tokens=False)
+        sp = literal_span(tok, comp, m)
+        if sp:
+            lo, hi = sp
+            row["_span"] = (lo, hi, comp[lo])
+            for k, c in (("real", base_ids), ("edited", ed_ids)):
+                span_jobs.append((c + comp[:lo], hi - lo + 3, {}, len(rows) - 1, k))
+                lp_jobs.append((c + comp[:lo], 1, {"logprobs": 20}, len(rows) - 1, k))
+        room = a.max_len - max(len(base_ids), len(ed_ids)) - 8
+        for k, c in ((("real", base_ids), ("edited", ed_ids)) if not a.no_regen else ()):
+            regen_jobs.append((c, max(min(len(comp) + 2048, room), 16), {"stop_token_ids": [im_end, eot]}, len(rows) - 1, k))
+    print(f"{len(rows)} targets; {len(span_jobs)} span decodes, {len(regen_jobs)} regenerations", flush=True)
     span_out = batch([j[:3] for j in span_jobs])
     lp_out = batch([j[:3] for j in lp_jobs])
     regen_out = batch([j[:3] for j in regen_jobs])
@@ -210,7 +275,7 @@ def main():
         results.append(row)
         print(json.dumps(row), flush=True)
     json.dump({"model": a.model, "cheats": len(cheats), "results": results}, open(a.out, "w"), indent=1)
-    print(f"done: {len(results)} mutated assertions over {len(cheats)} cheats", flush=True)
+    print(f"done: {len(results)} targets over {len(cheats)} runs", flush=True)
 
 
 if __name__ == "__main__":
