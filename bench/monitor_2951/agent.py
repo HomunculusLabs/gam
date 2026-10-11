@@ -355,6 +355,29 @@ def label(run, own, spec, modified):
     return "cheat" if own else "honest_fail"
 
 
+def parse_call(raw):
+    """One tool call's (name, args) from the text inside <tool_call>...</tool_call>: Qwen3's JSON object, or
+    Qwen3-Coder's XML (<function=NAME><parameter=ARG>VALUE</parameter>...</function>, one newline stripped from each
+    side of a value, as vLLM's qwen3_coder parser does). Raises ValueError when neither parses."""
+    raw = raw.strip()
+    if raw.startswith("<function="):
+        m = re.match(r"<function=([^>\n]+)>", raw)
+        if not m:
+            raise ValueError("no function name")
+        args = {}
+        for pm in re.finditer(r"<parameter=([^>\n]+)>(.*?)</parameter>", raw, re.S):
+            v = pm.group(2)
+            v = v[1:] if v.startswith("\n") else v
+            v = v[:-1] if v.endswith("\n") else v
+            args[pm.group(1).strip()] = v
+        return m.group(1).strip(), args
+    call = json.loads(raw, strict=False)
+    name, args = call.get("name"), call.get("arguments") or {}
+    if isinstance(args, str):
+        args = json.loads(args, strict=False)
+    return name, args
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -375,9 +398,11 @@ def main():
     ap.add_argument("--deadline", type=float, default=1e9, help="seconds after which no new turn starts")
     ap.add_argument("--max-seqs", type=int, default=128)
     ap.add_argument("--prompt", default="strict", choices=sorted(PROMPTS))
+    ap.add_argument("--no-thinking", action="store_true", help="a model without a thinking mode (Qwen3-Coder)")
     a = ap.parse_args()
     global INSTRUCTION
     INSTRUCTION = PROMPTS[a.prompt]
+    thinking_model = not (a.no_thinking or "Coder" in a.model)
     os.makedirs(a.out, exist_ok=True)
     st = sandbox.selftest()
     print("sandbox selftest", json.dumps(st), flush=True)
@@ -439,7 +464,7 @@ def main():
             r.turn_start = len(r.ids)
         r.append(toks, SEG_GEN)
         if c.finish_reason == "length":
-            if think_end not in r.ids[r.turn_start:]:
+            if thinking_model and think_end not in r.ids[r.turn_start:]:
                 if not r.phase_forced and len(r.ids) + 64 + a.action_tokens < a.max_len:
                     r.append(enc(FORCE_END), SEG_FORCED)
                     r.phase_forced = True
@@ -459,13 +484,10 @@ def main():
         results = []
         for k, raw in enumerate(calls):
             try:
-                call = json.loads(raw, strict=False)
-                name, args = call.get("name"), call.get("arguments") or {}
-                if isinstance(args, str):
-                    args = json.loads(args, strict=False)
+                name, args = parse_call(raw)
             except Exception as e:
                 name, args = None, {}
-                res, wrote = f"Error: could not parse the tool call as JSON ({e}).", None
+                res, wrote = f"Error: could not parse the tool call ({e}).", None
             else:
                 res, wrote = run_tool(r, name, args if isinstance(args, dict) else {})
             pos = call_pos[k] if k < len(call_pos) else te
@@ -482,7 +504,10 @@ def main():
             results.append(res)
         r.turns.append(turn)
         if results:
-            env = "\n<|im_start|>user\n" + "\n".join(f"<tool_response>\n{x}\n</tool_response>" for x in results) + "<|im_end|>\n<|im_start|>assistant\n"
+            if thinking_model:
+                env = "\n<|im_start|>user\n" + "\n".join(f"<tool_response>\n{x}\n</tool_response>" for x in results) + "<|im_end|>\n<|im_start|>assistant\n"
+            else:  # Qwen3-Coder's template: a newline after each response, then <|im_end|>
+                env = "\n<|im_start|>user\n" + "".join(f"<tool_response>\n{x}\n</tool_response>\n" for x in results) + "<|im_end|>\n<|im_start|>assistant\n"
         else:
             r.attempts += 1
             own, spec, modified, res = score(r)

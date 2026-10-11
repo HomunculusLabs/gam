@@ -35,6 +35,7 @@ def main():
     ap.add_argument("--layers", default="8,16,24,32")
     ap.add_argument("--shard-gb", type=float, default=2.0)
     ap.add_argument("--max-gb", type=float, default=40.0, help="token store budget; runs past it get checkpoint features only")
+    ap.add_argument("--deadline", type=float, default=1e9, help="seconds after which no further run is processed")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     from transformers import AutoModelForCausalLM
@@ -72,6 +73,9 @@ def main():
         shard, buf, idx, buf_bytes = shard + 1, [], [], 0
 
     for ri, r in enumerate(recs):
+        if time.time() - t0 > a.deadline:
+            print(f"deadline: {ri} of {len(recs)} runs processed (cheating runs first)", flush=True)
+            break
         ids = torch.tensor(r["token_ids"], device="cuda")[None]
         seg = np.array(r["seg"])
         keep = np.where((seg == agent.SEG_GEN) | (seg == agent.SEG_FORCED))[0]
