@@ -473,6 +473,193 @@ def test_window_rms_against_padded_reference(case):
     torch.testing.assert_close(window_gradient, padded_gradient, atol=3e-4, rtol=.002)
 
 
+def test_relay_screen_full_chunked_and_finite_difference(case):
+    nat, ids, targets, prompts, dense, *_ = case
+    p = 322
+    space = carry.UnitSpace(nat, len(ids), [p, *targets])
+    study = carry.MatrixCarry(nat, ids, targets, prompts, space)
+    full = carry._relay_attribution(study, p, targets)
+    chunks = carry._relay_attribution(study, p, targets, chunk_size=2)
+    assert [q for q, _ in full] == [q for q in range(p+1, max(targets)) if q not in targets]
+    torch.testing.assert_close(torch.tensor([v for _, v in full]), torch.tensor([v for _, v in chunks]),
+                               atol=3e-4, rtol=.002)
+    view = carry._unit_view(study, [p, *targets, *[q for q, _ in full]])
+    active = carry._position_mask(view.space, {p, *targets})
+    grad = carry._unit_attribution(view, view.space, active)
+    all_live_grad = carry._unit_attribution(view, view.space, torch.ones_like(active))
+    print("relay-screen sum absolute gradient: p/targets endpoint", float(grad.abs().sum()),
+          "all-live endpoint", float(all_live_grad.abs().sum()), flush=True)
+    # Check an omitted relay coefficient, rather than a live p/target unit.
+    relay = torch.tensor([u[-1] not in {p, *targets} for u in view.space.units], device=nat.dev)
+    j = int(grad.abs().masked_fill(~relay, -1).argmax())
+    losses = []
+    eps = .01
+    with torch.no_grad():
+        for sign in (-1, 1):
+            a = active.float()
+            a[j] += sign * eps
+            losses.append(torch.stack([carry.kl(lp, view.mixed(x, view.space.coefficients(a)))[0]
+                                       for x, lp in zip(prompts, view.lp)]).mean())
+    finite = (losses[1]-losses[0])/(2*eps)
+    print("omitted-relay unit finite difference", view.space.units[j], float(grad[j]), float(finite), flush=True)
+    torch.testing.assert_close(grad[j], finite, atol=2e-3, rtol=.04)
+    chosen = {p, *targets, full[0][0]}
+    mask = carry._position_mask(view.space, chosen)
+    torch.testing.assert_close(view.measure([mask]), dense.measure([view.space.expand(mask)]), atol=3e-5, rtol=1e-5)
+
+
+def test_relay_attribution_oom_never_skips(monkeypatch):
+    from types import SimpleNamespace
+    nat = SimpleNamespace(dev="cpu", names=["a", "b"], target=SimpleNamespace(n_head=1))
+    study = SimpleNamespace(nat=nat, T=24)
+    seen = []
+    def view(study, positions):
+        return SimpleNamespace(space=carry.UnitSpace(nat, study.T, positions))
+    def grad(study, space, active):
+        seen.append(space.positions)
+        assert all(bool(a) == (u[-1] in {1, 8, 23}) for a, u in zip(active, space.units))
+        if len(space.positions) > 7:
+            raise RuntimeError("out of memory: simulated gradient limit")
+        return torch.tensor([float(u[-1]) for u in space.units])
+    monkeypatch.setattr(carry, "_unit_view", view)
+    monkeypatch.setattr(carry, "_unit_attribution", grad)
+    values = carry._relay_attribution(study, 1, [8, 23])
+    assert values == [(q, 2.*q) for q in range(2, 23) if q != 8]
+    assert len(seen) > 2
+
+
+def test_head_relay_views(case):
+    nat, ids, targets, prompts, dense, *_ = case
+    base = {322, *targets}
+    study = carry.HeadCarry(nat, ids, targets, prompts,
+                            carry.UnitSpace(nat, len(ids), base, "head"))
+    view = carry._unit_view(study, [*base, 323, 325])
+    active = carry._position_mask(view.space, base)
+    full_grad = carry._unit_attribution(view, view.space, active)
+    chunk = carry._unit_view(study, [*base, 323])
+    chunk_grad = carry._unit_attribution(chunk, chunk.space, carry._position_mask(chunk.space, base))
+    indices = torch.tensor([view.space.index[u] for u in chunk.space.units], device=nat.dev)
+    torch.testing.assert_close(chunk_grad, full_grad[indices], atol=3e-4, rtol=.002)
+    rows = [carry._position_mask(view.space, ps) for ps in (base, base | {323}, base | {323, 325})]
+    matrix = carry.UnitSpace(nat, len(ids), view.space.positions)
+    reference = dense.measure([matrix.expand(carry._position_mask(matrix, ps))
+                               for ps in (base, base | {323}, base | {323, 325})])
+    torch.testing.assert_close(view.measure(rows), reference, atol=3e-5, rtol=1e-5)
+
+
+def test_measured_relays_and_stopping(monkeypatch):
+    from types import SimpleNamespace
+    nat = SimpleNamespace(dev="cpu", names=["a"], target=SimpleNamespace(n_head=1))
+    calls = []
+    class Study:
+        T = 30
+        def measure(self, sets):
+            scores = []
+            for a in sets:
+                qs = {u[-1] for u, live in zip(self.space.units, a) if live} - {1, 29}
+                assert {1, 29}.issubset({u[-1] for u, live in zip(self.space.units, a) if live})
+                calls.append(qs)
+                # Attribution ranks 2 highest, measured best is 3, then 4.
+                scores.append(8. - (4. if 3 in qs else 0) - (3.5 if 4 in qs else 0) - (.05 if 2 in qs else 0))
+            return torch.tensor(scores)
+    Study.nat = nat
+    study = Study()
+    def view(study, positions):
+        v = Study()
+        v.space = carry.UnitSpace(nat, study.T, positions)
+        return v
+    monkeypatch.setattr(carry, "_unit_view", view)
+    monkeypatch.setattr(carry, "_relay_attribution", lambda *args, **kwargs: [(q, 30-q) for q in range(2, 29)])
+    found = carry.relays(study, 1, [29], movement=10., baseline=8.)
+    assert found == [(3, 4.), (4, .5)]
+    assert len(calls) == 16 + 15
+    assert max(q for s in calls for q in s) == 17  # only the top 16 screen candidates
+    calls.clear()
+    assert carry.relays(study, 1, [29], max_relays=1, movement=10., baseline=8.) == [(3, 4.)]
+    # No candidate improves by 1% after 3; stop without accepting 2.
+    original = Study.measure
+    def weak(self, sets):
+        return original(self, sets) + torch.tensor([3.5 if any(u[-1] == 4 and a[j] for j, u in enumerate(self.space.units)) else 0 for a in sets])
+    monkeypatch.setattr(Study, "measure", weak)
+    assert carry.relays(study, 1, [29], movement=10., baseline=8.) == [(3, 4.)]
+    assert carry.relays(study, 1, [29], movement=10., baseline=.9) == []
+    assert carry.relays(study, 1, [29], movement=1e-6, baseline=8.) == []
+    assert carry.relays(study, 1, [29], max_relays=0, movement=10., baseline=8.) == []
+
+
+def test_relay_curve_positions_and_explain_forwarding(monkeypatch):
+    from types import SimpleNamespace
+    nat = SimpleNamespace(dev="cpu", names=["a"], target=SimpleNamespace(n_head=1))
+    study = SimpleNamespace(nat=nat, space=carry.UnitSpace(nat, 8, [1, 7]),
+                            measure=lambda sets: torch.tensor([5.]))
+    monkeypatch.setattr(carry, "_find_relays", lambda *args, **kwargs: [(4, .2)])
+    monkeypatch.setattr(carry, "_unit_view", lambda s, ps: SimpleNamespace(space=carry.UnitSpace(nat, 8, ps)))
+    def eliminate(study, space):
+        curve = carry.Curve(space)
+        curve.record(torch.ones(space.size, dtype=torch.bool), .2)
+        curve.record(torch.tensor([True, False, True]), .3)
+        return curve
+    monkeypatch.setattr(carry, "_position_circuit", eliminate)
+    curve = carry._circuit_with_relays(study, 1, [7], True, 10.)
+    assert curve.relays == [(4, .2)]
+    assert curve.before_relays_bits == 5.
+    assert curve.position_sets == [[1, 4, 7], [1, 7]]
+    assert carry._threshold(curve, 10., .9)["positions"] == [1, 7]
+    assert carry._unit_names([("h.1.attn.o_proj", 4)], 1, [7]) == ("L1.o@r+3",)
+
+
+def test_hard9300_relays_measured_against_dense():
+    nat = native.Native()
+    ids, targets = native.text(native.TEXTS / "vpd4l/hard9300.json")
+    p = 337
+    prompts = carry.alternatives(nat, ids, p)
+    dense = carry.Carry(nat, ids, targets, prompts, chunk_size=1)
+    base = {p, *targets}
+    initial = carry.UnitSpace(nat, len(ids), base)
+    study = carry.MatrixCarry(nat, ids, targets, prompts, initial)
+    movement = carry._movement(study)
+    before = float(study.measure([carry._position_mask(initial, base)])[0])
+    assert before > .1 * movement
+    found = carry.relays(study, p, targets, movement=movement, baseline=before)
+    assert found
+    print("hard9300", p, "movement", movement, "before", before, "relays", found, flush=True)
+    current = before
+    for q, score in found:
+        assert p < q < max(targets) and q not in base
+        assert current - score >= .01 * movement
+        base.add(q)
+        space = carry.UnitSpace(nat, len(ids), base)
+        active = carry._position_mask(space, base)
+        actual = float(dense.measure([space.expand(active)])[0])
+        assert actual == pytest.approx(score, abs=3e-5, rel=1e-5)
+        current = score
+    assert current <= .1 * movement
+
+
+def test_cli_relay_resume_rejects_mixed_configuration(monkeypatch):
+    out = Path.home() / "mpd-data/graph_oracle/carry"
+    with tempfile.NamedTemporaryFile(mode="w+", suffix=".jsonl", dir=out) as f:
+        f.write(json.dumps({"task": "hard9300", "split": "hard", "k": 8, "units": "matrix"}) + "\n")
+        f.flush()
+        monkeypatch.setattr(sys, "argv", ["carry.py", "explain", "--split", "hard", "--n", "1", "--relays", "--out", f.name])
+        with pytest.raises(SystemExit) as exc:
+            carry.main()
+        assert exc.value.code == 2
+
+
+def test_public_relay_options(monkeypatch):
+    from types import SimpleNamespace
+    nat = SimpleNamespace(dev="cpu", names=["a"], target=SimpleNamespace(n_head=1))
+    monkeypatch.setattr(carry, "MatrixCarry", lambda nat, ids, targets, prompts, space: SimpleNamespace(space=space))
+    monkeypatch.setattr(carry, "_movement", lambda study: 10.)
+    monkeypatch.setattr(carry, "_circuit_with_relays", lambda study, p, targets, enabled, movement: (enabled, movement))
+    assert carry.position_circuit(nat, [1, 2, 3], [2], 1, [[1, 4, 3]], relays=True) == (True, 10.)
+    assert carry.position_circuit(nat, [1, 2, 3], [2], 1, [[1, 4, 3]]) == (False, 10.)
+    nat.sensitivity = lambda *args: (torch.tensor([2., 3.]), torch.empty(0))
+    monkeypatch.setattr(carry, "_explain_positions", lambda *args, **kwargs: kwargs)
+    assert carry.explain(nat, [1, 2, 3], [2], 1, relays=True) == {"relays": True}
+
+
 if __name__ == "__main__":
     # The local memory guard recognizes script paths, but reserves only 2 GiB
     # for `python -m pytest` regardless of MPD_MEM_GIB.

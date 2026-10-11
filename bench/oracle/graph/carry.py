@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import copy
 import json
 import math
 from pathlib import Path
@@ -242,6 +243,10 @@ class Curve(list):
     @property
     def unit_sets(self):
         return [self.unit_set(i) for i in range(len(self))]
+
+    @property
+    def position_sets(self):
+        return [sorted({u[-1] for u in self.unit_set(i)}) for i in range(len(self))]
 
 
 def attribution(study, space, active):
@@ -572,7 +577,7 @@ def _run_units(study, coefficients, embeddings, *, compact=False):
     dependency is dropped.
     """
     import vpd_model
-    nat, tg, T = study.nat, study.nat.target, study.T
+    tg, T = study.nat.target, study.T
     B = next(iter(coefficients.values())).shape[0]
     s = max(0, min(study.first_change, min(study.space.positions), T - -(-64 // B), min(study.targets)))
     if s not in study.mask_windows:
@@ -581,8 +586,14 @@ def _run_units(study, coefficients, embeddings, *, compact=False):
     L, H, hd = T-s, tg.n_head, tg.hd
     offsets = [p-s for p in study.space.positions]
 
+    def indices(positions):
+        key = tuple(positions)
+        if key not in study.indices:
+            study.indices[key] = torch.tensor(key, device=study.nat.dev, dtype=torch.long)
+        return study.indices[key]
+
     def selected_rows(t, positions):
-        return torch.stack([t[:, p] for p in positions], 1)
+        return t.index_select(1, indices(positions))
 
     def norm(x, weight):
         if s and study.pad_norm:
@@ -610,10 +621,7 @@ def _run_units(study, coefficients, embeddings, *, compact=False):
             base = selected_rows(study.rec[n], study.space.positions)
             activation = torch.where(a, live, base) if a.dtype == torch.bool else a * live + (1-a) * base
             live_write = activation @ st.U
-        write = study.writes[n][:, s:].expand(B, -1, -1).clone()
-        for j, p in enumerate(offsets):
-            write[:, p] = live_write[:, j]
-        return write
+        return study.writes[n][:, s:].expand(B, -1, -1).index_copy(1, indices(offsets), live_write)
 
     def heads(w):
         return w.view(B, L, H, hd).transpose(1, 2)
@@ -846,6 +854,130 @@ def _unit_attribution(study, space, active):
     return grad
 
 
+def _unit_view(study, positions, granularity=None):
+    """Share immutable prompt caches, give an intervention its own unit space."""
+    granularity = granularity or getattr(getattr(study, "space", None), "granularity", "matrix")
+    space = UnitSpace(study.nat, study.T, positions, granularity)
+    if not getattr(study, "unit_vectors", False) or study.space.granularity != granularity:
+        return (HeadCarry if granularity == "head" else MatrixCarry)(
+            study.nat, study.ids, study.targets, study.prompts, space)
+    view = copy.copy(study)
+    view.space = space
+    view.windows, view.indices = {}, {}
+    return view
+
+
+@torch.no_grad()
+def _movement(study):
+    original = study.nat.reference([study.ids], study.targets)
+    return float(torch.stack([kl(lp, original)[0] for lp in study.lp]).mean())
+
+
+def _position_mask(space, positions):
+    positions = set(positions)
+    return torch.tensor([u[-1] in positions for u in space.units],
+                        dtype=torch.bool, device=space.nat.dev)
+
+
+def _relay_attribution(study, p, targets, *, chunk_size=None):
+    """Sum |d KL / da_unit| at the p/targets-only endpoint, for EVERY q.
+
+    Zero relay coefficients keep the forward intervention identical across
+    chunks. Each chunk differentiates its units, including all upstream live
+    dependencies, while other relay writes stay at the original values. This
+    is exactly the full-space gradient, not separate live-chunk interventions.
+    OOM retries shrink chunks; a single-position OOM raises, never skips q.
+    """
+    base = {p, *targets}
+    positions = [q for q in range(p + 1, max(targets)) if q not in base]
+    if not positions:
+        return []
+    width = len(positions) if chunk_size is None else chunk_size
+    if width < 1:
+        raise ValueError("attribution chunk_size must be positive")
+    result, start = [], 0
+    while start < len(positions):
+        qs = positions[start:start + width]
+        view = _unit_view(study, [*base, *qs])
+        try:
+            grad = _unit_attribution(view, view.space, _position_mask(view.space, base))
+            if not torch.isfinite(grad).all():
+                raise RuntimeError("nonfinite relay attribution")
+            costs = torch.zeros(len(view.space.positions), device=study.nat.dev)
+            for sl in view.space.offsets.values():
+                costs += grad[sl].abs().reshape(len(view.space.positions), -1).sum(-1)
+            values = dict(zip(view.space.positions, costs.cpu().tolist()))
+            result.extend((q, values[q]) for q in qs)
+            start += len(qs)
+            del grad, costs, view
+        except RuntimeError as exc:
+            if "out of memory" not in str(exc).lower() or len(qs) == 1:
+                raise
+            exc.__traceback__ = None
+            grad = costs = view = None
+            native.free(study.nat.dev)
+            if str(study.nat.dev).startswith("cuda"):
+                torch.cuda.empty_cache()
+            width = max(1, len(qs) // 2)
+            print(f"  relay attribution OOM: retry all remaining positions in chunks of {width}", flush=True)
+    return result
+
+
+def relays(study, p, targets, max_relays=3, *, movement=None, baseline=None,
+           attribution_chunk_size=None):
+    """Ordered (relay position, measured KL bits) additions, at most three.
+
+    Screen all strictly intermediate non-target positions by summed absolute
+    unit gradients, keeping 16 (ties by position). At each step measure every
+    remaining candidate with ALL units at p, targets and accepted relays.
+    Stop at 90% of independently measured movement, <1% improvement, or the
+    relay limit. A relay is an intervention location, not a proven unique path.
+    Accepts Carry, MatrixCarry or HeadCarry study-like inputs.
+    """
+    if max_relays < 0 or not targets or not 0 <= p < study.T or any(t < 0 or t >= study.T for t in targets):
+        raise ValueError("invalid relay limit, source or targets")
+    movement = _movement(study) if movement is None else movement
+    base = {p, *targets}
+    study = _unit_view(study, base)
+    current = float(study.measure([_position_mask(study.space, base)])[0]) if baseline is None else baseline
+    if max_relays == 0 or movement <= 1e-5 or current <= .1 * movement:
+        return []
+    scores = _relay_attribution(study, p, targets, chunk_size=attribution_chunk_size)
+    candidates = [q for q, _ in sorted(scores, key=lambda z: (-z[1], z[0]))[:16]]
+    if not candidates:
+        return []
+    view = _unit_view(study, [*base, *candidates])
+    chosen, result = set(base), []
+    while candidates and len(result) < max_relays and current > .1 * movement:
+        trials = [_position_mask(view.space, chosen | {q}) for q in candidates]
+        measured = view.measure(trials)
+        best = int(measured.argmin())
+        score = float(measured[best])
+        if current - score < .01 * movement:
+            break
+        q = candidates.pop(best)
+        chosen.add(q)
+        result.append((q, score))
+        current = score
+    return result
+
+
+# Public position_circuit's boolean keyword has the requested name.
+_find_relays = relays
+
+
+def _circuit_with_relays(study, p, targets, enabled, movement):
+    base = {p, *targets}
+    before = float(study.measure([_position_mask(study.space, base)])[0])
+    found = _find_relays(study, p, targets, movement=movement, baseline=before) if enabled else []
+    if found:
+        study = _unit_view(study, [*base, *[q for q, _ in found]])
+    curve = _position_circuit(study, study.space)
+    curve.relays, curve.before_relays_bits = found, before
+    curve.movement_bits = movement
+    return curve
+
+
 def _position_circuit(study, space):
     active = torch.ones(space.size, dtype=torch.bool, device=study.nat.dev)
     curve = Curve(space)
@@ -870,11 +1002,14 @@ def _position_circuit(study, space):
     return curve
 
 
-def position_circuit(nat, ids, targets, p, prompts, units="matrix"):
+def position_circuit(nat, ids, targets, p, prompts, units="matrix", *, relays=False):
     """Exact measured greedy elimination to one unit; Curve.unit_set(i).
 
     units is 'matrix', 'head', or an explicit iterable of the above unit tuples
     (at p and targets). Gradients affect order only, never membership or scores.
+    With relays=True, add up to three measured relay positions if the full
+    p/targets set carries less than 90% of movement. Curve.relays records the
+    additions; Curve.position_sets records positions used at every curve point.
     The smallest sets reported later are smallest on this greedy path, not a
     globally optimal subset. All candidate removals are one chunked carry call.
     """
@@ -887,7 +1022,7 @@ def position_circuit(nat, ids, targets, p, prompts, units="matrix"):
         if allowed != set(space.units):
             raise ValueError("explicit units must contain the full p/targets space")
     study = (HeadCarry if space.granularity == "head" else MatrixCarry)(nat, ids, targets, prompts, space)
-    return _position_circuit(study, space)
+    return _circuit_with_relays(study, p, targets, relays, _movement(study))
 
 
 def _threshold(curve, empty, fraction):
@@ -897,10 +1032,12 @@ def _threshold(curve, empty, fraction):
     if not eligible:
         return None
     i = min(eligible, key=lambda j: curve[j][0])
-    return {"size": curve[i][0], "kl_bits": curve[i][1], "units": sorted(curve.node_set(i))}
+    chosen = curve.node_set(i)
+    return {"size": curve[i][0], "kl_bits": curve[i][1], "units": sorted(chosen),
+            "positions": sorted({u[-1] for u in chosen if isinstance(u, tuple)})}
 
 
-def _explain_positions(nat, ids, targets, order, units, moved=None):
+def _explain_positions(nat, ids, targets, order, units, moved=None, *, relays=False):
     result = []
     for p in order:
         t0 = time.perf_counter()
@@ -908,10 +1045,8 @@ def _explain_positions(nat, ids, targets, order, units, moved=None):
         space = UnitSpace(nat, len(ids), [p, *targets], units)
         study = (HeadCarry if units == "head" else MatrixCarry)(nat, ids, targets, prompts, space)
         empty = float(study.measure([torch.zeros(space.size, dtype=torch.bool, device=nat.dev)])[0])
-        with torch.no_grad():
-            original = nat.reference([ids], targets)
-            movement = float(torch.stack([kl(lp, original)[0] for lp in study.lp]).mean())
-        curve = _position_circuit(study, space)
+        movement = _movement(study)
+        curve = _circuit_with_relays(study, p, targets, relays, movement)
         synchronize(nat.dev)
         row = {"position": p, "token": ids[p], "alternatives": [x[p] for x in prompts],
                "sensitivity_nats": float(moved[p-1]) if moved is not None else None,
@@ -920,16 +1055,26 @@ def _explain_positions(nat, ids, targets, order, units, moved=None):
                "threshold_90_below_tested_tolerance": .1 * empty < 3e-5,
                "threshold_99_below_tested_tolerance": .01 * empty < 3e-5,
                "curve": list(curve), "unit_sets": [sorted(curve.node_set(i)) for i in range(len(curve))],
-               "smallest_90": _threshold(curve, empty, .90), "smallest_99": _threshold(curve, empty, .99),
+               "position_sets": curve.position_sets,
+               "relays": [{"position": q, "token": ids[q], "offset": q-p, "kl_bits": score}
+                          for q, score in curve.relays],
+               "relay_curve": [[0, curve.before_relays_bits],
+                               *[[i+1, score] for i, (_, score) in enumerate(curve.relays)]],
+               "before_relays_bits": curve.before_relays_bits,
+               "after_relays_bits": curve[0][1],
+               "carry_fraction_before_relays": 1 - curve.before_relays_bits / movement if movement > 1e-5 else None,
+               "carry_fraction_after_relays": 1 - curve[0][1] / movement if movement > 1e-5 else None,
+               "smallest_90": _threshold(curve, movement if relays else empty, .90),
+               "smallest_99": _threshold(curve, movement if relays else empty, .99),
                "full_carry_fraction": 1 - curve[0][1] / empty if empty > 1e-5 else None,
-               "outside_needed_90": curve[0][1] > .1 * empty if empty > 1e-5 else None,
+               "outside_needed_90": curve.before_relays_bits > .1 * movement if movement > 1e-5 else None,
                "seconds": time.perf_counter() - t0}
         result.append(row)
         print(f"  p={p} empty={empty:.6g} full={curve[0][1]:.6g} n90={None if row['smallest_90'] is None else row['smallest_90']['size']} {row['seconds']:.1f}s", flush=True)
     return result
 
 
-def explain(nat, ids, targets, K, *, units="matrix"):
+def explain(nat, ids, targets, K, *, units="matrix", relays=False):
     """Top K Native.sensitivity positions; top three model alternatives each.
 
     Sensitivity is Native's one seeded random alternative and last-target KL
@@ -945,14 +1090,16 @@ def explain(nat, ids, targets, K, *, units="matrix"):
         moved, other = nat.sensitivity(ids, targets, torch.Generator(device="cpu").manual_seed(native.task_seed(str(ids[:8]))))
     order = [p for p in (moved.argsort(descending=True, stable=True) + 1).tolist() if p not in targets][:K]
     del other
-    return _explain_positions(nat, ids, targets, order, units, moved)
+    return _explain_positions(nat, ids, targets, order, units, moved, **({"relays": True} if relays else {}))
 
 
 def _unit_names(units, position, targets):
     names = []
     for u in units:
         layer, kind = native._name_layer_kind(u[0])
-        role = "p" if u[-1] == position else ("t" if len(targets) == 1 else f"t{targets.index(u[-1])}")
+        role = ("p" if u[-1] == position else
+                ("t" if len(targets) == 1 else f"t{targets.index(u[-1])}") if u[-1] in targets else
+                f"r+{u[-1]-position}")
         short = {"q_proj": "q", "k_proj": "k", "v_proj": "v", "o_proj": "o", "c_fc": "fc", "down_proj": "down"}[kind]
         names.append(f"L{layer}.{short}" + (f".h{u[1]}" if len(u) == 3 else "") + "@" + role)
     return tuple(sorted(names))
@@ -962,8 +1109,10 @@ def summarize(paths):
     """Normalize units to p/t roles; keep split denominators and failures."""
     rows = [json.loads(line) for path in paths for line in path.read_text().splitlines() if line.strip()]
     output = {}
-    for key in sorted({(r["split"], r["units"], r.get("selection", "sensitivity")) for r in rows}):
-        subset = [r for r in rows if (r["split"], r["units"], r.get("selection", "sensitivity")) == key]
+    def group(r):
+        return (r["split"], r["units"], r.get("selection", "sensitivity") + ("+relays" if r.get("relays") else ""))
+    for key in sorted({group(r) for r in rows}):
+        subset = [r for r in rows if group(r) == key]
         positions = [(r, p) for r in subset for p in r["positions"]]
         stats = {"questions": len(subset), "positions": len(positions),
                  "outside_needed_90": sum(p["outside_needed_90"] is True for _, p in positions),
@@ -979,6 +1128,30 @@ def summarize(paths):
         gpu = [r["gpu_utilization"] for r in subset if r.get("gpu_utilization")]
         stats["gpu_mean_percent"] = sum(g["mean_percent"] * g["samples"] for g in gpu) / sum(g["samples"] for g in gpu) if gpu else None
         stats["seconds_per_engine"] = {}
+        bins = {}
+        for label, lo, hi in (("<0.1", 0, .1), ("0.1-1", .1, 1), ("1-3", 1, 3), (">=3", 3, float("inf"))):
+            ps = [p for _, p in positions if lo <= p["movement_bits"] < hi and p["movement_bits"] > 1e-5]
+            before = sum(p.get("before_relays_bits", p["curve"][0][1]) <= .1 * p["movement_bits"] for p in ps)
+            after = sum(p.get("after_relays_bits", p["curve"][0][1]) <= .1 * p["movement_bits"] for p in ps)
+            curve_90 = sum(any(score <= .1 * p["movement_bits"] for _, score in p["curve"]) for p in ps)
+            bins[label] = {"positions": len(ps), "before_90": before, "after_90": after,
+                           "before_rate": before / len(ps) if ps else None,
+                           "after_rate": after / len(ps) if ps else None,
+                           "curve_90": curve_90, "curve_rate": curve_90 / len(ps) if ps else None}
+        stats["movement_bins"] = bins
+        stats["relay_count_distribution"] = dict(sorted(Counter(len(p.get("relays", [])) for _, p in positions).items()))
+        stats["relay_positions_in_smallest_90"] = dict(sorted(Counter(
+            len({u[-1] for u in p["smallest_90"]["units"]} & {z["position"] for z in p.get("relays", [])})
+            for _, p in positions if p["smallest_90"]).items()))
+        stats["relay_offsets"] = Counter(z["position"]-p["position"] for _, p in positions for z in p.get("relays", [])).most_common(20)
+        stats["relay_tokens"] = Counter(z["token"] for _, p in positions for z in p.get("relays", [])).most_common(20)
+        attention = Counter()
+        for _, p in positions:
+            if p["smallest_90"]:
+                qs = {z["position"] for z in p.get("relays", [])}
+                attention.update(u[0] + (f".h{u[1]}" if len(u) == 3 else "")
+                                 for u in p["smallest_90"]["units"] if u[-1] in qs and ".attn." in u[0])
+        stats["relay_attention_units_in_smallest_90"] = attention.most_common(20)
         for engine in sorted({r.get("engine", "native_unit") for r in subset}):
             seconds = [r["seconds"] for r in subset if r.get("engine", "native_unit") == engine]
             stats["seconds_per_engine"][engine] = {"questions": len(seconds), "mean": float(np.mean(seconds)), "median": float(np.median(seconds))}
@@ -1111,6 +1284,7 @@ def main():
     e.add_argument("--n", type=int, required=True)
     e.add_argument("--k", type=int, default=8)
     e.add_argument("--units", choices=("matrix", "head"), default="matrix")
+    e.add_argument("--relays", action="store_true", help="screen and measure up to three intermediate relay positions")
     e.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("search")
     p.add_argument("--task", required=True, help="copy question id, or first6")
@@ -1167,8 +1341,8 @@ def main():
             with args.out.open() as f:
                 for line in f:
                     row = json.loads(line)
-                    if (row["split"], row["k"], row["units"]) != (args.split, args.k, args.units):
-                        ap.error("existing output has incompatible split, k or units")
+                    if (row["split"], row["k"], row["units"], row.get("relays", False)) != (args.split, args.k, args.units, args.relays):
+                        ap.error("existing output has incompatible split, k, units or relays")
                     done.add(row["task"])
         pending = [p for p in native.tasks(args.split)[:args.n] if p.stem not in done]
         if not pending:
@@ -1183,14 +1357,16 @@ def main():
             synchronize(nat.dev)
             util = _Utilization(nat.dev)
             t0 = time.perf_counter()
-            positions = explain(nat, ids, targets, args.k, units=args.units)
+            positions = explain(nat, ids, targets, args.k, units=args.units, relays=args.relays)
             synchronize(nat.dev)
             result = {"task": path.stem, "split": args.split, "k": args.k, "units": args.units,
-                      "targets": targets, "device": str(nat.dev), "positions": positions,
+                      "targets": targets, "device": str(nat.dev), "positions": positions, "relays": args.relays,
                       "engine": "direct-unit-v4-stable-batches",
                       "seconds": time.perf_counter() - t0, "gpu_utilization": util.finish(),
                       "search": "exact greedy; smallest sets on measured path, not global optima",
                       "outside_criterion": "Full p/targets carry <90%, not proof every subset fails",
+                      "relay_screen": "top 16 by sum of absolute unit gradients at p/targets-only endpoint; every intermediate non-target position screened" if args.relays else None,
+                      "relay_stopping": "90% of movement, <1% movement improvement, or 3 relays" if args.relays else None,
                       "head_definition": UnitSpace.__doc__ if args.units == "head" else None}
             with args.out.open("a") as f:
                 f.write(json.dumps(result) + "\n")
