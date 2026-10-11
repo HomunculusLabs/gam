@@ -2,10 +2,10 @@
 # The unit-circuit explainer (#2951 graph oracle) on one pod, rl/units_sft.py's stages: LoRA SFT of Qwen3-4B on the train
 # circuits (units.dataset rows of carry.py explain's train output; the held-out circuits' rows give a held-out loss,
 # never trained on), meanwhile the held-out questions (units.sensitive on the pod's GPU) and the carry test of the copy
-# and all baselines on them, then N sampled answers per question and the carry test of each. The rows, the held-out
+# and all baselines on them, then SAMPLES answers per question and the carry test of each. The rows, the held-out
 # circuits and texts/vpd4l go up as one tar file and origin/main's bench/oracle/graph as another; VPD's files are
 # published inputs. report.txt has the per-question table.
-#   bench/oracle/graph/pods/units_sft_pod.sh HOURS   (env: RUN, TRAIN, HELD, EPOCHS, N, MAX_TOKENS, PRICE, VRAM, GPU)
+#   bench/oracle/graph/pods/units_sft_pod.sh HOURS   (env: RUN, TRAIN, HELD, EPOCHS, SAMPLES, MAX_TOKENS, PRICE, VRAM, GPU)
 cd /Users/user/gam
 H=${1:-1.5}
 RUN=${RUN:-a}
@@ -30,7 +30,7 @@ ls /Users/user/mpd-data/vpd/t-9d2b8f02/model_step_99999.safetensors /Users/user/
 cd $S/bench/oracle/graph; nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used,power.draw --format=csv,noheader -l 5 > $O/gpu.csv & \
 ($U questions $I/held_explain.jsonl $O/questions.jsonl > $O/questions.log 2>&1 && $U score $O/questions.jsonl $O/scores_baselines.jsonl > $O/score_baselines.log 2>&1) & BASE=\$!; \
 $U sft $I/train_rows.jsonl $O/sft --val $I/held_rows.jsonl --epochs ${EPOCHS:-3} > $O/sft.log 2>&1; wait \$BASE; \
-$U sample $O/questions.jsonl $O/sft/adapter $O/answers.jsonl --n ${N:-4} --max-tokens ${MAX_TOKENS:-1536} > $O/sample.log 2>&1 && \
+$U sample $O/questions.jsonl $O/sft/adapter $O/answers.jsonl --n ${SAMPLES:-4} --max-tokens ${MAX_TOKENS:-1536} > $O/sample.log 2>&1 && \
 $U score $O/questions.jsonl $O/scores_explainer.jsonl --answers $O/answers.jsonl > $O/score_explainer.log 2>&1; \
 cat $O/scores_baselines.jsonl $O/scores_explainer.jsonl > $O/scores.jsonl; $U report $O/scores.jsonl > $O/report.txt 2>&1; echo done"
 RP_ALLOW_OVER=1 RP_UPLOAD_MAX_MB=${RP_UPLOAD_MAX_MB:-200} RP_OWNER=lead RP_PARALLEL=1 RP_PYENV=oracle RP_HF_MODELS="Qwen/Qwen3-4B" RP_MAX_PRICE=${PRICE:-1.0} \
