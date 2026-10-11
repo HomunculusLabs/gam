@@ -174,7 +174,7 @@ def score(a) -> None:
                 s = units.score(nat, task, text, a.k)
                 f.write(json.dumps({"task": tid, "kind": kind, "sample": j, "tokens": tokens, "finish": finish,
                                     "lines": sum(p in circuits for p in q["positions"]), "positions": len(q["positions"]),
-                                    "uncarried": s["uncarried"], "units": s["units"], "outside": sum(r["outside"] for r in s["positions"]),
+                                    "uncarried": s["uncarried"], "rest_carried": s.get("rest_carried"), "units": s["units"], "outside": sum(r["outside"] for r in s["positions"]),
                                     "unknown": sum(r.get("unknown", 0) for r in s["positions"]),
                                     "per_position": s["positions"]}) + "\n")
                 f.flush()
@@ -182,36 +182,46 @@ def score(a) -> None:
 
 
 def report(a) -> None:
+    """Per question: uncarried share / rest_carried (what every other unit carries with the answer held: its necessity,
+    when units.score reports it) / units, for the explainer's best and median answer, the teacher and the baselines."""
     rows = [json.loads(line) for line in open(a.scores)]
     tasks = sorted({r["task"] for r in rows}, key=lambda t: int("".join(ch for ch in t if ch.isdigit()) or 0))
-    print(f"{'task':10s} {'expl best':>14s} {'expl median':>14s} {'parse':>6s} {'teacher':>14s} {'copy':>14s} {'all':>14s}   (uncarried share / units)")
-    agg = {k: [] for k in ("best", "median", "teacher", "copy", "all", "parse")}
     empty = [t for t in tasks if all(r["positions"] == 0 for r in rows if r["task"] == t)]
     tasks = [t for t in tasks if t not in empty]  # a text whose question lists no positions has nothing to measure
+    rest = lambda r: r.get("rest_carried")  # noqa: E731
+
+    def cell(u, rc, n):
+        return f"{u:.3f} {'  -  ' if rc is None else f'{rc:.3f}'} {n:4.0f}"
+
+    print(f"{'task':10s} {'explainer best':>16s} {'explainer median':>16s} {'parse':>6s} {'teacher':>16s} {'copy':>16s} {'all':>16s}")
+    print(f"{'':10s} {'(uncarried, rest_carried, units)':>50s}")
+    agg = {k: [] for k in ("best", "median", "teacher", "copy", "all", "parse")}
     for t in tasks:
         ex = [r for r in rows if r["task"] == t and r["kind"] == "explainer"]
         base = {r["kind"]: r for r in rows if r["task"] == t and r["kind"] in ("teacher", "copy", "all")}
-        cell = lambda u, n: f"{u:.3f} / {n:4.0f}"  # noqa: E731
         line = f"{t:10s}"
         if ex:
             best = min(ex, key=lambda r: (r["uncarried"], r["units"]))
-            med_u, med_n = statistics.median(r["uncarried"] for r in ex), statistics.median(r["units"] for r in ex)
+            med = (statistics.median(r["uncarried"] for r in ex), None if rest(ex[0]) is None else statistics.median(rest(r) for r in ex),
+                   statistics.median(r["units"] for r in ex))
             parse = sum(r["finish"] == "stop" and r["lines"] == r["positions"] for r in ex) / len(ex)
-            line += f" {cell(best['uncarried'], best['units']):>14s} {cell(med_u, med_n):>14s} {parse:6.2f}"
-            agg["best"].append((best["uncarried"], best["units"]))
-            agg["median"].append((med_u, med_n))
+            line += f" {cell(best['uncarried'], rest(best), best['units']):>16s} {cell(*med):>16s} {parse:6.2f}"
+            agg["best"].append((best["uncarried"], rest(best), best["units"]))
+            agg["median"].append(med)
             agg["parse"].append(parse)
         for k in ("teacher", "copy", "all"):
             if k in base:
-                line += f" {cell(base[k]['uncarried'], base[k]['units']):>14s}"
-                agg[k].append((base[k]["uncarried"], base[k]["units"]))
+                line += f" {cell(base[k]['uncarried'], rest(base[k]), base[k]['units']):>16s}"
+                agg[k].append((base[k]["uncarried"], rest(base[k]), base[k]["units"]))
             else:
-                line += f" {'-':>14s}"
+                line += f" {'-':>16s}"
         print(line)
     print(f"mean over the {len(tasks)} questions" + (f" (left out, no positions: {', '.join(empty)})" if empty else "") + ":")
     for k in ("best", "median", "teacher", "copy", "all"):
         if agg[k]:
-            print(f"  {k:7s} uncarried {statistics.mean(u for u, _ in agg[k]):.3f}, units {statistics.mean(n for _, n in agg[k]):.1f}")
+            rcs = [rc for _, rc, _ in agg[k] if rc is not None]
+            print(f"  {k:7s} uncarried {statistics.mean(u for u, _, _ in agg[k]):.3f}, rest_carried "
+                  f"{statistics.mean(rcs) if rcs else float('nan'):.3f}, units {statistics.mean(n for _, _, n in agg[k]):.1f}")
     if agg["parse"]:
         ex = [r for r in rows if r["kind"] == "explainer" and r["task"] in tasks]
         print(f"  answers that parse (ended, a line for every listed position): {statistics.mean(agg['parse']):.2f}; "
