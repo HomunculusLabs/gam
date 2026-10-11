@@ -255,7 +255,7 @@ def main():
     m.add_argument("--base", default="Qwen/Qwen3-4B")
     m.add_argument("--n", type=int, default=4)
     m.add_argument("--max-tokens", type=int, default=1536)
-    m.add_argument("--max-model-len", type=int, default=4096)
+    m.add_argument("--max-model-len", type=int, default=8192)  # a question numbers every token: up to 3.8k tokens
     m.add_argument("--seed", type=int, default=0)
     c = sub.add_parser("score")
     c.add_argument("questions", type=Path)
