@@ -16,7 +16,9 @@ the model moves). Its score: the share of the movement it leaves uncarried, the 
 (a position without a line carries nothing); its size: the number of units (a head counts as one).
 
   units.py score ANSWER.txt TASK_ID [--k 8]
+  units.py baseline copy|all TASK_ID [--k 8]                  a search-free answer's score
   units.py targets EXPLAIN.jsonl OUT_DIR [--fraction 90]     answers from carry.py explain's measured circuits
+  units.py dataset EXPLAIN.jsonl OUT.jsonl [--fraction 90]   SFT rows (question, measured answer)
 """
 from __future__ import annotations
 
@@ -157,6 +159,64 @@ def targets(explain_jsonl: Path, out_dir: Path, fraction: int = 90) -> int:
     return n
 
 
+ASK = ("How does {model} compute its prediction of the next token after the target of this text? For each listed input "
+       "position, name the units through which a change of the token there reaches the prediction: a unit is a weight "
+       "matrix of a layer at a position, L<layer>.<q|k|v|o|fc|down>@<position>, an attention matrix optionally by its "
+       "heads, L<layer>.<q|k|v|o>@<position>[h<i>,...]. Answer with a line EXPLANATION: (in plain English, what the model "
+       "does), then one line POSITION <p>: <units> per listed position. Fewer units are better, as long as they carry "
+       "the change.")
+
+
+def question(task: dict, positions: list[int]) -> str:
+    """The oracle's question for unit circuits: the ask, the text as tokens with the target and the model's most
+    probable next tokens (prompt.line), and the positions whose changed token moves the prediction most."""
+    from prompt import line
+
+    model = task["model"]
+    p = task["prompts"][0]
+    return "\n".join([ASK.format(model=model), line(model, p["token_ids"], p["target_positions"], p["model_top"]),
+                      "positions where a changed token moves the prediction most, most first: " + ", ".join(map(str, positions))])
+
+
+def baseline(kind: str, positions: list[int], targets: list[int]) -> str:
+    """Answers that need no search, for comparison: "copy", the recurring copy circuit at every position (layer-0 MLP
+    at the position, layer-2 values there, layer-2 output at the target); "all", every unit at the position and the
+    target."""
+    import native
+
+    t = max(targets)
+    circuits = {}
+    for p in positions:
+        if kind == "copy":
+            circuits[p] = [(native.site_name(0, "c_fc"), p), (native.site_name(0, "down_proj"), p), (native.site_name(2, "v_proj"), p),
+                           (native.site_name(2, "o_proj"), t)]
+        else:
+            circuits[p] = [(native.site_name(L, k), q) for L in range(4) for k in KINDS.values() for q in (p, t)]
+    return render("", circuits)
+
+
+def dataset(explain_jsonl: Path, out: Path, fraction: int = 90) -> int:
+    """SFT rows {"prompt": [user message], "completion": [assistant message], "info": {"task"}} from carry.py
+    explain's measured circuits (targets()'s answers) and their questions."""
+    import tempfile
+
+    import native
+
+    with tempfile.TemporaryDirectory() as tmp:
+        targets(explain_jsonl, Path(tmp), fraction)
+        n = 0
+        with open(out, "w") as f:
+            for line in open(explain_jsonl):
+                r = json.loads(line)
+                task = json.loads((native.TEXTS / "vpd4l" / f"{r['task']}.json").read_text())
+                answer = (Path(tmp) / f"{r['task']}.txt").read_text()
+                positions = [p["position"] for p in r["positions"]]
+                f.write(json.dumps({"prompt": [{"role": "user", "content": question(task, positions)}],
+                                    "completion": [{"role": "assistant", "content": answer}], "info": {"task": r["task"]}}) + "\n")
+                n += 1
+    return n
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -164,6 +224,14 @@ def main():
     s.add_argument("answer", type=Path)
     s.add_argument("task")
     s.add_argument("--k", type=int, default=8)
+    d = sub.add_parser("dataset")
+    d.add_argument("explain", type=Path)
+    d.add_argument("out", type=Path)
+    d.add_argument("--fraction", type=int, default=90)
+    b = sub.add_parser("baseline")
+    b.add_argument("kind", choices=("copy", "all"))
+    b.add_argument("task")
+    b.add_argument("--k", type=int, default=8)
     t = sub.add_parser("targets")
     t.add_argument("explain", type=Path)
     t.add_argument("out", type=Path)
@@ -172,11 +240,19 @@ def main():
     if a.cmd == "targets":
         print(f"{targets(a.explain, a.out, a.fraction)} answers in {a.out}")
         return
+    if a.cmd == "dataset":
+        print(f"{dataset(a.explain, a.out, a.fraction)} rows in {a.out}")
+        return
     import native
 
     nat = native.Native()
     task = json.loads((native.TEXTS / "vpd4l" / f"{a.task}.json").read_text())
-    print(json.dumps(score(nat, task, a.answer.read_text(), a.k), indent=1))
+    if a.cmd == "baseline":
+        p = task["prompts"][0]
+        text = baseline(a.kind, sensitive(nat, p["token_ids"], p["target_positions"], a.k), p["target_positions"])
+    else:
+        text = a.answer.read_text()
+    print(json.dumps(score(nat, task, text, a.k), indent=1))
 
 
 if __name__ == "__main__":
