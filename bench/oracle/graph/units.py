@@ -19,6 +19,12 @@ the model moves). Its score: the share of the movement it leaves uncarried, the 
   units.py baseline copy|all TASK_ID [--k 8]                  a search-free answer's score
   units.py targets EXPLAIN.jsonl OUT_DIR [--fraction 90]     answers from carry.py explain's measured circuits
   units.py dataset EXPLAIN.jsonl OUT.jsonl [--fraction 90]   SFT rows (question, measured answer)
+  units.py events SPLIT OUT.jsonl [--n 50] [--k 8]            the English reader's questions, answered by the model
+
+This track is a scaffold: units are whole matrices or heads at positions, and a line is a set, not a graph. It exists to
+get a model to state measured mechanism-shaped answers with a verifier it cannot fool. Climb-back criterion: once the
+trained explainer leaves less movement uncarried than the copy baseline at no more units on held-out texts, the unit
+space moves to VPD's subcomponents at the same positions (same carry test), and lines state attention edges.
 """
 from __future__ import annotations
 
@@ -104,9 +110,11 @@ def sensitive(nat, ids: list[int], targets: list[int], k: int) -> list[int]:
 
 def score(nat, task: dict, text: str, k: int = 8) -> dict:
     """The carry test of an answer on a task: {"uncarried": the movement-weighted share left uncarried, "units", per
-    position {"position", "movement" (bits), "carried" (share), "units" (existing units the line names at the position
-    or the targets), "outside" (units elsewhere, which the test cannot place), "unknown" (names of units the model does
-    not have)}, "explanation"}. Size counts existing units only."""
+    position {"position", "movement" (bits), "carried" (share), "units" (existing units the line names at the position,
+    at relay positions between it and the target, or at the targets), "rest_carried" (the share carried by every other
+    unit at those positions with the answer's held: near 0 when the answer is the only path, its necessity), "outside"
+    (units before the position or after the target, which a change at the position cannot reach), "unknown" (names of
+    units the model does not have)}, "rest_carried" (movement-weighted), "explanation"}. Size counts existing units only."""
     import torch
 
     import carry
@@ -120,21 +128,91 @@ def score(nat, task: dict, text: str, k: int = 8) -> dict:
     for p in positions:
         prompts = carry.alternatives(nat, ids, p)
         stated = circuits.get(p, [])
-        inside = [u for u in stated if u[-1] in (p, *targets)]
+        inside = [u for u in stated if p <= u[-1] <= max(targets)]  # at the position, a relay after it, or the targets
         gran = "head" if any(len(u) == 3 for u in inside) else "matrix"
-        space = carry.UnitSpace(nat, len(ids), [p, *targets], gran)
+        space = carry.UnitSpace(nat, len(ids), sorted({p, *targets, *(u[-1] for u in inside)}), gran)
         study = (carry.HeadCarry if gran == "head" else carry.MatrixCarry)(nat, ids, targets, prompts, space)
         on = _active(space, inside)
         with torch.no_grad():
-            empty, with_units = study.measure([_active(space, []), on]).tolist()
+            empty, with_units, without = study.measure([_active(space, []), on, ~on]).tolist()
         carried = 0.0 if empty <= 0 else max(0.0, min(1.0, 1 - with_units / empty))
-        rows.append({"position": p, "movement": empty, "carried": carried, "units": int(on.sum()), "outside": len(stated) - len(inside),
-                     "unknown": len(inside) - int(on.sum())})
+        rest = 0.0 if empty <= 0 else max(0.0, min(1.0, 1 - without / empty))
+        rows.append({"position": p, "movement": empty, "carried": carried, "rest_carried": rest, "units": int(on.sum()),
+                     "outside": len(stated) - len(inside), "unknown": len(inside) - int(on.sum())})
         total_w += empty
         total_u += empty * (1 - carried)
         native.free(nat.dev)
     return {"uncarried": total_u / total_w if total_w else 0.0, "units": sum(r["units"] for r in rows), "positions": rows,
+            "rest_carried": sum(r["movement"] * r["rest_carried"] for r in rows) / total_w if total_w else 0.0,
             "explanation": explanation}
+
+
+def _cut(t: int, s: int, layer: int):
+    """A mode that keeps one layer's attention at position t from reading position s (every head; its weight there set to
+    zero, the rest not renormalized). Native.run computes each layer's attention weights with one softmax, in layer order."""
+    import torch
+    from torch.overrides import TorchFunctionMode
+
+    class Cut(TorchFunctionMode):
+        calls = 0
+
+        def __torch_function__(self, func, types, args=(), kwargs=None):
+            out = func(*args, **(kwargs or {}))
+            if func is torch.Tensor.softmax and out.dim() == 4 and out.shape[-1] == out.shape[-2] > t:
+                if self.calls == layer:
+                    out = out.clone()
+                    out[:, :, t, s] = 0.0
+                self.calls += 1
+            return out
+
+    return Cut()
+
+
+def events(nat, task: dict, k: int = 8) -> list[dict]:
+    """The English reader's questions about a text (reader.Reader.bits), answered by the model: for the K positions
+    where a changed token moves the prediction most and K other positions before the target (drawn with the text's
+    seed), the token there replaced by the model's likeliest other token (carry.alternatives' first), and, for each
+    layer, the attention at the target kept from reading the position (_cut). Each event: {"position", "new" (token
+    id) or "layer", "down": whether the model's probability of its most likely next token goes down, "weight": by how
+    much it moves, |log2 of its ratio| capped at 4 bits (a change that moves nothing hardly counts), "bits": the signed
+    log2 ratio}."""
+    import math
+    import random
+
+    import torch
+
+    import carry
+    import native
+
+    prompt = task["prompts"][0]
+    ids, targets = prompt["token_ids"], prompt["target_positions"]
+    t = max(targets)
+
+    def p_top(x, mode=None):
+        with torch.no_grad():
+            if mode is None:
+                return nat.run(x, [t], nat._full_plan(len(x), 1), *nat._one())[0, 0].exp()
+            with mode:
+                return nat.run(x, [t], nat._full_plan(len(x), 1), *nat._one())[0, 0].exp()
+
+    base = p_top(ids)
+    top = int(base.argmax())
+    p0 = float(base[top])
+    near = sensitive(nat, ids, targets, k)
+    rest = [q for q in range(1, t) if q not in near]
+    others = random.Random(native.task_seed(task["id"])).sample(rest, min(k, len(rest)))
+    def event(q, p, **kind):
+        bits = math.log2(max(p, 1e-30) / p0)
+        return {"position": q, **kind, "down": bits < 0, "weight": min(abs(bits), 4.0), "bits": bits}
+
+    out = []
+    for q in near + others:
+        alt = carry.alternatives(nat, ids, q)[0]
+        out.append(event(q, float(p_top(alt)[top]), new=alt[q]))
+        for layer in range(nat.target.n_layer):
+            out.append(event(q, float(p_top(ids, _cut(t, q, layer))[top]), layer=layer))
+    native.free(nat.dev)
+    return out
 
 
 def targets(explain_jsonl: Path, out_dir: Path, fraction: int = 90) -> int:
@@ -170,15 +248,25 @@ ASK = ("How does {model} compute its prediction of the next token after the targ
        "the change.")
 
 
+def numbered(strings: list[str]) -> str:
+    """Tokens with their positions, 0:'The' 1:' cat' ...: a reader finds position 322 without counting."""
+    return " ".join(f"{i}:{s!r}" for i, s in enumerate(strings))
+
+
 def question(task: dict, positions: list[int]) -> str:
-    """The oracle's question for unit circuits: the ask, the text as tokens with the target and the model's most
-    probable next tokens (prompt.line), and the positions whose changed token moves the prediction most."""
-    from prompt import line
+    """The oracle's question for unit circuits: the ask, the text's tokens by position, the target and the model's most
+    probable next tokens there, and the positions whose changed token moves the prediction most (with their tokens)."""
+    from prompt import tokens_of
 
     model = task["model"]
     p = task["prompts"][0]
-    return "\n".join([ASK.format(model=model), line(model, p["token_ids"], p["target_positions"], p["model_top"]),
-                      "positions where a changed token moves the prediction most, most first: " + ", ".join(map(str, positions))])
+    strings = tokens_of(model, p["token_ids"])
+    t = max(p["target_positions"])
+    top = ", ".join(f"{tok!r} {q:.2f}" for tok, q in p["model_top"][0][:3])
+    return "\n".join([ASK.format(model=model), "tokens: " + numbered(strings),
+                      f"target: position {t}; the model's most probable next tokens there: {top}",
+                      "positions where a changed token moves the prediction most, most first: "
+                      + ", ".join(f"{q} ({strings[q]!r})" for q in positions)])
 
 
 def baseline(kind: str, positions: list[int], targets: list[int]) -> str:
@@ -237,6 +325,11 @@ def main():
     b.add_argument("kind", choices=("copy", "all"))
     b.add_argument("task")
     b.add_argument("--k", type=int, default=8)
+    e = sub.add_parser("events")
+    e.add_argument("split", choices=("train", "heldout", "hard"))
+    e.add_argument("out", type=Path)
+    e.add_argument("--n", type=int, default=50)
+    e.add_argument("--k", type=int, default=8)
     t = sub.add_parser("targets")
     t.add_argument("explain", type=Path)
     t.add_argument("out", type=Path)
@@ -251,6 +344,15 @@ def main():
     import native
 
     nat = native.Native()
+    if a.cmd == "events":  # one line per text: {"task", "events"}; resumable
+        done = {json.loads(x)["task"] for x in open(a.out)} if a.out.exists() else set()
+        with open(a.out, "a") as f:
+            for path in native.tasks(a.split)[:a.n]:
+                if path.stem in done:
+                    continue
+                f.write(json.dumps({"task": path.stem, "events": events(nat, json.loads(path.read_text()), a.k)}) + "\n")
+                f.flush()
+        return
     task = json.loads((native.TEXTS / "vpd4l" / f"{a.task}.json").read_text())
     if a.cmd == "baseline":
         p = task["prompts"][0]
