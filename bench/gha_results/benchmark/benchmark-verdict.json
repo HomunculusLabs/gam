@@ -1,15 +1,14 @@
 {
   "shard_outcome_schema": "benchmark-shard-outcome/v1",
-  "shard_outcomes_seen": 87,
+  "shard_outcomes_seen": 79,
   "censored_scenarios": [
     "geo_disease_eas3_matern_k24",
     "geo_disease_eas_tp_k12",
     "geo_disease_eas_tp_k6",
-    "geo_disease_shrinkage",
+    "geo_disease_tp",
     "geo_subpop16_tp_k24",
     "medium",
-    "pathological_ill_conditioned",
-    "us48_demand_31day"
+    "pathological_ill_conditioned"
   ],
   "errored_scenarios": [
     "bone_gamair",
@@ -17,15 +16,12 @@
     "continuous_order_boundary_smooth",
     "continuous_order_fractional_spde_nu18",
     "geo_disease_duchon",
-    "geo_disease_eas3_duchon_k12",
-    "geo_disease_eas3_duchon_k24",
     "geo_disease_eas3_duchon_k6",
     "geo_disease_eas3_matern_k12",
     "geo_disease_eas3_matern_k6",
     "geo_disease_eas3_tp_k12",
     "geo_disease_eas3_tp_k24",
     "geo_disease_eas3_tp_k6",
-    "geo_disease_eas_duchon_k12",
     "geo_disease_eas_duchon_k24",
     "geo_disease_eas_duchon_k4_downsample150x",
     "geo_disease_eas_duchon_k4_downsample300x",
@@ -52,9 +48,7 @@
     "geo_latlon_superpopnoise_matern_k6",
     "geo_latlon_superpopnoise_tp_k12",
     "geo_subpop16_duchon_k12",
-    "geo_subpop16_duchon_k24",
     "geo_subpop16_duchon_k6",
-    "geo_subpop16_margslope_aniso_duchon16d_k50",
     "geo_subpop16_matern_k12",
     "geo_subpop16_matern_k24",
     "geo_subpop16_matern_k6",
@@ -69,7 +63,6 @@
     "papuan_oce4_matern_k24",
     "papuan_oce4_matern_k6",
     "papuan_oce4_tp_k12",
-    "papuan_oce4_tp_k24",
     "papuan_oce4_tp_k6",
     "papuan_oce_duchon_k12",
     "papuan_oce_matern_k12",
@@ -78,25 +71,41 @@
     "thread3_admixture_cliff",
     "us48_demand_5day",
     "wine_gamair",
-    "wine_price_vs_temp"
-  ],
-  "unreported_scenarios": [
-    "icu_survival_death",
-    "icu_survival_los",
+    "wine_price_vs_temp",
     "wine_temp_vs_year"
   ],
+  "unreported_scenarios": [
+    "geo_disease_eas3_duchon_k12",
+    "geo_disease_eas3_duchon_k24",
+    "geo_disease_eas_duchon_k12",
+    "geo_disease_eas_tp_k24",
+    "geo_subpop16_duchon_k24",
+    "geo_subpop16_margslope_aniso_duchon16d_k50",
+    "geo_subpop16_tp_k6",
+    "icu_survival_death",
+    "icu_survival_los",
+    "papuan_oce4_tp_k24",
+    "us48_demand_31day"
+  ],
   "not_measured_scenarios": [
+    "geo_disease_eas3_duchon_k12",
+    "geo_disease_eas3_duchon_k24",
     "geo_disease_eas3_matern_k24",
+    "geo_disease_eas_duchon_k12",
     "geo_disease_eas_tp_k12",
+    "geo_disease_eas_tp_k24",
     "geo_disease_eas_tp_k6",
-    "geo_disease_shrinkage",
+    "geo_disease_tp",
+    "geo_subpop16_duchon_k24",
+    "geo_subpop16_margslope_aniso_duchon16d_k50",
     "geo_subpop16_tp_k24",
+    "geo_subpop16_tp_k6",
     "icu_survival_death",
     "icu_survival_los",
     "medium",
+    "papuan_oce4_tp_k24",
     "pathological_ill_conditioned",
-    "us48_demand_31day",
-    "wine_temp_vs_year"
+    "us48_demand_31day"
   ],
   "censored_with_results": [],
   "contract": {
@@ -107,7 +116,7 @@
     "full_suite_required": true
   },
   "configured_scenario_count": 90,
-  "observed_scenario_count": 12,
+  "observed_scenario_count": 10,
   "missing_scenarios": [
     "bone_gamair",
     "continuous_order_boundary_rough",
@@ -136,9 +145,10 @@
     "geo_disease_eas_matern_k24",
     "geo_disease_eas_matern_k6",
     "geo_disease_eas_tp_k12",
+    "geo_disease_eas_tp_k24",
     "geo_disease_eas_tp_k6",
     "geo_disease_matern",
-    "geo_disease_shrinkage",
+    "geo_disease_tp",
     "geo_latlon_equatornoise_duchon_k12",
     "geo_latlon_equatornoise_duchon_k24",
     "geo_latlon_equatornoise_duchon_k6",
@@ -161,6 +171,7 @@
     "geo_subpop16_matern_k6",
     "geo_subpop16_randomprev_randomscale_duchonfull_k50",
     "geo_subpop16_tp_k24",
+    "geo_subpop16_tp_k6",
     "haberman_5yr",
     "horse_colic",
     "icu_survival_death",
@@ -191,18 +202,7 @@
   "full_suite": false,
   "comparisons": [
     {
-      "scenario_name": "geo_disease_eas_tp_k24",
-      "gam_contender": "rust_gam",
-      "reference_contender": "r_mgcv",
-      "gam_status": "ok",
-      "reference_status": "failed",
-      "performance": [],
-      "accuracy": [],
-      "passed": false,
-      "failure": "missing or failed matched contender"
-    },
-    {
-      "scenario_name": "geo_disease_tp",
+      "scenario_name": "geo_disease_shrinkage",
       "gam_contender": "rust_gam",
       "reference_contender": "r_mgcv",
       "gam_status": "ok",
@@ -221,16 +221,16 @@
       "performance": [
         {
           "measure": "fit_sec",
-          "gam": 0.5158168330000592,
-          "reference": 2.019,
-          "gam_over_reference": 0.25548134373455134,
+          "gam": 0.5244548860000577,
+          "reference": 1.895,
+          "gam_over_reference": 0.2767571957783946,
           "passed": true
         },
         {
           "measure": "predict_sec",
-          "gam": 0.0025332479999917723,
-          "reference": 0.052000000000000005,
-          "gam_over_reference": 0.04871630769214946,
+          "gam": 0.002704319000031319,
+          "reference": 0.0520000000000002,
+          "gam_over_reference": 0.0520061346159867,
           "passed": true
         }
       ],
@@ -283,16 +283,16 @@
       "performance": [
         {
           "measure": "fit_sec",
-          "gam": 0.9832443340000623,
-          "reference": 2.412,
-          "gam_over_reference": 0.40764690464347525,
+          "gam": 1.3570727079999756,
+          "reference": 2.748,
+          "gam_over_reference": 0.49384014119358643,
           "passed": true
         },
         {
           "measure": "predict_sec",
-          "gam": 0.004098558000066532,
-          "reference": 0.0660000000000004,
-          "gam_over_reference": 0.06209936363737132,
+          "gam": 0.0062017519999812976,
+          "reference": 0.08399999999999999,
+          "gam_over_reference": 0.07383038095215831,
           "passed": true
         }
       ],
@@ -345,16 +345,16 @@
       "performance": [
         {
           "measure": "fit_sec",
-          "gam": 0.46107789999999227,
-          "reference": 2.033,
-          "gam_over_reference": 0.22679680275454614,
+          "gam": 0.6299802529999852,
+          "reference": 2.186,
+          "gam_over_reference": 0.2881885878316492,
           "passed": true
         },
         {
           "measure": "predict_sec",
-          "gam": 0.00244620300003362,
-          "reference": 0.0529999999999997,
-          "gam_over_reference": 0.04615477358554026,
+          "gam": 0.004098317999876144,
+          "reference": 0.0819999999999998,
+          "gam_over_reference": 0.049979487803367736,
           "passed": true
         }
       ],
@@ -407,16 +407,16 @@
       "performance": [
         {
           "measure": "fit_sec",
-          "gam": 0.8752576899999553,
-          "reference": 2.476,
-          "gam_over_reference": 0.35349664378027273,
+          "gam": 1.7557051859999717,
+          "reference": 3.5879999999999996,
+          "gam_over_reference": 0.4893269749163801,
           "passed": true
         },
         {
           "measure": "predict_sec",
-          "gam": 0.002813635000023851,
-          "reference": 0.02,
-          "gam_over_reference": 0.14068175000119254,
+          "gam": 0.00631723399996531,
+          "reference": 0.03000000000000027,
+          "gam_over_reference": 0.21057446666550847,
           "passed": true
         }
       ],
@@ -469,16 +469,16 @@
       "performance": [
         {
           "measure": "fit_sec",
-          "gam": 0.7657235579999906,
-          "reference": 4.206,
-          "gam_over_reference": 0.18205505420827164,
+          "gam": 0.8044525329999885,
+          "reference": 4.582,
+          "gam_over_reference": 0.17556799061544928,
           "passed": true
         },
         {
           "measure": "predict_sec",
-          "gam": 0.004479761000027338,
-          "reference": 0.03600000000000049,
-          "gam_over_reference": 0.12443780555631326,
+          "gam": 0.004527752000001328,
+          "reference": 0.03500000000000015,
+          "gam_over_reference": 0.12936434285718026,
           "passed": true
         }
       ],
@@ -534,17 +534,6 @@
       "failure": "missing or failed matched contender"
     },
     {
-      "scenario_name": "geo_subpop16_tp_k6",
-      "gam_contender": "rust_gam",
-      "reference_contender": "r_mgcv",
-      "gam_status": "ok",
-      "reference_status": "failed",
-      "performance": [],
-      "accuracy": [],
-      "passed": false,
-      "failure": "missing or failed matched contender"
-    },
-    {
       "scenario_name": "papuan_oce_tp_k12",
       "gam_contender": "rust_gam",
       "reference_contender": "r_mgcv",
@@ -558,9 +547,9 @@
   ],
   "worst_performance_measure": {
     "measure": "fit_sec",
-    "gam": 0.9832443340000623,
-    "reference": 2.412,
-    "gam_over_reference": 0.40764690464347525,
+    "gam": 1.3570727079999756,
+    "reference": 2.748,
+    "gam_over_reference": 0.49384014119358643,
     "passed": true,
     "scenario_name": "geo_latlon_superpopnoise_duchon_k24",
     "gam_contender": "rust_gam",
