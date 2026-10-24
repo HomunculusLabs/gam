@@ -2,10 +2,10 @@
 
 - Compile failures: **0**
 - Workspace tests run: **NOT MEASURED** (12853 runnable in the archive listing)
-- Runtime test failures (FAIL/TIMEOUT/TERMINATING/LEAK): **NOT MEASURED** (159 seen in the shards that did run)
-- Python test failures: **NOT MEASURED — at least 72** (LOWER BOUND, not a count: Python API tests (job `cancelled`); Python populations, slow + torch (job `cancelled`) did not run to completion, so the tests they never reached are unmeasured, not passing)
+- Runtime test failures (FAIL/TIMEOUT/TERMINATING/LEAK): **NOT MEASURED** (165 seen in the shards that did run)
+- Python test failures: **NOT MEASURED — at least 75** (LOWER BOUND, not a count: Python API tests (job `cancelled`); Python populations, slow + torch (job `cancelled`) did not run to completion, so the tests they never reached are unmeasured, not passing)
 - Forbidden runtime signatures seen: **NOT MEASURED** (1 seen in the shards that did run)
-- Slow/timeout notices (#1393): **NOT MEASURED** (159 seen in the shards that did run)
+- Slow/timeout notices (#1393): **NOT MEASURED** (163 seen in the shards that did run)
 
 Coverage:
 - workspace shards: **NOT MEASURED** (build `success`, matrix `failure`, workspace shard set differs from 1..10: missing=[5, 9, 10], extra=[])
@@ -56,17 +56,14 @@ _None._
 - **FAIL** `gam-event-history` :: `tests::gradient_and_hessian_match_central_differences`
 - **TERMINATING** `(─────────)` :: `gam-models transformation_normal::kappa_exact_joint_fd_tests::ctn_exact_joint_gradient_matches_fd_duchon_order0_power9`
 - **TIMEOUT** `gam-models` :: `transformation_normal::kappa_exact_joint_fd_tests::ctn_exact_joint_gradient_matches_fd_duchon_order0_power9`
-- **TERMINATING** `(─────────)` :: `gam-models::quality_multinomial_penguins_2612 gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet_on_real_data`
-- **TIMEOUT** `gam-models::quality_multinomial_penguins_2612` :: `gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet_on_real_data`
+- **FAIL** `gam-models::quality_multinomial_penguins_2612` :: `gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet_on_real_data`
 - **FAIL** `gam-models::suite` :: `survival_summary_block_offsets_3568::location_scale_survival_tables_name_the_covariate_terms_3568`
 - **FAIL** `gam-sae` :: `inference::atlas_nerve::tests::existence_test_is_calibrated_when_no_transfer_exists`
 - **FAIL** `gam-sae` :: `manifold::construction::construction_tests::exact_stationarity_solve_1418_tests::arrow_exact_a_polish_step_commits_objective_descent_2283`
 - **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_collapse_2132::manifold_circle_mixture_seed_eval_terminates_2132`
 - **TIMEOUT** `gam-sae` :: `manifold::tests_collapse_2132::manifold_circle_mixture_seed_eval_terminates_2132`
-- **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_schur_seed_refusal_1782::planted_circle_multi_atom_threshold_gate_clears_startup_validation_1782`
-- **TIMEOUT** `gam-sae` :: `manifold::tests_schur_seed_refusal_1782::planted_circle_multi_atom_threshold_gate_clears_startup_validation_1782`
-- **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::assignment_kinds_fit_on_circle_1782`
-- **TIMEOUT** `gam-sae` :: `manifold::tests_startup_validation_1782::assignment_kinds_fit_on_circle_1782`
+- **FAIL** `gam-sae` :: `manifold::tests_schur_seed_refusal_1782::planted_circle_multi_atom_threshold_gate_clears_startup_validation_1782`
+- **FAIL** `gam-sae` :: `manifold::tests_startup_validation_1782::assignment_kinds_fit_on_circle_1782`
 - **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_termination_2235::planted_circle_fit_returns_with_analytic_certificate`
 - **TIMEOUT** `gam-sae` :: `manifold::tests_termination_2235::planted_circle_fit_returns_with_analytic_certificate`
 - **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_zoo_micro_local::zz_rank_charge_zoo_micro_2022`
@@ -143,6 +140,8 @@ _None._
 - **TIMEOUT** `gam-sae` :: `manifold::tests::planted_circle_noise_scale_sweep_reaches_high_ev_with_dimensionless_rho_seed`
 - **FAIL** `gam::basis_smooth` :: `smooths::spline_scan_workflow_equivalence::spline_scan_recovers_truth_and_a_sane_edf_at_scale`
 - **FAIL** `gam::identifiability` :: `misc::binary_outcome_bms_identifiability::binary_outcome_shape_bms_matern_fit_is_not_refused_by_identifiability_audit`
+- **TERMINATING** `(─────────)` :: `gam::perf_scale optimization::grouped_binomial_sweep_2569::grouped_binomial_sweep_every_fit_is_minted_2569`
+- **TIMEOUT** `gam::perf_scale` :: `optimization::grouped_binomial_sweep_2569::grouped_binomial_sweep_every_fit_is_minted_2569`
 - **FAIL** `gam::regressions` :: `smooths::margslope_matern_slope_slowdown::margslope_matern_slope_centers20_issue_scale`
 - **TERMINATING** `(─────────)` :: `gam::sae sae::sae_ev_vs_k_frontier::ev_vs_k_frontier_does_not_fire_on_unstructured_linear_corpus`
 - **TIMEOUT** `gam::sae` :: `sae::sae_ev_vs_k_frontier::ev_vs_k_frontier_does_not_fire_on_unstructured_linear_corpus`
@@ -169,19 +168,26 @@ _None._
 - **TIMEOUT** `gam-sae` :: `manifold::tests_outer_quasi_laplace_probe_budget_2080::entangled_two_circle_outer_reml_separates_2080`
 - **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_outer_quasi_laplace_probe_budget_2080::wide_p_outer_reml_terminates_k3_heavy_2080`
 - **TIMEOUT** `gam-sae` :: `manifold::tests_outer_quasi_laplace_probe_budget_2080::wide_p_outer_reml_terminates_k3_heavy_2080`
+- **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::ordered_beta_finiteness_sweep_2609`
+- **TIMEOUT** `gam-sae` :: `manifold::tests_startup_validation_1782::ordered_beta_finiteness_sweep_2609`
 - **FAIL** `gam-sae` :: `manifold::tests_tier0_primary_path_2023::tests::e1_arc_outer_search_mints_or_reports_blocker_2266`
 - **FAIL** `gam::basis_smooth` :: `smooths::duchon_scale_and_memory::duchon_2d_recovers_smooth_surface`
 - **FAIL** `gam::perf_scale` :: `smooths::sparse_data_smooth_fit::sparse_30_points_sin2_recovers_oscillations`
+- **TERMINATING** `(─────────)` :: `gam::sae sae::sae_factored_frame_solve::evidence_consistency_at_fixed_lambda`
+- **TIMEOUT** `gam::sae` :: `sae::sae_factored_frame_solve::evidence_consistency_at_fixed_lambda`
 - **TERMINATING** `(─────────)` :: `gam::survival survival::survival_transformation_failure_category_2937::survival_transformation_search_failure_raises_its_category_2937`
 - **TIMEOUT** `gam::survival` :: `survival::survival_transformation_failure_category_2937::survival_transformation_search_failure_raises_its_category_2937`
 - **TERMINATING** `(─────────)` :: `gam-event-history tests::forecast_probabilities_are_coherent_under_a_latent_state`
 - **TIMEOUT** `gam-event-history` :: `tests::forecast_probabilities_are_coherent_under_a_latent_state`
 - **FAIL** `gam-models` :: `fit_orchestration::drivers::range_screen_tests::range_screen_jet_matches_central_differences_2902`
+- **FAIL** `gam-models::suite` :: `warm_start_from::a_point_of_another_outer_dimension_leaves_the_fit_cold`
 - **FAIL** `gam-models::survival_acceptance` :: `location_scale_heteroscedastic_globalization_1569::a_saved_model_predicts_the_log_likelihood_it_was_fit_at_2695`
 - **TERMINATING** `(─────────)` :: `gam-sae manifold::coordinate_fidelity::recovered_collapse_tests::order_free_bound_dominates_every_anchor_order_4323`
 - **TIMEOUT** `gam-sae` :: `manifold::coordinate_fidelity::recovered_collapse_tests::order_free_bound_dominates_every_anchor_order_4323`
 - **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_behavior_qwen_real::zz2015_tiny_inner_crawl_terminates`
 - **TIMEOUT** `gam-sae` :: `manifold::tests_behavior_qwen_real::zz2015_tiny_inner_crawl_terminates`
+- **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_certify_external_2266::tests::framed_converged_state_certifies_against_its_raw_target_2822`
+- **TIMEOUT** `gam-sae` :: `manifold::tests_certify_external_2266::tests::framed_converged_state_certifies_against_its_raw_target_2822`
 - **FAIL** `gam-sae` :: `manifold::tests_interval_active_bound_3438::interval_active_bound_slot_leaves_the_exact_information_3438`
 - **TERMINATING** `(─────────)` :: `gam-sae manifold::tests_outer_quasi_laplace_probe_budget_2080::wide_p_outer_reml_terminates_within_probe_budget_2080`
 - **TIMEOUT** `gam-sae` :: `manifold::tests_outer_quasi_laplace_probe_budget_2080::wide_p_outer_reml_terminates_within_probe_budget_2080`
@@ -189,7 +195,7 @@ _None._
 
 ## Python test failures
 
-_Lower bound: 72 recorded before the run stopped. Unmeasured: Python API tests (job `cancelled`); Python populations, slow + torch (job `cancelled`)._
+_Lower bound: 75 recorded before the run stopped. Unmeasured: Python API tests (job `cancelled`); Python populations, slow + torch (job `cancelled`)._
 
 - **FAIL** `python::tests/test_sae_manifold_accuracy_oos` :: `test_curved_circle_atom_in_sample_r2_per_seed[0]`
 - **FAIL** `python::tests/test_pygam_audit_predict_interval_hygiene` :: `test_gauss_small_estimated_scale_interval_coverage_is_nominal`
@@ -263,6 +269,9 @@ _Lower bound: 72 recorded before the run stopped. Unmeasured: Python API tests (
 - **ABORT** `python::tests/test_examples_sae_supervised` :: `test_sae_supervised_oos_predict_runs_the_frozen_decoder_encoder`
 - **FAIL** `python::tests/test_python_api` :: `test_sklearn_classifier_roundtrip`
 - **FAIL** `python::tests/test_python_api` :: `test_survival_marginal_slope_weibull_n3000_returns_under_60s`
+- **FAIL** `python::tests/test_survival_api_regressions` :: `test_survival_transformation_is_reachable_from_fit`
+- **FAIL** `python::tests/test_survival_api_regressions` :: `test_survival_at_accepts_array_like_times`
+- **FAIL** `python::tests/test_survival_save_load_roundtrip` :: `test_survival_transformation_save_load_predict_roundtrips`
 
 ## Forbidden runtime-error signatures
 
@@ -287,7 +296,6 @@ _Lower bound: 72 recorded before the run stopped. Unmeasured: Python API tests (
 - TERMINATING `(─────────)` :: `gam-models::survival_acceptance margslope_face_criterion_fd_2894::survival_marginal_slope_face_criterion_derivatives_match_central_differences_2894`
 - TIMEOUT `gam-models::survival_acceptance` :: `margslope_face_criterion_fd_2894::survival_marginal_slope_face_criterion_derivatives_match_central_differences_2894`
 - SLOW `gam-models` :: `inference::model_payload_builders::latent_saved_baseline_tests::saved_latent_survival_model_predicts_at_its_fitted_baseline_2714`
-- SLOW `(─────────)` :: `gam::survival survival::sbc_survival_probability_band_coverage::survival_probability_band_covers_truth_at_nominal`
 - SLOW `(─────────)` :: `gam-cli::bin/gam cli_tests::survival_location_scale_linear_location_linkwiggle_saves_and_predicts_3006`
 - TERMINATING `(─────────)` :: `gam-cli::bin/gam cli_tests::survival_location_scale_linear_location_linkwiggle_saves_and_predicts_3006`
 - TIMEOUT `gam-cli::bin/gam` :: `cli_tests::survival_location_scale_linear_location_linkwiggle_saves_and_predicts_3006`
@@ -295,17 +303,11 @@ _Lower bound: 72 recorded before the run stopped. Unmeasured: Python API tests (
 - TERMINATING `(─────────)` :: `gam-models transformation_normal::kappa_exact_joint_fd_tests::ctn_exact_joint_gradient_matches_fd_duchon_order0_power9`
 - TIMEOUT `gam-models` :: `transformation_normal::kappa_exact_joint_fd_tests::ctn_exact_joint_gradient_matches_fd_duchon_order0_power9`
 - SLOW `(─────────)` :: `gam-models::quality_multinomial_penguins_2612 gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet_on_real_data`
-- TERMINATING `(─────────)` :: `gam-models::quality_multinomial_penguins_2612 gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet_on_real_data`
-- TIMEOUT `gam-models::quality_multinomial_penguins_2612` :: `gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet_on_real_data`
 - SLOW `(─────────)` :: `gam-sae manifold::tests_collapse_2132::manifold_circle_mixture_seed_eval_terminates_2132`
 - TERMINATING `(─────────)` :: `gam-sae manifold::tests_collapse_2132::manifold_circle_mixture_seed_eval_terminates_2132`
 - TIMEOUT `gam-sae` :: `manifold::tests_collapse_2132::manifold_circle_mixture_seed_eval_terminates_2132`
 - SLOW `(─────────)` :: `gam-sae manifold::tests_schur_seed_refusal_1782::planted_circle_multi_atom_threshold_gate_clears_startup_validation_1782`
-- TERMINATING `(─────────)` :: `gam-sae manifold::tests_schur_seed_refusal_1782::planted_circle_multi_atom_threshold_gate_clears_startup_validation_1782`
-- TIMEOUT `gam-sae` :: `manifold::tests_schur_seed_refusal_1782::planted_circle_multi_atom_threshold_gate_clears_startup_validation_1782`
 - SLOW `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::assignment_kinds_fit_on_circle_1782`
-- TERMINATING `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::assignment_kinds_fit_on_circle_1782`
-- TIMEOUT `gam-sae` :: `manifold::tests_startup_validation_1782::assignment_kinds_fit_on_circle_1782`
 - SLOW `(─────────)` :: `gam-sae manifold::tests_termination_2235::planted_circle_fit_returns_with_analytic_certificate`
 - TERMINATING `(─────────)` :: `gam-sae manifold::tests_termination_2235::planted_circle_fit_returns_with_analytic_certificate`
 - TIMEOUT `gam-sae` :: `manifold::tests_termination_2235::planted_circle_fit_returns_with_analytic_certificate`
@@ -334,17 +336,20 @@ _Lower bound: 72 recorded before the run stopped. Unmeasured: Python API tests (
 - SLOW `(─────────)` :: `gam-sae manifold::tests_collapse_2132::zz_collapse_2132_heldout_ev_nondecreasing_and_beats_pca`
 - TERMINATING `(─────────)` :: `gam-sae manifold::tests_collapse_2132::zz_collapse_2132_heldout_ev_nondecreasing_and_beats_pca`
 - TIMEOUT `gam-sae` :: `manifold::tests_collapse_2132::zz_collapse_2132_heldout_ev_nondecreasing_and_beats_pca`
+- SLOW `(─────────)` :: `gam-sae manifold::tests_rank_charge_2101::rank_charge_k3_accepts_clean_atoms`
 - SLOW `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::cocollapse_startup_frontier_1026`
 - TERMINATING `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::cocollapse_startup_frontier_1026`
 - TIMEOUT `gam-sae` :: `manifold::tests_startup_validation_1782::cocollapse_startup_frontier_1026`
+- SLOW `(─────────)` :: `gam-sae manifold::tests_streaming_outer_gradient_2026::surrogate_certificate_is_rescored_on_unseen_probes_before_stamping_2933`
 - SLOW `(─────────)` :: `gam-sae manifold::tests_zoo_micro_local::zz_zoo_micro_local_full_fit_and_oos_discriminator`
 - TERMINATING `(─────────)` :: `gam-sae manifold::tests_zoo_micro_local::zz_zoo_micro_local_full_fit_and_oos_discriminator`
 - TIMEOUT `gam-sae` :: `manifold::tests_zoo_micro_local::zz_zoo_micro_local_full_fit_and_oos_discriminator`
 - SLOW `gam::survival` :: `survival::survival_marginal_slope_weibull_n3000_seed_startup_2627::survival_marginal_slope_weibull_n3000_starts_its_outer_search`
+- SLOW `gam-sae` :: `manifold::tests_rank_charge_2101::rank_charge_k3_accepts_clean_atoms`
+- SLOW `gam-sae` :: `manifold::tests_streaming_outer_gradient_2026::surrogate_certificate_is_rescored_on_unseen_probes_before_stamping_2933`
 - SLOW `(─────────)` :: `gam::regressions misc::bms_residual_repair_2924::residual_block_recovers_beta_and_approaches_the_oracle_repair_value`
 - TERMINATING `(─────────)` :: `gam::regressions misc::bms_residual_repair_2924::residual_block_recovers_beta_and_approaches_the_oracle_repair_value`
 - TIMEOUT `gam::regressions` :: `misc::bms_residual_repair_2924::residual_block_recovers_beta_and_approaches_the_oracle_repair_value`
-- SLOW `(─────────)` :: `gam::survival survival::survival_marginal_slope_conditional_latent_2768::survival_marginal_slope_removes_the_conditional_latent_shift`
 - SLOW `(─────────)` :: `gam-models survival::latent::survival::tests_interval_warm_surrogate_3711::a_zero_weight_exact_row_is_not_a_failure_for_the_surrogate_choice_3711`
 - TERMINATING `(─────────)` :: `gam-models survival::latent::survival::tests_interval_warm_surrogate_3711::a_zero_weight_exact_row_is_not_a_failure_for_the_surrogate_choice_3711`
 - TIMEOUT `gam-models` :: `survival::latent::survival::tests_interval_warm_surrogate_3711::a_zero_weight_exact_row_is_not_a_failure_for_the_surrogate_choice_3711`
@@ -379,6 +384,8 @@ _Lower bound: 72 recorded before the run stopped. Unmeasured: Python API tests (
 - SLOW `gam-sae` :: `manifold::tests_outer_quasi_laplace_probe_budget_2080::ceiling_vs_pathology_outer_reml_instrument_2156`
 - SLOW `(─────────)` :: `gam::misc misc::bug_hunt_2301_diagnose_alo_multiclass_test::diagnose_alo_transformation_normal_matches_brute_force_loo_2301`
 - SLOW `(─────────)` :: `gam::perf_scale optimization::grouped_binomial_sweep_2569::grouped_binomial_sweep_every_fit_is_minted_2569`
+- TERMINATING `(─────────)` :: `gam::perf_scale optimization::grouped_binomial_sweep_2569::grouped_binomial_sweep_every_fit_is_minted_2569`
+- TIMEOUT `gam::perf_scale` :: `optimization::grouped_binomial_sweep_2569::grouped_binomial_sweep_every_fit_is_minted_2569`
 - SLOW `(─────────)` :: `gam::sae sae::sae_ev_vs_k_frontier::ev_vs_k_frontier_does_not_fire_on_unstructured_linear_corpus`
 - TERMINATING `(─────────)` :: `gam::sae sae::sae_ev_vs_k_frontier::ev_vs_k_frontier_does_not_fire_on_unstructured_linear_corpus`
 - TIMEOUT `gam::sae` :: `sae::sae_ev_vs_k_frontier::ev_vs_k_frontier_does_not_fire_on_unstructured_linear_corpus`
@@ -407,16 +414,19 @@ _Lower bound: 72 recorded before the run stopped. Unmeasured: Python API tests (
 - TERMINATING `(─────────)` :: `gam-sae manifold::tests_outer_quasi_laplace_probe_budget_2080::wide_p_outer_reml_terminates_k3_heavy_2080`
 - TIMEOUT `gam-sae` :: `manifold::tests_outer_quasi_laplace_probe_budget_2080::wide_p_outer_reml_terminates_k3_heavy_2080`
 - SLOW `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::ordered_beta_finiteness_sweep_2609`
+- TERMINATING `(─────────)` :: `gam-sae manifold::tests_startup_validation_1782::ordered_beta_finiteness_sweep_2609`
+- TIMEOUT `gam-sae` :: `manifold::tests_startup_validation_1782::ordered_beta_finiteness_sweep_2609`
 - SLOW `gam::misc` :: `misc::bug_hunt_2301_diagnose_alo_multiclass_test::diagnose_alo_transformation_normal_matches_brute_force_loo_2301`
-- SLOW `gam::perf_scale` :: `optimization::grouped_binomial_sweep_2569::grouped_binomial_sweep_every_fit_is_minted_2569`
-- SLOW `gam-sae` :: `manifold::tests_startup_validation_1782::ordered_beta_finiteness_sweep_2609`
 - SLOW `(─────────)` :: `gam::sae sae::sae_factored_frame_solve::evidence_consistency_at_fixed_lambda`
+- TERMINATING `(─────────)` :: `gam::sae sae::sae_factored_frame_solve::evidence_consistency_at_fixed_lambda`
+- TIMEOUT `gam::sae` :: `sae::sae_factored_frame_solve::evidence_consistency_at_fixed_lambda`
 - SLOW `(─────────)` :: `gam::survival survival::survival_transformation_failure_category_2937::survival_transformation_search_failure_raises_its_category_2937`
 - TERMINATING `(─────────)` :: `gam::survival survival::survival_transformation_failure_category_2937::survival_transformation_search_failure_raises_its_category_2937`
 - TIMEOUT `gam::survival` :: `survival::survival_transformation_failure_category_2937::survival_transformation_search_failure_raises_its_category_2937`
 - SLOW `(─────────)` :: `gam-event-history tests::forecast_probabilities_are_coherent_under_a_latent_state`
 - TERMINATING `(─────────)` :: `gam-event-history tests::forecast_probabilities_are_coherent_under_a_latent_state`
 - TIMEOUT `gam-event-history` :: `tests::forecast_probabilities_are_coherent_under_a_latent_state`
+- SLOW `(─────────)` :: `gam-models bms::residual_repair_kernel::row_covariance_cache_tests::row_covariance_cache_is_the_fresh_recompute_after_an_escalated_fit`
 - SLOW `(─────────)` :: `gam-sae manifold::coordinate_fidelity::recovered_collapse_tests::order_free_bound_dominates_every_anchor_order_4323`
 - TERMINATING `(─────────)` :: `gam-sae manifold::coordinate_fidelity::recovered_collapse_tests::order_free_bound_dominates_every_anchor_order_4323`
 - TIMEOUT `gam-sae` :: `manifold::coordinate_fidelity::recovered_collapse_tests::order_free_bound_dominates_every_anchor_order_4323`
@@ -424,9 +434,12 @@ _Lower bound: 72 recorded before the run stopped. Unmeasured: Python API tests (
 - TERMINATING `(─────────)` :: `gam-sae manifold::tests_behavior_qwen_real::zz2015_tiny_inner_crawl_terminates`
 - TIMEOUT `gam-sae` :: `manifold::tests_behavior_qwen_real::zz2015_tiny_inner_crawl_terminates`
 - SLOW `(─────────)` :: `gam-sae manifold::tests_certify_external_2266::tests::framed_converged_state_certifies_against_its_raw_target_2822`
+- TERMINATING `(─────────)` :: `gam-sae manifold::tests_certify_external_2266::tests::framed_converged_state_certifies_against_its_raw_target_2822`
+- TIMEOUT `gam-sae` :: `manifold::tests_certify_external_2266::tests::framed_converged_state_certifies_against_its_raw_target_2822`
+- SLOW `(─────────)` :: `gam-sae manifold::tests_chart_collapse_2691::zz_2691_bounded_sigma_witness_returns_an_answer_at_every_sigma`
 - SLOW `(─────────)` :: `gam-sae manifold::tests_outer_quasi_laplace_probe_budget_2080::wide_p_outer_reml_terminates_within_probe_budget_2080`
 - TERMINATING `(─────────)` :: `gam-sae manifold::tests_outer_quasi_laplace_probe_budget_2080::wide_p_outer_reml_terminates_within_probe_budget_2080`
 - TIMEOUT `gam-sae` :: `manifold::tests_outer_quasi_laplace_probe_budget_2080::wide_p_outer_reml_terminates_within_probe_budget_2080`
-- SLOW `gam::sae` :: `sae::sae_factored_frame_solve::evidence_consistency_at_fixed_lambda`
-- SLOW `gam-sae` :: `manifold::tests_certify_external_2266::tests::framed_converged_state_certifies_against_its_raw_target_2822`
+- SLOW `gam-models` :: `bms::residual_repair_kernel::row_covariance_cache_tests::row_covariance_cache_is_the_fresh_recompute_after_an_escalated_fit`
+- SLOW `gam-sae` :: `manifold::tests_chart_collapse_2691::zz_2691_bounded_sigma_witness_returns_an_answer_at_every_sigma`
 
