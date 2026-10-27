@@ -1,14 +1,14 @@
 {
   "workflow": "Python Contracts",
-  "publish_job_status": "failure",
+  "publish_job_status": "cancelled",
   "publish_job_status_note": "status of the job that PUBLISHED these results, not the conclusion of run_id -- this job is part of that run, so the run has not concluded here",
-  "publish_job_failed_steps": "step 13: Run bench-package Python tests (#1512 orphans) | step 16: Triage full Python suite on the fresh wheel (#1512)",
-  "run_id": "40443368976",
-  "run_number": "398",
+  "publish_job_failed_steps": "",
+  "run_id": "40548552704",
+  "run_number": "399",
   "run_attempt": "1",
   "event": "schedule",
   "ref": "refs/heads/main",
-  "sha": "0d5dd1e3bed395c8aa1df334359025711bd31bca",
-  "completed_utc": "2026-10-27T08:08:30Z",
-  "run_url": "https://github.com/SauersML/gam/actions/runs/40443368976"
+  "sha": "239a4b79f6280ec4a22e8e0d61b4616ca65c52b3",
+  "completed_utc": "2026-10-27T22:14:11Z",
+  "run_url": "https://github.com/SauersML/gam/actions/runs/40548552704"
 }
